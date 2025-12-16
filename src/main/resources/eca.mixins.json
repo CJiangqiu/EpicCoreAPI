@@ -1,0 +1,30 @@
+{
+  "required": true,
+  "package": "net.eca.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "priority": 0,
+  "minVersion": "0.8",
+  "refmap": "mixins.eca.refmap.json",
+  "client": [
+    "ClientLevelMixin",
+    "DeathScreenMixin"
+  ],
+  "mixins": [
+    "ChunkMapMixin",
+    "ClassInstanceMultiMapMixin",
+    "EntityLookupMixin",
+    "EntityMixin",
+    "EntitySectionMixin",
+    "EntityTickListMixin",
+    "LevelMixin",
+    "LivingEntityMixin",
+    "MobMixin",
+    "PersistentEntitySectionManagerMixin",
+    "PlayerMixin",
+    "ServerLevelMixin",
+    "TransientEntitySectionManagerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

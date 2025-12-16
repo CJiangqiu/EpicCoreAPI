@@ -1,0 +1,29 @@
+modLoader = "javafml"
+loaderVersion = "[47,)"
+license = "Custom license"
+
+[[mods]]
+modId = "eca"
+version = "${mod_version}"
+displayName = "Epic Core API"
+displayURL = "https://www.curseforge.com/minecraft/mc-mods/epic-core-api"
+logoFile = "logo.png"
+credits = "Mascot:MCreator"
+authors = "CJiangqiu"
+description = '''
+This is a required dependency for various mods by CJiangqiu.
+'''
+
+[[dependencies.eca]]
+modId = "forge"
+mandatory = true
+versionRange = "[47,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.eca]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.20.1,)"
+ordering = "NONE"
+side = "BOTH"

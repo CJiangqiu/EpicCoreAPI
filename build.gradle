@@ -1,0 +1,130 @@
+plugins {
+    id 'maven-publish'
+    id 'idea'
+    id 'net.minecraftforge.gradle' version '[6.0.16,6.2)'
+    id 'org.spongepowered.mixin' version '0.7.+'
+}
+
+version = "${project.minecraft_version}-forge-${project.mod_version}"
+group = project.maven_group
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+base {
+    archivesName = project.archives_name
+}
+
+repositories {
+    maven { url = "https://maven.minecraftforge.net/" }
+    maven { url = "https://cursemaven.com"; content { includeGroup "curse.maven" } }
+    maven { name = "Progwml6"; url = "https://dvs1.progwml6.com/files/maven/" }
+    maven { name = "BlameJared"; url = "https://maven.blamejared.com/" }
+    maven { name = "ModMaven"; url = "https://modmaven.dev" }
+    maven { name = "SpongePowered"; url = "https://repo.spongepowered.org/repository/maven-public/" }
+}
+
+minecraft {
+    mappings channel: 'official', version: project.minecraft_version
+    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
+    copyIdeResources = true
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            mods { eca { source sourceSets.main } }
+        }
+        server {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            mods { eca { source sourceSets.main } }
+        }
+    }
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${project.forge_version}"
+
+    // Mixin annotation processor
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+
+    // Reflection utilities
+    implementation 'org.reflections:reflections:0.9.12'
+
+    // ASM bytecode manipulation
+    implementation 'org.ow2.asm:asm:9.2'
+    implementation 'org.ow2.asm:asm-commons:9.2'
+}
+
+mixin {
+    add sourceSets.main, "mixins.eca.refmap.json"
+    config "eca.mixins.json"
+}
+
+processResources {
+    inputs.property 'mod_version', project.mod_version
+    filesMatching('META-INF/mods.toml') {
+        expand 'mod_version': project.mod_version
+    }
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    it.options.release = 17
+}
+
+tasks.jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+// Agent JAR task - builds the embedded agent.jar
+tasks.register('agentJar', Jar) {
+    group = 'build'
+    description = 'Build inner agent.jar for runtime attachment'
+    dependsOn tasks.named('classes')
+    archiveBaseName = 'agent'
+    destinationDirectory = layout.buildDirectory.dir('embedded-agent')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    // Only include agent classes
+    from(sourceSets.main.output) {
+        include 'net/eca/agent/**'
+    }
+
+    manifest {
+        attributes(
+            'Agent-Class': 'net.eca.agent.EcaAgent',
+            'Premain-Class': 'net.eca.agent.EcaAgent',
+            'Can-Redefine-Classes': 'true',
+            'Can-Retransform-Classes': 'true'
+        )
+    }
+}
+
+// Include agent.jar in main JAR
+tasks.named('jar') {
+    dependsOn tasks.named('agentJar')
+    from(tasks.named('agentJar').flatMap { it.archiveFile }) {
+        into 'net/eca/agent'
+        rename { 'agent.jar' }
+    }
+}
+
+// Maven publishing
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
+    }
+
+    repositories {
+        // Add repositories to publish to here
+    }
+}

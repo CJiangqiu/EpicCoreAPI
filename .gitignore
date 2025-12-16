@@ -1,0 +1,10 @@
+.idea
+.settings
+.gradle
+build
+logs
+run
+libs
+.claude
+CLAUDE.md
+nul
