@@ -1,0 +1,61 @@
+Anything Goes As Long As It’s Free Mod License (AGALAF-Mod) Version 2.0
+Copyright (c) 2025 CJiangqiu
+────────────────────────────────────────────────────────────────────────
+1. Definitions
+   1.1 “Work” means all files covered by this license, including source code,
+        scripts, documentation, and the following protected “Assets”.
+   1.2 “Assets” means original visual or audio materials supplied with the
+        Work, such as textures, models, icons, UI layouts, sound effects,
+        as well as any AI model weights provided by the author.
+   1.3 “Direct Monetization” means charging money specifically for the
+        Work or any of its Assets—e.g. paid downloads, paid modpacks,
+        in-server stores, or selling extracted Assets.
+   1.4 “Indirect Monetization” means earning revenue from a larger work or
+        service that merely **uses** the Work (e.g. ad-supported videos,
+        map entrance fees, server subscriptions) without charging for the
+        Work or its Assets themselves.
+   1.5 “Modified Work” means any derivative, translation, alteration, or
+        merger of the Work.
+
+2. Grant of Rights
+   Provided you comply with Sections 3 and 4, the copyright holder grants
+   you a worldwide, royalty-free, non-exclusive, sublicensable license to:
+   a) use, copy, modify, and merge the Work;
+   b) redistribute the Work or any Modified Work **free of charge**; and
+   c) employ the Work in projects or services that yield Indirect
+      Monetization, provided all other terms of this license are met.
+
+3. Restrictions
+   3.1 **Direct Monetization is prohibited.**
+   3.2 You may not place the Work or its Assets in any paid product,
+       resource store, subscription bundle, or similar offering.
+   3.3 You must not remove or alter this license text or the copyright
+       notice from any copy or Modified Work.
+   3.4 You must not suggest that the original author provides support or
+       accepts liability for any Modified Work.
+
+4. Conditions
+   4.1 Every copy or Modified Work you distribute must include the complete
+       copyright notice and this license in full.
+   4.2 Any Modified Work **remains subject to this license** unless you
+       obtain the author’s written permission to relicense it.
+   4.3 You must comply with all applicable laws and platform terms of
+       service when using or distributing the Work.
+
+5. Disclaimer of Warranty
+   The Work is provided “AS IS”, without warranty of any kind, express or
+   implied, including but not limited to the warranties of merchantability,
+   fitness for a particular purpose, and non-infringement.
+
+6. Limitation of Liability
+   In no event shall the author be liable for any claim, damages, or other
+   liability, whether in an action of contract, tort, or otherwise, arising
+   from, out of, or in connection with the Work or the use or other dealings
+   in the Work. All legal risk arising from your use, modification, or
+   distribution of the Work is borne solely by you.
+
+7. Governing Law & Dispute Resolution
+   This license shall be governed by the laws of the jurisdiction chosen by
+   the author. Any dispute arising under this license shall be settled in
+   the courts or arbitration forum designated by the author.
+────────────────────────────────────────────────────────────────────────
