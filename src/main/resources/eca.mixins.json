@@ -19,7 +19,6 @@
     "EntityMixin",
     "EntitySectionMixin",
     "EntityTickListMixin",
-    "LevelMixin",
     "LivingEntityMixin",
     "MobMixin",
     "NetworkDefenceMixin$ConnectionDisconnectPrevent",

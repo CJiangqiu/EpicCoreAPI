@@ -3,6 +3,7 @@ package net.eca;
 import net.eca.agent.AgentLoader;
 import net.eca.event.EcaEventHandler;
 import net.eca.init.ModConfigs;
+import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.Mod;
@@ -20,6 +21,9 @@ public final class EcaMod {
 
         // 注册配置
         ModConfigs.register();
+
+        // 注册网络处理器
+        NetworkHandler.register();
 
         // 注册事件处理器
         MinecraftForge.EVENT_BUS.register(new EcaEventHandler());

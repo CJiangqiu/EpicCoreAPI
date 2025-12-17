@@ -97,7 +97,7 @@ public class ContainerReplacementTransformer implements ITransformModule {
 
     /**
      * 替换EntityLookup的容器
-     * byId: Int2ObjectLinkedOpenHashMap → EcaInt2ObjectOpenHashMap
+     * byId: Int2ObjectLinkedOpenHashMap → EcaInt2ObjectLinkedOpenHashMap
      * byUuid: HashMap → EcaHashMap
      */
     private byte[] replaceEntityLookupContainers(byte[] classBytes) {
@@ -115,7 +115,7 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/ints/Int2ObjectLinkedOpenHashMap",
-                    "net/eca/agent/container/EcaInt2ObjectOpenHashMap"
+                    "net/eca/agent/container/EcaInt2ObjectLinkedOpenHashMap"
                 );
 
                 // 替换 HashMap（通过Guava的Maps.newHashMap创建的）

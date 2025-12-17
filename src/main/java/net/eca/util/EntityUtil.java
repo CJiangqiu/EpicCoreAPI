@@ -1,6 +1,8 @@
 package net.eca.util;
 
 import net.eca.config.EcaConfiguration;
+import net.eca.network.EcaClientRemovePacket;
+import net.eca.network.NetworkHandler;
 import net.eca.util.health.HealthFieldCache;
 import net.eca.util.health.HealthGetterHook;
 import net.eca.util.reflect.ObfuscationMapping;
@@ -909,6 +911,12 @@ public class EntityUtil {
             }
 
             if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
+                // Send removal packet to tracking clients
+                NetworkHandler.sendToTrackingClients(
+                        new EcaClientRemovePacket(entity.getId()),
+                        entity
+                );
+
                 removeFromServerContainers(serverLevel, entity);
             } else if (entity.level().isClientSide && entity.level() instanceof ClientLevel clientLevel) {
                 removeFromClientContainers(clientLevel, entity);
