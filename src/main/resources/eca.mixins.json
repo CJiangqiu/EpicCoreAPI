@@ -6,8 +6,11 @@
   "minVersion": "0.8",
   "refmap": "mixins.eca.refmap.json",
   "client": [
+    "ClientEntityCallbacksMixin",
     "ClientLevelMixin",
-    "DeathScreenMixin"
+    "DeathScreenMixin",
+    "LocalPlayerMixin",
+    "MinecraftMixin"
   ],
   "mixins": [
     "ChunkMapMixin",
@@ -19,6 +22,9 @@
     "LevelMixin",
     "LivingEntityMixin",
     "MobMixin",
+    "NetworkDefenceMixin$ConnectionDisconnectPrevent",
+    "NetworkDefenceMixin$InventoryClearPrevent",
+    "NetworkDefenceMixin$ServerPacketListenerKickPrevent",
     "PersistentEntitySectionManagerMixin",
     "PlayerMixin",
     "ServerLevelMixin",

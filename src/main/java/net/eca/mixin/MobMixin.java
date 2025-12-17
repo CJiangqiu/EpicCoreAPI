@@ -13,7 +13,7 @@ public class MobMixin {
 
     @Inject(method = "setTarget", at = @At("HEAD"), cancellable = true)
     private void onSetTarget(LivingEntity target, CallbackInfo ci) {
-        if (target != null && EcaAPI.isInvulnerable(target)) {
+        if (EcaAPI.isInvulnerable(target)) {
             ci.cancel();
         }
     }

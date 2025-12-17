@@ -1,5 +1,6 @@
 package net.eca.agent;
 
+import net.eca.agent.transform.ContainerReplacementTransformer;
 import net.eca.agent.transform.ITransformModule;
 import net.eca.agent.transform.LivingEntityTransformer;
 
@@ -44,6 +45,10 @@ public final class EcaAgent {
 
             // 获取EcaTransformer并注册模块
             EcaTransformer transformer = EcaTransformer.getInstance();
+
+            // 注册容器替换模块（优先级最高，需要最先执行）
+            transformer.registerModule(new ContainerReplacementTransformer());
+            AgentLogWriter.info("[EcaAgent] Registered ContainerReplacementTransformer");
 
             // 注册LivingEntity转换模块
             transformer.registerModule(new LivingEntityTransformer());
