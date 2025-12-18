@@ -342,6 +342,17 @@ public final class EcaAPI {
         EntityUtil.removeEntity(entity, reason);
     }
 
+    // 清理实体 Boss 血条
+    /**
+     * Clean up boss bars associated with an entity.
+     * This method scans all instance fields of the entity and removes any ServerBossEvent instances found.
+     * Use this when you want to remove boss bars without completely removing the entity.
+     * @param entity the entity whose boss bars should be cleaned up
+     */
+    public static void cleanupBossBar(Entity entity) {
+        EntityUtil.cleanupBossBar(entity);
+    }
+
 
     // 传送实体到指定位置
     /**

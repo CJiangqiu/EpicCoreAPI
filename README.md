@@ -13,11 +13,13 @@ Use `/eca` command (requires OP permission level 2):
 - `/eca kill <targets>` - Kill entities
 - `/eca remove <targets> [reason]` - Remove entities from world
 - `/eca teleport <targets> <x> <y> <z>` - Teleport entities
+- `/eca cleanbossbar <targets>` - Clean up boss bars
+- `/eca clearoutsidedata <targets>` - Clear outside mod data
 
 ## Usage for Developers
 
 1. **Health**: Get and set entity health, supports custom entities with non-standard health storage (`getHealth`, `setHealth`, `modifyEntityHealth`, `triggerHealthAnalysis`, `getHealthCache`). You can customize health modification keyword lists via: `addHealthWhitelistKeyword`, `addHealthBlacklistKeyword`
-2. **Entity Control**: Kill, revive, teleport, and completely remove entities (`killEntity`, `reviveEntity`, `teleportEntity`, `removeEntity`)
+2. **Entity Control**: Kill, revive, teleport, and completely remove entities (`killEntity`, `reviveEntity`, `teleportEntity`, `removeEntity`, `cleanupBossBar`)
 3. **Invulnerability**: Manage entity invulnerable state via NBT (`isInvulnerable`, `setInvulnerable`)
 4. **Clear External Entity Data**: This mod provides functionality to clear entity data added by external mods (`clearExternalEntityData`). You can modify the data clearing blacklist via: `addDataClearBlacklistKeyword`
 
@@ -36,6 +38,7 @@ EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
 EcaAPI.teleportEntity(entity, x, y, z);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
+EcaAPI.cleanupBossBar(entity);
 
 // Invulnerability
 EcaAPI.setInvulnerable(entity, true);
@@ -63,11 +66,13 @@ EcaAPI.addDataClearBlacklistKeyword("important");
 - `/eca kill <目标>` - 击杀实体
 - `/eca remove <目标> [原因]` - 从世界中移除实体
 - `/eca teleport <目标> <x> <y> <z>` - 传送实体
+- `/eca cleanbossbar <目标>` - 清理 Boss 血条
+- `/eca clearoutsidedata <目标>` - 清除外部 Mod 数据
 
 ## 开发者使用
 
 1. **生命值**：获取和设置实体生命值，支持自定义存储方式的实体（`getHealth`, `setHealth`, `modifyEntityHealth`, `triggerHealthAnalysis`, `getHealthCache`）。您可以通过以下API修改生命值相关的名单设置：`addHealthWhitelistKeyword`, `addHealthBlacklistKeyword`
-2. **实体控制**：击杀、复活、传送、完全清除实体（`killEntity`, `reviveEntity`, `teleportEntity`, `removeEntity`）
+2. **实体控制**：击杀、复活、传送、完全清除实体（`killEntity`, `reviveEntity`, `teleportEntity`, `removeEntity`, `cleanupBossBar`）
 3. **无敌状态**：通过 NBT 管理实体无敌状态（`isInvulnerable`, `setInvulnerable`）
 4. **清除外部实体数据**：本Mod提供了清除外部Mod添加的实体数据的功能（`clearExternalEntityData`），您可以通过以下API修改清除数据的黑名单：`addDataClearBlacklistKeyword`
 
@@ -86,6 +91,7 @@ EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
 EcaAPI.teleportEntity(entity, x, y, z);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
+EcaAPI.cleanupBossBar(entity);
 
 // 无敌状态
 EcaAPI.setInvulnerable(entity, true);
