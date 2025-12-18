@@ -21,6 +21,10 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.level.entity.*;
 import net.minecraft.util.ClassInstanceMultiMap;
 import net.minecraft.advancements.CriteriaTriggers;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
+import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
@@ -30,6 +34,7 @@ import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -46,6 +51,13 @@ public class EntityUtil {
     //VarHandle - 死亡模块
     private static VarHandle DEATH_TIME_HANDLE;
     private static VarHandle DEAD_HANDLE;
+
+    //VarHandle - 传送模块
+    private static VarHandle ENTITY_POSITION_HANDLE;
+    private static VarHandle ENTITY_X_OLD_HANDLE;
+    private static VarHandle ENTITY_Y_OLD_HANDLE;
+    private static VarHandle ENTITY_Z_OLD_HANDLE;
+    private static VarHandle ENTITY_BB_HANDLE;
 
     //VarHandle - 实体清除模块（服务端）
     private static VarHandle SERVER_LEVEL_PLAYERS_HANDLE;
@@ -75,16 +87,31 @@ public class EntityUtil {
     private static VarHandle TRANSIENT_ENTITY_MANAGER_ENTITY_STORAGE_HANDLE;
     private static VarHandle TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE_HANDLE;
 
-    //生命值关键词白名单
-    private static final Set<String> HEALTH_KEYWORDS = Set.of("health", "heal", "hp", "life", "vital");
+    //生命值关键词白名单（可动态添加）
+    private static final Set<String> HEALTH_WHITELIST_KEYWORDS = ConcurrentHashMap.newKeySet();
 
-    //生命值修改黑名单
-    private static final Set<String> HEALTH_BLACKLIST_KEYWORDS = Set.of(
-        "ai", "goal", "target", "brain", "memory", "sensor", "skill", "ability", "spell", "cast",
-        "animation", "swing", "cooldown", "duration", "delay", "timer", "tick", "time",
-        "age", "lifetime", "deathtime", "hurttime", "invulnerabletime", "hurt",
-        "level", "all_things_end", "is_spawned", "allow_moving", "shoot", "texture"
-    );
+    //生命值修改黑名单（可动态添加）
+    private static final Set<String> HEALTH_BLACKLIST_KEYWORDS = ConcurrentHashMap.newKeySet();
+
+    //实体数据清除黑名单（可动态添加）
+    private static final Set<String> DATA_CLEAR_BLACKLIST_KEYWORDS = ConcurrentHashMap.newKeySet();
+
+    static {
+        //初始化生命值白名单默认值
+        HEALTH_WHITELIST_KEYWORDS.addAll(List.of("health", "heal", "hp", "life", "vital"));
+
+        //初始化生命值黑名单默认值
+        HEALTH_BLACKLIST_KEYWORDS.addAll(List.of(
+            "ai", "goal", "target", "brain", "memory", "sensor", "skill", "ability", "spell", "cast",
+            "animation", "swing", "cooldown", "duration", "delay", "timer", "tick", "time",
+            "age", "lifetime", "deathtime", "hurttime", "invulnerabletime", "hurt"
+        ));
+
+        //初始化实体数据清除黑名单默认值（来自 The Last Sword）
+        DATA_CLEAR_BLACKLIST_KEYWORDS.addAll(List.of(
+            "level", "all_things_end", "is_spawned", "allow_moving", "shoot", "texture"
+        ));
+    }
 
     //VarHandle缓存
     private static final Map<String, VarHandle> VAR_HANDLE_CACHE = new ConcurrentHashMap<>();
@@ -126,12 +153,32 @@ public class EntityUtil {
             DEATH_TIME_HANDLE = livingEntityLookup.unreflectVarHandle(deathTimeField);
             DEAD_HANDLE = livingEntityLookup.unreflectVarHandle(deadField);
 
+            //传送模块 VarHandle 初始化
+            initTeleportVarHandles();
+
             //实体清除模块 - 服务端 VarHandle 初始化
             initServerRemovalVarHandles();
 
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to initialize VarHandle: {}", e.getMessage());
         }
+    }
+
+    //初始化传送模块的 VarHandle
+    private static void initTeleportVarHandles() throws Exception {
+        //Entity - 传送相关字段
+        Field entityPositionField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.position"));
+        Field entityXOldField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.xOld"));
+        Field entityYOldField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.yOld"));
+        Field entityZOldField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.zOld"));
+        Field entityBbField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.bb"));
+
+        MethodHandles.Lookup entityLookup = MethodHandles.privateLookupIn(Entity.class, MethodHandles.lookup());
+        ENTITY_POSITION_HANDLE = entityLookup.unreflectVarHandle(entityPositionField);
+        ENTITY_X_OLD_HANDLE = entityLookup.unreflectVarHandle(entityXOldField);
+        ENTITY_Y_OLD_HANDLE = entityLookup.unreflectVarHandle(entityYOldField);
+        ENTITY_Z_OLD_HANDLE = entityLookup.unreflectVarHandle(entityZOldField);
+        ENTITY_BB_HANDLE = entityLookup.unreflectVarHandle(entityBbField);
     }
 
     //初始化服务端清除模块的 VarHandle
@@ -256,8 +303,8 @@ public class EntityUtil {
         try {
             if (ITEMS_BY_ID_FIELD == null) return null;
             Object itemsById = ITEMS_BY_ID_FIELD.get(entityData);
-            if (itemsById instanceof it.unimi.dsi.fastutil.ints.Int2ObjectMap) {
-                return (SynchedEntityData.DataItem<?>) ((it.unimi.dsi.fastutil.ints.Int2ObjectMap<?>) itemsById).get(id);
+            if (itemsById instanceof Int2ObjectMap) {
+                return (SynchedEntityData.DataItem<?>) ((Int2ObjectMap<?>) itemsById).get(id);
             }
             return null;
         } catch (Exception e) {
@@ -699,7 +746,7 @@ public class EntityUtil {
     private static void scanAndModifyHealthContainer(LivingEntity entity, float expectedHealth, HealthFieldCache cache) {
         try {
             Class<?> containerClass = Class.forName(cache.containerClass);
-            java.lang.reflect.Method getterMethod = containerClass.getDeclaredMethod(cache.containerGetterMethod);
+            Method getterMethod = containerClass.getDeclaredMethod(cache.containerGetterMethod);
             getterMethod.setAccessible(true);
 
             Object mapInstance = getterMethod.invoke(null);
@@ -780,7 +827,7 @@ public class EntityUtil {
     private static boolean matchesHealthWhitelist(String fieldName) {
         if (fieldName == null || fieldName.isEmpty()) return false;
         String lowerName = fieldName.toLowerCase();
-        for (String keyword : HEALTH_KEYWORDS) {
+        for (String keyword : HEALTH_WHITELIST_KEYWORDS) {
             if (lowerName.contains(keyword)) return true;
         }
         return false;
@@ -1276,5 +1323,228 @@ public class EntityUtil {
                 }
             }
         } catch (Exception ignored) {}
+    }
+
+    // ==================== 传送模块 ====================
+
+    /**
+     * Teleport an entity to the specified location using VarHandle direct access.
+     * This method directly modifies the entity's position fields and updates the bounding box.
+     * @param entity the entity to teleport
+     * @param x the target x coordinate
+     * @param y the target y coordinate
+     * @param z the target z coordinate
+     * @return true if teleportation succeeded, false otherwise
+     */
+    public static boolean teleportEntity(Entity entity, double x, double y, double z) {
+        if (entity == null) return false;
+
+        try {
+            Vec3 newPosition = new Vec3(x, y, z);
+
+            //修改核心位置字段(使用VarHandle)
+            ENTITY_POSITION_HANDLE.set(entity, newPosition);
+            ENTITY_X_OLD_HANDLE.set(entity, x);
+            ENTITY_Y_OLD_HANDLE.set(entity, y);
+            ENTITY_Z_OLD_HANDLE.set(entity, z);
+
+            //更新碰撞箱
+            AABB newBoundingBox = entity.getDimensions(entity.getPose()).makeBoundingBox(x, y, z);
+            ENTITY_BB_HANDLE.set(entity, newBoundingBox);
+
+            //同步到客户端
+            if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
+                syncTeleportToClient(entity, serverLevel);
+            }
+
+            return true;
+        } catch (Exception e) {
+            EcaLogger.error("Teleport failed for {}: {}", entity.getType().getDescriptionId(), e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Sync entity teleportation to clients.
+     * @param entity the entity that was teleported
+     * @param serverLevel the server level
+     */
+    private static void syncTeleportToClient(Entity entity, ServerLevel serverLevel) {
+        try {
+            ClientboundTeleportEntityPacket packet = new ClientboundTeleportEntityPacket(entity);
+            serverLevel.getChunkSource().broadcast(entity, packet);
+
+            //玩家特殊处理
+            if (entity instanceof ServerPlayer player) {
+                player.connection.teleport(
+                        entity.getX(),
+                        entity.getY(),
+                        entity.getZ(),
+                        entity.getYRot(),
+                        entity.getXRot()
+                );
+            }
+        } catch (Exception e) {
+            EcaLogger.error("Failed to sync teleport to clients: {}", e.getMessage());
+        }
+    }
+
+    // ==================== 实体数据清除模块 ====================
+
+    //通过 dataId 查找字段名
+    private static String findFieldNameByDataId(Class<?> entityClass, int dataId) {
+        for (Class<?> clazz = entityClass; clazz != null && clazz != Entity.class; clazz = clazz.getSuperclass()) {
+            for (Field field : clazz.getDeclaredFields()) {
+                try {
+                    field.setAccessible(true);
+                    if (!EntityDataAccessor.class.isAssignableFrom(field.getType())) continue;
+                    if (!Modifier.isStatic(field.getModifiers())) continue;
+
+                    EntityDataAccessor<?> accessor = (EntityDataAccessor<?>) field.get(null);
+                    if (accessor != null && accessor.getId() == dataId) {
+                        return field.getName();
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    //判断是否应该清除 EntityData（检查黑名单）
+    private static boolean shouldClearEntityData(LivingEntity entity, int dataId) {
+        if (dataId <= 15) return false;
+
+        String fieldName = findFieldNameByDataId(entity.getClass(), dataId);
+        if (fieldName != null) {
+            String lowerName = fieldName.toLowerCase();
+            for (String keyword : DATA_CLEAR_BLACKLIST_KEYWORDS) {
+                if (lowerName.contains(keyword)) return false;
+            }
+        }
+        return true;
+    }
+
+    //同步实体数据到客户端
+    private static void safeSyncEntityDataToClients(Entity entity, ServerLevel serverLevel) {
+        try {
+            serverLevel.getChunkSource().broadcastAndSend(entity,
+                    new ClientboundSetEntityDataPacket(
+                            entity.getId(), entity.getEntityData().getNonDefaultValues()
+                    )
+            );
+        } catch (Exception ignored) {}
+    }
+
+    //清理外部 mod 添加的数值型 EntityData
+    @SuppressWarnings("unchecked")
+    public static void clearExternalEntityData(LivingEntity entity) {
+        if (entity == null) return;
+
+        //只有在 Defence 激进模式下才清除外部实体数据
+        if (!EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+            return;
+        }
+
+        try {
+            SynchedEntityData entityData = entity.getEntityData();
+            Map<Integer, ?> itemsById = (Map<Integer, ?>) ITEMS_BY_ID_FIELD.get(entityData);
+            if (itemsById == null) return;
+
+            boolean hasCleared = false;
+            int vanillaHealthId = LivingEntity.DATA_HEALTH_ID.getId();
+
+            for (Map.Entry<Integer, ?> entry : itemsById.entrySet()) {
+                try {
+                    int dataId = entry.getKey();
+                    if (dataId == vanillaHealthId) continue;
+                    if (!shouldClearEntityData(entity, dataId)) continue;
+
+                    var dataItem = entry.getValue();
+                    var accessor = ((SynchedEntityData.DataItem<?>) dataItem).getAccessor();
+                    if (!(accessor instanceof EntityDataAccessor)) continue;
+
+                    EntityDataAccessor<?> entityDataAccessor = (EntityDataAccessor<?>) accessor;
+                    Object currentValue = ((SynchedEntityData.DataItem<?>) dataItem).getValue();
+
+                    if (currentValue instanceof Integer) {
+                        entityData.set((EntityDataAccessor<Integer>) entityDataAccessor, 0);
+                        hasCleared = true;
+                    } else if (currentValue instanceof Float) {
+                        entityData.set((EntityDataAccessor<Float>) entityDataAccessor, 0.0F);
+                        hasCleared = true;
+                    } else if (currentValue instanceof Double) {
+                        entityData.set((EntityDataAccessor<Double>) entityDataAccessor, 0.0D);
+                        hasCleared = true;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+
+            if (hasCleared && !entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
+                safeSyncEntityDataToClients(entity, serverLevel);
+            }
+        } catch (Exception e) {
+            EcaLogger.error("External entity data clearing failed: {}", e.getMessage());
+        }
+    }
+
+    // ==================== 关键词名单管理 API ====================
+
+    //添加生命值白名单关键词
+    public static void addHealthWhitelistKeyword(String keyword) {
+        if (keyword != null && !keyword.isEmpty()) {
+            HEALTH_WHITELIST_KEYWORDS.add(keyword.toLowerCase());
+        }
+    }
+
+    //移除生命值白名单关键词
+    public static void removeHealthWhitelistKeyword(String keyword) {
+        if (keyword != null) {
+            HEALTH_WHITELIST_KEYWORDS.remove(keyword.toLowerCase());
+        }
+    }
+
+    //获取生命值白名单关键词（只读副本）
+    public static Set<String> getHealthWhitelistKeywords() {
+        return new HashSet<>(HEALTH_WHITELIST_KEYWORDS);
+    }
+
+    //添加生命值黑名单关键词
+    public static void addHealthBlacklistKeyword(String keyword) {
+        if (keyword != null && !keyword.isEmpty()) {
+            HEALTH_BLACKLIST_KEYWORDS.add(keyword.toLowerCase());
+        }
+    }
+
+    //移除生命值黑名单关键词
+    public static void removeHealthBlacklistKeyword(String keyword) {
+        if (keyword != null) {
+            HEALTH_BLACKLIST_KEYWORDS.remove(keyword.toLowerCase());
+        }
+    }
+
+    //获取生命值黑名单关键词（只读副本）
+    public static Set<String> getHealthBlacklistKeywords() {
+        return new HashSet<>(HEALTH_BLACKLIST_KEYWORDS);
+    }
+
+    //添加实体数据清除黑名单关键词
+    public static void addDataClearBlacklistKeyword(String keyword) {
+        if (keyword != null && !keyword.isEmpty()) {
+            DATA_CLEAR_BLACKLIST_KEYWORDS.add(keyword.toLowerCase());
+        }
+    }
+
+    //移除实体数据清除黑名单关键词
+    public static void removeDataClearBlacklistKeyword(String keyword) {
+        if (keyword != null) {
+            DATA_CLEAR_BLACKLIST_KEYWORDS.remove(keyword.toLowerCase());
+        }
+    }
+
+    //获取实体数据清除黑名单关键词（只读副本）
+    public static Set<String> getDataClearBlacklistKeywords() {
+        return new HashSet<>(DATA_CLEAR_BLACKLIST_KEYWORDS);
     }
 }

@@ -16,7 +16,13 @@ public class EcaConfiguration {
     // Defence Configuration | 防御系统配置
     // ═══════════════════════════════════════════════════════════════════════════════════
 
-    //（未来扩展）
+    public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_ENABLE_RADICAL_LOGIC;
+
+    // ═══════════════════════════════════════════════════════════════════════════════════
+    // Attribute Configuration | 属性系统配置
+    // ═══════════════════════════════════════════════════════════════════════════════════
+
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
 
     static {
         // ═══════════════════════════════════════════════════════════════════════════════
@@ -35,9 +41,21 @@ public class EcaConfiguration {
         // ═══════════════════════════════════════════════════════════════════════════════
         BUILDER.push("Defence");
 
-        //（未来扩展）
+        DEFENCE_ENABLE_RADICAL_LOGIC = BUILDER
+            .comment("Enable radical logic for defence system, which increases defence processing strength but may cause performance overhead and mod conflicts")
+            .define("Enable Radical Logic", false);
 
         BUILDER.pop();
+
+        ATTRIBUTE_UNLOCK_LIMITS = BUILDER
+            .comment(
+                "Unlock vanilla attribute limits to allow extreme values",
+                "When enabled, all vanilla attributes (health, armor, damage, etc.) can exceed their normal limits",
+                "Limits will be extended to Double.MAX_VALUE (±1.7976931348623157E308)",
+                "WARNING: This may cause compatibility issues with some mods or game instability",
+                "Requires game restart to take effect"
+            )
+            .define("Unlock Attribute Limits", true);
 
         SPEC = BUILDER.build();
     }
@@ -56,6 +74,14 @@ public class EcaConfiguration {
 
     public static boolean getAttackEnableRadicalLogicSafely() {
         return safeGet(ATTACK_ENABLE_RADICAL_LOGIC, false);
+    }
+
+    public static boolean getDefenceEnableRadicalLogicSafely() {
+        return safeGet(DEFENCE_ENABLE_RADICAL_LOGIC, false);
+    }
+
+    public static boolean getAttributeUnlockLimitsSafely() {
+        return safeGet(ATTRIBUTE_UNLOCK_LIMITS, true);
     }
 }
 

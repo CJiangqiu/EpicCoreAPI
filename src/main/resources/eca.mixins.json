@@ -26,6 +26,7 @@
     "NetworkDefenceMixin$ServerPacketListenerKickPrevent",
     "PersistentEntitySectionManagerMixin",
     "PlayerMixin",
+    "RangedAttributeMixin",
     "ServerLevelMixin",
     "TransientEntitySectionManagerMixin"
   ],

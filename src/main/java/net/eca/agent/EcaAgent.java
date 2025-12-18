@@ -5,6 +5,7 @@ import net.eca.agent.transform.ITransformModule;
 import net.eca.agent.transform.LivingEntityTransformer;
 
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -235,7 +236,7 @@ public final class EcaAgent {
      */
     private static boolean hasOverriddenMethod(Class<?> clazz, String methodName, String methodDesc) {
         try {
-            for (java.lang.reflect.Method method : clazz.getDeclaredMethods()) {
+            for (Method method : clazz.getDeclaredMethods()) {
                 if (method.getName().equals(methodName)) {
                     // 简单检查：方法名匹配即可
                     // 更精确的检查需要比较方法描述符
@@ -261,7 +262,7 @@ public final class EcaAgent {
      * @param method the method
      * @return the method descriptor
      */
-    private static String getMethodDescriptor(java.lang.reflect.Method method) {
+    private static String getMethodDescriptor(Method method) {
         StringBuilder sb = new StringBuilder("(");
         for (Class<?> paramType : method.getParameterTypes()) {
             sb.append(getTypeDescriptor(paramType));

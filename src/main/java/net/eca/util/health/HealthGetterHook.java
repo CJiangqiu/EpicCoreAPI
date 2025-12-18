@@ -6,6 +6,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.eca.util.EcaLogger;
 import net.eca.util.reflect.ObfuscationMapping;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -426,10 +427,10 @@ public class HealthGetterHook {
 
                 try {
                     Class<?> ownerClass = Class.forName(ownerClassName.replace('/', '.'));
-                    java.lang.reflect.Method keyMethod = null;
+                    Method keyMethod = null;
 
                     //尝试查找方法（无参数）
-                    for (java.lang.reflect.Method m : ownerClass.getDeclaredMethods()) {
+                    for (Method m : ownerClass.getDeclaredMethods()) {
                         if (m.getName().equals(methodName) && m.getParameterCount() == 0) {
                             keyMethod = m;
                             keyMethod.setAccessible(true);
@@ -439,7 +440,7 @@ public class HealthGetterHook {
 
                     if (keyMethod == null) {
                         //尝试在父类中查找
-                        for (java.lang.reflect.Method m : ownerClass.getMethods()) {
+                        for (Method m : ownerClass.getMethods()) {
                             if (m.getName().equals(methodName) && m.getParameterCount() == 0) {
                                 keyMethod = m;
                                 keyMethod.setAccessible(true);
@@ -612,8 +613,8 @@ public class HealthGetterHook {
         try {
             if (ITEMS_BY_ID_FIELD == null) return null;
             Object itemsById = ITEMS_BY_ID_FIELD.get(entityData);
-            if (itemsById instanceof it.unimi.dsi.fastutil.ints.Int2ObjectMap) {
-                return (SynchedEntityData.DataItem<?>) ((it.unimi.dsi.fastutil.ints.Int2ObjectMap<?>) itemsById).get(id);
+            if (itemsById instanceof Int2ObjectMap) {
+                return (SynchedEntityData.DataItem<?>) ((Int2ObjectMap<?>) itemsById).get(id);
             }
             return null;
         } catch (Exception e) {

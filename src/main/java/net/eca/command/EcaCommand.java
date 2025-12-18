@@ -14,6 +14,7 @@ public class EcaCommand {
                 .then(SetHealthCommand.registerSubCommand())
                 .then(KillEntityCommand.registerSubCommand())
                 .then(RemoveEntityCommand.registerSubCommand())
+                .then(TeleportCommand.registerSubCommand())
         );
     }
 }

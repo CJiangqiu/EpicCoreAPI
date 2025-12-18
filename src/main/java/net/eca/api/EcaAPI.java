@@ -8,6 +8,8 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.damagesource.DamageSource;
 
+import java.util.Set;
+
 public final class EcaAPI {
 
     // ==================== 日志 ====================
@@ -300,7 +302,6 @@ public final class EcaAPI {
         }
     }
 
-    // ==================== 实体死亡模块 API ====================
 
     // 设置实体死亡
     /**
@@ -324,7 +325,6 @@ public final class EcaAPI {
         EntityUtil.reviveEntity(entity);
     }
 
-    // ==================== 实体清除模块 API ====================
 
     // 完整清除实体
     /**
@@ -342,7 +342,114 @@ public final class EcaAPI {
         EntityUtil.removeEntity(entity, reason);
     }
 
-    // 清理Boss血条
+
+    // 传送实体到指定位置
+    /**
+     * Teleport an entity to the specified location using VarHandle direct access.
+     * This method directly modifies the entity's position fields and automatically syncs to clients.
+     * @param entity the entity to teleport
+     * @param x the target x coordinate
+     * @param y the target y coordinate
+     * @param z the target z coordinate
+     * @return true if teleportation succeeded, false otherwise
+     */
+    public static boolean teleportEntity(Entity entity, double x, double y, double z) {
+        return EntityUtil.teleportEntity(entity, x, y, z);
+    }
+
+
+    // 清除外部实体数据
+    /**
+     * Clear external numeric EntityData added by other mods.
+     * This method ONLY executes when Defence Radical Logic is enabled in configuration.
+     * When enabled, it sets all numeric EntityDataAccessors (Integer, Float, Double) to 0,
+     * except for vanilla DATA_HEALTH_ID and fields matching the blacklist keywords.
+     * If Defence Radical Logic is disabled, this method does nothing and returns immediately.
+     * @param entity the living entity to clear data from
+     */
+    public static void clearExternalEntityData(LivingEntity entity) {
+        EntityUtil.clearExternalEntityData(entity);
+    }
+
+    // ==================== 关键词名单管理 API ====================
+
+    // 生命值白名单管理
+    /**
+     * Add a keyword to the health whitelist.
+     * Fields containing this keyword will be modified during health modification.
+     * @param keyword the keyword to add (case-insensitive)
+     */
+    public static void addHealthWhitelistKeyword(String keyword) {
+        EntityUtil.addHealthWhitelistKeyword(keyword);
+    }
+
+    /**
+     * Remove a keyword from the health whitelist.
+     * @param keyword the keyword to remove (case-insensitive)
+     */
+    public static void removeHealthWhitelistKeyword(String keyword) {
+        EntityUtil.removeHealthWhitelistKeyword(keyword);
+    }
+
+    /**
+     * Get all health whitelist keywords.
+     * @return a read-only copy of the health whitelist keywords
+     */
+    public static Set<String> getHealthWhitelistKeywords() {
+        return EntityUtil.getHealthWhitelistKeywords();
+    }
+
+    // 生命值黑名单管理
+    /**
+     * Add a keyword to the health blacklist.
+     * Fields containing this keyword will NOT be modified during health modification.
+     * @param keyword the keyword to add (case-insensitive)
+     */
+    public static void addHealthBlacklistKeyword(String keyword) {
+        EntityUtil.addHealthBlacklistKeyword(keyword);
+    }
+
+    /**
+     * Remove a keyword from the health blacklist.
+     * @param keyword the keyword to remove (case-insensitive)
+     */
+    public static void removeHealthBlacklistKeyword(String keyword) {
+        EntityUtil.removeHealthBlacklistKeyword(keyword);
+    }
+
+    /**
+     * Get all health blacklist keywords.
+     * @return a read-only copy of the health blacklist keywords
+     */
+    public static Set<String> getHealthBlacklistKeywords() {
+        return EntityUtil.getHealthBlacklistKeywords();
+    }
+
+    // 实体数据清除黑名单管理
+    /**
+     * Add a keyword to the data clear blacklist.
+     * Fields containing this keyword will NOT be cleared during external entity data clearing.
+     * @param keyword the keyword to add (case-insensitive)
+     */
+    public static void addDataClearBlacklistKeyword(String keyword) {
+        EntityUtil.addDataClearBlacklistKeyword(keyword);
+    }
+
+    /**
+     * Remove a keyword from the data clear blacklist.
+     * @param keyword the keyword to remove (case-insensitive)
+     */
+    public static void removeDataClearBlacklistKeyword(String keyword) {
+        EntityUtil.removeDataClearBlacklistKeyword(keyword);
+    }
+
+    /**
+     * Get all data clear blacklist keywords.
+     * @return a read-only copy of the data clear blacklist keywords
+     */
+    public static Set<String> getDataClearBlacklistKeywords() {
+        return EntityUtil.getDataClearBlacklistKeywords();
+    }
 
     private EcaAPI() {}
 }
