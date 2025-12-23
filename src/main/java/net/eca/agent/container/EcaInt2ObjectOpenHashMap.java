@@ -3,6 +3,7 @@ package net.eca.agent.container;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import net.eca.api.EcaAPI;
 import net.eca.util.EcaLogger;
+import net.eca.util.EntityUtil;
 import net.minecraft.world.entity.Entity;
 
 /**
@@ -54,8 +55,9 @@ public class EcaInt2ObjectOpenHashMap<V> extends Int2ObjectOpenHashMap<V> {
 
         // 检查值是否是Entity实例
         if (value instanceof Entity entity) {
-            // 检查实体是否处于无敌状态
-            return EcaAPI.isInvulnerable(entity);
+            // 检查实体是否处于无敌状态，同时允许切换维度操作
+            // Allow dimension change operations even for invulnerable entities
+            return EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity);
         }
 
         return false;

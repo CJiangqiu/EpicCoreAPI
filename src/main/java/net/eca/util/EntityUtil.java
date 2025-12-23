@@ -59,6 +59,12 @@ public class EntityUtil {
     private static VarHandle ENTITY_Z_OLD_HANDLE;
     private static VarHandle ENTITY_BB_HANDLE;
 
+    //VarHandle - 实体移除原因检测模块
+    private static VarHandle ENTITY_REMOVAL_REASON_HANDLE;
+
+    // 正在切换维度的实体UUID集合（线程安全）
+    private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
+
     //VarHandle - 实体清除模块（服务端）
     private static VarHandle SERVER_LEVEL_PLAYERS_HANDLE;
     private static VarHandle SERVER_LEVEL_CHUNK_SOURCE_HANDLE;
@@ -179,6 +185,9 @@ public class EntityUtil {
         ENTITY_Y_OLD_HANDLE = entityLookup.unreflectVarHandle(entityYOldField);
         ENTITY_Z_OLD_HANDLE = entityLookup.unreflectVarHandle(entityZOldField);
         ENTITY_BB_HANDLE = entityLookup.unreflectVarHandle(entityBbField);
+
+        Field entityRemovalReasonField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.removalReason"));
+        ENTITY_REMOVAL_REASON_HANDLE = entityLookup.unreflectVarHandle(entityRemovalReasonField);
     }
 
     //初始化服务端清除模块的 VarHandle
@@ -280,6 +289,58 @@ public class EntityUtil {
             } catch (Exception e) {
                 EcaLogger.info("[EntityUtil] Failed to initialize client VarHandles: {}", e.getMessage());
             }
+        }
+    }
+
+    //检查实体是否正在切换维度
+    /**
+     * Check if an entity is currently changing dimensions.
+     * This method checks the entity's removal reason to determine if it's being removed due to dimension change.
+     * Used internally by Mixins to allow dimension change operations even for invulnerable entities.
+     *
+     * @param entity the entity to check
+     * @return true if the entity's removal reason is CHANGED_DIMENSION, false otherwise
+     */
+    public static boolean isChangingDimension(Entity entity) {
+        if (entity == null) {
+            return false;
+        }
+
+        // 使用UUID集合判断，避免字段读取的时序问题和残留问题
+        return DIMENSION_CHANGING_ENTITIES.contains(entity.getUUID());
+    }
+
+    /**
+     * Mark an entity as currently changing dimensions.
+     * Should be called when dimension change starts (removalReason = CHANGED_DIMENSION).
+     *
+     * @param entity the entity starting dimension change
+     */
+    public static void markDimensionChanging(Entity entity) {
+        if (entity == null) {
+            return;
+        }
+
+        UUID uuid = entity.getUUID();
+        DIMENSION_CHANGING_ENTITIES.add(uuid);
+        EcaLogger.info("[EntityUtil] Marked entity {} (UUID: {}) as changing dimension", entity.getId(), uuid);
+    }
+
+    /**
+     * Unmark an entity from dimension changing state.
+     * Should be called when dimension change completes.
+     *
+     * @param entity the entity that finished dimension change
+     */
+    public static void unmarkDimensionChanging(Entity entity) {
+        if (entity == null) {
+            return;
+        }
+
+        UUID uuid = entity.getUUID();
+        boolean removed = DIMENSION_CHANGING_ENTITIES.remove(uuid);
+        if (removed) {
+            EcaLogger.info("[EntityUtil] Unmarked entity {} (UUID: {}) from changing dimension", entity.getId(), uuid);
         }
     }
 
@@ -970,6 +1031,83 @@ public class EntityUtil {
             }
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Entity removal failed: {}", e.getMessage());
+        }
+    }
+
+    //清除旧维度的残留实体记录
+    /**
+     * Cleanup residual entity records in the old dimension after dimension change.
+     * This method checks if the entity still exists in old dimension containers and removes it.
+     *
+     * @param oldLevel the old dimension level
+     * @param entity the entity that changed dimension
+     */
+    public static void cleanupOldDimensionRecords(ServerLevel oldLevel, Entity entity) {
+        if (oldLevel == null || entity == null) return;
+
+        int entityId = entity.getId();
+        UUID entityUUID = entity.getUUID();
+
+        try {
+            // 检查旧维度是否还有残留记录
+            if (hasEntityInContainers(oldLevel, entityId, entityUUID)) {
+                EcaLogger.info("[EntityUtil] Found residual entity records in old dimension for entity id={}, cleaning up", entityId);
+
+                // 强制清除旧维度的所有容器记录（不调用 setRemoved）
+                removeFromServerContainers(oldLevel, entity);
+            }
+        } catch (Exception e) {
+            EcaLogger.info("[EntityUtil] Failed to cleanup old dimension records: {}", e.getMessage());
+        }
+    }
+
+    //检查实体是否还在容器中
+    /**
+     * Check if entity still exists in level containers.
+     *
+     * @param level the server level
+     * @param entityId entity ID
+     * @param entityUUID entity UUID
+     * @return true if entity found in any container
+     */
+    private static boolean hasEntityInContainers(ServerLevel level, int entityId, UUID entityUUID) {
+        try {
+            // 检查 EntityLookup.byUuid 和 byId
+            PersistentEntitySectionManager<?> entityManager =
+                (PersistentEntitySectionManager<?>) SERVER_LEVEL_ENTITY_MANAGER_HANDLE.get(level);
+
+            if (entityManager != null) {
+                EntityLookup lookup = (EntityLookup) PERSISTENT_ENTITY_MANAGER_VISIBLE_STORAGE_HANDLE.get(entityManager);
+                if (lookup != null) {
+                    Map<UUID, ?> byUuid = (Map<UUID, ?>) ENTITY_LOOKUP_BY_UUID_HANDLE.get(lookup);
+                    if (byUuid != null && byUuid.containsKey(entityUUID)) {
+                        return true;
+                    }
+
+                    Int2ObjectMap<?> byId = (Int2ObjectMap<?>) ENTITY_LOOKUP_BY_ID_HANDLE.get(lookup);
+                    if (byId != null && byId.containsKey(entityId)) {
+                        return true;
+                    }
+                }
+            }
+
+            // 检查 ChunkMap.entityMap
+            ServerChunkCache chunkSource = (ServerChunkCache) SERVER_LEVEL_CHUNK_SOURCE_HANDLE.get(level);
+            if (chunkSource != null) {
+                ChunkMap chunkMap = (ChunkMap) SERVER_CHUNK_CACHE_CHUNK_MAP_HANDLE.get(chunkSource);
+                if (chunkMap != null) {
+                    Int2ObjectMap<?> entityMap = (Int2ObjectMap<?>) CHUNK_MAP_ENTITY_MAP_HANDLE.get(chunkMap);
+                    if (entityMap != null && entityMap.containsKey(entityId)) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        } catch (Exception e) {
+            EcaLogger.info("[EntityUtil] Error checking entity in containers: {}", e.getMessage());
+            // 如果检查失败，保守起见返回 true，执行清除
+            return true;
         }
     }
 

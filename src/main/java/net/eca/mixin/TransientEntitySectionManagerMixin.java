@@ -1,6 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
+import net.eca.util.EntityUtil;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.EntityAccess;
 import net.minecraft.world.level.entity.TransientEntitySectionManager;
@@ -23,7 +24,8 @@ public class TransientEntitySectionManagerMixin {
         @Inject(method = "onRemove", at = @At("HEAD"), cancellable = true)
         private void onCallbackOnRemove(Entity.RemovalReason reason, CallbackInfo ci) {
             if (this.entity instanceof Entity realEntity) {
-                if (EcaAPI.isInvulnerable(realEntity)) {
+                // Allow dimension change operations even for invulnerable entities
+                if (EcaAPI.isInvulnerable(realEntity) && reason != Entity.RemovalReason.CHANGED_DIMENSION) {
                     ci.cancel();
                 }
             }

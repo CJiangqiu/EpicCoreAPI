@@ -15,6 +15,7 @@
   "mixins": [
     "ChunkMapMixin",
     "ClassInstanceMultiMapMixin",
+    "EntityDimensionChangeMixin",
     "EntityLookupMixin",
     "EntityMixin",
     "EntitySectionMixin",

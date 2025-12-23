@@ -37,6 +37,7 @@ public final class ObfuscationMapping {
         fields.put("Entity.yOld", "f_19791_");
         fields.put("Entity.zOld", "f_19792_");
         fields.put("Entity.bb", "f_19828_");
+        fields.put("Entity.removalReason", "f_146795_");
 
         // LivingEntity
         fields.put("LivingEntity.hurtTime", "f_20915_");

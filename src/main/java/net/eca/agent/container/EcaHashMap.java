@@ -2,6 +2,7 @@ package net.eca.agent.container;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EcaLogger;
+import net.eca.util.EntityUtil;
 import net.minecraft.world.entity.Entity;
 
 import java.util.HashMap;
@@ -60,7 +61,8 @@ public class EcaHashMap<K, V> extends HashMap<K, V> {
 
         // 情况1：值直接是Entity（用于EntityLookup.byUuid）
         if (value instanceof Entity entity) {
-            return EcaAPI.isInvulnerable(entity);
+            // Allow dimension change operations even for invulnerable entities
+            return EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity);
         }
 
         // 情况2：值是List（用于ClassInstanceMultiMap.byClass）
@@ -68,7 +70,8 @@ public class EcaHashMap<K, V> extends HashMap<K, V> {
         if (value instanceof java.util.List<?> list) {
             for (Object item : list) {
                 if (item instanceof Entity entity) {
-                    if (EcaAPI.isInvulnerable(entity)) {
+                    // Allow dimension change operations even for invulnerable entities
+                    if (EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
                         return true; // 如果List中有任何无敌实体，阻止移除整个List
                     }
                 }

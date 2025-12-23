@@ -2,6 +2,7 @@ package net.eca.agent.container;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EcaLogger;
+import net.eca.util.EntityUtil;
 import net.minecraft.world.entity.Entity;
 
 import java.util.ArrayList;
@@ -88,8 +89,9 @@ public class EcaArrayList<E> extends ArrayList<E> {
     private boolean shouldProtectRemoval(Object element) {
         // 检查元素是否是Entity实例
         if (element instanceof Entity entity) {
-            // 检查实体是否处于无敌状态
-            return EcaAPI.isInvulnerable(entity);
+            // 检查实体是否处于无敌状态，同时允许切换维度操作
+            // Allow dimension change operations even for invulnerable entities
+            return EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity);
         }
 
         return false;
