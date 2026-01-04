@@ -7,7 +7,6 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
-// LivingEntity级别字节码转换器
 /**
  * Bytecode transformer for LivingEntity and its subclasses.
  * Handles transformations like getHealth() hooking for heal negation.
@@ -21,9 +20,9 @@ public class LivingEntityTransformer implements ITransformModule {
     private static final String GET_HEALTH_METHOD_DESC = "()F";
 
     // Hook处理器类（由使用者设置）
-    private static String hookClassName = "net/eca/agent/transform/LivingEntityTransformer";
+    private static String hookClassName = "net/eca/util/health/GetHealthHook";
     private static String hookMethodName = "processGetHealth";
-    private static String hookMethodDesc = "(FLnet/minecraft/world/entity/LivingEntity;Ljava/lang/String;)F";
+    private static String hookMethodDesc = "(Lnet/minecraft/world/entity/LivingEntity;F)F";
 
     // 设置Hook处理器
     /**
@@ -184,9 +183,9 @@ public class LivingEntityTransformer implements ITransformModule {
         public void visitInsn(int opcode) {
             if (opcode == Opcodes.FRETURN) {
                 // 在返回前修改栈顶的返回值
-                // 栈：[原始血量] → [原始血量, this, className] → [最终血量]
-                mv.visitVarInsn(Opcodes.ALOAD, 0);  // 加载this
-                mv.visitLdcInsn(className.replace('/', '.'));  // 加载类名
+                // 栈：[原始血量] → [this, 原始血量] → [最终血量]
+                mv.visitVarInsn(Opcodes.ALOAD, 0);  // 加载this（放在栈底）
+                mv.visitInsn(Opcodes.SWAP);  // 交换栈顶两个元素，变成 [this, 原始血量]
                 mv.visitMethodInsn(
                         Opcodes.INVOKESTATIC,
                         hookClassName,

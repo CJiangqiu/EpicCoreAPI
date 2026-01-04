@@ -42,7 +42,13 @@ public class EcaConfiguration {
         BUILDER.push("Defence");
 
         DEFENCE_ENABLE_RADICAL_LOGIC = BUILDER
-            .comment("Enable radical logic for defence system, which increases defence processing strength but may cause performance overhead and mod conflicts")
+            .comment(
+                "Enable radical logic for defence system",
+                "When enabled:",
+                "  - Increases defence processing strength",
+                "  - Enables EntityData protection to block unauthorized modifications from other mods",
+                "WARNING: May cause performance overhead and mod conflicts"
+            )
             .define("Enable Radical Logic", false);
 
         BUILDER.pop();

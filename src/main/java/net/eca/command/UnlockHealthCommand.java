@@ -12,51 +12,63 @@ import net.minecraft.world.entity.LivingEntity;
 
 import java.util.Collection;
 
-//清除外部实体数据命令
-public class ClearOutsideDataCommand {
+//解除实体血量锁定命令
+public class UnlockHealthCommand {
 
     //注册子命令
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
-        return Commands.literal("clearoutsidedata")
+        return Commands.literal("unlockHealth")
             .then(Commands.argument("targets", EntityArgument.entities())
-                .executes(ClearOutsideDataCommand::clearOutsideData)
+                .executes(UnlockHealthCommand::unlockHealth)
             );
     }
 
-    //执行清除
-    private static int clearOutsideData(CommandContext<CommandSourceStack> context) {
+    //执行解除锁定
+    private static int unlockHealth(CommandContext<CommandSourceStack> context) {
         CommandSourceStack source = context.getSource();
 
         try {
             Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+
             int successCount = 0;
+            int skippedCount = 0;
 
             for (Entity entity : targets) {
-                if (!(entity instanceof LivingEntity livingEntity)) {
-                    source.sendFailure(Component.literal(
-                        "§c" + entity.getName().getString() + " is not a living entity"
-                    ));
-                    continue;
-                }
+                if (!(entity instanceof LivingEntity livingEntity)) continue;
 
                 try {
-                    EcaAPI.clearExternalEntityData(livingEntity);
+                    // 检查是否已锁定
+                    if (!EcaAPI.isHealthLocked(livingEntity)) {
+                        skippedCount++;
+                        continue;
+                    }
+
+                    EcaAPI.unlockHealth(livingEntity);
                     successCount++;
                 } catch (Exception e) {
                     source.sendFailure(Component.literal(
-                        "§cFailed to clear outside data for " + entity.getName().getString() + ": " + e.getMessage()
+                        "§cError unlocking health for " + entity.getName().getString() + ": " + e.getMessage()
                     ));
                 }
             }
 
             final int finalSuccessCount = successCount;
+            final int finalSkippedCount = skippedCount;
 
             if (finalSuccessCount > 0) {
                 source.sendSuccess(() -> Component.literal(
-                    String.format("§aCleared outside data for %d %s",
+                    String.format("§aUnlocked health of %d %s",
                         finalSuccessCount,
                         finalSuccessCount == 1 ? "entity" : "entities")
                 ), true);
+            }
+
+            if (finalSkippedCount > 0) {
+                source.sendSuccess(() -> Component.literal(
+                    String.format("§eSkipped %d %s (not locked)",
+                        finalSkippedCount,
+                        finalSkippedCount == 1 ? "entity" : "entities")
+                ), false);
             }
 
             return finalSuccessCount;

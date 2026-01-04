@@ -4,7 +4,7 @@ import net.eca.config.EcaConfiguration;
 import net.eca.network.EcaClientRemovePacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.health.HealthFieldCache;
-import net.eca.util.health.HealthGetterHook;
+import net.eca.util.health.HealthAnalyzerManager;
 import net.eca.util.reflect.ObfuscationMapping;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -41,6 +41,13 @@ import java.util.concurrent.ConcurrentHashMap;
 
 //实体工具类
 public class EntityUtil {
+
+    //EntityDataAccessor - 血量锁定模块
+    public static EntityDataAccessor<Boolean> HEALTH_LOCK_ENABLED;
+    public static EntityDataAccessor<String> HEALTH_LOCK_VALUE;
+
+    //EntityDataAccessor - 无敌状态模块
+    public static EntityDataAccessor<Boolean> INVULNERABLE;
 
     //VarHandle - 生命值模块
     private static VarHandle DATA_ITEM_VALUE_HANDLE;
@@ -99,9 +106,6 @@ public class EntityUtil {
     //生命值修改黑名单（可动态添加）
     private static final Set<String> HEALTH_BLACKLIST_KEYWORDS = ConcurrentHashMap.newKeySet();
 
-    //实体数据清除黑名单（可动态添加）
-    private static final Set<String> DATA_CLEAR_BLACKLIST_KEYWORDS = ConcurrentHashMap.newKeySet();
-
     static {
         //初始化生命值白名单默认值
         HEALTH_WHITELIST_KEYWORDS.addAll(List.of("health", "heal", "hp", "life", "vital"));
@@ -111,11 +115,6 @@ public class EntityUtil {
             "ai", "goal", "target", "brain", "memory", "sensor", "skill", "ability", "spell", "cast",
             "animation", "swing", "cooldown", "duration", "delay", "timer", "tick", "time",
             "age", "lifetime", "deathtime", "hurttime", "invulnerabletime", "hurt"
-        ));
-
-        //初始化实体数据清除黑名单默认值（来自 The Last Sword）
-        DATA_CLEAR_BLACKLIST_KEYWORDS.addAll(List.of(
-            "level", "all_things_end", "is_spawned", "allow_moving", "shoot", "texture"
         ));
     }
 
@@ -774,11 +773,11 @@ public class EntityUtil {
     private static void setHealthViaPhase3(LivingEntity entity, float expectedHealth) {
         try {
             Class<?> entityClass = entity.getClass();
-            HealthFieldCache cache = HealthGetterHook.getCache(entityClass);
+            HealthFieldCache cache = HealthAnalyzerManager.getCache(entityClass);
 
             if (cache == null) {
-                HealthGetterHook.triggerAnalysis(entity);
-                cache = HealthGetterHook.getCache(entityClass);
+                HealthAnalyzerManager.triggerAnalysis(entity);
+                cache = HealthAnalyzerManager.getCache(entityClass);
                 if (cache == null) return;
             }
 
@@ -845,18 +844,18 @@ public class EntityUtil {
     //修改HashMap的值
     private static boolean modifyHashMapValue(HashMap<?, ?> map, Object key, float newValue) {
         try {
-            HealthGetterHook.initHashMapVarHandles(map.getClass());
-            Object[] table = (Object[]) HealthGetterHook.getHashMapTable(map);
+            HealthAnalyzerManager.initHashMapVarHandles(map.getClass());
+            Object[] table = (Object[]) HealthAnalyzerManager.getHashMapTable(map);
             if (table == null) return false;
 
             for (Object node : table) {
                 while (node != null) {
-                    Object nodeKey = HealthGetterHook.getHashMapNodeKey(node);
+                    Object nodeKey = HealthAnalyzerManager.getHashMapNodeKey(node);
                     if (key.equals(nodeKey) || key == nodeKey) {
-                        HealthGetterHook.setHashMapNodeValue(node, newValue);
+                        HealthAnalyzerManager.setHashMapNodeValue(node, newValue);
                         return true;
                     }
-                    node = HealthGetterHook.getHashMapNodeNext(node);
+                    node = HealthAnalyzerManager.getHashMapNodeNext(node);
                 }
             }
         } catch (Exception ignored) {}
@@ -866,18 +865,18 @@ public class EntityUtil {
     //修改WeakHashMap的值
     private static boolean modifyWeakHashMapValue(WeakHashMap<?, ?> map, Object key, float newValue) {
         try {
-            HealthGetterHook.initHashMapVarHandles(map.getClass());
-            Object[] table = (Object[]) HealthGetterHook.getWeakHashMapTable(map);
+            HealthAnalyzerManager.initHashMapVarHandles(map.getClass());
+            Object[] table = (Object[]) HealthAnalyzerManager.getWeakHashMapTable(map);
             if (table == null) return false;
 
             for (Object entry : table) {
                 while (entry != null) {
-                    Object entryKey = HealthGetterHook.getWeakHashMapEntryKey(entry);
+                    Object entryKey = HealthAnalyzerManager.getWeakHashMapEntryKey(entry);
                     if (key.equals(entryKey) || key == entryKey) {
-                        HealthGetterHook.setWeakHashMapEntryValue(entry, newValue);
+                        HealthAnalyzerManager.setWeakHashMapEntryValue(entry, newValue);
                         return true;
                     }
-                    entry = HealthGetterHook.getWeakHashMapEntryNext(entry);
+                    entry = HealthAnalyzerManager.getWeakHashMapEntryNext(entry);
                 }
             }
         } catch (Exception ignored) {}
@@ -1527,106 +1526,6 @@ public class EntityUtil {
         }
     }
 
-    // ==================== 实体数据清除模块 ====================
-
-    //通过 dataId 查找字段名
-    private static String findFieldNameByDataId(Class<?> entityClass, int dataId) {
-        for (Class<?> clazz = entityClass; clazz != null && clazz != Entity.class; clazz = clazz.getSuperclass()) {
-            for (Field field : clazz.getDeclaredFields()) {
-                try {
-                    field.setAccessible(true);
-                    if (!EntityDataAccessor.class.isAssignableFrom(field.getType())) continue;
-                    if (!Modifier.isStatic(field.getModifiers())) continue;
-
-                    EntityDataAccessor<?> accessor = (EntityDataAccessor<?>) field.get(null);
-                    if (accessor != null && accessor.getId() == dataId) {
-                        return field.getName();
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-        }
-        return null;
-    }
-
-    //判断是否应该清除 EntityData（检查黑名单）
-    private static boolean shouldClearEntityData(LivingEntity entity, int dataId) {
-        if (dataId <= 15) return false;
-
-        String fieldName = findFieldNameByDataId(entity.getClass(), dataId);
-        if (fieldName != null) {
-            String lowerName = fieldName.toLowerCase();
-            for (String keyword : DATA_CLEAR_BLACKLIST_KEYWORDS) {
-                if (lowerName.contains(keyword)) return false;
-            }
-        }
-        return true;
-    }
-
-    //同步实体数据到客户端
-    private static void safeSyncEntityDataToClients(Entity entity, ServerLevel serverLevel) {
-        try {
-            serverLevel.getChunkSource().broadcastAndSend(entity,
-                    new ClientboundSetEntityDataPacket(
-                            entity.getId(), entity.getEntityData().getNonDefaultValues()
-                    )
-            );
-        } catch (Exception ignored) {}
-    }
-
-    //清理外部 mod 添加的数值型 EntityData
-    @SuppressWarnings("unchecked")
-    public static void clearExternalEntityData(LivingEntity entity) {
-        if (entity == null) return;
-
-        //只有在 Defence 激进模式下才清除外部实体数据
-        if (!EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            return;
-        }
-
-        try {
-            SynchedEntityData entityData = entity.getEntityData();
-            Map<Integer, ?> itemsById = (Map<Integer, ?>) ITEMS_BY_ID_FIELD.get(entityData);
-            if (itemsById == null) return;
-
-            boolean hasCleared = false;
-            int vanillaHealthId = LivingEntity.DATA_HEALTH_ID.getId();
-
-            for (Map.Entry<Integer, ?> entry : itemsById.entrySet()) {
-                try {
-                    int dataId = entry.getKey();
-                    if (dataId == vanillaHealthId) continue;
-                    if (!shouldClearEntityData(entity, dataId)) continue;
-
-                    var dataItem = entry.getValue();
-                    var accessor = ((SynchedEntityData.DataItem<?>) dataItem).getAccessor();
-                    if (!(accessor instanceof EntityDataAccessor)) continue;
-
-                    EntityDataAccessor<?> entityDataAccessor = (EntityDataAccessor<?>) accessor;
-                    Object currentValue = ((SynchedEntityData.DataItem<?>) dataItem).getValue();
-
-                    if (currentValue instanceof Integer) {
-                        entityData.set((EntityDataAccessor<Integer>) entityDataAccessor, 0);
-                        hasCleared = true;
-                    } else if (currentValue instanceof Float) {
-                        entityData.set((EntityDataAccessor<Float>) entityDataAccessor, 0.0F);
-                        hasCleared = true;
-                    } else if (currentValue instanceof Double) {
-                        entityData.set((EntityDataAccessor<Double>) entityDataAccessor, 0.0D);
-                        hasCleared = true;
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-
-            if (hasCleared && !entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
-                safeSyncEntityDataToClients(entity, serverLevel);
-            }
-        } catch (Exception e) {
-            EcaLogger.error("External entity data clearing failed: {}", e.getMessage());
-        }
-    }
-
     // ==================== 关键词名单管理 API ====================
 
     //添加生命值白名单关键词
@@ -1665,24 +1564,5 @@ public class EntityUtil {
     //获取生命值黑名单关键词（只读副本）
     public static Set<String> getHealthBlacklistKeywords() {
         return new HashSet<>(HEALTH_BLACKLIST_KEYWORDS);
-    }
-
-    //添加实体数据清除黑名单关键词
-    public static void addDataClearBlacklistKeyword(String keyword) {
-        if (keyword != null && !keyword.isEmpty()) {
-            DATA_CLEAR_BLACKLIST_KEYWORDS.add(keyword.toLowerCase());
-        }
-    }
-
-    //移除实体数据清除黑名单关键词
-    public static void removeDataClearBlacklistKeyword(String keyword) {
-        if (keyword != null) {
-            DATA_CLEAR_BLACKLIST_KEYWORDS.remove(keyword.toLowerCase());
-        }
-    }
-
-    //获取实体数据清除黑名单关键词（只读副本）
-    public static Set<String> getDataClearBlacklistKeywords() {
-        return new HashSet<>(DATA_CLEAR_BLACKLIST_KEYWORDS);
     }
 }

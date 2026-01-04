@@ -10,20 +10,20 @@ import java.util.List;
 import java.util.Stack;
 import java.util.function.Function;
 
-//Health value analyzer: analyzes getRecordHp() method implementation and builds reverse formula
+//Health value analyzer: analyzes getHealth() method implementation and builds reverse formula
 public class HealthAnalyzer {
 
     private static final String TARGET_METHOD_NAME = "m_21223_";
     private static final String TARGET_METHOD_DESC = "()F";
 
-    //Analyze the getRecordHp() method of a class (entry point with recursion)
+    //Analyze the getHealth() method of a class (entry point with recursion)
     public static AnalysisResult analyze(Class<?> clazz) {
 
-        //查找定义 getRecordHp() 方法的类（可能在父类）
+        //查找定义 getHealth() 方法的类（可能在父类）
         Class<?> methodOwnerClass = findMethodOwnerClass(clazz);
 
         if (methodOwnerClass == null) {
-            EcaLogger.warn("[HealthAnalyzer] getRecordHp method not found in class hierarchy for: {}", clazz.getName());
+            EcaLogger.warn("[HealthAnalyzer] getHealth() method not found in class hierarchy for: {}", clazz.getName());
             return null;
         }
 
@@ -33,7 +33,7 @@ public class HealthAnalyzer {
         return analyzeMethodRecursive(methodOwnerClass, TARGET_METHOD_NAME, TARGET_METHOD_DESC, 0);
     }
 
-    //查找定义了 getRecordHp() 方法的类（向上遍历继承链）
+    //查找定义了 getHealth() 方法的类（向上遍历继承链）
     private static Class<?> findMethodOwnerClass(Class<?> startClass) {
         Class<?> current = startClass;
         int depth = 0;
@@ -424,7 +424,7 @@ public class HealthAnalyzer {
                 return true;
             }
 
-            //情况2：算术运算包装的方法调用（如: -getRecordHp() - 1270）
+            //情况2：算术运算包装的方法调用（如: -getHealth() - 10.0）
             if (dataSource != null && dataSource.sourceType == SourceType.ARITHMETIC && methodCallTarget != null && !foundMinimalUnit) {
                 return true;
             }

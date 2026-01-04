@@ -54,12 +54,13 @@ public final class EcaAgent {
             // 注册LivingEntity转换模块
             transformer.registerModule(new LivingEntityTransformer());
 
-            // 设置health分析hook处理器
+            // 设置 getHealth() 完整钩子处理器（分析 + 覆盖）
             LivingEntityTransformer.setHookHandler(
-                "net/eca/util/health/HealthAnalysisHook",
+                "net/eca/util/health/GetHealthHook",
                 "processGetHealth",
-                "(FLnet/minecraft/world/entity/LivingEntity;Ljava/lang/String;)F"
+                "(Lnet/minecraft/world/entity/LivingEntity;F)F"
             );
+            AgentLogWriter.info("[EcaAgent] Registered GetHealthHook handler");
 
             // 注册transformer（canRetransform = true用于已加载类）
             inst.addTransformer(transformer, true);
