@@ -17,8 +17,8 @@ import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
-//Runtime hook for getRecordHp() method
-public class HealthGetterHook {
+//Runtime manager for health analysis system
+public class HealthAnalyzerManager {
 
     //Class cache: tracks which entity classes have been analyzed
     private static final Map<Class<?>, HealthFieldCache> cache = new ConcurrentHashMap<>();
@@ -66,7 +66,7 @@ public class HealthGetterHook {
             DATA_ITEM_DIRTY_HANDLE = lookup.unreflectVarHandle(dirtyField);
 
         } catch (Exception e) {
-            EcaLogger.error("[HealthGetterHook] Failed to initialize SynchedEntityData fields", e);
+            EcaLogger.error("[HealthAnalyzerManager] Failed to initialize SynchedEntityData fields", e);
         }
     }
 
@@ -111,17 +111,17 @@ public class HealthGetterHook {
                 }
             } else {
                 //不支持的 Map 类型
-                EcaLogger.error("[HealthGetterHook] Unsupported map type: {} - Only HashMap, LinkedHashMap, and WeakHashMap are supported", mapClass.getName());
+                EcaLogger.error("[HealthAnalyzerManager] Unsupported map type: {} - Only HashMap, LinkedHashMap, and WeakHashMap are supported", mapClass.getName());
                 throw new IllegalArgumentException("Unsupported map type: " + mapClass.getName());
             }
 
         } catch (Exception e) {
-            EcaLogger.error("[HealthGetterHook] Failed to initialize HashMap VarHandles for " + mapClass.getName(), e);
+            EcaLogger.error("[HealthAnalyzerManager] Failed to initialize HashMap VarHandles for " + mapClass.getName(), e);
             throw new RuntimeException("Failed to initialize HashMap VarHandles", e);
         }
     }
 
-    //Hook entry point: called at the beginning of getRecordHp() method
+    //Hook entry point: called when entity's getHealth() is invoked
     public static void onGetHealthCalled(LivingEntity entity, String className) {
         Class<?> entityClass = entity.getClass();
 
@@ -147,7 +147,7 @@ public class HealthGetterHook {
         analyzeAndCache(entity, className);
     }
 
-    //Analyze entity's getRecordHp() implementation and cache results
+    //Analyze entity's getHealth() implementation and cache results
     private static void analyzeAndCache(LivingEntity entity, String className) {
         try {
             //1. Get entity class
@@ -157,13 +157,13 @@ public class HealthGetterHook {
             HealthAnalyzer.AnalysisResult analysisResult = HealthAnalyzer.analyze(entityClass);
 
             if (analysisResult == null || !analysisResult.foundMethod) {
-                EcaLogger.warn("[HealthGetterHook] getRecordHp method not found in {}", className);
+                EcaLogger.warn("[HealthAnalyzerManager] getHealth() method not found in {}", className);
                 createDefaultCache(entityClass);
                 return;
             }
 
             if (!analysisResult.foundMinimalUnit) {
-                EcaLogger.warn("[HealthGetterHook] No minimal writable unit found for {}", className);
+                EcaLogger.warn("[HealthAnalyzerManager] No minimal writable unit found for {}", className);
                 createDefaultCache(entityClass);
                 return;
             }
@@ -182,7 +182,7 @@ public class HealthGetterHook {
             cache.put(entityClass, fieldCache);
 
         } catch (Throwable t) {
-            EcaLogger.error("[HealthGetterHook] Failed to analyze {}", className, t);
+            EcaLogger.error("[HealthAnalyzerManager] Failed to analyze {}", className, t);
             createDefaultCache(entity.getClass());
         }
     }
@@ -194,7 +194,7 @@ public class HealthGetterHook {
 
             //检查是否有字段访问路径（嵌套字段）
             if (analysis.fieldAccessPath.isEmpty()) {
-                EcaLogger.warn("[HealthGetterHook] No field access path found");
+                EcaLogger.warn("[HealthAnalyzerManager] No field access path found");
                 return;
             }
 
@@ -210,7 +210,7 @@ public class HealthGetterHook {
                 //Get field type
                 Class<?> fieldType = descriptorToClass(descriptor);
                 if (fieldType == null) {
-                    EcaLogger.warn("[HealthGetterHook] Cannot convert descriptor: {}", descriptor);
+                    EcaLogger.warn("[HealthAnalyzerManager] Cannot convert descriptor: {}", descriptor);
                     return;
                 }
 
@@ -235,7 +235,7 @@ public class HealthGetterHook {
                 for (int i = 0; i < fieldHandles.length - 1; i++) {
                     current = fieldHandles[i].get(current);
                     if (current == null) {
-                        EcaLogger.warn("[HealthGetterHook] Null value at field path step {}", i);
+                        EcaLogger.warn("[HealthAnalyzerManager] Null value at field path step {}", i);
                         return null;
                     }
                 }
@@ -252,7 +252,7 @@ public class HealthGetterHook {
                     //导航到最终对象
                     Object target = pattern.valueLocator.locateValueHolder(entity, null);
                     if (target == null) {
-                        EcaLogger.warn("[HealthGetterHook] Cannot locate target object");
+                        EcaLogger.warn("[HealthAnalyzerManager] Cannot locate target object");
                         return false;
                     }
 
@@ -260,13 +260,13 @@ public class HealthGetterHook {
                     finalFieldHandle.set(target, value);
                     return Math.abs(entity.getHealth() - value) <= 2.0f;
                 } catch (Exception e) {
-                    EcaLogger.error("[HealthGetterHook] Failed to write nested field", e);
+                    EcaLogger.error("[HealthAnalyzerManager] Failed to write nested field", e);
                     return false;
                 }
             };
 
         } catch (Exception e) {
-            EcaLogger.error("[HealthGetterHook] Failed to build field access pattern", e);
+            EcaLogger.error("[HealthAnalyzerManager] Failed to build field access pattern", e);
         }
     }
 
@@ -284,7 +284,7 @@ public class HealthGetterHook {
         } else if (owner.contains("SynchedEntityData")) {
             buildEntityDataAccessPattern(cache, analysis, entityClass);
         } else {
-            EcaLogger.warn("[HealthGetterHook] Unsupported container type: {}", owner);
+            EcaLogger.warn("[HealthAnalyzerManager] Unsupported container type: {}", owner);
         }
     }
 
@@ -297,7 +297,7 @@ public class HealthGetterHook {
             HealthAnalyzer.StackElement keySource = analysis.hashMapKeySource;
 
             if (getterMethod == null || getterOwner == null) {
-                EcaLogger.warn("[HealthGetterHook] Missing HashMap container getter information");
+                EcaLogger.warn("[HealthAnalyzerManager] Missing HashMap container getter information");
                 return;
             }
 
@@ -320,7 +320,7 @@ public class HealthGetterHook {
             }
 
             if (containerGetterMethod == null) {
-                EcaLogger.warn("[HealthGetterHook] Cannot find container getter method: {}.{}", getterOwner, getterMethod);
+                EcaLogger.warn("[HealthAnalyzerManager] Cannot find container getter method: {}.{}", getterOwner, getterMethod);
                 return;
             }
 
@@ -329,7 +329,7 @@ public class HealthGetterHook {
             //获取 HashMap 实例以确定类型
             Object mapInstance = finalGetterMethod.invoke(null);
             if (mapInstance == null) {
-                EcaLogger.warn("[HealthGetterHook] HashMap container is null");
+                EcaLogger.warn("[HealthAnalyzerManager] HashMap container is null");
                 return;
             }
 
@@ -386,20 +386,20 @@ public class HealthGetterHook {
                     pattern.valueHandle.set(node, value);
                     return true;
                 } catch (Exception e) {
-                    EcaLogger.error("[HealthGetterHook] Failed to write HashMap value", e);
+                    EcaLogger.error("[HealthAnalyzerManager] Failed to write HashMap value", e);
                     return false;
                 }
             };
 
         } catch (Exception e) {
-            EcaLogger.error("[HealthGetterHook] Failed to build HashMap access pattern", e);
+            EcaLogger.error("[HealthAnalyzerManager] Failed to build HashMap access pattern", e);
         }
     }
 
     //Build HashMap key builder from stack element
     private static ContainerAccessPattern.KeyBuilder buildHashMapKeyBuilder(HealthAnalyzer.StackElement keySource) {
         if (keySource == null) {
-            EcaLogger.warn("[HealthGetterHook] No key source, using entity as key");
+            EcaLogger.warn("[HealthAnalyzerManager] No key source, using entity as key");
             return (entity) -> entity;
         }
 
@@ -417,7 +417,7 @@ public class HealthGetterHook {
 
             case FIELD_VALUE:
                 //TODO: 实现字段访问
-                EcaLogger.warn("[HealthGetterHook] Field-based key not implemented yet");
+                EcaLogger.warn("[HealthAnalyzerManager] Field-based key not implemented yet");
                 return (entity) -> entity;
 
             case METHOD_RESULT:
@@ -460,20 +460,20 @@ public class HealthGetterHook {
                                 }
                                 return result;
                             } catch (Exception e) {
-                                EcaLogger.error("[HealthGetterHook] Failed to invoke key method", e);
+                                EcaLogger.error("[HealthAnalyzerManager] Failed to invoke key method", e);
                                 return entity;
                             }
                         };
                     }
                 } catch (Exception e) {
-                    EcaLogger.error("[HealthGetterHook] Failed to build METHOD_RESULT key", e);
+                    EcaLogger.error("[HealthAnalyzerManager] Failed to build METHOD_RESULT key", e);
                 }
 
-                EcaLogger.warn("[HealthGetterHook] Failed to resolve METHOD_RESULT key, using entity as fallback");
+                EcaLogger.warn("[HealthAnalyzerManager] Failed to resolve METHOD_RESULT key, using entity as fallback");
                 return (entity) -> entity;
 
             default:
-                EcaLogger.warn("[HealthGetterHook] Unknown key type: {}", keySource.type);
+                EcaLogger.warn("[HealthAnalyzerManager] Unknown key type: {}", keySource.type);
                 return (entity) -> entity;
         }
     }
@@ -544,7 +544,7 @@ public class HealthGetterHook {
 
     //Build ArrayList access pattern
     private static void buildArrayListAccessPattern(HealthFieldCache cache, HealthAnalyzer.AnalysisResult analysis, Class<?> entityClass) {
-        EcaLogger.warn("[HealthGetterHook] ArrayList access pattern not implemented yet");
+        EcaLogger.warn("[HealthAnalyzerManager] ArrayList access pattern not implemented yet");
         //TODO: 实现 ArrayList 支持
     }
 
@@ -555,7 +555,7 @@ public class HealthGetterHook {
             String accessorOwner = analysis.entityDataAccessorOwner;
 
             if (accessorName == null || accessorOwner == null) {
-                EcaLogger.warn("[HealthGetterHook] Missing EntityData accessor information");
+                EcaLogger.warn("[HealthAnalyzerManager] Missing EntityData accessor information");
                 return;
             }
 
@@ -565,7 +565,7 @@ public class HealthGetterHook {
 
             //使用静态初始化的VarHandles（已通过ObfuscationMapping处理混淆）
             if (DATA_ITEM_VALUE_HANDLE == null || DATA_ITEM_DIRTY_HANDLE == null) {
-                EcaLogger.error("[HealthGetterHook] DataItem VarHandles not initialized");
+                EcaLogger.error("[HealthAnalyzerManager] DataItem VarHandles not initialized");
                 return;
             }
 
@@ -597,13 +597,13 @@ public class HealthGetterHook {
 
                     return true;
                 } catch (Exception e) {
-                    EcaLogger.error("[HealthGetterHook] Failed to write EntityData value", e);
+                    EcaLogger.error("[HealthAnalyzerManager] Failed to write EntityData value", e);
                     return false;
                 }
             };
 
         } catch (Exception e) {
-            EcaLogger.error("[HealthGetterHook] Failed to build EntityData access pattern", e);
+            EcaLogger.error("[HealthAnalyzerManager] Failed to build EntityData access pattern", e);
         }
     }
 
@@ -633,7 +633,7 @@ public class HealthGetterHook {
 
     //Create default cache (used when analysis fails)
     private static void createDefaultCache(Class<?> entityClass) {
-        EcaLogger.warn("[HealthGetterHook] Creating default empty cache for {}", entityClass.getSimpleName());
+        EcaLogger.warn("[HealthAnalyzerManager] Creating default empty cache for {}", entityClass.getSimpleName());
         HealthFieldCache fieldCache = new HealthFieldCache();
         cache.put(entityClass, fieldCache);
     }
@@ -698,7 +698,7 @@ public class HealthGetterHook {
         try {
             NODE_VALUE.set(node, value);
         } catch (Exception e) {
-            EcaLogger.error("[HealthGetterHook] Failed to set HashMap node value", e);
+            EcaLogger.error("[HealthAnalyzerManager] Failed to set HashMap node value", e);
         }
     }
 
@@ -731,7 +731,7 @@ public class HealthGetterHook {
         try {
             WEAK_ENTRY_VALUE.set(entry, value);
         } catch (Exception e) {
-            EcaLogger.error("[HealthGetterHook] Failed to set WeakHashMap entry value", e);
+            EcaLogger.error("[HealthAnalyzerManager] Failed to set WeakHashMap entry value", e);
         }
     }
 

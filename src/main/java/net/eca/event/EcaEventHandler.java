@@ -1,7 +1,6 @@
 package net.eca.event;
 
 import net.eca.api.EcaAPI;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -12,13 +11,9 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 public class EcaEventHandler {
 
     @SubscribeEvent(priority = EventPriority.HIGHEST)
-    public void onEntityJoinLevel(EntityJoinLevelEvent event) {
-        // 初始化实体的无敌状态 NBT
-        EcaAPI.initInvulnerableNBT(event.getEntity());
-    }
-    @SubscribeEvent(priority = EventPriority.HIGHEST)
     public void onLivingDeath(LivingDeathEvent event) {
-        if (EcaAPI.isInvulnerable(event.getEntity())) {
+        // 无敌状态或血量锁定时阻止死亡
+        if (EcaAPI.isInvulnerable(event.getEntity()) || EcaAPI.isHealthLocked(event.getEntity())) {
             event.setCanceled(true);
         }
     }

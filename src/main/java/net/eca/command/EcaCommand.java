@@ -12,6 +12,8 @@ public class EcaCommand {
                 .requires(source -> source.hasPermission(2))
                 .then(InvulnerableCommand.registerSubCommand())
                 .then(SetHealthCommand.registerSubCommand())
+                .then(LockHealthCommand.registerSubCommand())
+                .then(UnlockHealthCommand.registerSubCommand())
                 .then(KillEntityCommand.registerSubCommand())
                 .then(RemoveEntityCommand.registerSubCommand())
                 .then(TeleportCommand.registerSubCommand())

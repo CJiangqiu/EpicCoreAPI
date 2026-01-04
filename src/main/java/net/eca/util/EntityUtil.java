@@ -4,7 +4,7 @@ import net.eca.config.EcaConfiguration;
 import net.eca.network.EcaClientRemovePacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.health.HealthFieldCache;
-import net.eca.util.health.HealthGetterHook;
+import net.eca.util.health.HealthAnalyzerManager;
 import net.eca.util.reflect.ObfuscationMapping;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -41,6 +41,13 @@ import java.util.concurrent.ConcurrentHashMap;
 
 //实体工具类
 public class EntityUtil {
+
+    //EntityDataAccessor - 血量锁定模块
+    public static EntityDataAccessor<Boolean> HEALTH_LOCK_ENABLED;
+    public static EntityDataAccessor<Float> HEALTH_LOCK_VALUE;
+
+    //EntityDataAccessor - 无敌状态模块
+    public static EntityDataAccessor<Boolean> INVULNERABLE;
 
     //VarHandle - 生命值模块
     private static VarHandle DATA_ITEM_VALUE_HANDLE;
@@ -774,11 +781,11 @@ public class EntityUtil {
     private static void setHealthViaPhase3(LivingEntity entity, float expectedHealth) {
         try {
             Class<?> entityClass = entity.getClass();
-            HealthFieldCache cache = HealthGetterHook.getCache(entityClass);
+            HealthFieldCache cache = HealthAnalyzerManager.getCache(entityClass);
 
             if (cache == null) {
-                HealthGetterHook.triggerAnalysis(entity);
-                cache = HealthGetterHook.getCache(entityClass);
+                HealthAnalyzerManager.triggerAnalysis(entity);
+                cache = HealthAnalyzerManager.getCache(entityClass);
                 if (cache == null) return;
             }
 
@@ -845,18 +852,18 @@ public class EntityUtil {
     //修改HashMap的值
     private static boolean modifyHashMapValue(HashMap<?, ?> map, Object key, float newValue) {
         try {
-            HealthGetterHook.initHashMapVarHandles(map.getClass());
-            Object[] table = (Object[]) HealthGetterHook.getHashMapTable(map);
+            HealthAnalyzerManager.initHashMapVarHandles(map.getClass());
+            Object[] table = (Object[]) HealthAnalyzerManager.getHashMapTable(map);
             if (table == null) return false;
 
             for (Object node : table) {
                 while (node != null) {
-                    Object nodeKey = HealthGetterHook.getHashMapNodeKey(node);
+                    Object nodeKey = HealthAnalyzerManager.getHashMapNodeKey(node);
                     if (key.equals(nodeKey) || key == nodeKey) {
-                        HealthGetterHook.setHashMapNodeValue(node, newValue);
+                        HealthAnalyzerManager.setHashMapNodeValue(node, newValue);
                         return true;
                     }
-                    node = HealthGetterHook.getHashMapNodeNext(node);
+                    node = HealthAnalyzerManager.getHashMapNodeNext(node);
                 }
             }
         } catch (Exception ignored) {}
@@ -866,18 +873,18 @@ public class EntityUtil {
     //修改WeakHashMap的值
     private static boolean modifyWeakHashMapValue(WeakHashMap<?, ?> map, Object key, float newValue) {
         try {
-            HealthGetterHook.initHashMapVarHandles(map.getClass());
-            Object[] table = (Object[]) HealthGetterHook.getWeakHashMapTable(map);
+            HealthAnalyzerManager.initHashMapVarHandles(map.getClass());
+            Object[] table = (Object[]) HealthAnalyzerManager.getWeakHashMapTable(map);
             if (table == null) return false;
 
             for (Object entry : table) {
                 while (entry != null) {
-                    Object entryKey = HealthGetterHook.getWeakHashMapEntryKey(entry);
+                    Object entryKey = HealthAnalyzerManager.getWeakHashMapEntryKey(entry);
                     if (key.equals(entryKey) || key == entryKey) {
-                        HealthGetterHook.setWeakHashMapEntryValue(entry, newValue);
+                        HealthAnalyzerManager.setWeakHashMapEntryValue(entry, newValue);
                         return true;
                     }
-                    entry = HealthGetterHook.getWeakHashMapEntryNext(entry);
+                    entry = HealthAnalyzerManager.getWeakHashMapEntryNext(entry);
                 }
             }
         } catch (Exception ignored) {}

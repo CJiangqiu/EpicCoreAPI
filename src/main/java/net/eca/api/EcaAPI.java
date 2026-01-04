@@ -3,7 +3,8 @@ package net.eca.api;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.util.health.HealthFieldCache;
-import net.eca.util.health.HealthGetterHook;
+import net.eca.util.health.HealthAnalyzerManager;
+import net.eca.util.health.HealthLockManager;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.damagesource.DamageSource;
@@ -166,7 +167,7 @@ public final class EcaAPI {
         if (entity == null) {
             throw new IllegalArgumentException("Entity cannot be null");
         }
-        HealthGetterHook.triggerAnalysis(entity);
+        HealthAnalyzerManager.triggerAnalysis(entity);
     }
 
     // 获取实体类的生命值缓存
@@ -184,7 +185,7 @@ public final class EcaAPI {
         if (entityClass == null) {
             throw new IllegalArgumentException("Entity class cannot be null");
         }
-        return HealthGetterHook.getCache(entityClass);
+        return HealthAnalyzerManager.getCache(entityClass);
     }
 
     // 修改实体生命值（智能修改，支持复杂存储方式）
@@ -202,10 +203,10 @@ public final class EcaAPI {
         }
 
         // 触发分析（如果尚未分析）
-        HealthGetterHook.triggerAnalysis(entity);
+        HealthAnalyzerManager.triggerAnalysis(entity);
 
         // 获取缓存
-        HealthFieldCache cache = HealthGetterHook.getCache(entity.getClass());
+        HealthFieldCache cache = HealthAnalyzerManager.getCache(entity.getClass());
         if (cache == null || cache.writePath == null) {
             EcaLogger.warn("[EcaAPI] No health cache or write path found for: {}", entity.getClass().getSimpleName());
             return false;
@@ -224,6 +225,74 @@ public final class EcaAPI {
             EcaLogger.error("[EcaAPI] Failed to modify health for: {}", entity.getClass().getSimpleName(), e);
             return false;
         }
+    }
+
+    // ==================== 血量锁定系统 ====================
+
+    // 锁定血量
+    /**
+     * Lock entity health at a specific value.
+     * When enabled, the entity's health is locked in two ways:
+     * 1. getHealth() always returns the locked value (via bytecode hook)
+     * 2. Real health is reset to the locked value every tick (via Mixin)
+     *
+     * This provides true health locking - the entity cannot die from damage
+     * as long as the lock is active (unless killed instantly with damage > locked value).
+     *
+     * Use cases:
+     * - Boss invincibility phases
+     * - Tutorial mode (beginner protection)
+     * - PVP damage limitation
+     * - Heal negation effects
+     *
+     * The locked value is synchronized to clients via SynchedEntityData.
+     * @param entity the living entity
+     * @param value the health lock value
+     */
+    public static void lockHealth(LivingEntity entity, float value) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        HealthLockManager.setLock(entity, value);
+    }
+
+    // 解锁血量
+    /**
+     * Unlock entity health.
+     * After unlocking, the entity's getHealth() method will return the actual health value.
+     * @param entity the living entity
+     */
+    public static void unlockHealth(LivingEntity entity) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        HealthLockManager.removeLock(entity);
+    }
+
+    // 获取当前锁定值（如果没有锁定返回 null）
+    /**
+     * Get the current health lock value for an entity.
+     * @param entity the living entity
+     * @return the locked value, or null if health is not locked
+     */
+    public static Float getLockedHealth(LivingEntity entity) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        return HealthLockManager.getLock(entity);
+    }
+
+    // 检查是否被锁定
+    /**
+     * Check if an entity has health locked.
+     * @param entity the living entity
+     * @return true if health is locked, false otherwise
+     */
+    public static boolean isHealthLocked(LivingEntity entity) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        return HealthLockManager.hasLock(entity);
     }
 
     // ==================== 实体血量工具 ====================
@@ -245,7 +314,7 @@ public final class EcaAPI {
      * Phase 1: Modify vanilla DATA_HEALTH_ID
      * Phase 2: Smart scan for EntityDataAccessors and fields matching health keywords
      * Phase 2.5: Radical mode (all numeric fields, if enabled in config)
-     * Phase 3: Bytecode reverse tracking via HealthGetterHook
+     * Phase 3: Bytecode reverse tracking via HealthAnalyzerManager
      * @param entity the living entity
      * @param health the target health value
      * @return true if modification succeeded
@@ -256,13 +325,11 @@ public final class EcaAPI {
 
     // ==================== 无敌状态管理 ====================
 
-    // ECA 无敌状态 NBT 键名
-    public static final String NBT_INVULNERABLE = "eca:invulnerable";
-
     // 获取实体无敌状态
     /**
      * Get the invulnerability state of an entity (ECA system).
-     * Reads from entity's PersistentData NBT.
+     * Uses EntityData for LivingEntity types (synchronized to clients automatically).
+     * Non-LivingEntity types always return false.
      * @param entity the entity to check
      * @return true if the entity is invulnerable, false otherwise
      */
@@ -270,13 +337,22 @@ public final class EcaAPI {
         if (entity == null) {
             return false;
         }
-        return entity.getPersistentData().getBoolean(NBT_INVULNERABLE);
+        if (!(entity instanceof LivingEntity livingEntity)) {
+            return false;
+        }
+        return livingEntity.getEntityData().get(EntityUtil.INVULNERABLE);
     }
 
     // 设置实体无敌状态
     /**
      * Set the invulnerability state of an entity (ECA system).
-     * Writes to entity's PersistentData NBT.
+     * Uses EntityData for LivingEntity types (synchronized to clients automatically).
+     * Non-LivingEntity types are ignored.
+     *
+     * IMPORTANT: This method automatically manages health lock:
+     * - When enabling invulnerability: locks health at current value
+     * - When disabling invulnerability: unlocks health
+     *
      * @param entity the entity to modify
      * @param invulnerable true to make the entity invulnerable, false otherwise
      */
@@ -284,21 +360,19 @@ public final class EcaAPI {
         if (entity == null) {
             return;
         }
-        entity.getPersistentData().putBoolean(NBT_INVULNERABLE, invulnerable);
-    }
-
-    // 初始化实体无敌状态 NBT（由事件调用）
-    /**
-     * Initialize the invulnerability NBT for an entity if not present.
-     * Called by EntityJoinLevelEvent handler.
-     * @param entity the entity to initialize
-     */
-    public static void initInvulnerableNBT(Entity entity) {
-        if (entity == null) {
+        if (!(entity instanceof LivingEntity livingEntity)) {
             return;
         }
-        if (!entity.getPersistentData().contains(NBT_INVULNERABLE)) {
-            entity.getPersistentData().putBoolean(NBT_INVULNERABLE, false);
+
+        if (invulnerable) {
+            // 开启无敌：先锁血，再设置无敌状态
+            float currentHealth = livingEntity.getHealth();
+            lockHealth(livingEntity, currentHealth);
+            livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, true);
+        } else {
+            // 关闭无敌：先解除无敌状态，再解锁血量
+            livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, false);
+            unlockHealth(livingEntity);
         }
     }
 
