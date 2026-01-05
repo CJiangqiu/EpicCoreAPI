@@ -29,6 +29,7 @@
     "PlayerMixin",
     "RangedAttributeMixin",
     "ServerLevelMixin",
+    "SynchedEntityDataMixin",
     "TransientEntitySectionManagerMixin"
   ],
   "injectors": {
