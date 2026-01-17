@@ -6,33 +6,12 @@ public class EcaConfiguration {
     public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
     public static final ForgeConfigSpec SPEC;
 
-    // ═══════════════════════════════════════════════════════════════════════════════════
-    // Attack Configuration | 攻击系统配置
-    // ═══════════════════════════════════════════════════════════════════════════════════
-
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_ENABLE_RADICAL_LOGIC;
-
-    // ═══════════════════════════════════════════════════════════════════════════════════
-    // Defence Configuration | 防御系统配置
-    // ═══════════════════════════════════════════════════════════════════════════════════
-
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_ENABLE_RADICAL_LOGIC;
-
-    // ═══════════════════════════════════════════════════════════════════════════════════
-    // Attribute Configuration | 属性系统配置
-    // ═══════════════════════════════════════════════════════════════════════════════════
-
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
 
-    // ═══════════════════════════════════════════════════════════════════════════════════
-    // Field Backtrace Configuration | 字段回溯配置
-    // ═══════════════════════════════════════════════════════════════════════════════════
-
-
     static {
-        // ═══════════════════════════════════════════════════════════════════════════════
         // Attack Configuration | 攻击系统配置
-        // ═══════════════════════════════════════════════════════════════════════════════
         BUILDER.push("Attack");
 
         ATTACK_ENABLE_RADICAL_LOGIC = BUILDER
@@ -41,9 +20,7 @@ public class EcaConfiguration {
 
         BUILDER.pop();
 
-        // ═══════════════════════════════════════════════════════════════════════════════
         // Defence Configuration | 防御系统配置
-        // ═══════════════════════════════════════════════════════════════════════════════
         BUILDER.push("Defence");
 
         DEFENCE_ENABLE_RADICAL_LOGIC = BUILDER
@@ -67,17 +44,10 @@ public class EcaConfiguration {
                 "Requires game restart to take effect"
             )
             .define("Unlock Attribute Limits", true);
-
-        // ═════════════════════════════════════════════════════════════════════
-        // Field Backtrace Configuration | 字段回溯配置
-        // ═════════════════════════════════════════════════════════════════════
         SPEC = BUILDER.build();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════════════
     // Safe Config Access Methods | 安全的配置访问方法
-    // ═══════════════════════════════════════════════════════════════════════════════════
-
     private static <T> T safeGet(ForgeConfigSpec.ConfigValue<T> configValue, T defaultValue) {
         try {
             return configValue != null ? configValue.get() : defaultValue;

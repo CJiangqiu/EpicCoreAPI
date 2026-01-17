@@ -9,14 +9,17 @@ This mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You ca
 Use `/eca` command (requires OP permission level 2):
 - `/eca setHealth <targets> <health>` - Set entity health
 - `/eca setInvulnerable <targets> <true|false>` - Set entity invulnerability
-- `/eca lockHealth <targets> <value>` - Lock entity health at specific value
-- `/eca unlockHealth <targets>` - Unlock entity health
+- `/eca lockHealth <targets> true <value>` - Lock entity health at specific value
+- `/eca lockHealth <targets> false` - Unlock entity health
 - `/eca kill <targets>` - Kill entities
 - `/eca remove <targets> [reason]` - Remove entities from world
+- `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities using LWJGL API
 - `/eca teleport <targets> <x> <y> <z>` - Teleport entities
 - `/eca cleanbossbar <targets>` - Clean up boss bars
 - `/eca allreturn <targets>` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the target entity's mod
 - `/eca allreturn off` - Disable AllReturn and clear targets
+- `/eca spawnban <targets> <seconds>` - Ban spawning of selected entities' types for specified duration
+- `/eca spawnban clear` - Clear all spawn bans in current dimension
 
 ## Usage for Developers
 
@@ -65,12 +68,20 @@ side="BOTH"
 - `reviveEntity(entity)` - Clear death state and restore health
 - `teleportEntity(entity, x, y, z)` - Teleport via VarHandle with client sync
 - `removeEntity(entity, reason)` - Complete removal (AI, boss bars, containers, passengers)
+- `memoryRemoveEntity(entity)` - DANGER! Requires Attack Radical Logic config. Remove entity using LWJGL API
 - `cleanupBossBar(entity)` - Remove boss bars without removing entity
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
 - `setInvulnerable(entity, invulnerable)` - Set invulnerability (auto-manages health lock)
 - `enableAllReturn(entity)` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the target entity's mod
+- `setGlobalAllReturn(enabled)` - DANGER! Requires Attack Radical Logic config. Set global AllReturn for all loaded mod classes (no entity parameter needed)
 - `disableAllReturn()` - Disable AllReturn and clear targets
 - `isAllReturnEnabled()` - Check if AllReturn is enabled
+- `addSpawnBan(level, entityType, seconds)` - Ban entity type from spawning for specified duration
+- `isSpawnBanned(level, entityType)` - Check if entity type is banned from spawning
+- `getSpawnBanTime(level, entityType)` - Get remaining spawn ban time in seconds
+- `clearSpawnBan(level, entityType)` - Clear spawn ban for entity type
+- `getAllSpawnBans(level)` - Get all spawn bans in level (Map<EntityType, Integer>)
+- `clearAllSpawnBans(level)` - Clear all spawn bans in level
 
 ```java
 import net.eca.api.EcaAPI;
@@ -93,6 +104,7 @@ EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
 EcaAPI.teleportEntity(entity, x, y, z);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
+EcaAPI.memoryRemoveEntity(entity);  // Remove using LWJGL API
 EcaAPI.cleanupBossBar(entity);
 
 // Invulnerability
@@ -102,8 +114,18 @@ EcaAPI.setInvulnerable(entity, false);
 
 // AllReturn (DANGER! Requires Attack Radical Logic config)
 EcaAPI.enableAllReturn(entity);  // Enable for entity's mod
+EcaAPI.setGlobalAllReturn(true);  // Enable for all loaded mods (no entity needed)
 boolean enabled = EcaAPI.isAllReturnEnabled();
+EcaAPI.setGlobalAllReturn(false);  // Disable
 EcaAPI.disableAllReturn();  // Disable and clear
+
+// Spawn Ban
+EcaAPI.addSpawnBan(serverLevel, EntityType.ZOMBIE, 300);  // Ban zombies for 5 minutes
+boolean banned = EcaAPI.isSpawnBanned(serverLevel, EntityType.ZOMBIE);
+int remaining = EcaAPI.getSpawnBanTime(serverLevel, EntityType.ZOMBIE);
+EcaAPI.clearSpawnBan(serverLevel, EntityType.ZOMBIE);
+Map<EntityType<?>, Integer> allBans = EcaAPI.getAllSpawnBans(serverLevel);
+EcaAPI.clearAllSpawnBans(serverLevel);
 ```
 
 ---
@@ -119,14 +141,17 @@ EcaAPI.disableAllReturn();  // Disable and clear
 使用 `/eca` 命令（需要 OP 权限等级 2）：
 - `/eca setHealth <目标> <血量值>` - 设置实体血量值
 - `/eca setInvulnerable <目标> <true|false>` - 设置实体无敌状态
-- `/eca lockHealth <目标> <血量值>` - 锁定实体血量
-- `/eca unlockHealth <目标>` - 解锁实体血量
+- `/eca lockHealth <目标> true <血量值>` - 锁定实体血量
+- `/eca lockHealth <目标> false` - 解锁实体血量
 - `/eca kill <目标>` - 击杀实体
 - `/eca remove <目标> [原因]` - 从世界中移除实体
+- `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，使用LWJGL相关API清除实体
 - `/eca teleport <目标> <x> <y> <z>` - 传送实体
 - `/eca cleanbossbar <目标>` - 清理 Boss 血条
 - `/eca allreturn <目标>` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
 - `/eca allreturn off` - 关闭AllReturn并清除目标
+- `/eca spawnban <目标> <秒数>` - 禁止选中实体的类型生成指定时长
+- `/eca spawnban clear` - 清除当前维度所有禁生成
 
 ## 开发者使用
 
@@ -175,12 +200,20 @@ side="BOTH"
 - `reviveEntity(entity)` - 复活实体（清除死亡状态）
 - `teleportEntity(entity, x, y, z)` - VarHandle 传送并同步到客户端
 - `removeEntity(entity, reason)` - 完整移除（AI、Boss 血条、容器、乘客等）
+- `memoryRemoveEntity(entity)` - 危险！需要开启激进攻击逻辑配置，使用LWJGL相关API清除实体
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
 - `setInvulnerable(entity, invulnerable)` - 设置无敌状态（自动管理血量锁定）
 - `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
+- `setGlobalAllReturn(enabled)` - 危险！需要开启激进攻击逻辑配置，全局AllReturn开关（不需要实体参数，对所有已加载的mod类生效）
 - `disableAllReturn()` - 关闭AllReturn并清除目标
 - `isAllReturnEnabled()` - 检查AllReturn是否启用
+- `addSpawnBan(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
+- `isSpawnBanned(level, entityType)` - 检查实体类型是否被禁生成
+- `getSpawnBanTime(level, entityType)` - 获取禁生成剩余秒数
+- `clearSpawnBan(level, entityType)` - 清除指定实体类型的禁生成
+- `getAllSpawnBans(level)` - 获取所有禁生成（Map<EntityType, Integer>）
+- `clearAllSpawnBans(level)` - 清除所有禁生成
 
 ```java
 import net.eca.api.EcaAPI;
@@ -203,6 +236,7 @@ EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
 EcaAPI.teleportEntity(entity, x, y, z);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
+EcaAPI.memoryRemoveEntity(entity);  // 使用LWJGL API清除
 EcaAPI.cleanupBossBar(entity);
 
 // 无敌状态
@@ -212,8 +246,18 @@ EcaAPI.setInvulnerable(entity, false);
 
 // AllReturn（危险！需开启激进攻击配置）
 EcaAPI.enableAllReturn(entity);  // 对实体所属mod启用
+EcaAPI.setGlobalAllReturn(true);  // 全局启用（不需要实体）
 boolean enabled = EcaAPI.isAllReturnEnabled();
+EcaAPI.setGlobalAllReturn(false);  // 关闭
 EcaAPI.disableAllReturn();  // 关闭并清除
+
+// 禁生成
+EcaAPI.addSpawnBan(serverLevel, EntityType.ZOMBIE, 300);  // 禁止僵尸生成5分钟
+boolean banned = EcaAPI.isSpawnBanned(serverLevel, EntityType.ZOMBIE);
+int remaining = EcaAPI.getSpawnBanTime(serverLevel, EntityType.ZOMBIE);
+EcaAPI.clearSpawnBan(serverLevel, EntityType.ZOMBIE);
+Map<EntityType<?>, Integer> allBans = EcaAPI.getAllSpawnBans(serverLevel);
+EcaAPI.clearAllSpawnBans(serverLevel);
 ```
 
 ---

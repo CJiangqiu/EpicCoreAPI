@@ -6,6 +6,7 @@ import net.eca.agent.SafeClassWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -21,9 +22,40 @@ public class AllReturnTransformer implements ITransformModule {
     private static final String CHECK_METHOD = "shouldReturn";
     private static final String CHECK_DESC = "(Ljava/lang/String;)Z";
 
+    // 标签字段名（用于验证转换是否被拦截）
+    private static final String MARK_FIELD_NAME = "__ECA_ALLRETURN_MARK__";
+
+    // 第一个被转换的类名（用于验证）
+    private static volatile String firstTransformedClass = null;
+
+    /**
+     * 获取第一个被转换的类名
+     * @return 第一个被转换的类名，如果没有则返回null
+     */
+    public static String getFirstTransformed() {
+        return firstTransformedClass;
+    }
+
     @Override
     public String getName() {
         return "AllReturnTransformer";
+    }
+
+    @Override
+    public String getMarkFieldName() {
+        return MARK_FIELD_NAME;
+    }
+
+    @Override
+    public String getFirstTransformedClass() {
+        return firstTransformedClass;
+    }
+
+    @Override
+    public boolean requiresVerification() {
+        // AllReturn只有在转换过类时才需要验证
+        // 如果没有其他mod的类被转换，就不需要验证
+        return firstTransformedClass != null;
     }
 
     @Override
@@ -38,10 +70,20 @@ public class AllReturnTransformer implements ITransformModule {
         try {
             ClassReader cr = new ClassReader(classfileBuffer);
             ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES);
-            AllReturnClassVisitor cv = new AllReturnClassVisitor(cw, className);
+
+            // 判断是否是第一个转换的类（需要注入标签）
+            boolean isFirstClass = (firstTransformedClass == null);
+
+            AllReturnClassVisitor cv = new AllReturnClassVisitor(cw, className, isFirstClass);
             cr.accept(cv, ClassReader.EXPAND_FRAMES);
 
             if (cv.transformed) {
+                // 记录第一个被转换的类
+                if (isFirstClass) {
+                    firstTransformedClass = className.replace('/', '.');
+                    AgentLogWriter.info("[AllReturnTransformer] First transformed class: " + firstTransformedClass + " (mark field injected)");
+                }
+
                 ReturnToggle.registerTransformedClass(className);
                 AgentLogWriter.info("[AllReturnTransformer] Instrumented: " + className);
                 return cw.toByteArray();
@@ -55,11 +97,13 @@ public class AllReturnTransformer implements ITransformModule {
 
     private static class AllReturnClassVisitor extends ClassVisitor {
         private final String className;
+        private final boolean injectMark;
         private boolean transformed = false;
 
-        AllReturnClassVisitor(ClassVisitor cv, String className) {
+        AllReturnClassVisitor(ClassVisitor cv, String className, boolean injectMark) {
             super(Opcodes.ASM9, cv);
             this.className = className;
+            this.injectMark = injectMark;
         }
 
         @Override
@@ -88,6 +132,15 @@ public class AllReturnTransformer implements ITransformModule {
 
             transformed = true;
             return new AllReturnMethodVisitor(mv, className, descriptor);
+        }
+
+        @Override
+        public void visitEnd() {
+            // 如果是第一个转换的类，注入标签字段
+            if (injectMark && transformed) {
+                ITransformModule.injectMarkField(cv, MARK_FIELD_NAME);
+            }
+            super.visitEnd();
         }
     }
 

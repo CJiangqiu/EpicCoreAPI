@@ -16,7 +16,7 @@ public class CleanupBossBarCommand {
 
     //注册子命令
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
-        return Commands.literal("cleanbossbar")
+        return Commands.literal("cleanBossBar")
             .then(Commands.argument("targets", EntityArgument.entities())
                 .executes(CleanupBossBarCommand::cleanupBossBars)
             );

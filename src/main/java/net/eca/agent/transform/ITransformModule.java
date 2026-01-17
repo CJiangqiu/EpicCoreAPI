@@ -1,5 +1,9 @@
 package net.eca.agent.transform;
 
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.Opcodes;
+
 import java.util.Collections;
 import java.util.List;
 
@@ -92,5 +96,66 @@ public interface ITransformModule {
      */
     default String getTargetMethodDescriptor() {
         return null;
+    }
+
+    // ==================== 验证相关方法 ====================
+
+    // 获取标签字段名
+    /**
+     * Get the mark field name for verification.
+     * The field will be injected as: public static final boolean [fieldName] = true
+     * @return the mark field name (e.g., "__ECA_LIVING_ENTITY_MARK__")
+     */
+    default String getMarkFieldName() {
+        return "__ECA_" + getName().toUpperCase().replace("TRANSFORMER", "") + "MARK__";
+    }
+
+    // 获取第一个被转换的类名
+    /**
+     * Get the first transformed class name for verification.
+     * @return the binary class name (e.g., "net.minecraft.world.entity.LivingEntity"), or null if no class was transformed
+     */
+    default String getFirstTransformedClass() {
+        return null;
+    }
+
+    // 获取需要恢复转换的类列表
+    /**
+     * Get the classes that need to be retransformed during recovery.
+     * Called when verification fails and recovery is needed.
+     * @return array of classes to retransform, or empty array if not applicable
+     */
+    default Class<?>[] getRetransformTargets() {
+        return new Class<?>[0];
+    }
+
+    // 是否需要验证
+    /**
+     * Check if this module requires verification.
+     * Some modules (like AllReturnTransformer) may not need verification if they haven't transformed any classes.
+     * @return true if verification is required
+     */
+    default boolean requiresVerification() {
+        return getFirstTransformedClass() != null;
+    }
+
+    // 注入标签字段到类中
+    /**
+     * Inject the mark field into a class via ClassVisitor.
+     * Call this in your ClassVisitor's visitEnd() method.
+     * @param cv the ClassVisitor to inject the field into
+     * @param markFieldName the name of the mark field
+     */
+    static void injectMarkField(ClassVisitor cv, String markFieldName) {
+        FieldVisitor fv = cv.visitField(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL,
+            markFieldName,
+            "Z",  // boolean
+            null,
+            Boolean.TRUE
+        );
+        if (fv != null) {
+            fv.visitEnd();
+        }
     }
 }

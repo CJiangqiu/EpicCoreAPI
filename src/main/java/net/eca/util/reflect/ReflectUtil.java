@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Reflection utility class using traditional Field/Method reflection.
  * Provides cached access to fields and methods with obfuscation support.
  */
+@SuppressWarnings("unchecked")
 public final class ReflectUtil {
 
     private static final Map<String, Field> FIELD_CACHE = new ConcurrentHashMap<>();
@@ -82,7 +83,6 @@ public final class ReflectUtil {
      * @param <T> the expected return type
      * @return the field value, or null if failed
      */
-    @SuppressWarnings("unchecked")
     public static <T> T getFieldValue(Object target, Class<?> clazz, String fieldKey) {
         try {
             Field field = getField(clazz, fieldKey);
@@ -187,7 +187,6 @@ public final class ReflectUtil {
      * @param <T> the expected return type
      * @return the method return value, or null if failed
      */
-    @SuppressWarnings("unchecked")
     public static <T> T invokeMethod(Object target, Class<?> clazz, String methodKey, Class<?>[] paramTypes, Object... args) {
         try {
             Method method = getMethod(clazz, methodKey, paramTypes);

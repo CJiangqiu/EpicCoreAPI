@@ -41,6 +41,12 @@ public class NetworkHandler {
                 .decoder(EcaClientRemovePacket::decode)
                 .consumerMainThread(EcaClientRemovePacket::handle)
                 .add();
+
+        CHANNEL.messageBuilder(LwjglClientRemovePacket.class, id())
+                .encoder(LwjglClientRemovePacket::encode)
+                .decoder(LwjglClientRemovePacket::decode)
+                .consumerMainThread(LwjglClientRemovePacket::handle)
+                .add();
     }
 
     /**

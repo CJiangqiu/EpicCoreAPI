@@ -2,6 +2,8 @@ package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
+import net.eca.util.spawn.SpawnBanHook;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.EntityAccess;
 import net.minecraft.world.level.entity.EntityLookup;
@@ -13,8 +15,18 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(EntityLookup.class)
 public class EntityLookupMixin {
 
+    // 禁生成：阻止被禁实体添加到EntityLookup
+    @Inject(method = "add", at = @At("HEAD"), cancellable = true)
+    private void eca$onAdd(EntityAccess entity, CallbackInfo ci) {
+        if (entity instanceof Entity realEntity && realEntity.level() instanceof ServerLevel level) {
+            if (SpawnBanHook.shouldBlockSpawn(level, realEntity)) {
+                ci.cancel();
+            }
+        }
+    }
+
     @Inject(method = "remove", at = @At("HEAD"), cancellable = true)
-    private void onEntityLookupRemove(EntityAccess entity, CallbackInfo ci) {
+    private void eca$onRemove(EntityAccess entity, CallbackInfo ci) {
         if (entity instanceof Entity realEntity) {
             // Allow dimension change operations even for invulnerable entities
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {

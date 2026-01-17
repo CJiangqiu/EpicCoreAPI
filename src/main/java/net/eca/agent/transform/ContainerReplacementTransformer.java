@@ -4,6 +4,8 @@ import net.eca.agent.AgentLogWriter;
 import net.eca.agent.SafeClassWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Opcodes;
+
 import java.util.List;
 import org.objectweb.asm.tree.*;
 
@@ -23,9 +25,58 @@ import static org.objectweb.asm.Opcodes.*;
  */
 public class ContainerReplacementTransformer implements ITransformModule {
 
+    // 标签字段名（用于验证转换是否被拦截）
+    private static final String MARK_FIELD_NAME = "__ECA_CONTAINER_MARK__";
+
+    // 第一个被转换的类名（用于验证）
+    private static volatile String firstTransformedClass = null;
+
+    /**
+     * 获取第一个被转换的类名
+     * @return 第一个被转换的类名，如果没有则返回null
+     */
+    public static String getFirstTransformed() {
+        return firstTransformedClass;
+    }
+
     @Override
     public String getName() {
         return "ContainerReplacementTransformer";
+    }
+
+    @Override
+    public String getMarkFieldName() {
+        return MARK_FIELD_NAME;
+    }
+
+    @Override
+    public String getFirstTransformedClass() {
+        return firstTransformedClass;
+    }
+
+    /**
+     * 为ClassNode注入标签字段（如果是第一个转换的类）
+     * @param cn ClassNode
+     * @param className 类名
+     * @return true如果注入了标签
+     */
+    private boolean tryInjectMarkField(ClassNode cn, String className) {
+        if (firstTransformedClass == null) {
+            // 注入标签字段: public static final boolean MARK_FIELD_NAME = true
+            FieldNode markField = new FieldNode(
+                Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL,
+                MARK_FIELD_NAME,
+                "Z",
+                null,
+                Boolean.TRUE
+            );
+            cn.fields.add(markField);
+
+            firstTransformedClass = className.replace('/', '.');
+            AgentLogWriter.info("[ContainerReplacementTransformer] First transformed class: " + firstTransformedClass + " (mark field injected)");
+            return true;
+        }
+        return false;
     }
 
     @Override
@@ -99,6 +150,9 @@ public class ContainerReplacementTransformer implements ITransformModule {
             }
         }
 
+        // 尝试注入标签字段
+        tryInjectMarkField(cn, "net/minecraft/world/level/entity/EntityTickList");
+
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in EntityTickList");
 
         ClassWriter cw = new SafeClassWriter(ClassWriter.COMPUTE_FRAMES);
@@ -134,6 +188,9 @@ public class ContainerReplacementTransformer implements ITransformModule {
             }
         }
 
+        // 尝试注入标签字段
+        tryInjectMarkField(cn, "net/minecraft/world/level/entity/EntityLookup");
+
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in EntityLookup");
 
         ClassWriter cw = new SafeClassWriter(ClassWriter.COMPUTE_FRAMES);
@@ -165,6 +222,9 @@ public class ContainerReplacementTransformer implements ITransformModule {
             }
         }
 
+        // 尝试注入标签字段
+        tryInjectMarkField(cn, "net/minecraft/util/ClassInstanceMultiMap");
+
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in ClassInstanceMultiMap");
 
         ClassWriter cw = new SafeClassWriter(ClassWriter.COMPUTE_FRAMES);
@@ -194,6 +254,9 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 );
             }
         }
+
+        // 尝试注入标签字段
+        tryInjectMarkField(cn, "net/minecraft/server/level/ChunkMap");
 
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in ChunkMap");
 

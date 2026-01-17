@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * VarHandle utility class for high-performance field access.
  * VarHandle provides better performance than traditional reflection for frequent access.
  */
+@SuppressWarnings("unchecked")
 public final class VarHandleUtil {
 
     private static final Map<String, VarHandle> VARHANDLE_CACHE = new ConcurrentHashMap<>();
@@ -76,7 +77,6 @@ public final class VarHandleUtil {
      * @param <T> the expected return type
      * @return the field value, or null if failed
      */
-    @SuppressWarnings("unchecked")
     public static <T> T get(Object target, Class<?> clazz, String fieldKey) {
         VarHandle handle = getVarHandle(clazz, fieldKey);
         if (handle == null) {
@@ -113,7 +113,6 @@ public final class VarHandleUtil {
      * @param <T> the value type
      * @return the previous value, or null if failed
      */
-    @SuppressWarnings("unchecked")
     public static <T> T getAndSet(Object target, Class<?> clazz, String fieldKey, T newValue) {
         VarHandle handle = getVarHandle(clazz, fieldKey);
         if (handle == null) {
@@ -149,7 +148,6 @@ public final class VarHandleUtil {
      * @param <T> the expected return type
      * @return the field value, or null if failed
      */
-    @SuppressWarnings("unchecked")
     public static <T> T getVolatile(Object target, Class<?> clazz, String fieldKey) {
         VarHandle handle = getVarHandle(clazz, fieldKey);
         if (handle == null) {
@@ -226,7 +224,6 @@ public final class VarHandleUtil {
      * @param <T> the expected return type
      * @return the field value, or null if failed
      */
-    @SuppressWarnings("unchecked")
     public static <T> T getFieldValue(Object target, Field field) {
         VarHandle handle = getVarHandleFromField(field);
         if (handle == null) {

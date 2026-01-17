@@ -45,14 +45,8 @@ minecraft {
 
 dependencies {
     minecraft "net.minecraftforge:forge:${project.forge_version}"
-
-    // Mixin annotation processor
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
-
-    // Reflection utilities
     implementation 'org.reflections:reflections:0.9.12'
-
-    // ASM bytecode manipulation
     implementation 'org.ow2.asm:asm:9.2'
     implementation 'org.ow2.asm:asm-commons:9.2'
 }
@@ -83,16 +77,14 @@ tasks.jar {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
-// Agent JAR task - builds the embedded agent.jar
+// Agent JAR
 tasks.register('agentJar', Jar) {
     group = 'build'
-    description = 'Build inner agent.jar for runtime attachment'
     dependsOn tasks.named('classes')
     archiveBaseName = 'agent'
     destinationDirectory = layout.buildDirectory.dir('embedded-agent')
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
-    // Only include agent classes
     from(sourceSets.main.output) {
         include 'net/eca/agent/**'
     }
@@ -107,7 +99,6 @@ tasks.register('agentJar', Jar) {
     }
 }
 
-// Include agent.jar in main JAR
 tasks.named('jar') {
     dependsOn tasks.named('agentJar')
     from(tasks.named('agentJar').flatMap { it.archiveFile }) {
@@ -116,22 +107,15 @@ tasks.named('jar') {
     }
 }
 
-// Dev JAR task - builds unobfuscated jar for development environments
 tasks.register('devJar', Jar) {
     group = 'build'
-    description = 'Build dev jar with MCP mappings (not reobfuscated)'
     dependsOn tasks.named('classes'), tasks.named('agentJar')
-
     archiveClassifier.set('dev')
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
-    // Include compiled classes (not reobfuscated)
     from sourceSets.main.output
-
-    // Include resources
     from(sourceSets.main.resources.srcDirs)
 
-    // Include agent.jar
     from(tasks.named('agentJar').flatMap { it.archiveFile }) {
         into 'net/eca/agent'
         rename { 'agent.jar' }
@@ -139,27 +123,17 @@ tasks.register('devJar', Jar) {
 
     manifest {
         attributes([
-            'Specification-Title': 'Epic Core API',
-            'Specification-Version': project.mod_version,
-            'Implementation-Title': project.name,
-            'Implementation-Version': project.mod_version,
             'MixinConfigs': 'eca.mixins.dev.json'
         ])
     }
 }
 
-// Make build task also generate dev jar
 build.dependsOn devJar
 
-// Maven publishing
 publishing {
     publications {
         mavenJava(MavenPublication) {
             from components.java
         }
-    }
-
-    repositories {
-        // Add repositories to publish to here
     }
 }

@@ -2,6 +2,7 @@ package net.eca.agent;
 
 import net.eca.util.EcaLogger;
 
+import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -43,7 +44,7 @@ public final class ReturnToggle {
     }
 
     public static Set<String> getModPackagePrefixes() {
-        return new java.util.HashSet<>(modPackagePrefixes);
+        return new HashSet<>(modPackagePrefixes);
     }
 
     public static boolean shouldReturn(String internalClassName) {
@@ -128,6 +129,15 @@ public final class ReturnToggle {
             activeClassNames.add(internalClassName);
             explicitTargets.remove(internalClassName);
         }
+    }
+
+    /**
+     * 获取所有已转换的类名（内部格式）
+     * 用于验证恢复时 retransform 所有已转换的类
+     * @return 已转换类名的副本
+     */
+    public static Set<String> getActiveClassNames() {
+        return new HashSet<>(activeClassNames);
     }
 
     public static void clearAllTargets() {

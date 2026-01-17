@@ -18,6 +18,7 @@ import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 //Runtime manager for health analysis system
+@SuppressWarnings("unchecked")
 public class HealthAnalyzerManager {
 
     //Class cache: tracks which entity classes have been analyzed
@@ -450,7 +451,7 @@ public class HealthAnalyzerManager {
                     }
 
                     if (keyMethod != null) {
-                        java.lang.reflect.Method finalKeyMethod = keyMethod;
+                        Method finalKeyMethod = keyMethod;
                         return (entity) -> {
                             try {
                                 Object result = finalKeyMethod.invoke(entity);
@@ -608,7 +609,6 @@ public class HealthAnalyzerManager {
     }
 
     //获取DataItem（通过反射访问itemsById）
-    @SuppressWarnings("unchecked")
     private static SynchedEntityData.DataItem<?> getDataItem(SynchedEntityData entityData, int id) {
         try {
             if (ITEMS_BY_ID_FIELD == null) return null;

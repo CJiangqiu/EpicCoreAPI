@@ -4,6 +4,7 @@ import net.eca.agent.AgentLogWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
@@ -23,6 +24,31 @@ public class LivingEntityTransformer implements ITransformModule {
     private static String hookClassName = "net/eca/util/health/GetHealthHook";
     private static String hookMethodName = "processGetHealth";
     private static String hookMethodDesc = "(Lnet/minecraft/world/entity/LivingEntity;F)F";
+
+    // 转换计数器（用于验证转换是否生效）
+    private static volatile int transformCount = 0;
+
+    // 标签字段名（用于验证转换是否被拦截）
+    private static final String MARK_FIELD_NAME = "__ECA_LIVING_ENTITY_MARK__";
+
+    // 第一个被转换的类名（用于验证）
+    private static volatile String firstTransformedClass = null;
+
+    /**
+     * 获取转换计数
+     * @return 成功转换的类数量
+     */
+    public static int getTransformCount() {
+        return transformCount;
+    }
+
+    /**
+     * 获取第一个被转换的类名
+     * @return 第一个被转换的类名，如果没有则返回null
+     */
+    public static String getFirstTransformed() {
+        return firstTransformedClass;
+    }
 
     // 设置Hook处理器
     /**
@@ -77,6 +103,16 @@ public class LivingEntityTransformer implements ITransformModule {
     }
 
     @Override
+    public String getMarkFieldName() {
+        return MARK_FIELD_NAME;
+    }
+
+    @Override
+    public String getFirstTransformedClass() {
+        return firstTransformedClass;
+    }
+
+    @Override
     public boolean shouldTransform(String className, ClassLoader classLoader) {
         // 跳过ECA自己的类
         if (className.startsWith("net/eca/")) {
@@ -101,12 +137,24 @@ public class LivingEntityTransformer implements ITransformModule {
             // 第二遍：实际转换
             ClassReader cr = new ClassReader(classfileBuffer);
             ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_MAXS);
-            GetHealthClassVisitor cv = new GetHealthClassVisitor(cw, className);
+
+            // 判断是否是第一个转换的类（需要注入标签）
+            boolean isFirstClass = (firstTransformedClass == null);
+
+            GetHealthClassVisitor cv = new GetHealthClassVisitor(cw, className, isFirstClass);
             cr.accept(cv, ClassReader.EXPAND_FRAMES);
 
             if (cv.transformed) {
                 byte[] transformedBytes = cw.toByteArray();
-                AgentLogWriter.info("[LivingEntityTransformer] Hooked getHealth() in: " + className);
+                transformCount++;
+
+                // 记录第一个被转换的类
+                if (isFirstClass) {
+                    firstTransformedClass = className.replace('/', '.');
+                    AgentLogWriter.info("[LivingEntityTransformer] First transformed class: " + firstTransformedClass + " (mark field injected)");
+                }
+
+                AgentLogWriter.info("[LivingEntityTransformer] Hooked getHealth() in: " + className + " (total: " + transformCount + ")");
                 return transformedBytes;
             }
             return null;
@@ -150,11 +198,13 @@ public class LivingEntityTransformer implements ITransformModule {
     // ClassVisitor：遍历类的所有方法
     private static class GetHealthClassVisitor extends ClassVisitor {
         private final String className;
+        private final boolean injectMark;
         public boolean transformed = false;
 
-        GetHealthClassVisitor(ClassWriter cw, String className) {
+        GetHealthClassVisitor(ClassWriter cw, String className, boolean injectMark) {
             super(Opcodes.ASM9, cw);
             this.className = className;
+            this.injectMark = injectMark;
         }
 
         @Override
@@ -167,6 +217,15 @@ public class LivingEntityTransformer implements ITransformModule {
             }
 
             return mv;
+        }
+
+        @Override
+        public void visitEnd() {
+            // 如果是第一个转换的类，注入标签字段
+            if (injectMark && transformed) {
+                ITransformModule.injectMarkField(cv, MARK_FIELD_NAME);
+            }
+            super.visitEnd();
         }
     }
 

@@ -6,6 +6,7 @@ import net.eca.util.EntityUtil;
 import net.minecraft.world.entity.Entity;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -15,6 +16,7 @@ import java.util.function.Function;
  *
  * 内置无敌保护逻辑，当尝试移除无敌实体时自动拦截
  */
+@SuppressWarnings("unchecked")
 public class EcaHashMap<K, V> extends HashMap<K, V> {
 
     private static final long serialVersionUID = 1L;
@@ -84,7 +86,7 @@ public class EcaHashMap<K, V> extends HashMap<K, V> {
 
         // 情况2：值是List（用于ClassInstanceMultiMap.byClass）
         // 检查List中是否包含无敌实体
-        if (value instanceof java.util.List<?> list) {
+        if (value instanceof List<?> list) {
             for (Object item : list) {
                 if (item instanceof Entity entity) {
                     // Allow dimension change operations even for invulnerable entities
@@ -98,12 +100,11 @@ public class EcaHashMap<K, V> extends HashMap<K, V> {
         return false;
     }
 
-    @SuppressWarnings("unchecked")
     private V wrapListIfNeeded(V value) {
         if (value instanceof EcaArrayList) {
             return value;
         }
-        if (value instanceof java.util.List<?> list) {
+        if (value instanceof List<?> list) {
             return (V) new EcaArrayList<>(list);
         }
         return value;

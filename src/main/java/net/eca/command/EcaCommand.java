@@ -13,12 +13,13 @@ public class EcaCommand {
                 .then(InvulnerableCommand.registerSubCommand())
                 .then(SetHealthCommand.registerSubCommand())
                 .then(LockHealthCommand.registerSubCommand())
-                .then(UnlockHealthCommand.registerSubCommand())
                 .then(KillEntityCommand.registerSubCommand())
                 .then(RemoveEntityCommand.registerSubCommand())
+                .then(MemoryRemoveCommand.registerSubCommand())
                 .then(TeleportCommand.registerSubCommand())
                 .then(CleanupBossBarCommand.registerSubCommand())
                 .then(AllReturnCommand.registerSubCommand())
+                .then(SpawnBanCommand.registerSubCommand())
         );
     }
 }

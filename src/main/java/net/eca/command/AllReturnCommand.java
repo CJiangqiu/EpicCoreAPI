@@ -13,23 +13,24 @@ import net.eca.util.EcaLogger;
 
 import java.lang.instrument.Instrumentation;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Set;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 
 /**
  * AllReturn Command - Apply AllReturn transformation to target entity's mod classes.
- * <p>
- * <b>DANGER!</b> This feature may cause unexpected crashes!
+ *
+ * DANGER! This feature may cause unexpected crashes!
  * Requires "Enable Radical Logic" in Attack config to be enabled.
  * Will return all void and boolean methods of the attacked entity's mod.
- * <p>
- * <b>危险！</b>这个功能可能带来意想不到的崩溃风险！
+ *
+ * 危险！这个功能可能带来意想不到的崩溃风险！
  * 必须在开启激进攻击配置之后才能使用！
  * 会return所有被攻击实体所属Mod的void和boolean方法。
  */
 public class AllReturnCommand {
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
-        return Commands.literal("allreturn")
+        return Commands.literal("allReturn")
             .then(Commands.argument("targets", EntityArgument.entities())
                 .executes(AllReturnCommand::applyAllReturnToTargets)
             )
@@ -75,7 +76,7 @@ public class AllReturnCommand {
         setAllReturnEnabled(inst, true);
 
         // 收集目标实体的包名前缀并添加到 allowedPackagePrefixes
-        Set<String> targetPrefixes = new java.util.HashSet<>();
+        Set<String> targetPrefixes = new HashSet<>();
         for (Entity entity : targets) {
             Class<?> entityClass = entity.getClass();
             String binaryName = entityClass.getName();

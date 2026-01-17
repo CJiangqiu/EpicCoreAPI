@@ -1,19 +1,32 @@
 package net.eca;
 
-import net.eca.agent.AgentLoader;
+import net.eca.agent.EcaAgent;
+import net.eca.agent.ReturnToggle;
 import net.eca.event.EcaEventHandler;
 import net.eca.init.ModConfigs;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
+import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import net.minecraftforge.forgespi.language.IModInfo;
 
+import java.lang.instrument.Instrumentation;
+import java.util.HashSet;
+import java.util.Set;
+
+@SuppressWarnings("removal")
 @Mod(EcaMod.MOD_ID)
 public final class EcaMod {
     public static final String MOD_ID = "eca";
 
-    static {
-        AgentLoader.enableSelfAttach();
+    // 标志：Forge 加载是否完成
+    private static volatile boolean loadComplete = false;
+
+    public static boolean isLoadComplete() {
+        return loadComplete;
     }
 
     public EcaMod() {
@@ -28,17 +41,26 @@ public final class EcaMod {
         // 注册事件处理器
         MinecraftForge.EVENT_BUS.register(new EcaEventHandler());
 
-        // 加载Agent
-        if (AgentLoader.loadAgent(EcaMod.class)) {
-            EcaLogger.info("Agent loaded successfully");
+        // 注册 Forge 生命周期事件
+        FMLJavaModLoadingContext.get().getModEventBus().addListener(this::onLoadComplete);
 
-            // 收集所有 mod 包名并设置到 ReturnToggle
+        // Agent 已在 CoreMod 阶段加载，这里只需要收集 mod 包名
+        if (EcaAgent.isInitialized()) {
+            EcaLogger.info("Agent already loaded by CoreMod");
             collectAndSetModPackages();
         } else {
-            EcaLogger.warn("Agent loading failed - some features may be unavailable");
+            EcaLogger.warn("Agent not initialized - some features may be unavailable");
         }
 
         EcaLogger.info("EpicCoreAPI initialized");
+    }
+
+    /**
+     * Forge 加载完成事件
+     */
+    private void onLoadComplete(FMLLoadCompleteEvent event) {
+        loadComplete = true;
+        EcaLogger.info("Forge load complete,start check");
     }
 
     /**
@@ -46,24 +68,21 @@ public final class EcaMod {
      */
     private void collectAndSetModPackages() {
         try {
-            java.util.Set<String> modPackages = new java.util.HashSet<>();
-            java.util.Set<String> excludedModIds = java.util.Set.of(
+            Set<String> modPackages = new HashSet<>();
+            Set<String> excludedModIds = Set.of(
                 "minecraft", "forge", "fml", "eca"
             );
 
-            net.minecraftforge.fml.ModList.get().forEachModFile(modFile -> {
-                for (net.minecraftforge.forgespi.language.IModInfo modInfo : modFile.getModInfos()) {
+            ModList.get().forEachModFile(modFile -> {
+                for (IModInfo modInfo : modFile.getModInfos()) {
                     String modId = modInfo.getModId();
 
-                    // 跳过核心 mod
                     if (excludedModIds.contains(modId)) {
                         continue;
                     }
 
-                    // 从扫描结果获取所有类
                     modFile.getScanResult().getClasses().forEach(classData -> {
                         String internalName = classData.clazz().getInternalName();
-                        // 提取顶层包名（前两级，如 com/example/）
                         String prefix = extractPackagePrefix(internalName, 2);
                         if (prefix != null) {
                             modPackages.add(prefix);
@@ -73,11 +92,9 @@ public final class EcaMod {
             });
 
             if (!modPackages.isEmpty()) {
-                // 设置到 ReturnToggle（mod ClassLoader）
-                net.eca.agent.ReturnToggle.setModPackagePrefixes(modPackages);
-                net.eca.agent.ReturnToggle.setLoadTimeTransformEnabled(true);
+                ReturnToggle.setModPackagePrefixes(modPackages);
+                ReturnToggle.setLoadTimeTransformEnabled(true);
 
-                // 也设置到 agent ClassLoader
                 setModPackagePrefixesInAgent(modPackages);
                 setLoadTimeTransformEnabledInAgent(true);
 
@@ -93,9 +110,6 @@ public final class EcaMod {
 
     /**
      * 提取包名前缀
-     * @param internalClassName 内部类名 (如 com/example/mod/MyClass)
-     * @param levels 提取的层级数
-     * @return 包名前缀 (如 com/example/)
      */
     private String extractPackagePrefix(String internalClassName, int levels) {
         String[] parts = internalClassName.split("/");
@@ -113,9 +127,9 @@ public final class EcaMod {
     /**
      * 通过反射设置到 agent ClassLoader 中的 ReturnToggle
      */
-    private void setModPackagePrefixesInAgent(java.util.Set<String> packages) {
+    private void setModPackagePrefixesInAgent(Set<String> packages) {
         try {
-            java.lang.instrument.Instrumentation inst = net.eca.agent.EcaAgent.getInstrumentation();
+            Instrumentation inst = EcaAgent.getInstrumentation();
             if (inst == null) {
                 return;
             }
@@ -134,7 +148,7 @@ public final class EcaMod {
             }
 
             if (agentReturnToggle != null) {
-                agentReturnToggle.getMethod("setModPackagePrefixes", java.util.Set.class)
+                agentReturnToggle.getMethod("setModPackagePrefixes", Set.class)
                     .invoke(null, packages);
                 EcaLogger.info("Set mod packages to agent ReturnToggle");
             }
@@ -148,7 +162,7 @@ public final class EcaMod {
      */
     private void setLoadTimeTransformEnabledInAgent(boolean enabled) {
         try {
-            java.lang.instrument.Instrumentation inst = net.eca.agent.EcaAgent.getInstrumentation();
+            java.lang.instrument.Instrumentation inst = EcaAgent.getInstrumentation();
             if (inst == null) {
                 return;
             }

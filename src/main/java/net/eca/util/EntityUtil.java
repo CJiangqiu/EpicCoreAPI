@@ -39,7 +39,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-
+@SuppressWarnings("unchecked")
 //实体工具类
 public class EntityUtil {
 
@@ -382,7 +382,6 @@ public class EntityUtil {
     }
 
     //获取DataItem
-    @SuppressWarnings("unchecked")
     private static SynchedEntityData.DataItem<?> getDataItem(SynchedEntityData entityData, int id) {
         try {
             if (ITEMS_BY_ID_FIELD == null) return null;
@@ -832,7 +831,6 @@ public class EntityUtil {
     }
 
     //设置EntityDataAccessor的值
-    @SuppressWarnings("unchecked")
     private static void setAccessorValue(LivingEntity entity, EntityDataAccessor<?> accessor, float expectedHealth) {
         try {
             EntityDataSerializer<?> serializer = accessor.getSerializer();
@@ -1273,7 +1271,6 @@ public class EntityUtil {
     }
 
     //从 EntityTickList.active 和 passive 移除（使用双缓冲机制）
-    @SuppressWarnings("unchecked")
     private static void removeFromEntityTickList(ServerLevel serverLevel, int entityId) {
         try {
             if (SERVER_LEVEL_ENTITY_TICK_LIST_HANDLE == null) return;
@@ -1313,7 +1310,6 @@ public class EntityUtil {
     }
 
     //从 EntityLookup (byUuid + byId) 移除
-    @SuppressWarnings("unchecked")
     private static void removeFromEntityLookup(ServerLevel serverLevel, int entityId, UUID entityUUID) {
         try {
             if (SERVER_LEVEL_ENTITY_MANAGER_HANDLE == null) return;
@@ -1339,7 +1335,6 @@ public class EntityUtil {
     }
 
     //从 EntitySectionStorage → EntitySection.storage 移除
-    @SuppressWarnings("unchecked")
     private static void removeFromEntitySectionStorage(ServerLevel serverLevel, Entity entity) {
         try {
             if (SERVER_LEVEL_ENTITY_MANAGER_HANDLE == null) return;
@@ -1378,7 +1373,6 @@ public class EntityUtil {
     }
 
     //从 ChunkMap.entityMap 移除
-    @SuppressWarnings("unchecked")
     private static void removeFromChunkMapEntityMap(ServerLevel serverLevel, int entityId) {
         try {
             if (SERVER_LEVEL_CHUNK_SOURCE_HANDLE == null) return;
@@ -1397,7 +1391,6 @@ public class EntityUtil {
     }
 
     //从 PersistentEntitySectionManager.knownUuids 移除
-    @SuppressWarnings("unchecked")
     private static void removeFromKnownUuids(ServerLevel serverLevel, UUID entityUUID) {
         try {
             if (SERVER_LEVEL_ENTITY_MANAGER_HANDLE == null) return;
@@ -1413,7 +1406,6 @@ public class EntityUtil {
     }
 
     //从 ServerLevel.players 或 navigatingMobs 移除
-    @SuppressWarnings("unchecked")
     private static void removeFromPlayersOrMobs(ServerLevel serverLevel, Entity entity) {
         try {
             //如果是玩家，从 players 列表移除
@@ -1456,7 +1448,6 @@ public class EntityUtil {
     }
 
     //从客户端 EntityTickList.active 和 passive 移除
-    @SuppressWarnings("unchecked")
     private static void removeFromClientEntityTickList(ClientLevel clientLevel, int entityId) {
         try {
             if (CLIENT_LEVEL_TICKING_ENTITIES_HANDLE == null) return;
@@ -1477,7 +1468,6 @@ public class EntityUtil {
     }
 
     //从客户端 EntityLookup (byUuid + byId) 移除
-    @SuppressWarnings("unchecked")
     private static void removeFromClientEntityLookup(ClientLevel clientLevel, int entityId, UUID entityUUID) {
         try {
             if (CLIENT_LEVEL_ENTITY_STORAGE_HANDLE == null) return;
@@ -1503,7 +1493,6 @@ public class EntityUtil {
     }
 
     //从客户端 EntitySectionStorage 移除
-    @SuppressWarnings("unchecked")
     private static void removeFromClientEntitySectionStorage(ClientLevel clientLevel, Entity entity) {
         try {
             if (CLIENT_LEVEL_ENTITY_STORAGE_HANDLE == null) return;
@@ -1542,7 +1531,6 @@ public class EntityUtil {
     }
 
     //从客户端 players 列表移除
-    @SuppressWarnings("unchecked")
     private static void removeFromClientPlayers(ClientLevel clientLevel, Entity entity) {
         try {
             if (entity instanceof Player && CLIENT_LEVEL_PLAYERS_HANDLE != null) {

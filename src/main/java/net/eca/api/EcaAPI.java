@@ -6,6 +6,10 @@ import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.util.health.HealthLockManager;
+import net.eca.util.reflect.LwjglUtil;
+import net.eca.util.spawn.SpawnBanManager;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.damagesource.DamageSource;
@@ -16,6 +20,7 @@ import java.security.CodeSource;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public final class EcaAPI {
@@ -204,6 +209,24 @@ public final class EcaAPI {
         EntityUtil.removeEntity(entity, reason);
     }
 
+    // 清除实体（使用LWJGL实现，需要开启激进攻击逻辑配置）
+    /**
+     * Remove an entity using LWJGL API.
+     * DANGER! Requires "Enable Radical Logic" in Attack config.
+     * @param entity the entity to remove
+     * @return true if removal succeeded, false otherwise (including when config is disabled)
+     */
+    public static boolean memoryRemoveEntity(Entity entity) {
+        if (entity == null) {
+            return false;
+        }
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
+            EcaLogger.warn("memoryRemoveEntity requires Attack Radical Logic to be enabled in config");
+            return false;
+        }
+        return LwjglUtil.lwjglRemove(entity);
+    }
+
     // 清理实体 Boss 血条
     /**
      * Clean up boss bars associated with an entity.
@@ -283,6 +306,117 @@ public final class EcaAPI {
     }
 
 
+    // ============ 禁生成 API ============
+
+    // 添加禁生成
+    /**
+     * Add a spawn ban for the specified entity type in a level.
+     * Entities of this type will be blocked from spawning for the specified duration.
+     * The ban is stored per-dimension and persists with world saves.
+     *
+     * Use cases:
+     * - Temporarily disable mob spawning after boss death
+     * - Prevent specific entities from respawning during events
+     * - Create mob-free zones for building or exploration
+     *
+     * @param level the server level
+     * @param type the entity type to ban
+     * @param timeInSeconds ban duration in seconds
+     * @return true if ban was added successfully
+     * @throws IllegalArgumentException if level or type is null
+     */
+    public static boolean addSpawnBan(ServerLevel level, EntityType<?> type, int timeInSeconds) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        if (type == null) {
+            throw new IllegalArgumentException("EntityType cannot be null");
+        }
+        return SpawnBanManager.addBan(level, type, timeInSeconds);
+    }
+
+    // 检查是否被禁生成
+    /**
+     * Check if an entity type is currently banned from spawning.
+     * @param level the server level
+     * @param type the entity type to check
+     * @return true if the entity type is banned
+     * @throws IllegalArgumentException if level or type is null
+     */
+    public static boolean isSpawnBanned(ServerLevel level, EntityType<?> type) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        if (type == null) {
+            throw new IllegalArgumentException("EntityType cannot be null");
+        }
+        return SpawnBanManager.isBanned(level, type);
+    }
+
+    // 获取禁生成剩余时间
+    /**
+     * Get the remaining spawn ban time for an entity type.
+     * @param level the server level
+     * @param type the entity type to check
+     * @return remaining time in seconds, 0 if not banned
+     * @throws IllegalArgumentException if level or type is null
+     */
+    public static int getSpawnBanTime(ServerLevel level, EntityType<?> type) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        if (type == null) {
+            throw new IllegalArgumentException("EntityType cannot be null");
+        }
+        return SpawnBanManager.getRemainingTime(level, type);
+    }
+
+    // 清除禁生成
+    /**
+     * Clear the spawn ban for an entity type.
+     * @param level the server level
+     * @param type the entity type to unban
+     * @return true if a ban was removed
+     * @throws IllegalArgumentException if level or type is null
+     */
+    public static boolean clearSpawnBan(ServerLevel level, EntityType<?> type) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        if (type == null) {
+            throw new IllegalArgumentException("EntityType cannot be null");
+        }
+        return SpawnBanManager.clearBan(level, type);
+    }
+
+    // 获取所有禁生成
+    /**
+     * Get all current spawn bans for a level.
+     * @param level the server level
+     * @return immutable map of EntityType to remaining seconds
+     * @throws IllegalArgumentException if level is null
+     */
+    public static Map<EntityType<?>, Integer> getAllSpawnBans(ServerLevel level) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        return SpawnBanManager.getAllBans(level);
+    }
+
+    // 清除所有禁生成
+    /**
+     * Clear all spawn bans for a level.
+     * @param level the server level
+     * @throws IllegalArgumentException if level is null
+     */
+    public static void clearAllSpawnBans(ServerLevel level) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        SpawnBanManager.clearAllBans(level);
+    }
+
+
     // 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
     /**
      * Enable AllReturn for the specified entity's mod.
@@ -355,6 +489,68 @@ public final class EcaAPI {
      */
     public static boolean isAllReturnEnabled() {
         return ReturnToggle.isAllReturnEnabled();
+    }
+
+    // 全局AllReturn开关（不需要实体参数，对所有已加载的非排除类生效）
+    /**
+     * Set global AllReturn state for all loaded non-excluded classes.
+     * DANGER! Requires "Enable Radical Logic" in Attack config.
+     * When enabled, performs return transformation on all boolean and void methods of all loaded mod classes.
+     * @param enabled true to enable, false to disable
+     * @return true if operation succeeded, false if radical logic is disabled or agent not available
+     */
+    public static boolean setGlobalAllReturn(boolean enabled) {
+        if (!enabled) {
+            disableAllReturn();
+            return true;
+        }
+
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
+            EcaLogger.warn("GlobalAllReturn requires Attack Radical Logic to be enabled in config");
+            return false;
+        }
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst == null) {
+            EcaLogger.warn("GlobalAllReturn: Agent is not initialized");
+            return false;
+        }
+
+        ReturnToggle.setAllReturnEnabled(true);
+
+        List<Class<?>> candidates = new ArrayList<>();
+        for (Class<?> clazz : inst.getAllLoadedClasses()) {
+            if (!inst.isModifiableClass(clazz)) continue;
+            if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) continue;
+
+            String className = clazz.getName();
+            if (ReturnToggle.isExcludedBinaryName(className)) continue;
+
+            candidates.add(clazz);
+        }
+
+        if (candidates.isEmpty()) {
+            return false;
+        }
+
+        List<String> targets = new ArrayList<>();
+        for (Class<?> clazz : candidates) {
+            targets.add(clazz.getName().replace('.', '/'));
+        }
+        ReturnToggle.addExplicitTargets(targets.toArray(new String[0]));
+
+        int successCount = 0;
+        int failCount = 0;
+        for (Class<?> clazz : candidates) {
+            try {
+                inst.retransformClasses(clazz);
+                successCount++;
+            } catch (Throwable t) {
+                failCount++;
+            }
+        }
+
+        EcaLogger.info("GlobalAllReturn: transformed {} classes, {} failed", successCount, failCount);
+        return successCount > 0;
     }
 
     //AllReturn 内部方法
