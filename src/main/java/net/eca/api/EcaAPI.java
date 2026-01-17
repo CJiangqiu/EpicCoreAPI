@@ -1,233 +1,24 @@
 package net.eca.api;
 
+import net.eca.agent.EcaAgent;
+import net.eca.agent.ReturnToggle;
+import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
-import net.eca.util.health.HealthFieldCache;
-import net.eca.util.health.HealthAnalyzerManager;
 import net.eca.util.health.HealthLockManager;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.damagesource.DamageSource;
 
+import java.lang.instrument.Instrumentation;
+import java.net.URL;
+import java.security.CodeSource;
+import java.security.ProtectionDomain;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 
 public final class EcaAPI {
-
-    // ==================== 日志 ====================
-
-    // 通过委托接口注册mod日志器
-    /**
-     * Register a mod logger using the ILoggerDelegate interface.
-     * Output format: [ECA/Prefix] message
-     * @param delegate the logger delegate implementation
-     * @return the ModLogger instance
-     */
-    public static EcaLogger.ModLogger registerLogger(ILoggerDelegate delegate) {
-        return EcaLogger.register(delegate);
-    }
-
-    // 通过mod id和自定义前缀注册
-    /**
-     * Register a mod logger with custom prefix.
-     * @param modId the mod id (used as key)
-     * @param displayPrefix the display prefix for log messages
-     * @return the ModLogger instance
-     */
-    public static EcaLogger.ModLogger registerLogger(String modId, String displayPrefix) {
-        return EcaLogger.register(modId, displayPrefix);
-    }
-
-    // 通过mod id注册（前缀使用mod id）
-    /**
-     * Register a mod logger using mod id as prefix.
-     * @param modId the mod id
-     * @return the ModLogger instance
-     */
-    public static EcaLogger.ModLogger registerLogger(String modId) {
-        return EcaLogger.register(modId);
-    }
-
-    // 获取已注册的mod日志器
-    /**
-     * Get a registered mod logger by mod id.
-     * @param modId the mod id
-     * @return the ModLogger instance, or null if not registered
-     */
-    public static EcaLogger.ModLogger getLogger(String modId) {
-        return EcaLogger.get(modId);
-    }
-
-    // 获取或注册mod日志器
-    /**
-     * Get or register a mod logger by mod id.
-     * @param modId the mod id
-     * @return the ModLogger instance
-     */
-    public static EcaLogger.ModLogger getOrRegisterLogger(String modId) {
-        return EcaLogger.getOrRegister(modId);
-    }
-
-    // ECA日志 - INFO
-    /**
-     * Log an info message with [ECA] prefix.
-     * @param msg the message to log
-     */
-    public static void logInfo(String msg) {
-        EcaLogger.info(msg);
-    }
-
-    // ECA日志 - INFO（带参数）
-    /**
-     * Log an info message with [ECA] prefix and arguments.
-     * @param fmt the format string
-     * @param args the arguments
-     */
-    public static void logInfo(String fmt, Object... args) {
-        EcaLogger.info(fmt, args);
-    }
-
-    // ECA日志 - WARN
-    /**
-     * Log a warning message with [ECA] prefix.
-     * @param msg the message to log
-     */
-    public static void logWarn(String msg) {
-        EcaLogger.warn(msg);
-    }
-
-    // ECA日志 - WARN（带参数）
-    /**
-     * Log a warning message with [ECA] prefix and arguments.
-     * @param fmt the format string
-     * @param args the arguments
-     */
-    public static void logWarn(String fmt, Object... args) {
-        EcaLogger.warn(fmt, args);
-    }
-
-    // ECA日志 - ERROR
-    /**
-     * Log an error message with [ECA] prefix.
-     * @param msg the message to log
-     */
-    public static void logError(String msg) {
-        EcaLogger.error(msg);
-    }
-
-    // ECA日志 - ERROR（带参数）
-    /**
-     * Log an error message with [ECA] prefix and arguments.
-     * @param fmt the format string
-     * @param args the arguments
-     */
-    public static void logError(String fmt, Object... args) {
-        EcaLogger.error(fmt, args);
-    }
-
-    // ECA日志 - ERROR（带异常）
-    /**
-     * Log an error message with [ECA] prefix and throwable.
-     * @param msg the message to log
-     * @param throwable the exception to log
-     */
-    public static void logError(String msg, Throwable throwable) {
-        EcaLogger.error(msg, throwable);
-    }
-
-    // ECA日志 - DEBUG
-    /**
-     * Log a debug message with [ECA] prefix.
-     * @param msg the message to log
-     */
-    public static void logDebug(String msg) {
-        EcaLogger.debug(msg);
-    }
-
-    // ECA日志 - DEBUG（带参数）
-    /**
-     * Log a debug message with [ECA] prefix and arguments.
-     * @param fmt the format string
-     * @param args the arguments
-     */
-    public static void logDebug(String fmt, Object... args) {
-        EcaLogger.debug(fmt, args);
-    }
-
-    // ==================== 生命值分析 ====================
-
-    // 手动触发实体生命值分析
-    /**
-     * Manually trigger health analysis for an entity.
-     * This will analyze the entity's getHealth() method implementation and cache the result.
-     * Normally, analysis is triggered automatically when getHealth() is called, but this method
-     * can be used to pre-analyze entities before modification.
-     * @param entity the living entity to analyze
-     */
-    public static void triggerHealthAnalysis(LivingEntity entity) {
-        if (entity == null) {
-            throw new IllegalArgumentException("Entity cannot be null");
-        }
-        HealthAnalyzerManager.triggerAnalysis(entity);
-    }
-
-    // 获取实体类的生命值缓存
-    /**
-     * Get the health field cache for an entity class.
-     * Returns null if the entity class has not been analyzed yet.
-     * The cache contains:
-     * - Access pattern (how to access the health field/container)
-     * - Reverse transformation formula (if the health value is computed)
-     * - Write function (how to modify the health value)
-     * @param entityClass the entity class
-     * @return the health field cache, or null if not analyzed
-     */
-    public static HealthFieldCache getHealthCache(Class<? extends LivingEntity> entityClass) {
-        if (entityClass == null) {
-            throw new IllegalArgumentException("Entity class cannot be null");
-        }
-        return HealthAnalyzerManager.getCache(entityClass);
-    }
-
-    // 修改实体生命值（智能修改，支持复杂存储方式）
-    /**
-     * Modify entity health intelligently.
-     * This method uses the cached analysis result to modify the health value correctly,
-     * even if the entity stores health in a custom container or applies transformations.
-     * @param entity the living entity
-     * @param targetHealth the target health value
-     * @return true if modification succeeded
-     */
-    public static boolean modifyEntityHealth(LivingEntity entity, float targetHealth) {
-        if (entity == null) {
-            throw new IllegalArgumentException("Entity cannot be null");
-        }
-
-        // 触发分析（如果尚未分析）
-        HealthAnalyzerManager.triggerAnalysis(entity);
-
-        // 获取缓存
-        HealthFieldCache cache = HealthAnalyzerManager.getCache(entity.getClass());
-        if (cache == null || cache.writePath == null) {
-            EcaLogger.warn("[EcaAPI] No health cache or write path found for: {}", entity.getClass().getSimpleName());
-            return false;
-        }
-
-        try {
-            // 应用逆向公式（如果有）
-            float valueToWrite = targetHealth;
-            if (cache.reverseTransform != null) {
-                valueToWrite = cache.reverseTransform.apply(targetHealth);
-            }
-
-            // 执行写入
-            return cache.writePath.apply(entity, valueToWrite);
-        } catch (Exception e) {
-            EcaLogger.error("[EcaAPI] Failed to modify health for: {}", entity.getClass().getSimpleName(), e);
-            return false;
-        }
-    }
-
-    // ==================== 血量锁定系统 ====================
 
     // 锁定血量
     /**
@@ -295,8 +86,6 @@ public final class EcaAPI {
         return HealthLockManager.hasLock(entity);
     }
 
-    // ==================== 实体血量工具 ====================
-
     // 获取实体真实血量
     /**
      * Get entity real health using VarHandle direct access.
@@ -323,7 +112,6 @@ public final class EcaAPI {
         return EntityUtil.setHealth(entity, health);
     }
 
-    // ==================== 无敌状态管理 ====================
 
     // 获取实体无敌状态
     /**
@@ -442,9 +230,6 @@ public final class EcaAPI {
         return EntityUtil.teleportEntity(entity, x, y, z);
     }
 
-
-    // ==================== 关键词名单管理 API ====================
-
     // 生命值白名单管理
     /**
      * Add a keyword to the health whitelist.
@@ -495,6 +280,125 @@ public final class EcaAPI {
      */
     public static Set<String> getHealthBlacklistKeywords() {
         return EntityUtil.getHealthBlacklistKeywords();
+    }
+
+
+    // 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
+    /**
+     * Enable AllReturn for the specified entity's mod.
+     * DANGER! Requires "Enable Radical Logic" in Attack config.
+     * Will perform return transformation on all boolean and void methods of the target entity's mod.
+     * @param entity the entity whose mod classes will be transformed
+     * @return true if AllReturn was enabled successfully, false if radical logic is disabled or agent not available
+     */
+    public static boolean enableAllReturn(Entity entity) {
+        if (entity == null) {
+            return false;
+        }
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
+            EcaLogger.warn("AllReturn requires Attack Radical Logic to be enabled in config");
+            return false;
+        }
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst == null) {
+            EcaLogger.warn("AllReturn: Agent is not initialized");
+            return false;
+        }
+
+        Class<?> entityClass = entity.getClass();
+        String binaryName = entityClass.getName();
+        if (ReturnToggle.isExcludedBinaryName(binaryName)) {
+            return false;
+        }
+
+        String packagePrefix = getPackagePrefix(binaryName);
+        String internalPrefix = packagePrefix != null ? packagePrefix.replace('.', '/') : null;
+
+        ReturnToggle.setAllReturnEnabled(true);
+        ReturnToggle.addAllowedPackagePrefix(internalPrefix);
+
+        URL codeSource = getCodeSourceLocation(entityClass);
+        List<Class<?>> candidates = collectCandidates(inst, codeSource, packagePrefix);
+
+        if (candidates.isEmpty()) {
+            return false;
+        }
+
+        List<String> targets = new ArrayList<>();
+        for (Class<?> clazz : candidates) {
+            targets.add(clazz.getName().replace('.', '/'));
+        }
+        ReturnToggle.addExplicitTargets(targets.toArray(new String[0]));
+
+        try {
+            inst.retransformClasses(candidates.toArray(new Class<?>[0]));
+            return true;
+        } catch (Throwable t) {
+            EcaLogger.warn("AllReturn batch retransform failed: {}", t.getMessage());
+            return false;
+        }
+    }
+
+    // 关闭AllReturn
+    /**
+     * Disable AllReturn and clear all targets.
+     */
+    public static void disableAllReturn() {
+        ReturnToggle.setAllReturnEnabled(false);
+        ReturnToggle.clearAllTargets();
+    }
+
+    // 检查AllReturn是否启用
+    /**
+     * Check if AllReturn is currently enabled.
+     * @return true if AllReturn is enabled
+     */
+    public static boolean isAllReturnEnabled() {
+        return ReturnToggle.isAllReturnEnabled();
+    }
+
+    //AllReturn 内部方法
+
+    private static String getPackagePrefix(String binaryName) {
+        int lastDot = binaryName.lastIndexOf('.');
+        if (lastDot <= 0) {
+            return null;
+        }
+        return binaryName.substring(0, lastDot + 1);
+    }
+
+    private static URL getCodeSourceLocation(Class<?> clazz) {
+        try {
+            ProtectionDomain domain = clazz.getProtectionDomain();
+            if (domain == null) return null;
+            CodeSource source = domain.getCodeSource();
+            if (source == null) return null;
+            return source.getLocation();
+        } catch (SecurityException ignored) {
+            return null;
+        }
+    }
+
+    private static List<Class<?>> collectCandidates(Instrumentation inst, URL codeSource, String packagePrefix) {
+        List<Class<?>> candidates = new ArrayList<>();
+        for (Class<?> clazz : inst.getAllLoadedClasses()) {
+            if (!inst.isModifiableClass(clazz)) continue;
+            if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) continue;
+
+            String className = clazz.getName();
+            if (ReturnToggle.isExcludedBinaryName(className)) continue;
+
+            if (codeSource != null) {
+                URL classSource = getCodeSourceLocation(clazz);
+                if (classSource == null || !classSource.equals(codeSource)) continue;
+            } else if (packagePrefix != null) {
+                if (!className.startsWith(packagePrefix)) continue;
+            } else {
+                continue;
+            }
+            candidates.add(clazz);
+        }
+        return candidates;
     }
 
     private EcaAPI() {}

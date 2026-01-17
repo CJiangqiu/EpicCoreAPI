@@ -24,6 +24,11 @@ public class EcaConfiguration {
 
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
 
+    // ═══════════════════════════════════════════════════════════════════════════════════
+    // Field Backtrace Configuration | 字段回溯配置
+    // ═══════════════════════════════════════════════════════════════════════════════════
+
+
     static {
         // ═══════════════════════════════════════════════════════════════════════════════
         // Attack Configuration | 攻击系统配置
@@ -63,6 +68,9 @@ public class EcaConfiguration {
             )
             .define("Unlock Attribute Limits", true);
 
+        // ═════════════════════════════════════════════════════════════════════
+        // Field Backtrace Configuration | 字段回溯配置
+        // ═════════════════════════════════════════════════════════════════════
         SPEC = BUILDER.build();
     }
 
@@ -89,5 +97,6 @@ public class EcaConfiguration {
     public static boolean getAttributeUnlockLimitsSafely() {
         return safeGet(ATTRIBUTE_UNLOCK_LIMITS, true);
     }
+
 }
 

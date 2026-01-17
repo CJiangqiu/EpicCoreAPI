@@ -7,6 +7,7 @@ import net.minecraft.world.entity.Entity;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * ECA自定义的HashMap容器
@@ -35,6 +36,22 @@ public class EcaHashMap<K, V> extends HashMap<K, V> {
 
     public EcaHashMap(Map<? extends K, ? extends V> m) {
         super(m);
+    }
+
+    @Override
+    public V put(K key, V value) {
+        return super.put(key, wrapListIfNeeded(value));
+    }
+
+    @Override
+    public V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction) {
+        V value = super.computeIfAbsent(key, mappingFunction);
+        V wrapped = wrapListIfNeeded(value);
+        if (wrapped != value) {
+            super.put(key, wrapped);
+            return wrapped;
+        }
+        return value;
     }
 
     @Override
@@ -79,5 +96,16 @@ public class EcaHashMap<K, V> extends HashMap<K, V> {
         }
 
         return false;
+    }
+
+    @SuppressWarnings("unchecked")
+    private V wrapListIfNeeded(V value) {
+        if (value instanceof EcaArrayList) {
+            return value;
+        }
+        if (value instanceof java.util.List<?> list) {
+            return (V) new EcaArrayList<>(list);
+        }
+        return value;
     }
 }

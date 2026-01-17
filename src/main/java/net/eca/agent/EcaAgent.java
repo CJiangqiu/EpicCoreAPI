@@ -1,10 +1,12 @@
 package net.eca.agent;
 
+import net.eca.agent.transform.AllReturnTransformer;
 import net.eca.agent.transform.ContainerReplacementTransformer;
 import net.eca.agent.transform.ITransformModule;
 import net.eca.agent.transform.LivingEntityTransformer;
 
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,6 +42,7 @@ public final class EcaAgent {
         try {
             AgentLogWriter.info("[EcaAgent] Starting agent initialization...");
             instrumentation = inst;
+            bridgeInstrumentationToCallerClassLoader(args, inst);
 
             // 打开必要的模块
             openRequiredModules(args, inst);
@@ -53,6 +56,9 @@ public final class EcaAgent {
 
             // 注册LivingEntity转换模块
             transformer.registerModule(new LivingEntityTransformer());
+
+            // 注册AllReturn转换模块
+            transformer.registerModule(new AllReturnTransformer());
 
             // 设置 getHealth() 完整钩子处理器（分析 + 覆盖）
             LivingEntityTransformer.setHookHandler(
@@ -75,6 +81,41 @@ public final class EcaAgent {
         } catch (Throwable t) {
             AgentLogWriter.error("[EcaAgent] Agent initialization failed", t);
             throw new RuntimeException(t);
+        }
+    }
+
+    private static void bridgeInstrumentationToCallerClassLoader(String callerClassName, Instrumentation inst) {
+        if (callerClassName == null || inst == null) {
+            return;
+        }
+
+        ClassLoader targetLoader = null;
+        try {
+            Class<?> callerClass = findClass(inst.getAllLoadedClasses(), callerClassName);
+            if (callerClass != null) {
+                targetLoader = callerClass.getClassLoader();
+            }
+        } catch (Throwable ignored) {
+        }
+
+        if (targetLoader == null) {
+            targetLoader = ClassLoader.getSystemClassLoader();
+        }
+
+        try {
+            Class<?> modEcaAgent = Class.forName("net.eca.agent.EcaAgent", false, targetLoader);
+            if (modEcaAgent == EcaAgent.class) {
+                return;
+            }
+            Field instField = modEcaAgent.getDeclaredField("instrumentation");
+            instField.setAccessible(true);
+            instField.set(null, inst);
+            Field initField = modEcaAgent.getDeclaredField("initialized");
+            initField.setAccessible(true);
+            initField.setBoolean(null, true);
+            AgentLogWriter.info("[EcaAgent] Bridged Instrumentation to caller classloader");
+        } catch (Throwable t) {
+            AgentLogWriter.warn("[EcaAgent] Failed to bridge Instrumentation: " + t.getMessage());
         }
     }
 
@@ -147,6 +188,45 @@ public final class EcaAgent {
         AgentLogWriter.info("[EcaAgent] Scanning " + allClasses.length + " loaded classes...");
 
         for (ITransformModule module : transformer.getModules()) {
+            List<String> targetClassNames = module.getTargetClassNames();
+            if (targetClassNames != null && !targetClassNames.isEmpty()) {
+                List<Class<?>> targetClasses = new ArrayList<>();
+
+                for (String className : targetClassNames) {
+                    Class<?> clazz = findClass(allClasses, className);
+                    if (clazz == null) {
+                        AgentLogWriter.warn("[EcaAgent] Target class not found: " + className);
+                        continue;
+                    }
+                    if (!module.shouldRetransform(className, clazz.getClassLoader())) {
+                        continue;
+                    }
+                    if (!inst.isModifiableClass(clazz)) {
+                        AgentLogWriter.warn("[EcaAgent] Target class not modifiable: " + className);
+                        continue;
+                    }
+                    targetClasses.add(clazz);
+                }
+
+                AgentLogWriter.info("[EcaAgent] Found " + targetClasses.size() + " classes for module: " + module.getName());
+
+                int successCount = 0;
+                int failCount = 0;
+                for (Class<?> clazz : targetClasses) {
+                    try {
+                        inst.retransformClasses(clazz);
+                        successCount++;
+                    } catch (Throwable t) {
+                        failCount++;
+                        AgentLogWriter.warn("[EcaAgent] Failed to retransform: " + clazz.getName());
+                    }
+                }
+
+                AgentLogWriter.info("[EcaAgent] Retransformation for " + module.getName()
+                    + ": " + successCount + " success, " + failCount + " failed");
+                continue;
+            }
+
             String targetBaseClass = module.getTargetBaseClass();
             if (targetBaseClass == null) {
                 continue;
@@ -173,6 +253,10 @@ public final class EcaAgent {
                     name.startsWith("sun.") || name.startsWith("jdk.") ||
                     name.startsWith("com.sun.") || name.startsWith("org.objectweb.asm.") ||
                     name.startsWith("net.eca.")) {
+                    continue;
+                }
+
+                if (!module.shouldRetransform(name, clazz.getClassLoader())) {
                     continue;
                 }
 

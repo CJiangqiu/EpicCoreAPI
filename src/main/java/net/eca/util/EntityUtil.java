@@ -6,6 +6,7 @@ import net.eca.network.NetworkHandler;
 import net.eca.util.health.HealthFieldCache;
 import net.eca.util.health.HealthAnalyzerManager;
 import net.eca.util.reflect.ObfuscationMapping;
+import net.minecraft.network.syncher.EntityDataSerializer;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
@@ -343,6 +344,29 @@ public class EntityUtil {
         }
     }
 
+    public static void clearRemovalReasonIfProtected(Entity entity) {
+        if (entity == null) {
+            return;
+        }
+        if (ENTITY_REMOVAL_REASON_HANDLE == null) {
+            return;
+        }
+
+        Entity.RemovalReason reason = entity.getRemovalReason();
+        if (reason == null) {
+            return;
+        }
+        if (reason == Entity.RemovalReason.CHANGED_DIMENSION) {
+            return;
+        }
+        if (isChangingDimension(entity)) {
+            return;
+        }
+        if (!reason.shouldSave()) {
+            ENTITY_REMOVAL_REASON_HANDLE.set(entity, null);
+        }
+    }
+
     //获取实体真实生命值
     public static float getHealth(LivingEntity entity) {
         if (entity == null) return 0.0f;
@@ -391,12 +415,16 @@ public class EntityUtil {
             }
 
             //验证是否成功
-            if (verifyHealthChange(entity, expectedHealth)) return true;
+            boolean verify1 = verifyHealthChange(entity, expectedHealth);
+            if (verify1) {
+                return true;
+            }
 
             //阶段3：字节码反向追踪
             setHealthViaPhase3(entity, expectedHealth);
 
-            return verifyHealthChange(entity, expectedHealth);
+            boolean verify2 = verifyHealthChange(entity, expectedHealth);
+            return verify2;
         } catch (Exception e) {
             return false;
         }
@@ -405,8 +433,10 @@ public class EntityUtil {
     //验证血量修改是否成功
     private static boolean verifyHealthChange(LivingEntity entity, float expectedHealth) {
         try {
-            float actualHealth = entity.getHealth();
-            return Math.abs(actualHealth - expectedHealth) <= 10.0f;
+            float actualHealth = entity.getHealth();  // 调用实体的 getHealth()
+            boolean actualPass = Math.abs(actualHealth - expectedHealth) <= 10.0f;
+            // 使用实体的 getHealth() 验证，因为这才是真正显示的血量
+            return actualPass;
         } catch (Exception e) {
             return false;
         }
@@ -456,21 +486,51 @@ public class EntityUtil {
     //阶段2：修改符合条件的EntityDataAccessor和字段
     private static void setHealthViaPhase2(LivingEntity entity, float expectedHealth) {
         try {
-            float currentHealth = entity.getHealth();
+            float currentHealth = getHealth(entity);
+
+            //尝试调用实体自己的 setHealth 类方法（优先级最高）
+            tryCallEntityHealthSetter(entity, expectedHealth);
 
             //修改数值近似的EntityDataAccessor
-            for (EntityDataAccessor<?> acc : findNearbyNumericAccessors(entity)) {
+            List<EntityDataAccessor<?>> nearbyAccessors = findNearbyNumericAccessors(entity);
+            for (EntityDataAccessor<?> acc : nearbyAccessors) {
                 setAccessorValue(entity, acc, expectedHealth);
             }
 
             //修改关键词匹配的EntityDataAccessor
-            for (EntityDataAccessor<?> acc : findHealthKeywordAccessors(entity)) {
+            List<EntityDataAccessor<?>> keywordAccessors = findHealthKeywordAccessors(entity);
+            for (EntityDataAccessor<?> acc : keywordAccessors) {
                 setAccessorValue(entity, acc, expectedHealth);
             }
 
             //扫描并修改符合条件的实例字段
             scanAndModifyIntelligentFields(entity, currentHealth, expectedHealth);
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            // Silently fail
+        }
+    }
+
+    //尝试调用实体自身的血量设置方法
+    private static boolean tryCallEntityHealthSetter(LivingEntity entity, float expectedHealth) {
+        Class<?> entityClass = entity.getClass();
+        // 常见的血量设置方法名
+        String[] methodNames = {"setHEALTS", "setHealth", "set_health", "setHP", "setHp"};
+
+        for (Class<?> clazz = entityClass; clazz != null && clazz != LivingEntity.class; clazz = clazz.getSuperclass()) {
+            for (String methodName : methodNames) {
+                try {
+                    Method method = clazz.getDeclaredMethod(methodName, float.class);
+                    method.setAccessible(true);
+                    method.invoke(entity, expectedHealth);
+                    return true;
+                } catch (NoSuchMethodException ignored) {
+                    // 方法不存在，尝试下一个
+                } catch (Exception ignored) {
+                    // Silently fail
+                }
+            }
+        }
+        return false;
     }
 
     //扫描并修改符合智能条件的字段
@@ -552,7 +612,7 @@ public class EntityUtil {
     private static int scanAndModifyAllInstanceFields(LivingEntity entity, float expectedHealth) {
         Set<Object> scannedObjects = new HashSet<>();
         int totalModified = 0;
-        float currentHealth = entity.getHealth();
+        float currentHealth = getHealth(entity);
 
         Class<?> currentClass = entity.getClass();
         int inheritanceLevel = 0;
@@ -693,10 +753,12 @@ public class EntityUtil {
     private static List<EntityDataAccessor<?>> findNearbyNumericAccessors(LivingEntity entity) {
         Class<?> entityClass = entity.getClass();
         List<EntityDataAccessor<?>> cached = NEARBY_ACCESSOR_CACHE.get(entityClass);
-        if (cached != null) return cached;
+        if (cached != null) {
+            return cached;
+        }
 
         List<EntityDataAccessor<?>> result = new ArrayList<>();
-        float entityHealth = entity.getHealth();
+        float entityHealth = getHealth(entity);
         int vanillaHealthId = LivingEntity.DATA_HEALTH_ID.getId();
 
         for (Class<?> clazz = entityClass; clazz != null && clazz != Entity.class; clazz = clazz.getSuperclass()) {
@@ -707,12 +769,15 @@ public class EntityUtil {
                     if (!Modifier.isStatic(field.getModifiers())) continue;
 
                     EntityDataAccessor<?> accessor = (EntityDataAccessor<?>) field.get(null);
-                    if (accessor.getId() == vanillaHealthId) continue;
+                    if (accessor.getId() == vanillaHealthId) {
+                        continue;
+                    }
 
                     Object value = entity.getEntityData().get(accessor);
                     if (value instanceof Number) {
                         float numericValue = ((Number) value).floatValue();
-                        if (Math.abs(numericValue - entityHealth) <= 10.0f) {
+                        float diff = Math.abs(numericValue - entityHealth);
+                        if (diff <= 10.0f) {
                             result.add(accessor);
                         }
                     }
@@ -728,7 +793,9 @@ public class EntityUtil {
     private static List<EntityDataAccessor<?>> findHealthKeywordAccessors(LivingEntity entity) {
         Class<?> entityClass = entity.getClass();
         List<EntityDataAccessor<?>> cached = KEYWORD_ACCESSOR_CACHE.get(entityClass);
-        if (cached != null) return cached;
+        if (cached != null) {
+            return cached;
+        }
 
         List<EntityDataAccessor<?>> result = new ArrayList<>();
         int vanillaHealthId = LivingEntity.DATA_HEALTH_ID.getId();
@@ -741,15 +808,22 @@ public class EntityUtil {
                     if (!Modifier.isStatic(field.getModifiers())) continue;
 
                     EntityDataAccessor<?> accessor = (EntityDataAccessor<?>) field.get(null);
-                    if (accessor.getId() == vanillaHealthId) continue;
-
-                    if (matchesHealthWhitelist(field.getName())) {
-                        Object value = entity.getEntityData().get(accessor);
-                        if (value instanceof Number) {
-                            result.add(accessor);
-                        }
+                    if (accessor == null) {
+                        continue;
                     }
-                } catch (Exception ignored) {}
+                    if (accessor.getId() == vanillaHealthId) {
+                        continue;
+                    }
+
+                    boolean keywordMatch = matchesHealthWhitelist(field.getName());
+                    Object value = entity.getEntityData().get(accessor);
+
+                    if (keywordMatch && value instanceof Number) {
+                        result.add(accessor);
+                    }
+                } catch (Exception ignored) {
+                    // Silently fail
+                }
             }
         }
 
@@ -761,12 +835,30 @@ public class EntityUtil {
     @SuppressWarnings("unchecked")
     private static void setAccessorValue(LivingEntity entity, EntityDataAccessor<?> accessor, float expectedHealth) {
         try {
-            if (accessor.getSerializer() == EntityDataSerializers.FLOAT) {
-                entity.getEntityData().set((EntityDataAccessor<Float>) accessor, expectedHealth);
-            } else if (accessor.getSerializer() == EntityDataSerializers.INT) {
-                entity.getEntityData().set((EntityDataAccessor<Integer>) accessor, (int) expectedHealth);
+            EntityDataSerializer<?> serializer = accessor.getSerializer();
+            SynchedEntityData entityData = entity.getEntityData();
+            boolean success = false;
+
+            if (serializer == EntityDataSerializers.FLOAT) {
+                entityData.set((EntityDataAccessor<Float>) accessor, expectedHealth);
+                success = true;
+            } else if (serializer == EntityDataSerializers.INT) {
+                entityData.set((EntityDataAccessor<Integer>) accessor, (int) expectedHealth);
+                success = true;
             }
-        } catch (Exception ignored) {}
+
+            if (success) {
+                // 强制标记dirty并触发同步回调
+                SynchedEntityData.DataItem<?> dataItem = getDataItem(entityData, accessor.getId());
+                if (dataItem != null && DATA_ITEM_DIRTY_HANDLE != null) {
+                    DATA_ITEM_DIRTY_HANDLE.set(dataItem, true);
+                }
+                setIsDirty(entityData, true);
+                entity.onSyncedDataUpdated(accessor);
+            }
+        } catch (Exception ignored) {
+            // Silently fail
+        }
     }
 
     //阶段3：字节码反向追踪修改血量

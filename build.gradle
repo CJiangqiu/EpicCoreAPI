@@ -116,6 +116,41 @@ tasks.named('jar') {
     }
 }
 
+// Dev JAR task - builds unobfuscated jar for development environments
+tasks.register('devJar', Jar) {
+    group = 'build'
+    description = 'Build dev jar with MCP mappings (not reobfuscated)'
+    dependsOn tasks.named('classes'), tasks.named('agentJar')
+
+    archiveClassifier.set('dev')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    // Include compiled classes (not reobfuscated)
+    from sourceSets.main.output
+
+    // Include resources
+    from(sourceSets.main.resources.srcDirs)
+
+    // Include agent.jar
+    from(tasks.named('agentJar').flatMap { it.archiveFile }) {
+        into 'net/eca/agent'
+        rename { 'agent.jar' }
+    }
+
+    manifest {
+        attributes([
+            'Specification-Title': 'Epic Core API',
+            'Specification-Version': project.mod_version,
+            'Implementation-Title': project.name,
+            'Implementation-Version': project.mod_version,
+            'MixinConfigs': 'eca.mixins.dev.json'
+        ])
+    }
+}
+
+// Make build task also generate dev jar
+build.dependsOn devJar
+
 // Maven publishing
 publishing {
     publications {

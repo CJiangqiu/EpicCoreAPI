@@ -4,6 +4,7 @@ import net.eca.agent.AgentLogWriter;
 import net.eca.agent.SafeClassWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
+import java.util.List;
 import org.objectweb.asm.tree.*;
 
 import static org.objectweb.asm.Opcodes.*;
@@ -25,6 +26,16 @@ public class ContainerReplacementTransformer implements ITransformModule {
     @Override
     public String getName() {
         return "ContainerReplacementTransformer";
+    }
+
+    @Override
+    public List<String> getTargetClassNames() {
+        return List.of(
+            "net.minecraft.world.level.entity.EntityTickList",
+            "net.minecraft.world.level.entity.EntityLookup",
+            "net.minecraft.util.ClassInstanceMultiMap",
+            "net.minecraft.server.level.ChunkMap"
+        );
     }
 
     @Override

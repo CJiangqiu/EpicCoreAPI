@@ -1,12 +1,9 @@
 package net.eca.util.health;
 
-import net.eca.util.EcaLogger;
 import net.minecraft.world.entity.LivingEntity;
 
 //getHealth() 完整钩子处理器（分析 + 锁定）
 public class GetHealthHook {
-
-    private static boolean debugLogged = false;
 
     // 处理 getHealth() 返回值（供 Transformer 调用）
     /**
@@ -20,13 +17,6 @@ public class GetHealthHook {
      * @return the final health value (locked value if set, otherwise original)
      */
     public static float processGetHealth(LivingEntity entity, float originalHealth) {
-        // 调试日志（只打印一次避免刷屏）
-        if (!debugLogged) {
-            EcaLogger.info("[GetHealthHook] processGetHealth CALLED! Entity: {}, Original: {}",
-                          entity.getClass().getSimpleName(), originalHealth);
-            debugLogged = true;
-        }
-
         // 第一步：始终触发分析（缓存机制会避免重复分析）
         // 即使实体被锁血，也要完成分析，这样解锁后才能正确修改血量
         try {
@@ -39,8 +29,6 @@ public class GetHealthHook {
         // 第二步：检查是否有锁定值（优先级高于原始值）
         Float locked = HealthLockManager.getLock(entity);
         if (locked != null) {
-            EcaLogger.info("[GetHealthHook] LOCK ACTIVE! Entity: {}, Locked: {}, Original: {}",
-                          entity.getName().getString(), locked, originalHealth);
             return locked;
         }
 

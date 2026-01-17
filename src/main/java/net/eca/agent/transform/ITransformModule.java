@@ -1,5 +1,8 @@
 package net.eca.agent.transform;
 
+import java.util.Collections;
+import java.util.List;
+
 // 字节码转换模块接口
 /**
  * Interface for bytecode transformation modules.
@@ -23,6 +26,16 @@ public interface ITransformModule {
      */
     boolean shouldTransform(String className, ClassLoader classLoader);
 
+    /**
+     * Check if this module should retransform an already loaded class.
+     * @param className the binary class name (e.g., "net.minecraft.world.entity.LivingEntity")
+     * @param classLoader the class loader of the class
+     * @return true if this module wants to retransform the class
+     */
+    default boolean shouldRetransform(String className, ClassLoader classLoader) {
+        return true;
+    }
+
     // 执行字节码转换
     /**
      * Transform the bytecode of the class.
@@ -40,6 +53,15 @@ public interface ITransformModule {
      */
     default String getTargetBaseClass() {
         return null;
+    }
+
+    /**
+     * Get explicit target class names for retransformation.
+     * Used for modules that transform unrelated classes (not a shared base type).
+     * @return list of class names (e.g., "net.minecraft.server.level.ChunkMap")
+     */
+    default List<String> getTargetClassNames() {
+        return Collections.emptyList();
     }
 
     // 判断是否需要检查方法重写

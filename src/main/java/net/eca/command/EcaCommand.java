@@ -18,6 +18,7 @@ public class EcaCommand {
                 .then(RemoveEntityCommand.registerSubCommand())
                 .then(TeleportCommand.registerSubCommand())
                 .then(CleanupBossBarCommand.registerSubCommand())
+                .then(AllReturnCommand.registerSubCommand())
         );
     }
 }

@@ -9,7 +9,6 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
  * Event handler for ECA mod events.
  */
 public class EcaEventHandler {
-
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public void onLivingDeath(LivingDeathEvent event) {
         // 无敌状态或血量锁定时阻止死亡
@@ -17,4 +16,5 @@ public class EcaEventHandler {
             event.setCanceled(true);
         }
     }
+
 }
