@@ -73,7 +73,6 @@ side="BOTH"
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
 - `setInvulnerable(entity, invulnerable)` - Set invulnerability (auto-manages health lock)
 - `enableAllReturn(entity)` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the target entity's mod
-- `setGlobalAllReturn(enabled)` - DANGER! Requires Attack Radical Logic config. Set global AllReturn for all loaded mod classes (no entity parameter needed)
 - `disableAllReturn()` - Disable AllReturn and clear targets
 - `isAllReturnEnabled()` - Check if AllReturn is enabled
 - `addSpawnBan(level, entityType, seconds)` - Ban entity type from spawning for specified duration
@@ -114,9 +113,7 @@ EcaAPI.setInvulnerable(entity, false);
 
 // AllReturn (DANGER! Requires Attack Radical Logic config)
 EcaAPI.enableAllReturn(entity);  // Enable for entity's mod
-EcaAPI.setGlobalAllReturn(true);  // Enable for all loaded mods (no entity needed)
 boolean enabled = EcaAPI.isAllReturnEnabled();
-EcaAPI.setGlobalAllReturn(false);  // Disable
 EcaAPI.disableAllReturn();  // Disable and clear
 
 // Spawn Ban
@@ -205,7 +202,6 @@ side="BOTH"
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
 - `setInvulnerable(entity, invulnerable)` - 设置无敌状态（自动管理血量锁定）
 - `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
-- `setGlobalAllReturn(enabled)` - 危险！需要开启激进攻击逻辑配置，全局AllReturn开关（不需要实体参数，对所有已加载的mod类生效）
 - `disableAllReturn()` - 关闭AllReturn并清除目标
 - `isAllReturnEnabled()` - 检查AllReturn是否启用
 - `addSpawnBan(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
@@ -246,9 +242,7 @@ EcaAPI.setInvulnerable(entity, false);
 
 // AllReturn（危险！需开启激进攻击配置）
 EcaAPI.enableAllReturn(entity);  // 对实体所属mod启用
-EcaAPI.setGlobalAllReturn(true);  // 全局启用（不需要实体）
 boolean enabled = EcaAPI.isAllReturnEnabled();
-EcaAPI.setGlobalAllReturn(false);  // 关闭
 EcaAPI.disableAllReturn();  // 关闭并清除
 
 // 禁生成
