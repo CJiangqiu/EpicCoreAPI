@@ -491,68 +491,6 @@ public final class EcaAPI {
         return ReturnToggle.isAllReturnEnabled();
     }
 
-    // 全局AllReturn开关（不需要实体参数，对所有已加载的非排除类生效）
-    /**
-     * Set global AllReturn state for all loaded non-excluded classes.
-     * DANGER! Requires "Enable Radical Logic" in Attack config.
-     * When enabled, performs return transformation on all boolean and void methods of all loaded mod classes.
-     * @param enabled true to enable, false to disable
-     * @return true if operation succeeded, false if radical logic is disabled or agent not available
-     */
-    public static boolean setGlobalAllReturn(boolean enabled) {
-        if (!enabled) {
-            disableAllReturn();
-            return true;
-        }
-
-        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
-            EcaLogger.warn("GlobalAllReturn requires Attack Radical Logic to be enabled in config");
-            return false;
-        }
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
-            EcaLogger.warn("GlobalAllReturn: Agent is not initialized");
-            return false;
-        }
-
-        ReturnToggle.setAllReturnEnabled(true);
-
-        List<Class<?>> candidates = new ArrayList<>();
-        for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!inst.isModifiableClass(clazz)) continue;
-            if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) continue;
-
-            String className = clazz.getName();
-            if (ReturnToggle.isExcludedBinaryName(className)) continue;
-
-            candidates.add(clazz);
-        }
-
-        if (candidates.isEmpty()) {
-            return false;
-        }
-
-        List<String> targets = new ArrayList<>();
-        for (Class<?> clazz : candidates) {
-            targets.add(clazz.getName().replace('.', '/'));
-        }
-        ReturnToggle.addExplicitTargets(targets.toArray(new String[0]));
-
-        int successCount = 0;
-        int failCount = 0;
-        for (Class<?> clazz : candidates) {
-            try {
-                inst.retransformClasses(clazz);
-                successCount++;
-            } catch (Throwable t) {
-                failCount++;
-            }
-        }
-
-        EcaLogger.info("GlobalAllReturn: transformed {} classes, {} failed", successCount, failCount);
-        return successCount > 0;
-    }
-
     //AllReturn 内部方法
 
     private static String getPackagePrefix(String binaryName) {
