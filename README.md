@@ -1,6 +1,6 @@
 # EpicCoreAPI
 
-A library mod made by CJiangqiu for his other mods. Despite the name "Core API", this is **NOT** a Core Mod.
+A library mod made by CJiangqiu for his other mods. Provides powerful entity manipulation APIs through CoreMod (ITransformationService), Java Agent, and VarHandle technologies.
 
 This mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
 
@@ -132,7 +132,7 @@ EcaAPI.clearAllSpawnBans(serverLevel);
 
 # 中文
 
-由 CJiangqiu 为自己的其他 Mod 制作的库 Mod。虽然名字叫 Core API，但**不是** Core Mod。
+由 CJiangqiu 为自己的其他 Mod 所制作的前置 Mod。提供一些强大的实体操作 API，通过 CoreMod (ITransformationService)、Java Agent、VarHandle 等技术实现。
 
 本 Mod 默认将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
 
