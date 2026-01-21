@@ -13,7 +13,7 @@ Use `/eca` command (requires OP permission level 2):
 - `/eca lockHealth <targets> false` - Unlock entity health
 - `/eca kill <targets>` - Kill entities
 - `/eca remove <targets> [reason]` - Remove entities from world
-- `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities using LWJGL API
+- `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities via LWJGL internal channel
 - `/eca teleport <targets> <x> <y> <z>` - Teleport entities
 - `/eca cleanbossbar <targets>` - Clean up boss bars
 - `/eca allreturn <targets>` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the target entity's mod
@@ -68,7 +68,7 @@ side="BOTH"
 - `reviveEntity(entity)` - Clear death state and restore health
 - `teleportEntity(entity, x, y, z)` - Teleport via VarHandle with client sync
 - `removeEntity(entity, reason)` - Complete removal (AI, boss bars, containers, passengers)
-- `memoryRemoveEntity(entity)` - DANGER! Requires Attack Radical Logic config. Remove entity using LWJGL API
+- `memoryRemoveEntity(entity)` - DANGER! Requires Attack Radical Logic config. Remove entity via LWJGL internal channel
 - `cleanupBossBar(entity)` - Remove boss bars without removing entity
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
 - `setInvulnerable(entity, invulnerable)` - Set invulnerability (auto-manages health lock)
@@ -104,7 +104,7 @@ EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
 EcaAPI.teleportEntity(entity, x, y, z);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
-EcaAPI.memoryRemoveEntity(entity);  // Remove using LWJGL API
+EcaAPI.memoryRemoveEntity(entity);  // Remove via LWJGL internal channel
 EcaAPI.cleanupBossBar(entity);
 
 // Invulnerability
@@ -145,7 +145,7 @@ EcaAPI.clearAllSpawnBans(serverLevel);
 - `/eca lockHealth <目标> false` - 解锁实体血量
 - `/eca kill <目标>` - 击杀实体
 - `/eca remove <目标> [原因]` - 从世界中移除实体
-- `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，使用LWJGL相关API清除实体
+- `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
 - `/eca teleport <目标> <x> <y> <z>` - 传送实体
 - `/eca cleanbossbar <目标>` - 清理 Boss 血条
 - `/eca allreturn <目标>` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
@@ -200,7 +200,7 @@ side="BOTH"
 - `reviveEntity(entity)` - 复活实体（清除死亡状态）
 - `teleportEntity(entity, x, y, z)` - VarHandle 传送并同步到客户端
 - `removeEntity(entity, reason)` - 完整移除（AI、Boss 血条、容器、乘客等）
-- `memoryRemoveEntity(entity)` - 危险！需要开启激进攻击逻辑配置，使用LWJGL相关API清除实体
+- `memoryRemoveEntity(entity)` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
 - `setInvulnerable(entity, invulnerable)` - 设置无敌状态（自动管理血量锁定）
@@ -236,7 +236,7 @@ EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
 EcaAPI.teleportEntity(entity, x, y, z);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
-EcaAPI.memoryRemoveEntity(entity);  // 使用LWJGL API清除
+EcaAPI.memoryRemoveEntity(entity);  // 通过LWJGL内部通道清除
 EcaAPI.cleanupBossBar(entity);
 
 // 无敌状态
