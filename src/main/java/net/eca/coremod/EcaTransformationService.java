@@ -5,7 +5,6 @@ import cpw.mods.modlauncher.api.IEnvironment;
 import cpw.mods.modlauncher.api.IModuleLayerManager;
 import cpw.mods.modlauncher.api.ITransformationService;
 import cpw.mods.modlauncher.api.ITransformer;
-import net.eca.agent.AgentLoader;
 import org.jetbrains.annotations.NotNull;
 import sun.misc.Unsafe;
 
@@ -19,24 +18,15 @@ import java.util.*;
 /**
  * ECA CoreMod 转换服务
  * 这是 ECA 最早的入口点，由 ModLauncher 在所有模组之前加载。
- * 在静态块中启动 Agent 字节码转换和验证线程。
+ * 主要用于启用双重加载模式（CoreMod + Mod）。
+ * Agent 加载已移至 EcaMod 构造函数中以避免 ClassLoader 问题。
  */
 @SuppressWarnings("unchecked")
 public class EcaTransformationService implements ITransformationService {
 
     static {
         System.out.println("[ECA CoreMod] Static block - earliest entry point");
-
-        // 1. 启用自附着权限
-        boolean selfAttachEnabled = AgentLoader.enableSelfAttach();
-        System.out.println("[ECA CoreMod] Self-attach enabled: " + selfAttachEnabled);
-
-        // 2. 加载 Agent 并执行字节码转换
-        boolean agentLoaded = AgentLoader.loadAgent(EcaTransformationService.class);
-        System.out.println("[ECA CoreMod] Agent loaded: " + agentLoaded);
-
-        // 3. 启动验证线程（等待游戏加载完成后检测转换是否生效）
-        AgentVerifier.startVerification();
+        // Agent 加载已移至 EcaMod 构造函数，避免多 ClassLoader 桥接问题
     }
 
     private static final String SERVICE_NAME = "eca_coremod";
