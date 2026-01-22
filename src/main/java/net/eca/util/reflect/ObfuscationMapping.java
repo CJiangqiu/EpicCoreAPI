@@ -75,6 +75,8 @@ public final class ObfuscationMapping {
         fields.put("PersistentEntitySectionManager.visibleEntityStorage", "f_157494_");
         fields.put("PersistentEntitySectionManager.knownUuids", "f_157491_");
         fields.put("PersistentEntitySectionManager.sectionStorage", "f_157495_");
+        fields.put("PersistentEntitySectionManager.callbacks", "f_157489_");
+        fields.put("PersistentEntitySectionManager.loadingInbox", "f_157492_");
 
         // EntityLookup
         fields.put("EntityLookup.byUuid", "f_156808_");
@@ -93,10 +95,14 @@ public final class ObfuscationMapping {
         fields.put("ClientLevel.tickingEntities", "f_171630_");
         fields.put("ClientLevel.entityStorage", "f_171631_");
         fields.put("ClientLevel.players", "f_104566_");
+        fields.put("ClientLevel.partEntities", "f_104567_");
 
         // TransientEntitySectionManager
         fields.put("TransientEntitySectionManager.entityStorage", "f_157637_");
         fields.put("TransientEntitySectionManager.sectionStorage", "f_157638_");
+
+        // BossHealthOverlay
+        fields.put("BossHealthOverlay.events", "f_93699_");
 
         FIELD_MAPPINGS.put(CURRENT_VERSION, fields);
     }

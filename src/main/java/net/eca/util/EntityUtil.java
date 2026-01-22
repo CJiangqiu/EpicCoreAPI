@@ -5,9 +5,9 @@ import net.eca.network.EcaClientRemovePacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.health.HealthFieldCache;
 import net.eca.util.health.HealthAnalyzerManager;
-import net.eca.util.reflect.ObfuscationMapping;
+import net.eca.util.reflect.VarHandleUtil;
 import net.minecraft.network.syncher.EntityDataSerializer;
-import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
+import net.minecraftforge.entity.PartEntity;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -18,14 +18,17 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.server.level.*;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.BossHealthOverlay;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.level.entity.*;
-import net.minecraft.util.ClassInstanceMultiMap;
+import net.minecraft.world.level.gameevent.DynamicGameEventListener;
 import net.minecraft.advancements.CriteriaTriggers;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.AABB;
-import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundBossEventPacket;
+import net.minecraft.core.SectionPos;
 import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
@@ -39,67 +42,20 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+
+import static net.eca.util.reflect.VarHandleUtil.*;
+
 @SuppressWarnings("unchecked")
 //实体工具类
 public class EntityUtil {
 
-    //EntityDataAccessor - 血量锁定模块
+    //EntityDataAccessor 血量锁定（神秘文本血）+无敌状态
     public static EntityDataAccessor<Boolean> HEALTH_LOCK_ENABLED;
     public static EntityDataAccessor<String> HEALTH_LOCK_VALUE;
-
-    //EntityDataAccessor - 无敌状态模块
     public static EntityDataAccessor<Boolean> INVULNERABLE;
-
-    //VarHandle - 生命值模块
-    private static VarHandle DATA_ITEM_VALUE_HANDLE;
-    private static VarHandle DATA_ITEM_DIRTY_HANDLE;
-    private static Field ITEMS_BY_ID_FIELD;
-    private static Field IS_DIRTY_FIELD;
-
-    //VarHandle - 死亡模块
-    private static VarHandle DEATH_TIME_HANDLE;
-    private static VarHandle DEAD_HANDLE;
-
-    //VarHandle - 传送模块
-    private static VarHandle ENTITY_POSITION_HANDLE;
-    private static VarHandle ENTITY_X_OLD_HANDLE;
-    private static VarHandle ENTITY_Y_OLD_HANDLE;
-    private static VarHandle ENTITY_Z_OLD_HANDLE;
-    private static VarHandle ENTITY_BB_HANDLE;
-
-    //VarHandle - 实体移除原因检测模块
-    private static VarHandle ENTITY_REMOVAL_REASON_HANDLE;
 
     // 正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
-
-    //VarHandle - 实体清除模块（服务端）
-    private static VarHandle SERVER_LEVEL_PLAYERS_HANDLE;
-    private static VarHandle SERVER_LEVEL_CHUNK_SOURCE_HANDLE;
-    private static VarHandle SERVER_LEVEL_ENTITY_TICK_LIST_HANDLE;
-    private static VarHandle SERVER_LEVEL_ENTITY_MANAGER_HANDLE;
-    private static VarHandle SERVER_LEVEL_NAVIGATING_MOBS_HANDLE;
-    private static VarHandle ENTITY_TICK_LIST_ACTIVE_HANDLE;
-    private static VarHandle ENTITY_TICK_LIST_PASSIVE_HANDLE;
-    private static VarHandle ENTITY_TICK_LIST_ITERATED_HANDLE;
-    private static VarHandle SERVER_CHUNK_CACHE_CHUNK_MAP_HANDLE;
-    private static VarHandle CHUNK_MAP_ENTITY_MAP_HANDLE;
-    private static VarHandle PERSISTENT_ENTITY_MANAGER_VISIBLE_STORAGE_HANDLE;
-    private static VarHandle PERSISTENT_ENTITY_MANAGER_KNOWN_UUIDS_HANDLE;
-    private static VarHandle PERSISTENT_ENTITY_MANAGER_SECTION_STORAGE_HANDLE;
-    private static VarHandle ENTITY_LOOKUP_BY_UUID_HANDLE;
-    private static VarHandle ENTITY_LOOKUP_BY_ID_HANDLE;
-    private static VarHandle ENTITY_SECTION_STORAGE_SECTIONS_HANDLE;
-    private static VarHandle ENTITY_SECTION_STORAGE_HANDLE;
-    private static VarHandle CLASS_INSTANCE_MULTI_MAP_BY_CLASS_HANDLE;
-
-    //VarHandle - 实体清除模块（客户端）- 懒加载
-    private static volatile boolean clientVarHandlesInitialized = false;
-    private static VarHandle CLIENT_LEVEL_TICKING_ENTITIES_HANDLE;
-    private static VarHandle CLIENT_LEVEL_ENTITY_STORAGE_HANDLE;
-    private static VarHandle CLIENT_LEVEL_PLAYERS_HANDLE;
-    private static VarHandle TRANSIENT_ENTITY_MANAGER_ENTITY_STORAGE_HANDLE;
-    private static VarHandle TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE_HANDLE;
 
     //生命值关键词白名单（可动态添加）
     private static final Set<String> HEALTH_WHITELIST_KEYWORDS = ConcurrentHashMap.newKeySet();
@@ -127,169 +83,8 @@ public class EntityUtil {
     private static final Map<Class<?>, List<EntityDataAccessor<?>>> KEYWORD_ACCESSOR_CACHE = new ConcurrentHashMap<>();
 
     static {
-        try {
-            //使用ObfuscationReflectionHelper获取Field，自动处理混淆
-            Class<?> dataItemClass = SynchedEntityData.DataItem.class;
-            String valueObfName = ObfuscationMapping.getFieldMapping("DataItem.value");
-            String dirtyObfName = ObfuscationMapping.getFieldMapping("DataItem.dirty");
-
-            Field valueField = ObfuscationReflectionHelper.findField(dataItemClass, valueObfName);
-            Field dirtyField = ObfuscationReflectionHelper.findField(dataItemClass, dirtyObfName);
-
-            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(dataItemClass, MethodHandles.lookup());
-            DATA_ITEM_VALUE_HANDLE = lookup.unreflectVarHandle(valueField);
-            DATA_ITEM_DIRTY_HANDLE = lookup.unreflectVarHandle(dirtyField);
-
-            //获取itemsById字段
-            String itemsByIdObfName = ObfuscationMapping.getFieldMapping("SynchedEntityData.itemsById");
-            ITEMS_BY_ID_FIELD = ObfuscationReflectionHelper.findField(SynchedEntityData.class, itemsByIdObfName);
-
-            //获取isDirty字段
-            String isDirtyObfName = ObfuscationMapping.getFieldMapping("SynchedEntityData.isDirty");
-            IS_DIRTY_FIELD = ObfuscationReflectionHelper.findField(SynchedEntityData.class, isDirtyObfName);
-
-            //死亡模块 VarHandle 初始化
-            String deathTimeObfName = ObfuscationMapping.getFieldMapping("LivingEntity.deathTime");
-            String deadObfName = ObfuscationMapping.getFieldMapping("LivingEntity.dead");
-
-            Field deathTimeField = ObfuscationReflectionHelper.findField(LivingEntity.class, deathTimeObfName);
-            Field deadField = ObfuscationReflectionHelper.findField(LivingEntity.class, deadObfName);
-
-            MethodHandles.Lookup livingEntityLookup = MethodHandles.privateLookupIn(LivingEntity.class, MethodHandles.lookup());
-            DEATH_TIME_HANDLE = livingEntityLookup.unreflectVarHandle(deathTimeField);
-            DEAD_HANDLE = livingEntityLookup.unreflectVarHandle(deadField);
-
-            //传送模块 VarHandle 初始化
-            initTeleportVarHandles();
-
-            //实体清除模块 - 服务端 VarHandle 初始化
-            initServerRemovalVarHandles();
-
-        } catch (Exception e) {
-            EcaLogger.info("[EntityUtil] Failed to initialize VarHandle: {}", e.getMessage());
-        }
-    }
-
-    //初始化传送模块的 VarHandle
-    private static void initTeleportVarHandles() throws Exception {
-        //Entity - 传送相关字段
-        Field entityPositionField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.position"));
-        Field entityXOldField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.xOld"));
-        Field entityYOldField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.yOld"));
-        Field entityZOldField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.zOld"));
-        Field entityBbField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.bb"));
-
-        MethodHandles.Lookup entityLookup = MethodHandles.privateLookupIn(Entity.class, MethodHandles.lookup());
-        ENTITY_POSITION_HANDLE = entityLookup.unreflectVarHandle(entityPositionField);
-        ENTITY_X_OLD_HANDLE = entityLookup.unreflectVarHandle(entityXOldField);
-        ENTITY_Y_OLD_HANDLE = entityLookup.unreflectVarHandle(entityYOldField);
-        ENTITY_Z_OLD_HANDLE = entityLookup.unreflectVarHandle(entityZOldField);
-        ENTITY_BB_HANDLE = entityLookup.unreflectVarHandle(entityBbField);
-
-        Field entityRemovalReasonField = ObfuscationReflectionHelper.findField(Entity.class, ObfuscationMapping.getFieldMapping("Entity.removalReason"));
-        ENTITY_REMOVAL_REASON_HANDLE = entityLookup.unreflectVarHandle(entityRemovalReasonField);
-    }
-
-    //初始化服务端清除模块的 VarHandle
-    private static void initServerRemovalVarHandles() throws Exception {
-        //ServerLevel
-        Field serverLevelPlayersField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.players"));
-        Field serverLevelChunkSourceField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.chunkSource"));
-        Field serverLevelEntityTickListField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.entityTickList"));
-        Field serverLevelEntityManagerField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.entityManager"));
-        Field serverLevelNavigatingMobsField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.navigatingMobs"));
-
-        MethodHandles.Lookup serverLevelLookup = MethodHandles.privateLookupIn(ServerLevel.class, MethodHandles.lookup());
-        SERVER_LEVEL_PLAYERS_HANDLE = serverLevelLookup.unreflectVarHandle(serverLevelPlayersField);
-        SERVER_LEVEL_CHUNK_SOURCE_HANDLE = serverLevelLookup.unreflectVarHandle(serverLevelChunkSourceField);
-        SERVER_LEVEL_ENTITY_TICK_LIST_HANDLE = serverLevelLookup.unreflectVarHandle(serverLevelEntityTickListField);
-        SERVER_LEVEL_ENTITY_MANAGER_HANDLE = serverLevelLookup.unreflectVarHandle(serverLevelEntityManagerField);
-        SERVER_LEVEL_NAVIGATING_MOBS_HANDLE = serverLevelLookup.unreflectVarHandle(serverLevelNavigatingMobsField);
-
-        //EntityTickList
-        Field entityTickListActiveField = ObfuscationReflectionHelper.findField(EntityTickList.class, ObfuscationMapping.getFieldMapping("EntityTickList.active"));
-        Field entityTickListPassiveField = ObfuscationReflectionHelper.findField(EntityTickList.class, ObfuscationMapping.getFieldMapping("EntityTickList.passive"));
-        Field entityTickListIteratedField = ObfuscationReflectionHelper.findField(EntityTickList.class, ObfuscationMapping.getFieldMapping("EntityTickList.iterated"));
-
-        MethodHandles.Lookup entityTickListLookup = MethodHandles.privateLookupIn(EntityTickList.class, MethodHandles.lookup());
-        ENTITY_TICK_LIST_ACTIVE_HANDLE = entityTickListLookup.unreflectVarHandle(entityTickListActiveField);
-        ENTITY_TICK_LIST_PASSIVE_HANDLE = entityTickListLookup.unreflectVarHandle(entityTickListPassiveField);
-        ENTITY_TICK_LIST_ITERATED_HANDLE = entityTickListLookup.unreflectVarHandle(entityTickListIteratedField);
-
-        //ServerChunkCache
-        Field serverChunkCacheChunkMapField = ObfuscationReflectionHelper.findField(ServerChunkCache.class, ObfuscationMapping.getFieldMapping("ServerChunkCache.chunkMap"));
-        MethodHandles.Lookup serverChunkCacheLookup = MethodHandles.privateLookupIn(ServerChunkCache.class, MethodHandles.lookup());
-        SERVER_CHUNK_CACHE_CHUNK_MAP_HANDLE = serverChunkCacheLookup.unreflectVarHandle(serverChunkCacheChunkMapField);
-
-        //ChunkMap
-        Field chunkMapEntityMapField = ObfuscationReflectionHelper.findField(ChunkMap.class, ObfuscationMapping.getFieldMapping("ChunkMap.entityMap"));
-        MethodHandles.Lookup chunkMapLookup = MethodHandles.privateLookupIn(ChunkMap.class, MethodHandles.lookup());
-        CHUNK_MAP_ENTITY_MAP_HANDLE = chunkMapLookup.unreflectVarHandle(chunkMapEntityMapField);
-
-        //PersistentEntitySectionManager
-        Field persistentEntityManagerVisibleStorageField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.visibleEntityStorage"));
-        Field persistentEntityManagerKnownUuidsField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.knownUuids"));
-        Field persistentEntityManagerSectionStorageField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.sectionStorage"));
-
-        MethodHandles.Lookup persistentEntityManagerLookup = MethodHandles.privateLookupIn(PersistentEntitySectionManager.class, MethodHandles.lookup());
-        PERSISTENT_ENTITY_MANAGER_VISIBLE_STORAGE_HANDLE = persistentEntityManagerLookup.unreflectVarHandle(persistentEntityManagerVisibleStorageField);
-        PERSISTENT_ENTITY_MANAGER_KNOWN_UUIDS_HANDLE = persistentEntityManagerLookup.unreflectVarHandle(persistentEntityManagerKnownUuidsField);
-        PERSISTENT_ENTITY_MANAGER_SECTION_STORAGE_HANDLE = persistentEntityManagerLookup.unreflectVarHandle(persistentEntityManagerSectionStorageField);
-
-        //EntityLookup
-        Field entityLookupByUuidField = ObfuscationReflectionHelper.findField(EntityLookup.class, ObfuscationMapping.getFieldMapping("EntityLookup.byUuid"));
-        Field entityLookupByIdField = ObfuscationReflectionHelper.findField(EntityLookup.class, ObfuscationMapping.getFieldMapping("EntityLookup.byId"));
-
-        MethodHandles.Lookup entityLookupLookup = MethodHandles.privateLookupIn(EntityLookup.class, MethodHandles.lookup());
-        ENTITY_LOOKUP_BY_UUID_HANDLE = entityLookupLookup.unreflectVarHandle(entityLookupByUuidField);
-        ENTITY_LOOKUP_BY_ID_HANDLE = entityLookupLookup.unreflectVarHandle(entityLookupByIdField);
-
-        //EntitySectionStorage
-        Field entitySectionStorageSectionsField = ObfuscationReflectionHelper.findField(EntitySectionStorage.class, ObfuscationMapping.getFieldMapping("EntitySectionStorage.sections"));
-        MethodHandles.Lookup entitySectionStorageLookup = MethodHandles.privateLookupIn(EntitySectionStorage.class, MethodHandles.lookup());
-        ENTITY_SECTION_STORAGE_SECTIONS_HANDLE = entitySectionStorageLookup.unreflectVarHandle(entitySectionStorageSectionsField);
-
-        //EntitySection
-        Field entitySectionStorageField = ObfuscationReflectionHelper.findField(EntitySection.class, ObfuscationMapping.getFieldMapping("EntitySection.storage"));
-        MethodHandles.Lookup entitySectionLookup = MethodHandles.privateLookupIn(EntitySection.class, MethodHandles.lookup());
-        ENTITY_SECTION_STORAGE_HANDLE = entitySectionLookup.unreflectVarHandle(entitySectionStorageField);
-
-        //ClassInstanceMultiMap
-        Field classInstanceMultiMapByClassField = ObfuscationReflectionHelper.findField(ClassInstanceMultiMap.class, ObfuscationMapping.getFieldMapping("ClassInstanceMultiMap.byClass"));
-        MethodHandles.Lookup classInstanceMultiMapLookup = MethodHandles.privateLookupIn(ClassInstanceMultiMap.class, MethodHandles.lookup());
-        CLASS_INSTANCE_MULTI_MAP_BY_CLASS_HANDLE = classInstanceMultiMapLookup.unreflectVarHandle(classInstanceMultiMapByClassField);
-    }
-
-    //初始化客户端清除模块的 VarHandle（懒加载，只在客户端环境调用）
-    private static void initClientRemovalVarHandles() {
-        if (clientVarHandlesInitialized) return;
-        synchronized (EntityUtil.class) {
-            if (clientVarHandlesInitialized) return;
-            try {
-                //ClientLevel
-                Field clientLevelTickingEntitiesField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.tickingEntities"));
-                Field clientLevelEntityStorageField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.entityStorage"));
-                Field clientLevelPlayersField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.players"));
-
-                MethodHandles.Lookup clientLevelLookup = MethodHandles.privateLookupIn(ClientLevel.class, MethodHandles.lookup());
-                CLIENT_LEVEL_TICKING_ENTITIES_HANDLE = clientLevelLookup.unreflectVarHandle(clientLevelTickingEntitiesField);
-                CLIENT_LEVEL_ENTITY_STORAGE_HANDLE = clientLevelLookup.unreflectVarHandle(clientLevelEntityStorageField);
-                CLIENT_LEVEL_PLAYERS_HANDLE = clientLevelLookup.unreflectVarHandle(clientLevelPlayersField);
-
-                //TransientEntitySectionManager
-                Field transientEntityManagerEntityStorageField = ObfuscationReflectionHelper.findField(TransientEntitySectionManager.class, ObfuscationMapping.getFieldMapping("TransientEntitySectionManager.entityStorage"));
-                Field transientEntityManagerSectionStorageField = ObfuscationReflectionHelper.findField(TransientEntitySectionManager.class, ObfuscationMapping.getFieldMapping("TransientEntitySectionManager.sectionStorage"));
-
-                MethodHandles.Lookup transientEntityManagerLookup = MethodHandles.privateLookupIn(TransientEntitySectionManager.class, MethodHandles.lookup());
-                TRANSIENT_ENTITY_MANAGER_ENTITY_STORAGE_HANDLE = transientEntityManagerLookup.unreflectVarHandle(transientEntityManagerEntityStorageField);
-                TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE_HANDLE = transientEntityManagerLookup.unreflectVarHandle(transientEntityManagerSectionStorageField);
-
-                clientVarHandlesInitialized = true;
-                EcaLogger.info("[EntityUtil] Client VarHandles initialized successfully");
-            } catch (Exception e) {
-                EcaLogger.info("[EntityUtil] Failed to initialize client VarHandles: {}", e.getMessage());
-            }
-        }
+        //初始化所有实体相关的 VarHandle
+        VarHandleUtil.init();
     }
 
     //检查实体是否正在切换维度
@@ -348,7 +143,7 @@ public class EntityUtil {
         if (entity == null) {
             return;
         }
-        if (ENTITY_REMOVAL_REASON_HANDLE == null) {
+        if (VH_ENTITY_REMOVAL_REASON == null) {
             return;
         }
 
@@ -363,7 +158,7 @@ public class EntityUtil {
             return;
         }
         if (!reason.shouldSave()) {
-            ENTITY_REMOVAL_REASON_HANDLE.set(entity, null);
+            VH_ENTITY_REMOVAL_REASON.set(entity, null);
         }
     }
 
@@ -372,10 +167,10 @@ public class EntityUtil {
         if (entity == null) return 0.0f;
         try {
             SynchedEntityData.DataItem<?> dataItem = getDataItem(entity.getEntityData(), LivingEntity.DATA_HEALTH_ID.getId());
-            if (dataItem == null || DATA_ITEM_VALUE_HANDLE == null) {
+            if (dataItem == null || VH_DATA_ITEM_VALUE == null) {
                 return entity.getHealth();
             }
-            return (Float) DATA_ITEM_VALUE_HANDLE.get(dataItem);
+            return (Float) VH_DATA_ITEM_VALUE.get(dataItem);
         } catch (Exception e) {
             return entity.getHealth();
         }
@@ -384,8 +179,8 @@ public class EntityUtil {
     //获取DataItem
     private static SynchedEntityData.DataItem<?> getDataItem(SynchedEntityData entityData, int id) {
         try {
-            if (ITEMS_BY_ID_FIELD == null) return null;
-            Object itemsById = ITEMS_BY_ID_FIELD.get(entityData);
+            if (FIELD_ITEMS_BY_ID == null) return null;
+            Object itemsById = FIELD_ITEMS_BY_ID.get(entityData);
             if (itemsById instanceof Int2ObjectMap) {
                 return (SynchedEntityData.DataItem<?>) ((Int2ObjectMap<?>) itemsById).get(id);
             }
@@ -444,15 +239,15 @@ public class EntityUtil {
     //阶段1：设置原版血量
     private static void setBasicHealth(LivingEntity entity, float expectedHealth) {
         try {
-            if (DATA_ITEM_VALUE_HANDLE == null || DATA_ITEM_DIRTY_HANDLE == null) return;
+            if (VH_DATA_ITEM_VALUE == null || VH_DATA_ITEM_DIRTY == null) return;
 
             SynchedEntityData entityData = entity.getEntityData();
             SynchedEntityData.DataItem<?> dataItem = getDataItem(entityData, LivingEntity.DATA_HEALTH_ID.getId());
             if (dataItem == null) return;
 
-            DATA_ITEM_VALUE_HANDLE.set(dataItem, expectedHealth);
+            VH_DATA_ITEM_VALUE.set(dataItem, expectedHealth);
             entity.onSyncedDataUpdated(LivingEntity.DATA_HEALTH_ID);
-            DATA_ITEM_DIRTY_HANDLE.set(dataItem, true);
+            VH_DATA_ITEM_DIRTY.set(dataItem, true);
             setIsDirty(entityData, true);
         } catch (Exception ignored) {}
     }
@@ -460,15 +255,15 @@ public class EntityUtil {
     //同步原版DATA_HEALTH_ID
     private static void syncDataHealthId(LivingEntity entity, float expectedHealth) {
         try {
-            if (DATA_ITEM_VALUE_HANDLE == null || DATA_ITEM_DIRTY_HANDLE == null) return;
+            if (VH_DATA_ITEM_VALUE == null || VH_DATA_ITEM_DIRTY == null) return;
 
             SynchedEntityData entityData = entity.getEntityData();
             SynchedEntityData.DataItem<?> dataItem = getDataItem(entityData, LivingEntity.DATA_HEALTH_ID.getId());
             if (dataItem == null) return;
 
-            DATA_ITEM_VALUE_HANDLE.set(dataItem, expectedHealth);
+            VH_DATA_ITEM_VALUE.set(dataItem, expectedHealth);
             entity.onSyncedDataUpdated(LivingEntity.DATA_HEALTH_ID);
-            DATA_ITEM_DIRTY_HANDLE.set(dataItem, true);
+            VH_DATA_ITEM_DIRTY.set(dataItem, true);
             setIsDirty(entityData, true);
         } catch (Exception ignored) {}
     }
@@ -476,8 +271,8 @@ public class EntityUtil {
     //设置isDirty标记
     private static void setIsDirty(SynchedEntityData entityData, boolean dirty) {
         try {
-            if (IS_DIRTY_FIELD != null) {
-                IS_DIRTY_FIELD.set(entityData, dirty);
+            if (FIELD_IS_DIRTY != null) {
+                FIELD_IS_DIRTY.set(entityData, dirty);
             }
         } catch (Exception ignored) {}
     }
@@ -848,8 +643,8 @@ public class EntityUtil {
             if (success) {
                 // 强制标记dirty并触发同步回调
                 SynchedEntityData.DataItem<?> dataItem = getDataItem(entityData, accessor.getId());
-                if (dataItem != null && DATA_ITEM_DIRTY_HANDLE != null) {
-                    DATA_ITEM_DIRTY_HANDLE.set(dataItem, true);
+                if (dataItem != null && VH_DATA_ITEM_DIRTY != null) {
+                    VH_DATA_ITEM_DIRTY.set(dataItem, true);
                 }
                 setIsDirty(entityData, true);
                 entity.onSyncedDataUpdated(accessor);
@@ -1042,11 +837,11 @@ public class EntityUtil {
         if (entity == null) return;
 
         try {
-            if (DEAD_HANDLE != null) {
-                DEAD_HANDLE.set(entity, false);
+            if (VH_DEAD != null) {
+                VH_DEAD.set(entity, false);
             }
-            if (DEATH_TIME_HANDLE != null) {
-                DEATH_TIME_HANDLE.set(entity, 0);
+            if (VH_DEATH_TIME != null) {
+                VH_DEATH_TIME.set(entity, 0);
             }
             setHealth(entity, entity.getMaxHealth());
         } catch (Exception e) {
@@ -1057,11 +852,11 @@ public class EntityUtil {
     //使用VarHandle设置死亡相关字段
     private static void setDeathFieldsViaVarHandle(LivingEntity entity) {
         try {
-            if (DEAD_HANDLE != null) {
-                DEAD_HANDLE.set(entity, true);
+            if (VH_DEAD != null) {
+                VH_DEAD.set(entity, true);
             }
-            if (DEATH_TIME_HANDLE != null) {
-                DEATH_TIME_HANDLE.set(entity, 0);
+            if (VH_DEATH_TIME != null) {
+                VH_DEATH_TIME.set(entity, 0);
             }
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to set death fields: {}", e.getMessage());
@@ -1089,31 +884,38 @@ public class EntityUtil {
 
     //完整的实体清除方法
     public static void removeEntity(Entity entity, Entity.RemovalReason reason) {
-        if (entity == null) return;
+        if (entity == null || entity.level() == null) return;
+        boolean isServerSide = !entity.level().isClientSide;
 
         try {
+
             cleanupAI(entity);
             cleanupBossBar(entity);
-
-            if (!entity.level().isClientSide) {
-                entity.onRemovedFromWorld();
-            }
-
-            entity.setRemoved(reason);
             entity.stopRiding();
             removeAllPassengers(entity);
-
-            if (!entity.level().isClientSide) {
-                entity.levelCallback = EntityInLevelCallback.NULL;
-            }
-
-            if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
-                // Send removal packet to tracking clients
+            entity.invalidateCaps();
+            if (isServerSide && entity.level() instanceof ServerLevel serverLevel) {
+                serverLevel.getScoreboard().entityRemoved(entity);
                 NetworkHandler.sendToTrackingClients(
                         new EcaClientRemovePacket(entity.getId()),
                         entity
                 );
+            }
 
+            entity.setRemoved(reason);
+            entity.onRemovedFromWorld();
+            //调用 levelCallback.onRemove() 在设置 NULL 之前
+            EntityInLevelCallback callback = entity.levelCallback;
+            if (callback != EntityInLevelCallback.NULL) {
+                callback.onRemove(reason);
+            }
+            entity.levelCallback = EntityInLevelCallback.NULL;
+            if (entity instanceof LivingEntity livingEntity) {
+                livingEntity.updateDynamicGameEventListener(DynamicGameEventListener::remove);
+            }
+
+
+            if (isServerSide && entity.level() instanceof ServerLevel serverLevel) {
                 removeFromServerContainers(serverLevel, entity);
             } else if (entity.level().isClientSide && entity.level() instanceof ClientLevel clientLevel) {
                 removeFromClientContainers(clientLevel, entity);
@@ -1123,102 +925,23 @@ public class EntityUtil {
         }
     }
 
-    //清除旧维度的残留实体记录
-    /**
-     * Cleanup residual entity records in the old dimension after dimension change.
-     * This method checks if the entity still exists in old dimension containers and removes it.
-     *
-     * @param oldLevel the old dimension level
-     * @param entity the entity that changed dimension
-     */
-    public static void cleanupOldDimensionRecords(ServerLevel oldLevel, Entity entity) {
-        if (oldLevel == null || entity == null) return;
 
-        int entityId = entity.getId();
-        UUID entityUUID = entity.getUUID();
-
-        try {
-            // 检查旧维度是否还有残留记录
-            if (hasEntityInContainers(oldLevel, entityId, entityUUID)) {
-                EcaLogger.info("[EntityUtil] Found residual entity records in old dimension for entity id={}, cleaning up", entityId);
-
-                // 强制清除旧维度的所有容器记录（不调用 setRemoved）
-                removeFromServerContainers(oldLevel, entity);
-            }
-        } catch (Exception e) {
-            EcaLogger.info("[EntityUtil] Failed to cleanup old dimension records: {}", e.getMessage());
-        }
-    }
-
-    //检查实体是否还在容器中
-    /**
-     * Check if entity still exists in level containers.
-     *
-     * @param level the server level
-     * @param entityId entity ID
-     * @param entityUUID entity UUID
-     * @return true if entity found in any container
-     */
-    private static boolean hasEntityInContainers(ServerLevel level, int entityId, UUID entityUUID) {
-        try {
-            // 检查 EntityLookup.byUuid 和 byId
-            PersistentEntitySectionManager<?> entityManager =
-                (PersistentEntitySectionManager<?>) SERVER_LEVEL_ENTITY_MANAGER_HANDLE.get(level);
-
-            if (entityManager != null) {
-                EntityLookup lookup = (EntityLookup) PERSISTENT_ENTITY_MANAGER_VISIBLE_STORAGE_HANDLE.get(entityManager);
-                if (lookup != null) {
-                    Map<UUID, ?> byUuid = (Map<UUID, ?>) ENTITY_LOOKUP_BY_UUID_HANDLE.get(lookup);
-                    if (byUuid != null && byUuid.containsKey(entityUUID)) {
-                        return true;
-                    }
-
-                    Int2ObjectMap<?> byId = (Int2ObjectMap<?>) ENTITY_LOOKUP_BY_ID_HANDLE.get(lookup);
-                    if (byId != null && byId.containsKey(entityId)) {
-                        return true;
-                    }
-                }
-            }
-
-            // 检查 ChunkMap.entityMap
-            ServerChunkCache chunkSource = (ServerChunkCache) SERVER_LEVEL_CHUNK_SOURCE_HANDLE.get(level);
-            if (chunkSource != null) {
-                ChunkMap chunkMap = (ChunkMap) SERVER_CHUNK_CACHE_CHUNK_MAP_HANDLE.get(chunkSource);
-                if (chunkMap != null) {
-                    Int2ObjectMap<?> entityMap = (Int2ObjectMap<?>) CHUNK_MAP_ENTITY_MAP_HANDLE.get(chunkMap);
-                    if (entityMap != null && entityMap.containsKey(entityId)) {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
-        } catch (Exception e) {
-            EcaLogger.info("[EntityUtil] Error checking entity in containers: {}", e.getMessage());
-            // 如果检查失败，保守起见返回 true，执行清除
-            return true;
-        }
-    }
-
-    //AI系统清理
+    //AI清理
     private static void cleanupAI(Entity entity) {
         if (entity instanceof Mob mob) {
-            if (mob.goalSelector != null) {
-                mob.goalSelector.removeAllGoals(goal -> true);
-            }
-            if (mob.targetSelector != null) {
-                mob.targetSelector.removeAllGoals(goal -> true);
-            }
+            mob.goalSelector.removeAllGoals(goal -> true);
+            mob.targetSelector.removeAllGoals(goal -> true);
             mob.setTarget(null);
-            if (mob.getNavigation() != null) {
-                mob.getNavigation().stop();
-            }
+            mob.getNavigation().stop();
         }
     }
 
     //Boss血条清理
     public static void cleanupBossBar(Entity entity) {
         if (entity == null) return;
+
+        //收集所有 ServerBossEvent
+        List<ServerBossEvent> bossEvents = new ArrayList<>();
 
         for (Class<?> clazz = entity.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
             for (Field field : clazz.getDeclaredFields()) {
@@ -1228,10 +951,30 @@ public class EntityUtil {
                 try {
                     Object fieldValue = field.get(entity);
                     if (fieldValue instanceof ServerBossEvent serverBossEvent) {
-                        serverBossEvent.removeAllPlayers();
-                        serverBossEvent.setVisible(false);
+                        bossEvents.add(serverBossEvent);
                     }
                 } catch (IllegalAccessException ignored) {}
+            }
+        }
+
+        //发送移除网络包并清理
+        if (!bossEvents.isEmpty() && !entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
+            for (ServerBossEvent bossEvent : bossEvents) {
+                //发送移除网络包给所有玩家
+                for (ServerPlayer player : serverLevel.players()) {
+                    try {
+                        player.connection.send(ClientboundBossEventPacket.createRemovePacket(bossEvent.getId()));
+                    } catch (Exception ignored) {}
+                }
+                //服务端清理
+                bossEvent.removeAllPlayers();
+                bossEvent.setVisible(false);
+            }
+        } else {
+            //客户端或无法获取 ServerLevel 时只做基本清理
+            for (ServerBossEvent bossEvent : bossEvents) {
+                bossEvent.removeAllPlayers();
+                bossEvent.setVisible(false);
             }
         }
     }
@@ -1247,299 +990,385 @@ public class EntityUtil {
         }
     }
 
-    //底层容器清除 - 服务端（顺序很重要）
+    //服务端底层容器清除
     private static void removeFromServerContainers(ServerLevel serverLevel, Entity entity) {
         int entityId = entity.getId();
         UUID entityUUID = entity.getUUID();
 
         try {
-            //1. ChunkMap
+            callbacksOnDestroyed(serverLevel, entity);
+            removeFromLoadingInbox(serverLevel, entity);
             removeFromChunkMapEntityMap(serverLevel, entityId);
-            //2. ServerLevel Lists (players/navigatingMobs)
-            removeFromPlayersOrMobs(serverLevel, entity);
-            //3. EntityLookup (byUuid + byId)
-            removeFromEntityLookup(serverLevel, entityId, entityUUID);
-            //4. KnownUuids
-            removeFromKnownUuids(serverLevel, entityUUID);
-            //5. EntityTickList (active + passive)
-            removeFromEntityTickList(serverLevel, entityId);
-            //6. EntitySectionStorage (ClassInstanceMultiMap)
-            removeFromEntitySectionStorage(serverLevel, entity);
+            removeFromServerPlayers(serverLevel, entity);
+            removeFromServerNavigatingMobs(serverLevel, entity);
+            //原版顺序
+            removeFromEntitySectionStorage(serverLevel, entity);  //1. EntitySection (ClassInstanceMultiMap)
+            removeSectionIfEmpty(serverLevel, entity);
+            removeFromEntityTickList(serverLevel, entityId);      //2. EntityTickList
+            removeFromEntityLookup(serverLevel, entityId, entityUUID); //3. EntityLookup
+            removeFromKnownUuids(serverLevel, entityUUID);        //4. KnownUuids
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to remove from server containers: {}", e.getMessage());
         }
     }
 
-    //从 EntityTickList.active 和 passive 移除（使用双缓冲机制）
-    private static void removeFromEntityTickList(ServerLevel serverLevel, int entityId) {
-        try {
-            if (SERVER_LEVEL_ENTITY_TICK_LIST_HANDLE == null) return;
+    //从 loadingInbox 清理正在加载的实体
+    private static void removeFromLoadingInbox(ServerLevel serverLevel, Entity entity) throws Exception {
+        if (VH_SERVER_LEVEL_ENTITY_MANAGER == null || VH_PERSISTENT_ENTITY_MANAGER_LOADING_INBOX == null) return;
 
-            Object entityTickList = SERVER_LEVEL_ENTITY_TICK_LIST_HANDLE.get(serverLevel);
-            if (entityTickList == null) return;
+        Object entityManager = VH_SERVER_LEVEL_ENTITY_MANAGER.get(serverLevel);
+        if (entityManager == null) return;
 
-            //获取 active、passive、iterated 字段
-            Int2ObjectLinkedOpenHashMap<Entity> active = (Int2ObjectLinkedOpenHashMap<Entity>) ENTITY_TICK_LIST_ACTIVE_HANDLE.get(entityTickList);
-            Int2ObjectLinkedOpenHashMap<Entity> passive = (Int2ObjectLinkedOpenHashMap<Entity>) ENTITY_TICK_LIST_PASSIVE_HANDLE.get(entityTickList);
+        Queue<?> loadingInbox = (Queue<?>) VH_PERSISTENT_ENTITY_MANAGER_LOADING_INBOX.get(entityManager);
+        if (loadingInbox == null) return;
 
-            if (active == null || passive == null) return;
+        Iterator<?> iterator = loadingInbox.iterator();
+        while (iterator.hasNext()) {
+            Object chunkEntities = iterator.next();
+            if (chunkEntities == null) continue;
 
-            //检查是否正在迭代 active
-            Object iterated = ENTITY_TICK_LIST_ITERATED_HANDLE.get(entityTickList);
-
-            if (iterated == active) {
-                //正在迭代 active，使用双缓冲切换
-                passive.clear();
-
-                //复制 active 到 passive（排除要删除的实体）
-                for (Int2ObjectMap.Entry<Entity> entry : active.int2ObjectEntrySet()) {
-                    int id = entry.getIntKey();
-                    if (id != entityId) {
-                        passive.put(id, entry.getValue());
-                    }
-                }
-
-                //交换 active 和 passive
-                ENTITY_TICK_LIST_ACTIVE_HANDLE.set(entityTickList, passive);
-                ENTITY_TICK_LIST_PASSIVE_HANDLE.set(entityTickList, active);
-            } else {
-                //未在迭代，直接删除
-                active.remove(entityId);
+            Field entitiesField = chunkEntities.getClass().getDeclaredField("entities");
+            entitiesField.setAccessible(true);
+            List<?> entities = (List<?>) entitiesField.get(chunkEntities);
+            if (entities != null && entities.contains(entity)) {
+                entities.remove(entity);
             }
-        } catch (Exception ignored) {}
-    }
-
-    //从 EntityLookup (byUuid + byId) 移除
-    private static void removeFromEntityLookup(ServerLevel serverLevel, int entityId, UUID entityUUID) {
-        try {
-            if (SERVER_LEVEL_ENTITY_MANAGER_HANDLE == null) return;
-
-            Object entityManager = SERVER_LEVEL_ENTITY_MANAGER_HANDLE.get(serverLevel);
-            if (entityManager == null) return;
-
-            Object visibleEntityStorage = PERSISTENT_ENTITY_MANAGER_VISIBLE_STORAGE_HANDLE.get(entityManager);
-            if (visibleEntityStorage == null) return;
-
-            //移除 byUuid
-            Map<UUID, Entity> byUuid = (Map<UUID, Entity>) ENTITY_LOOKUP_BY_UUID_HANDLE.get(visibleEntityStorage);
-            if (byUuid != null) {
-                byUuid.remove(entityUUID);
-            }
-
-            //移除 byId
-            Int2ObjectLinkedOpenHashMap<Entity> byId = (Int2ObjectLinkedOpenHashMap<Entity>) ENTITY_LOOKUP_BY_ID_HANDLE.get(visibleEntityStorage);
-            if (byId != null) {
-                byId.remove(entityId);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    //从 EntitySectionStorage → EntitySection.storage 移除
-    private static void removeFromEntitySectionStorage(ServerLevel serverLevel, Entity entity) {
-        try {
-            if (SERVER_LEVEL_ENTITY_MANAGER_HANDLE == null) return;
-
-            Object entityManager = SERVER_LEVEL_ENTITY_MANAGER_HANDLE.get(serverLevel);
-            if (entityManager == null) return;
-
-            Object sectionStorage = PERSISTENT_ENTITY_MANAGER_SECTION_STORAGE_HANDLE.get(entityManager);
-            if (sectionStorage == null) return;
-
-            Long2ObjectMap<?> sections = (Long2ObjectMap<?>) ENTITY_SECTION_STORAGE_SECTIONS_HANDLE.get(sectionStorage);
-            if (sections == null) return;
-
-            //遍历所有 EntitySection
-            for (Object section : sections.values()) {
-                if (section == null) continue;
-
-                Object storage = ENTITY_SECTION_STORAGE_HANDLE.get(section);
-                if (storage == null) continue;
-
-                //获取 ClassInstanceMultiMap.byClass
-                Map<Class<?>, List<?>> byClass = (Map<Class<?>, List<?>>) CLASS_INSTANCE_MULTI_MAP_BY_CLASS_HANDLE.get(storage);
-                if (byClass == null) continue;
-
-                //遍历所有类型的 List，移除匹配的实体
-                for (Map.Entry<Class<?>, List<?>> entry : byClass.entrySet()) {
-                    Class<?> clazz = entry.getKey();
-                    List<?> list = entry.getValue();
-
-                    if (clazz.isInstance(entity)) {
-                        list.remove(entity);
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
+        }
     }
 
     //从 ChunkMap.entityMap 移除
     private static void removeFromChunkMapEntityMap(ServerLevel serverLevel, int entityId) {
-        try {
-            if (SERVER_LEVEL_CHUNK_SOURCE_HANDLE == null) return;
+        if (VH_SERVER_LEVEL_CHUNK_SOURCE == null) return;
 
-            Object chunkSource = SERVER_LEVEL_CHUNK_SOURCE_HANDLE.get(serverLevel);
-            if (chunkSource == null) return;
+        Object chunkSource = VH_SERVER_LEVEL_CHUNK_SOURCE.get(serverLevel);
+        if (chunkSource == null) return;
 
-            Object chunkMap = SERVER_CHUNK_CACHE_CHUNK_MAP_HANDLE.get(chunkSource);
-            if (chunkMap == null) return;
+        Object chunkMap = VH_SERVER_CHUNK_CACHE_CHUNK_MAP.get(chunkSource);
+        if (chunkMap == null) return;
 
-            Int2ObjectOpenHashMap<?> entityMap = (Int2ObjectOpenHashMap<?>) CHUNK_MAP_ENTITY_MAP_HANDLE.get(chunkMap);
-            if (entityMap != null) {
-                entityMap.remove(entityId);
+        Int2ObjectOpenHashMap<?> entityMap = (Int2ObjectOpenHashMap<?>) VH_CHUNK_MAP_ENTITY_MAP.get(chunkMap);
+        if (entityMap != null) {
+            entityMap.remove(entityId);
+        }
+    }
+
+    //从 ServerLevel.players 移除
+    private static void removeFromServerPlayers(ServerLevel serverLevel, Entity entity) {
+        if (entity instanceof ServerPlayer && VH_SERVER_LEVEL_PLAYERS != null) {
+            List<ServerPlayer> players = (List<ServerPlayer>) VH_SERVER_LEVEL_PLAYERS.get(serverLevel);
+            if (players != null) {
+                players.remove(entity);
             }
-        } catch (Exception ignored) {}
+        }
+    }
+
+    //从 ServerLevel.navigatingMobs 移除
+    private static void removeFromServerNavigatingMobs(ServerLevel serverLevel, Entity entity) {
+        if (entity instanceof Mob && VH_SERVER_LEVEL_NAVIGATING_MOBS != null) {
+            ObjectOpenHashSet<Mob> navigatingMobs = (ObjectOpenHashSet<Mob>) VH_SERVER_LEVEL_NAVIGATING_MOBS.get(serverLevel);
+            if (navigatingMobs != null) {
+                navigatingMobs.remove(entity);
+            }
+        }
+    }
+
+    //从 EntitySectionStorage → EntitySection.storage 移除
+    private static void removeFromEntitySectionStorage(ServerLevel serverLevel, Entity entity) {
+        if (VH_SERVER_LEVEL_ENTITY_MANAGER == null) return;
+
+        Object entityManager = VH_SERVER_LEVEL_ENTITY_MANAGER.get(serverLevel);
+        if (entityManager == null) return;
+
+        Object sectionStorage = VH_PERSISTENT_ENTITY_MANAGER_SECTION_STORAGE.get(entityManager);
+        if (sectionStorage == null) return;
+
+        Long2ObjectMap<?> sections = (Long2ObjectMap<?>) VH_ENTITY_SECTION_STORAGE_SECTIONS.get(sectionStorage);
+        if (sections == null) return;
+
+        for (Object section : sections.values()) {
+            if (section == null) continue;
+
+            Object storage = VH_ENTITY_SECTION_STORAGE.get(section);
+            if (storage == null) continue;
+
+            Map<Class<?>, List<?>> byClass = (Map<Class<?>, List<?>>) VH_CLASS_INSTANCE_MULTI_MAP_BY_CLASS.get(storage);
+            if (byClass == null) continue;
+
+            for (Map.Entry<Class<?>, List<?>> entry : byClass.entrySet()) {
+                if (entry.getKey().isInstance(entity)) {
+                    entry.getValue().remove(entity);
+                }
+            }
+        }
+    }
+
+    //从 EntityTickList.active、passive、iterated 移除（使用双缓冲机制）
+    private static void removeFromEntityTickList(ServerLevel serverLevel, int entityId) {
+        if (VH_SERVER_LEVEL_ENTITY_TICK_LIST == null) return;
+
+        Object entityTickList = VH_SERVER_LEVEL_ENTITY_TICK_LIST.get(serverLevel);
+        if (entityTickList == null) return;
+
+        Int2ObjectLinkedOpenHashMap<Entity> active = (Int2ObjectLinkedOpenHashMap<Entity>) VH_ENTITY_TICK_LIST_ACTIVE.get(entityTickList);
+        Int2ObjectLinkedOpenHashMap<Entity> passive = (Int2ObjectLinkedOpenHashMap<Entity>) VH_ENTITY_TICK_LIST_PASSIVE.get(entityTickList);
+        Int2ObjectLinkedOpenHashMap<Entity> iterated = (Int2ObjectLinkedOpenHashMap<Entity>) VH_ENTITY_TICK_LIST_ITERATED.get(entityTickList);
+
+        if (active == null || passive == null) return;
+
+        if (iterated != null) {
+            iterated.remove(entityId);
+        }
+
+        if (iterated == active) {
+            passive.clear();
+            for (Int2ObjectMap.Entry<Entity> entry : active.int2ObjectEntrySet()) {
+                int id = entry.getIntKey();
+                if (id != entityId) {
+                    passive.put(id, entry.getValue());
+                }
+            }
+            VH_ENTITY_TICK_LIST_ACTIVE.set(entityTickList, passive);
+            VH_ENTITY_TICK_LIST_PASSIVE.set(entityTickList, active);
+        } else {
+            active.remove(entityId);
+        }
+    }
+
+    //从 EntityLookup (byUuid + byId) 移除
+    private static void removeFromEntityLookup(ServerLevel serverLevel, int entityId, UUID entityUUID) {
+        if (VH_SERVER_LEVEL_ENTITY_MANAGER == null) return;
+
+        Object entityManager = VH_SERVER_LEVEL_ENTITY_MANAGER.get(serverLevel);
+        if (entityManager == null) return;
+
+        Object visibleEntityStorage = VH_PERSISTENT_ENTITY_MANAGER_VISIBLE_STORAGE.get(entityManager);
+        if (visibleEntityStorage == null) return;
+
+        Map<UUID, Entity> byUuid = (Map<UUID, Entity>) VH_ENTITY_LOOKUP_BY_UUID.get(visibleEntityStorage);
+        if (byUuid != null) {
+            byUuid.remove(entityUUID);
+        }
+
+        Int2ObjectLinkedOpenHashMap<Entity> byId = (Int2ObjectLinkedOpenHashMap<Entity>) VH_ENTITY_LOOKUP_BY_ID.get(visibleEntityStorage);
+        if (byId != null) {
+            byId.remove(entityId);
+        }
     }
 
     //从 PersistentEntitySectionManager.knownUuids 移除
     private static void removeFromKnownUuids(ServerLevel serverLevel, UUID entityUUID) {
-        try {
-            if (SERVER_LEVEL_ENTITY_MANAGER_HANDLE == null) return;
+        if (VH_SERVER_LEVEL_ENTITY_MANAGER == null) return;
 
-            Object entityManager = SERVER_LEVEL_ENTITY_MANAGER_HANDLE.get(serverLevel);
-            if (entityManager == null) return;
+        Object entityManager = VH_SERVER_LEVEL_ENTITY_MANAGER.get(serverLevel);
+        if (entityManager == null) return;
 
-            Set<UUID> knownUuids = (Set<UUID>) PERSISTENT_ENTITY_MANAGER_KNOWN_UUIDS_HANDLE.get(entityManager);
-            if (knownUuids != null) {
-                knownUuids.remove(entityUUID);
-            }
-        } catch (Exception ignored) {}
+        Set<UUID> knownUuids = (Set<UUID>) VH_PERSISTENT_ENTITY_MANAGER_KNOWN_UUIDS.get(entityManager);
+        if (knownUuids != null) {
+            knownUuids.remove(entityUUID);
+        }
     }
 
-    //从 ServerLevel.players 或 navigatingMobs 移除
-    private static void removeFromPlayersOrMobs(ServerLevel serverLevel, Entity entity) {
-        try {
-            //如果是玩家，从 players 列表移除
-            if (entity instanceof ServerPlayer) {
-                List<ServerPlayer> players = (List<ServerPlayer>) SERVER_LEVEL_PLAYERS_HANDLE.get(serverLevel);
-                if (players != null) {
-                    players.remove(entity);
-                }
-            }
+    //调用 PersistentEntitySectionManager.callbacks.onDestroyed() 触发 tracking 结束
+    @SuppressWarnings("rawtypes")
+    private static void callbacksOnDestroyed(ServerLevel serverLevel, Entity entity) {
+        if (VH_SERVER_LEVEL_ENTITY_MANAGER == null || VH_PERSISTENT_ENTITY_MANAGER_CALLBACKS == null) return;
 
-            //如果是 Mob，从 navigatingMobs 集合移除
-            if (entity instanceof Mob) {
-                ObjectOpenHashSet<Mob> navigatingMobs = (ObjectOpenHashSet<Mob>) SERVER_LEVEL_NAVIGATING_MOBS_HANDLE.get(serverLevel);
-                if (navigatingMobs != null) {
-                    navigatingMobs.remove(entity);
-                }
-            }
-        } catch (Exception ignored) {}
+        Object entityManager = VH_SERVER_LEVEL_ENTITY_MANAGER.get(serverLevel);
+        if (entityManager == null) return;
+
+        Object callbacks = VH_PERSISTENT_ENTITY_MANAGER_CALLBACKS.get(entityManager);
+        if (callbacks instanceof LevelCallback levelCallback) {
+            levelCallback.onDestroyed(entity);
+        }
     }
 
-    //底层容器清除 - 客户端
+    //清理空的 EntitySection（内存优化）
+    private static void removeSectionIfEmpty(ServerLevel serverLevel, Entity entity) {
+        if (VH_SERVER_LEVEL_ENTITY_MANAGER == null || VH_PERSISTENT_ENTITY_MANAGER_SECTION_STORAGE == null) return;
+
+        Object entityManager = VH_SERVER_LEVEL_ENTITY_MANAGER.get(serverLevel);
+        if (entityManager == null) return;
+
+        Object sectionStorage = VH_PERSISTENT_ENTITY_MANAGER_SECTION_STORAGE.get(entityManager);
+        if (sectionStorage == null) return;
+
+        long sectionKey = SectionPos.asLong(entity.blockPosition());
+        Long2ObjectMap<?> sections = (Long2ObjectMap<?>) VH_ENTITY_SECTION_STORAGE_SECTIONS.get(sectionStorage);
+        if (sections == null) return;
+
+        Object section = sections.get(sectionKey);
+        if (section instanceof EntitySection<?> entitySection) {
+            if (entitySection.isEmpty()) {
+                sections.remove(sectionKey);
+            }
+        }
+    }
+
+    //客户端底层容器清除
     public static void removeFromClientContainers(ClientLevel clientLevel, Entity entity) {
-        //懒加载初始化客户端VarHandle
-        initClientRemovalVarHandles();
-
+        VarHandleUtil.initClient();
         int entityId = entity.getId();
         UUID entityUUID = entity.getUUID();
 
         try {
-            //高优先级容器
-            removeFromClientEntityTickList(clientLevel, entityId);
-            removeFromClientEntityLookup(clientLevel, entityId, entityUUID);
-            removeFromClientEntitySectionStorage(clientLevel, entity);
-
-            //中优先级容器
+            //清理客户端 Boss Overlay
+            clearClientBossOverlay(entity);
             removeFromClientPlayers(clientLevel, entity);
+            removeFromClientPartEntities(clientLevel, entity);
+            //原版顺序
+            removeFromClientEntitySectionStorage(clientLevel, entity);       //1. EntitySection (ClassInstanceMultiMap)
+            removeClientSectionIfEmpty(clientLevel, entity);
+            removeFromClientEntityTickList(clientLevel, entityId);           //2. EntityTickList
+            removeFromClientEntityLookup(clientLevel, entityId, entityUUID); //3. EntityLookup
+
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to remove from client containers: {}", e.getMessage());
         }
     }
 
-    //从客户端 EntityTickList.active 和 passive 移除
+    //清理客户端 Boss Overlay（Boss血条 UI）
+    private static void clearClientBossOverlay(Entity entity) {
+        if (VH_BOSS_HEALTH_OVERLAY_EVENTS == null) return;
+        Minecraft minecraft = Minecraft.getInstance();
+        BossHealthOverlay bossOverlay = minecraft.gui.getBossOverlay();
+        //使用 VarHandle 获取 events 字段
+        Object events = VH_BOSS_HEALTH_OVERLAY_EVENTS.get(bossOverlay);
+        if (events instanceof Map<?, ?> eventsMap) {
+            eventsMap.clear();
+        }
+    }
+
+    //从客户端 EntityTickList 移除（双缓冲机制）
     private static void removeFromClientEntityTickList(ClientLevel clientLevel, int entityId) {
-        try {
-            if (CLIENT_LEVEL_TICKING_ENTITIES_HANDLE == null) return;
+        if (VH_CLIENT_LEVEL_TICKING_ENTITIES == null) return;
 
-            Object entityTickList = CLIENT_LEVEL_TICKING_ENTITIES_HANDLE.get(clientLevel);
-            if (entityTickList == null) return;
+        Object entityTickList = VH_CLIENT_LEVEL_TICKING_ENTITIES.get(clientLevel);
+        if (entityTickList == null) return;
 
-            Int2ObjectLinkedOpenHashMap<Entity> active = (Int2ObjectLinkedOpenHashMap<Entity>) ENTITY_TICK_LIST_ACTIVE_HANDLE.get(entityTickList);
-            if (active != null) {
-                active.remove(entityId);
+        Int2ObjectLinkedOpenHashMap<Entity> active = (Int2ObjectLinkedOpenHashMap<Entity>) VH_ENTITY_TICK_LIST_ACTIVE.get(entityTickList);
+        Int2ObjectLinkedOpenHashMap<Entity> passive = (Int2ObjectLinkedOpenHashMap<Entity>) VH_ENTITY_TICK_LIST_PASSIVE.get(entityTickList);
+        Int2ObjectLinkedOpenHashMap<Entity> iterated = (Int2ObjectLinkedOpenHashMap<Entity>) VH_ENTITY_TICK_LIST_ITERATED.get(entityTickList);
+
+        if (active == null || passive == null) return;
+
+        if (iterated != null) {
+            iterated.remove(entityId);
+        }
+
+        if (iterated == active) {
+            passive.clear();
+            for (Int2ObjectMap.Entry<Entity> entry : active.int2ObjectEntrySet()) {
+                int id = entry.getIntKey();
+                if (id != entityId) {
+                    passive.put(id, entry.getValue());
+                }
             }
-
-            Int2ObjectLinkedOpenHashMap<Entity> passive = (Int2ObjectLinkedOpenHashMap<Entity>) ENTITY_TICK_LIST_PASSIVE_HANDLE.get(entityTickList);
-            if (passive != null) {
-                passive.remove(entityId);
-            }
-        } catch (Exception ignored) {}
+            VH_ENTITY_TICK_LIST_ACTIVE.set(entityTickList, passive);
+            VH_ENTITY_TICK_LIST_PASSIVE.set(entityTickList, active);
+        } else {
+            active.remove(entityId);
+        }
     }
 
     //从客户端 EntityLookup (byUuid + byId) 移除
     private static void removeFromClientEntityLookup(ClientLevel clientLevel, int entityId, UUID entityUUID) {
-        try {
-            if (CLIENT_LEVEL_ENTITY_STORAGE_HANDLE == null) return;
+        if (VH_CLIENT_LEVEL_ENTITY_STORAGE == null) return;
 
-            Object entityStorage = CLIENT_LEVEL_ENTITY_STORAGE_HANDLE.get(clientLevel);
-            if (entityStorage == null) return;
+        Object entityStorage = VH_CLIENT_LEVEL_ENTITY_STORAGE.get(clientLevel);
+        if (entityStorage == null) return;
 
-            Object entityLookup = TRANSIENT_ENTITY_MANAGER_ENTITY_STORAGE_HANDLE.get(entityStorage);
-            if (entityLookup == null) return;
+        Object entityLookup = VH_TRANSIENT_ENTITY_MANAGER_ENTITY_STORAGE.get(entityStorage);
+        if (entityLookup == null) return;
 
-            //移除 byUuid
-            Map<UUID, Entity> byUuid = (Map<UUID, Entity>) ENTITY_LOOKUP_BY_UUID_HANDLE.get(entityLookup);
-            if (byUuid != null) {
-                byUuid.remove(entityUUID);
-            }
+        Map<UUID, Entity> byUuid = (Map<UUID, Entity>) VH_ENTITY_LOOKUP_BY_UUID.get(entityLookup);
+        if (byUuid != null) {
+            byUuid.remove(entityUUID);
+        }
 
-            //移除 byId
-            Int2ObjectLinkedOpenHashMap<Entity> byId = (Int2ObjectLinkedOpenHashMap<Entity>) ENTITY_LOOKUP_BY_ID_HANDLE.get(entityLookup);
-            if (byId != null) {
-                byId.remove(entityId);
-            }
-        } catch (Exception ignored) {}
+        Int2ObjectLinkedOpenHashMap<Entity> byId = (Int2ObjectLinkedOpenHashMap<Entity>) VH_ENTITY_LOOKUP_BY_ID.get(entityLookup);
+        if (byId != null) {
+            byId.remove(entityId);
+        }
     }
 
     //从客户端 EntitySectionStorage 移除
     private static void removeFromClientEntitySectionStorage(ClientLevel clientLevel, Entity entity) {
-        try {
-            if (CLIENT_LEVEL_ENTITY_STORAGE_HANDLE == null) return;
+        if (VH_CLIENT_LEVEL_ENTITY_STORAGE == null) return;
 
-            Object entityStorage = CLIENT_LEVEL_ENTITY_STORAGE_HANDLE.get(clientLevel);
-            if (entityStorage == null) return;
+        Object entityStorage = VH_CLIENT_LEVEL_ENTITY_STORAGE.get(clientLevel);
+        if (entityStorage == null) return;
 
-            Object sectionStorage = TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE_HANDLE.get(entityStorage);
-            if (sectionStorage == null) return;
+        Object sectionStorage = VH_TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE.get(entityStorage);
+        if (sectionStorage == null) return;
 
-            Long2ObjectMap<?> sections = (Long2ObjectMap<?>) ENTITY_SECTION_STORAGE_SECTIONS_HANDLE.get(sectionStorage);
-            if (sections == null) return;
+        Long2ObjectMap<?> sections = (Long2ObjectMap<?>) VH_ENTITY_SECTION_STORAGE_SECTIONS.get(sectionStorage);
+        if (sections == null) return;
 
-            //遍历所有 EntitySection
-            for (Object section : sections.values()) {
-                if (section == null) continue;
+        for (Object section : sections.values()) {
+            if (section == null) continue;
 
-                Object storage = ENTITY_SECTION_STORAGE_HANDLE.get(section);
-                if (storage == null) continue;
+            Object storage = VH_ENTITY_SECTION_STORAGE.get(section);
+            if (storage == null) continue;
 
-                //获取 ClassInstanceMultiMap.byClass
-                Map<Class<?>, List<?>> byClass = (Map<Class<?>, List<?>>) CLASS_INSTANCE_MULTI_MAP_BY_CLASS_HANDLE.get(storage);
-                if (byClass == null) continue;
+            Map<Class<?>, List<?>> byClass = (Map<Class<?>, List<?>>) VH_CLASS_INSTANCE_MULTI_MAP_BY_CLASS.get(storage);
+            if (byClass == null) continue;
 
-                //遍历所有类型的 List，移除匹配的实体
-                for (Map.Entry<Class<?>, List<?>> entry : byClass.entrySet()) {
-                    Class<?> clazz = entry.getKey();
-                    List<?> list = entry.getValue();
-
-                    if (clazz.isInstance(entity)) {
-                        list.remove(entity);
-                    }
+            for (Map.Entry<Class<?>, List<?>> entry : byClass.entrySet()) {
+                if (entry.getKey().isInstance(entity)) {
+                    entry.getValue().remove(entity);
                 }
             }
-        } catch (Exception ignored) {}
+        }
     }
 
     //从客户端 players 列表移除
     private static void removeFromClientPlayers(ClientLevel clientLevel, Entity entity) {
-        try {
-            if (entity instanceof Player && CLIENT_LEVEL_PLAYERS_HANDLE != null) {
-                List<?> players = (List<?>) CLIENT_LEVEL_PLAYERS_HANDLE.get(clientLevel);
-                if (players != null) {
-                    players.remove(entity);
+        if (entity instanceof Player && VH_CLIENT_LEVEL_PLAYERS != null) {
+            List<?> players = (List<?>) VH_CLIENT_LEVEL_PLAYERS.get(clientLevel);
+            if (players != null) {
+                players.remove(entity);
+            }
+        }
+    }
+
+    //从客户端 partEntities 移除（末影龙等多部分实体）
+    private static void removeFromClientPartEntities(ClientLevel clientLevel, Entity entity) {
+        if (VH_CLIENT_LEVEL_PART_ENTITIES == null) return;
+        if (!entity.isMultipartEntity()) return;
+
+        Int2ObjectMap<Entity> partEntities = (Int2ObjectMap<Entity>) VH_CLIENT_LEVEL_PART_ENTITIES.get(clientLevel);
+        if (partEntities == null) return;
+
+        PartEntity<?>[] parts = entity.getParts();
+        if (parts != null) {
+            for (PartEntity<?> part : parts) {
+                if (part != null) {
+                    partEntities.remove(part.getId());
                 }
             }
-        } catch (Exception ignored) {}
+        }
+    }
+
+    //清理空的客户端 EntitySection
+    private static void removeClientSectionIfEmpty(ClientLevel clientLevel, Entity entity) {
+        if (VH_CLIENT_LEVEL_ENTITY_STORAGE == null || VH_TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE == null) return;
+
+        Object entityStorage = VH_CLIENT_LEVEL_ENTITY_STORAGE.get(clientLevel);
+        if (entityStorage == null) return;
+
+        Object sectionStorage = VH_TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE.get(entityStorage);
+        if (sectionStorage == null) return;
+
+        long sectionKey = SectionPos.asLong(entity.blockPosition());
+        Long2ObjectMap<?> sections = (Long2ObjectMap<?>) VH_ENTITY_SECTION_STORAGE_SECTIONS.get(sectionStorage);
+        if (sections == null) return;
+
+        Object section = sections.get(sectionKey);
+        if (section instanceof EntitySection<?> entitySection) {
+            if (entitySection.isEmpty()) {
+                sections.remove(sectionKey);
+            }
+        }
     }
 
     // ==================== 传送模块 ====================
@@ -1560,14 +1389,14 @@ public class EntityUtil {
             Vec3 newPosition = new Vec3(x, y, z);
 
             //修改核心位置字段(使用VarHandle)
-            ENTITY_POSITION_HANDLE.set(entity, newPosition);
-            ENTITY_X_OLD_HANDLE.set(entity, x);
-            ENTITY_Y_OLD_HANDLE.set(entity, y);
-            ENTITY_Z_OLD_HANDLE.set(entity, z);
+            VH_ENTITY_POSITION.set(entity, newPosition);
+            VH_ENTITY_X_OLD.set(entity, x);
+            VH_ENTITY_Y_OLD.set(entity, y);
+            VH_ENTITY_Z_OLD.set(entity, z);
 
             //更新碰撞箱
             AABB newBoundingBox = entity.getDimensions(entity.getPose()).makeBoundingBox(x, y, z);
-            ENTITY_BB_HANDLE.set(entity, newBoundingBox);
+            VH_ENTITY_BB.set(entity, newBoundingBox);
 
             //同步到客户端
             if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {

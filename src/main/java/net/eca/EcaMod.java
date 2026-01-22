@@ -3,7 +3,6 @@ package net.eca;
 import net.eca.agent.AgentLoader;
 import net.eca.agent.EcaAgent;
 import net.eca.agent.ReturnToggle;
-import net.eca.coremod.AgentVerifier;
 import net.eca.event.EcaEventHandler;
 import net.eca.init.ModConfigs;
 import net.eca.network.NetworkHandler;
@@ -53,11 +52,9 @@ public final class EcaMod {
         boolean agentLoaded = AgentLoader.loadAgent(EcaMod.class);
         EcaLogger.info("Agent loaded: {}", agentLoaded);
 
-        // 收集 mod 包名用于 AllReturn，并启动验证线程
+        // 收集 mod 包名用于 AllReturn
         if (EcaAgent.isInitialized()) {
             collectAndSetModPackages();
-            // 启动验证线程（等待游戏加载完成后检测转换是否生效）
-            AgentVerifier.startVerification();
         } else {
             EcaLogger.warn("Agent not initialized - some features may be unavailable");
         }

@@ -17,6 +17,7 @@ Use `/eca` command (requires OP permission level 2):
 - `/eca teleport <targets> <x> <y> <z>` - Teleport entities
 - `/eca cleanbossbar <targets>` - Clean up boss bars
 - `/eca allreturn <targets>` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the target entity's mod
+- `/eca allreturn global <true|false>` - DANGER! Enable/disable global AllReturn for all non-whitelisted mods
 - `/eca allreturn off` - Disable AllReturn and clear targets
 - `/eca spawnban <targets> <seconds>` - Ban spawning of selected entities' types for specified duration
 - `/eca spawnban clear` - Clear all spawn bans in current dimension
@@ -73,8 +74,10 @@ side="BOTH"
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
 - `setInvulnerable(entity, invulnerable)` - Set invulnerability (auto-manages health lock)
 - `enableAllReturn(entity)` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the target entity's mod
+- `setGlobalAllReturn(enable)` - DANGER! Requires Attack Radical Logic config. Enable/disable global AllReturn for all non-whitelisted mods
 - `disableAllReturn()` - Disable AllReturn and clear targets
 - `isAllReturnEnabled()` - Check if AllReturn is enabled
+- `PackageWhitelist.addProtection(prefix)` - Add custom package prefix to whitelist (e.g., "com.example.")
 - `addSpawnBan(level, entityType, seconds)` - Ban entity type from spawning for specified duration
 - `isSpawnBanned(level, entityType)` - Check if entity type is banned from spawning
 - `getSpawnBanTime(level, entityType)` - Get remaining spawn ban time in seconds
@@ -84,6 +87,7 @@ side="BOTH"
 
 ```java
 import net.eca.api.EcaAPI;
+import net.eca.agent.PackageWhitelist;
 
 // Health Lock
 EcaAPI.lockHealth(entity, 20.0f);
@@ -113,8 +117,13 @@ EcaAPI.setInvulnerable(entity, false);
 
 // AllReturn (DANGER! Requires Attack Radical Logic config)
 EcaAPI.enableAllReturn(entity);  // Enable for entity's mod
+EcaAPI.setGlobalAllReturn(true);  // Enable for ALL non-whitelisted mods
 boolean enabled = EcaAPI.isAllReturnEnabled();
-EcaAPI.disableAllReturn();  // Disable and clear
+EcaAPI.setGlobalAllReturn(false);  // Disable global
+EcaAPI.disableAllReturn();  // Disable and clear all
+
+// Custom Package Whitelist (protect your mod from AllReturn)
+PackageWhitelist.addProtection("com.yourmod.");
 
 // Spawn Ban
 EcaAPI.addSpawnBan(serverLevel, EntityType.ZOMBIE, 300);  // Ban zombies for 5 minutes
@@ -146,6 +155,7 @@ EcaAPI.clearAllSpawnBans(serverLevel);
 - `/eca teleport <目标> <x> <y> <z>` - 传送实体
 - `/eca cleanbossbar <目标>` - 清理 Boss 血条
 - `/eca allreturn <目标>` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
+- `/eca allreturn global <true|false>` - 危险！启用/禁用全局AllReturn，影响所有非白名单mod
 - `/eca allreturn off` - 关闭AllReturn并清除目标
 - `/eca spawnban <目标> <秒数>` - 禁止选中实体的类型生成指定时长
 - `/eca spawnban clear` - 清除当前维度所有禁生成
@@ -202,8 +212,10 @@ side="BOTH"
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
 - `setInvulnerable(entity, invulnerable)` - 设置无敌状态（自动管理血量锁定）
 - `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
+- `setGlobalAllReturn(enable)` - 危险！需要开启激进攻击逻辑配置，启用/禁用全局AllReturn，影响所有非白名单mod
 - `disableAllReturn()` - 关闭AllReturn并清除目标
 - `isAllReturnEnabled()` - 检查AllReturn是否启用
+- `PackageWhitelist.addProtection(prefix)` - 添加自定义包名前缀到白名单（如 "com.example."）
 - `addSpawnBan(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
 - `isSpawnBanned(level, entityType)` - 检查实体类型是否被禁生成
 - `getSpawnBanTime(level, entityType)` - 获取禁生成剩余秒数
@@ -213,6 +225,7 @@ side="BOTH"
 
 ```java
 import net.eca.api.EcaAPI;
+import net.eca.agent.PackageWhitelist;
 
 // 血量锁定
 EcaAPI.lockHealth(entity, 20.0f);
@@ -242,8 +255,13 @@ EcaAPI.setInvulnerable(entity, false);
 
 // AllReturn（危险！需开启激进攻击配置）
 EcaAPI.enableAllReturn(entity);  // 对实体所属mod启用
+EcaAPI.setGlobalAllReturn(true);  // 对所有非白名单mod启用
 boolean enabled = EcaAPI.isAllReturnEnabled();
-EcaAPI.disableAllReturn();  // 关闭并清除
+EcaAPI.setGlobalAllReturn(false);  // 禁用全局
+EcaAPI.disableAllReturn();  // 关闭并清除全部
+
+// 自定义包名白名单（保护你的mod免受AllReturn影响）
+PackageWhitelist.addProtection("com.yourmod.");
 
 // 禁生成
 EcaAPI.addSpawnBan(serverLevel, EntityType.ZOMBIE, 300);  // 禁止僵尸生成5分钟

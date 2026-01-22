@@ -51,7 +51,7 @@ public final class ReturnToggle {
         if (!allReturnEnabled) {
             return false;
         }
-        if (isExcludedInternal(internalClassName)) {
+        if (PackageWhitelist.isProtected(internalClassName)) {
             return false;
         }
         boolean shouldReturn = activeClassNames.contains(internalClassName)
@@ -184,20 +184,7 @@ public final class ReturnToggle {
     }
 
     private static boolean isExcludedInternal(String internalClassName) {
-        return internalClassName.startsWith("java/")
-            || internalClassName.startsWith("javax/")
-            || internalClassName.startsWith("sun/")
-            || internalClassName.startsWith("jdk/")
-            || internalClassName.startsWith("com/sun/")
-            || internalClassName.startsWith("org/spongepowered/")
-            || internalClassName.startsWith("org/lwjgl/")
-            || internalClassName.startsWith("org/openjdk/")
-            || internalClassName.startsWith("org/objectweb/asm/")
-            || internalClassName.startsWith("com/mojang/")
-            || internalClassName.startsWith("com/google/")
-            || internalClassName.startsWith("net/eca/")
-            || internalClassName.startsWith("net/minecraft/")
-            || internalClassName.startsWith("net/minecraftforge/");
+        return PackageWhitelist.isProtected(internalClassName);
     }
 
     private ReturnToggle() {}

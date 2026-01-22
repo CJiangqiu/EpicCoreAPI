@@ -22,12 +22,4 @@ public class SpawnBanHook {
         return SpawnBanManager.isBanned(serverLevel, type);
     }
 
-    // 检查EntityType是否应该被阻止
-    public static boolean shouldBlockType(ServerLevel level, EntityType<?> type) {
-        if (level == null || type == null) {
-            return false;
-        }
-
-        return SpawnBanManager.isBanned(level, type);
-    }
 }

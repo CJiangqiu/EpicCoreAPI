@@ -248,11 +248,8 @@ public final class EcaAgent {
 
                 String name = clazz.getName();
 
-                // 跳过JDK类和ECA类
-                if (name.startsWith("java.") || name.startsWith("javax.") ||
-                    name.startsWith("sun.") || name.startsWith("jdk.") ||
-                    name.startsWith("com.sun.") || name.startsWith("org.objectweb.asm.") ||
-                    name.startsWith("net.eca.")) {
+                // 跳过受保护的类
+                if (PackageWhitelist.isProtectedBinary(name)) {
                     continue;
                 }
 

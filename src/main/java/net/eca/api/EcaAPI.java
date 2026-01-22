@@ -19,6 +19,7 @@ import java.net.URL;
 import java.security.CodeSource;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -489,6 +490,121 @@ public final class EcaAPI {
      */
     public static boolean isAllReturnEnabled() {
         return ReturnToggle.isAllReturnEnabled();
+    }
+
+    // 全局AllReturn开关（影响所有已加载的mod）
+    /**
+     * Enable or disable global AllReturn mode.
+     * DANGER! Requires "Enable Radical Logic" in Attack config.
+     * When enabled, will perform return transformation on all boolean and void methods
+     * of ALL loaded mods (excluding whitelisted packages).
+     * @param enable true to enable, false to disable
+     * @return true if operation succeeded, false if radical logic is disabled or agent not available
+     */
+    public static boolean setGlobalAllReturn(boolean enable) {
+        Instrumentation inst = EcaAgent.getInstrumentation();
+
+        if (!enable) {
+            ReturnToggle.setAllReturnEnabled(false);
+            ReturnToggle.clearAllTargets();
+            invokeAgentReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, false);
+            invokeAgentReturnToggle(inst, "clearAllTargets", new Class<?>[0]);
+            return true;
+        }
+
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
+            EcaLogger.warn("GlobalAllReturn requires Attack Radical Logic to be enabled in config");
+            return false;
+        }
+
+        if (inst == null) {
+            EcaLogger.warn("GlobalAllReturn: Agent is not initialized");
+            return false;
+        }
+
+        // 收集所有非白名单的类（不依赖 modPackagePrefixes）
+        List<Class<?>> candidates = new ArrayList<>();
+        Set<String> collectedPrefixes = new HashSet<>();
+
+        for (Class<?> clazz : inst.getAllLoadedClasses()) {
+            if (!inst.isModifiableClass(clazz)) continue;
+            if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) continue;
+
+            String className = clazz.getName();
+            if (ReturnToggle.isExcludedBinaryName(className)) continue;
+
+            candidates.add(clazz);
+
+            // 收集包前缀
+            String packagePrefix = getPackagePrefix(className);
+            if (packagePrefix != null) {
+                String internalPrefix = packagePrefix.replace('.', '/');
+                collectedPrefixes.add(internalPrefix);
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            EcaLogger.warn("GlobalAllReturn: No candidate classes found");
+            return false;
+        }
+
+        // 启用 AllReturn 并添加所有包前缀（与实体版相同方式）
+        ReturnToggle.setAllReturnEnabled(true);
+        invokeAgentReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, true);
+
+        for (String prefix : collectedPrefixes) {
+            ReturnToggle.addAllowedPackagePrefix(prefix);
+            invokeAgentReturnToggle(inst, "addAllowedPackagePrefix", new Class<?>[] { String.class }, prefix);
+        }
+
+        // 添加显式目标
+        List<String> targets = new ArrayList<>();
+        for (Class<?> clazz : candidates) {
+            targets.add(clazz.getName().replace('.', '/'));
+        }
+        ReturnToggle.addExplicitTargets(targets.toArray(new String[0]));
+        invokeAgentReturnToggle(inst, "addExplicitTargets", new Class<?>[] { String[].class }, (Object) targets.toArray(new String[0]));
+
+        EcaLogger.info("GlobalAllReturn: Retransforming {} classes from {} package prefixes",
+            candidates.size(), collectedPrefixes.size());
+
+        try {
+            inst.retransformClasses(candidates.toArray(new Class<?>[0]));
+        } catch (Throwable t) {
+            EcaLogger.warn("GlobalAllReturn: Batch retransform failed: {}", t.getMessage());
+        }
+
+        return true;
+    }
+
+    private static void invokeAgentReturnToggle(Instrumentation inst, String method, Class<?>[] paramTypes, Object... args) {
+        Class<?> agentToggle = findAgentReturnToggle(inst);
+        if (agentToggle == null) {
+            return;
+        }
+        try {
+            agentToggle.getMethod(method, paramTypes).invoke(null, args);
+        } catch (ReflectiveOperationException ignored) {
+        }
+    }
+
+    private static Class<?> findAgentReturnToggle(Instrumentation inst) {
+        if (inst == null) {
+            return null;
+        }
+        ClassLoader localLoader = EcaAPI.class.getClassLoader();
+        Class<?> fallback = null;
+        for (Class<?> clazz : inst.getAllLoadedClasses()) {
+            if (!"net.eca.agent.ReturnToggle".equals(clazz.getName())) {
+                continue;
+            }
+            ClassLoader loader = clazz.getClassLoader();
+            if (loader != localLoader) {
+                return clazz;
+            }
+            fallback = clazz;
+        }
+        return fallback;
     }
 
     //AllReturn 内部方法

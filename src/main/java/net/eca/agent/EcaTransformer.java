@@ -108,13 +108,7 @@ public class EcaTransformer implements ClassFileTransformer {
      * @return true if the class should be skipped
      */
     private boolean shouldSkipClass(String className) {
-        return className.startsWith("java/") ||
-               className.startsWith("javax/") ||
-               className.startsWith("sun/") ||
-               className.startsWith("jdk/") ||
-               className.startsWith("com/sun/") ||
-               className.startsWith("org/objectweb/asm/") ||
-               className.startsWith("net/eca/");
+        return PackageWhitelist.isProtected(className);
     }
 
     private EcaTransformer() {}

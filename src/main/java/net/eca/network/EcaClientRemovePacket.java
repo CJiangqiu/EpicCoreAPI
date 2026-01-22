@@ -6,6 +6,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraftforge.network.NetworkEvent;
 
 import java.util.function.Supplier;
@@ -42,6 +43,12 @@ public class EcaClientRemovePacket {
 
     /**
      * Handle the packet on client side.
+     * Follows the same phase order as EntityUtil.removeEntity():
+     * 1. Lifecycle callback (onClientRemoval)
+     * 2. Capabilities invalidation
+     * 3. State marking (setRemoved, levelCallback)
+     * 4. Container removal
+     *
      * @param msg the packet to handle
      * @param ctx the network context
      */
@@ -52,10 +59,10 @@ public class EcaClientRemovePacket {
             if (clientLevel != null) {
                 Entity entity = clientLevel.getEntity(msg.entityId);
                 if (entity != null) {
-                    // Call client removal callback
                     entity.onClientRemoval();
-
-                    // Execute client container cleanup
+                    entity.invalidateCaps();
+                    entity.setRemoved(Entity.RemovalReason.DISCARDED);
+                    entity.levelCallback = EntityInLevelCallback.NULL;
                     EntityUtil.removeFromClientContainers(clientLevel, entity);
                     EcaLogger.info("[EcaClientRemovePacket] Client entity removal executed for entity ID: {}", msg.entityId);
                 } else {

@@ -1,9 +1,11 @@
 package net.eca.command;
 
+import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import net.eca.agent.EcaAgent;
 import net.eca.agent.ReturnToggle;
+import net.eca.api.EcaAPI;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
@@ -36,7 +38,36 @@ public class AllReturnCommand {
             )
             .then(Commands.literal("off")
                 .executes(AllReturnCommand::disableAllReturn)
+            )
+            .then(Commands.literal("global")
+                .then(Commands.argument("enable", BoolArgumentType.bool())
+                    .executes(AllReturnCommand::setGlobalAllReturn)
+                )
             );
+    }
+
+    private static int setGlobalAllReturn(CommandContext<CommandSourceStack> context) {
+        boolean enable = BoolArgumentType.getBool(context, "enable");
+        boolean success = EcaAPI.setGlobalAllReturn(enable);
+
+        if (success) {
+            if (enable) {
+                context.getSource().sendSuccess(() -> Component.literal(
+                    "§aGlobal AllReturn enabled (all non-whitelisted mods)"
+                ), true);
+            } else {
+                context.getSource().sendSuccess(() -> Component.literal(
+                    "§aGlobal AllReturn disabled"
+                ), true);
+            }
+            return 1;
+        } else {
+            context.getSource().sendFailure(Component.literal(
+                "§cFailed to enable global AllReturn. " +
+                "Check if Attack Radical Logic is enabled and Agent is initialized."
+            ));
+            return 0;
+        }
     }
 
     private static int disableAllReturn(CommandContext<CommandSourceStack> context) {

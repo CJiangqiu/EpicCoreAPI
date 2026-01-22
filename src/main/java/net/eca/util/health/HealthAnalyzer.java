@@ -1,5 +1,6 @@
 package net.eca.util.health;
 
+import net.eca.agent.PackageWhitelist;
 import net.eca.util.EcaLogger;
 import org.objectweb.asm.*;
 
@@ -148,10 +149,10 @@ public class HealthAnalyzer {
             return null;
         }
 
-        //检查是否是 Java 标准库类（避免递归到 java.* 和 javax.* 包）
+        //检查是否是受保护的类（避免递归分析）
         String className = clazz.getName();
-        if (className.startsWith("java.") || className.startsWith("javax.") || className.startsWith("jdk.")) {
-            EcaLogger.warn("[HealthAnalyzer] Skipping Java standard library class: {}", className);
+        if (PackageWhitelist.isProtectedBinary(className)) {
+            EcaLogger.warn("[HealthAnalyzer] Skipping protected class: {}", className);
             return null;
         }
 
@@ -173,9 +174,9 @@ public class HealthAnalyzer {
                 //加载被调用方法的类
                 String targetClassName = result.methodCallTarget.owner.replace('/', '.');
 
-                //检查是否是 Java 标准库类（避免递归分析）
-                if (targetClassName.startsWith("java.") || targetClassName.startsWith("javax.") || targetClassName.startsWith("jdk.")) {
-                    EcaLogger.warn("[HealthAnalyzer] Skipping recursion into Java standard library class: {}", targetClassName);
+                //检查是否是受保护的类（避免递归分析）
+                if (PackageWhitelist.isProtectedBinary(targetClassName)) {
+                    EcaLogger.warn("[HealthAnalyzer] Skipping recursion into protected class: {}", targetClassName);
                     return result;
                 }
 
