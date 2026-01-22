@@ -7,7 +7,6 @@ import net.eca.util.health.HealthFieldCache;
 import net.eca.util.health.HealthAnalyzerManager;
 import net.eca.util.reflect.VarHandleUtil;
 import net.minecraft.network.syncher.EntityDataSerializer;
-import net.minecraftforge.entity.PartEntity;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -1214,7 +1213,6 @@ public class EntityUtil {
             //清理客户端 Boss Overlay
             clearClientBossOverlay(entity);
             removeFromClientPlayers(clientLevel, entity);
-            removeFromClientPartEntities(clientLevel, entity);
             //原版顺序
             removeFromClientEntitySectionStorage(clientLevel, entity);       //1. EntitySection (ClassInstanceMultiMap)
             removeClientSectionIfEmpty(clientLevel, entity);
@@ -1331,23 +1329,6 @@ public class EntityUtil {
         }
     }
 
-    //从客户端 partEntities 移除（末影龙等多部分实体）
-    private static void removeFromClientPartEntities(ClientLevel clientLevel, Entity entity) {
-        if (VH_CLIENT_LEVEL_PART_ENTITIES == null) return;
-        if (!entity.isMultipartEntity()) return;
-
-        Int2ObjectMap<Entity> partEntities = (Int2ObjectMap<Entity>) VH_CLIENT_LEVEL_PART_ENTITIES.get(clientLevel);
-        if (partEntities == null) return;
-
-        PartEntity<?>[] parts = entity.getParts();
-        if (parts != null) {
-            for (PartEntity<?> part : parts) {
-                if (part != null) {
-                    partEntities.remove(part.getId());
-                }
-            }
-        }
-    }
 
     //清理空的客户端 EntitySection
     private static void removeClientSectionIfEmpty(ClientLevel clientLevel, Entity entity) {

@@ -65,7 +65,6 @@ public final class VarHandleUtil {
     public static VarHandle VH_CLIENT_LEVEL_TICKING_ENTITIES;
     public static VarHandle VH_CLIENT_LEVEL_ENTITY_STORAGE;
     public static VarHandle VH_CLIENT_LEVEL_PLAYERS;
-    public static VarHandle VH_CLIENT_LEVEL_PART_ENTITIES;
     public static VarHandle VH_TRANSIENT_ENTITY_MANAGER_ENTITY_STORAGE;
     public static VarHandle VH_TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE;
     public static VarHandle VH_BOSS_HEALTH_OVERLAY_EVENTS;
@@ -159,102 +158,148 @@ public final class VarHandleUtil {
 
     private static void initServerRemovalHandles() throws Exception {
         // ServerLevel
-        Field playersField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.players"));
-        Field chunkSourceField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.chunkSource"));
-        Field entityTickListField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.entityTickList"));
-        Field entityManagerField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.entityManager"));
-        Field navigatingMobsField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.navigatingMobs"));
+        try {
+            Field playersField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.players"));
+            Field chunkSourceField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.chunkSource"));
+            Field entityTickListField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.entityTickList"));
+            Field entityManagerField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.entityManager"));
+            Field navigatingMobsField = ObfuscationReflectionHelper.findField(ServerLevel.class, ObfuscationMapping.getFieldMapping("ServerLevel.navigatingMobs"));
 
-        MethodHandles.Lookup serverLevelLookup = MethodHandles.privateLookupIn(ServerLevel.class, MethodHandles.lookup());
-        VH_SERVER_LEVEL_PLAYERS = serverLevelLookup.unreflectVarHandle(playersField);
-        VH_SERVER_LEVEL_CHUNK_SOURCE = serverLevelLookup.unreflectVarHandle(chunkSourceField);
-        VH_SERVER_LEVEL_ENTITY_TICK_LIST = serverLevelLookup.unreflectVarHandle(entityTickListField);
-        VH_SERVER_LEVEL_ENTITY_MANAGER = serverLevelLookup.unreflectVarHandle(entityManagerField);
-        VH_SERVER_LEVEL_NAVIGATING_MOBS = serverLevelLookup.unreflectVarHandle(navigatingMobsField);
+            MethodHandles.Lookup serverLevelLookup = MethodHandles.privateLookupIn(ServerLevel.class, MethodHandles.lookup());
+            VH_SERVER_LEVEL_PLAYERS = serverLevelLookup.unreflectVarHandle(playersField);
+            VH_SERVER_LEVEL_CHUNK_SOURCE = serverLevelLookup.unreflectVarHandle(chunkSourceField);
+            VH_SERVER_LEVEL_ENTITY_TICK_LIST = serverLevelLookup.unreflectVarHandle(entityTickListField);
+            VH_SERVER_LEVEL_ENTITY_MANAGER = serverLevelLookup.unreflectVarHandle(entityManagerField);
+            VH_SERVER_LEVEL_NAVIGATING_MOBS = serverLevelLookup.unreflectVarHandle(navigatingMobsField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init ServerLevel handles: {}", e.getMessage());
+        }
 
         // EntityTickList
-        Field activeField = ObfuscationReflectionHelper.findField(EntityTickList.class, ObfuscationMapping.getFieldMapping("EntityTickList.active"));
-        Field passiveField = ObfuscationReflectionHelper.findField(EntityTickList.class, ObfuscationMapping.getFieldMapping("EntityTickList.passive"));
-        Field iteratedField = ObfuscationReflectionHelper.findField(EntityTickList.class, ObfuscationMapping.getFieldMapping("EntityTickList.iterated"));
+        try {
+            Field activeField = ObfuscationReflectionHelper.findField(EntityTickList.class, ObfuscationMapping.getFieldMapping("EntityTickList.active"));
+            Field passiveField = ObfuscationReflectionHelper.findField(EntityTickList.class, ObfuscationMapping.getFieldMapping("EntityTickList.passive"));
+            Field iteratedField = ObfuscationReflectionHelper.findField(EntityTickList.class, ObfuscationMapping.getFieldMapping("EntityTickList.iterated"));
 
-        MethodHandles.Lookup tickListLookup = MethodHandles.privateLookupIn(EntityTickList.class, MethodHandles.lookup());
-        VH_ENTITY_TICK_LIST_ACTIVE = tickListLookup.unreflectVarHandle(activeField);
-        VH_ENTITY_TICK_LIST_PASSIVE = tickListLookup.unreflectVarHandle(passiveField);
-        VH_ENTITY_TICK_LIST_ITERATED = tickListLookup.unreflectVarHandle(iteratedField);
+            MethodHandles.Lookup tickListLookup = MethodHandles.privateLookupIn(EntityTickList.class, MethodHandles.lookup());
+            VH_ENTITY_TICK_LIST_ACTIVE = tickListLookup.unreflectVarHandle(activeField);
+            VH_ENTITY_TICK_LIST_PASSIVE = tickListLookup.unreflectVarHandle(passiveField);
+            VH_ENTITY_TICK_LIST_ITERATED = tickListLookup.unreflectVarHandle(iteratedField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init EntityTickList handles: {}", e.getMessage());
+        }
 
         // ServerChunkCache
-        Field chunkMapField = ObfuscationReflectionHelper.findField(ServerChunkCache.class, ObfuscationMapping.getFieldMapping("ServerChunkCache.chunkMap"));
-        MethodHandles.Lookup chunkCacheLookup = MethodHandles.privateLookupIn(ServerChunkCache.class, MethodHandles.lookup());
-        VH_SERVER_CHUNK_CACHE_CHUNK_MAP = chunkCacheLookup.unreflectVarHandle(chunkMapField);
+        try {
+            Field chunkMapField = ObfuscationReflectionHelper.findField(ServerChunkCache.class, ObfuscationMapping.getFieldMapping("ServerChunkCache.chunkMap"));
+            MethodHandles.Lookup chunkCacheLookup = MethodHandles.privateLookupIn(ServerChunkCache.class, MethodHandles.lookup());
+            VH_SERVER_CHUNK_CACHE_CHUNK_MAP = chunkCacheLookup.unreflectVarHandle(chunkMapField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init ServerChunkCache handles: {}", e.getMessage());
+        }
 
         // ChunkMap
-        Field entityMapField = ObfuscationReflectionHelper.findField(ChunkMap.class, ObfuscationMapping.getFieldMapping("ChunkMap.entityMap"));
-        MethodHandles.Lookup chunkMapLookup = MethodHandles.privateLookupIn(ChunkMap.class, MethodHandles.lookup());
-        VH_CHUNK_MAP_ENTITY_MAP = chunkMapLookup.unreflectVarHandle(entityMapField);
+        try {
+            Field entityMapField = ObfuscationReflectionHelper.findField(ChunkMap.class, ObfuscationMapping.getFieldMapping("ChunkMap.entityMap"));
+            MethodHandles.Lookup chunkMapLookup = MethodHandles.privateLookupIn(ChunkMap.class, MethodHandles.lookup());
+            VH_CHUNK_MAP_ENTITY_MAP = chunkMapLookup.unreflectVarHandle(entityMapField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init ChunkMap handles: {}", e.getMessage());
+        }
 
         // PersistentEntitySectionManager
-        Field visibleStorageField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.visibleEntityStorage"));
-        Field knownUuidsField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.knownUuids"));
-        Field sectionStorageField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.sectionStorage"));
-        Field callbacksField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.callbacks"));
-        Field loadingInboxField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.loadingInbox"));
+        try {
+            Field visibleStorageField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.visibleEntityStorage"));
+            Field knownUuidsField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.knownUuids"));
+            Field sectionStorageField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.sectionStorage"));
+            Field callbacksField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.callbacks"));
+            Field loadingInboxField = ObfuscationReflectionHelper.findField(PersistentEntitySectionManager.class, ObfuscationMapping.getFieldMapping("PersistentEntitySectionManager.loadingInbox"));
 
-        MethodHandles.Lookup persistentLookup = MethodHandles.privateLookupIn(PersistentEntitySectionManager.class, MethodHandles.lookup());
-        VH_PERSISTENT_ENTITY_MANAGER_VISIBLE_STORAGE = persistentLookup.unreflectVarHandle(visibleStorageField);
-        VH_PERSISTENT_ENTITY_MANAGER_KNOWN_UUIDS = persistentLookup.unreflectVarHandle(knownUuidsField);
-        VH_PERSISTENT_ENTITY_MANAGER_SECTION_STORAGE = persistentLookup.unreflectVarHandle(sectionStorageField);
-        VH_PERSISTENT_ENTITY_MANAGER_CALLBACKS = persistentLookup.unreflectVarHandle(callbacksField);
-        VH_PERSISTENT_ENTITY_MANAGER_LOADING_INBOX = persistentLookup.unreflectVarHandle(loadingInboxField);
+            MethodHandles.Lookup persistentLookup = MethodHandles.privateLookupIn(PersistentEntitySectionManager.class, MethodHandles.lookup());
+            VH_PERSISTENT_ENTITY_MANAGER_VISIBLE_STORAGE = persistentLookup.unreflectVarHandle(visibleStorageField);
+            VH_PERSISTENT_ENTITY_MANAGER_KNOWN_UUIDS = persistentLookup.unreflectVarHandle(knownUuidsField);
+            VH_PERSISTENT_ENTITY_MANAGER_SECTION_STORAGE = persistentLookup.unreflectVarHandle(sectionStorageField);
+            VH_PERSISTENT_ENTITY_MANAGER_CALLBACKS = persistentLookup.unreflectVarHandle(callbacksField);
+            VH_PERSISTENT_ENTITY_MANAGER_LOADING_INBOX = persistentLookup.unreflectVarHandle(loadingInboxField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init PersistentEntitySectionManager handles: {}", e.getMessage());
+        }
 
         // EntityLookup
-        Field byUuidField = ObfuscationReflectionHelper.findField(EntityLookup.class, ObfuscationMapping.getFieldMapping("EntityLookup.byUuid"));
-        Field byIdField = ObfuscationReflectionHelper.findField(EntityLookup.class, ObfuscationMapping.getFieldMapping("EntityLookup.byId"));
+        try {
+            Field byUuidField = ObfuscationReflectionHelper.findField(EntityLookup.class, ObfuscationMapping.getFieldMapping("EntityLookup.byUuid"));
+            Field byIdField = ObfuscationReflectionHelper.findField(EntityLookup.class, ObfuscationMapping.getFieldMapping("EntityLookup.byId"));
 
-        MethodHandles.Lookup lookupLookup = MethodHandles.privateLookupIn(EntityLookup.class, MethodHandles.lookup());
-        VH_ENTITY_LOOKUP_BY_UUID = lookupLookup.unreflectVarHandle(byUuidField);
-        VH_ENTITY_LOOKUP_BY_ID = lookupLookup.unreflectVarHandle(byIdField);
+            MethodHandles.Lookup lookupLookup = MethodHandles.privateLookupIn(EntityLookup.class, MethodHandles.lookup());
+            VH_ENTITY_LOOKUP_BY_UUID = lookupLookup.unreflectVarHandle(byUuidField);
+            VH_ENTITY_LOOKUP_BY_ID = lookupLookup.unreflectVarHandle(byIdField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init EntityLookup handles: {}", e.getMessage());
+        }
 
         // EntitySectionStorage
-        Field sectionsField = ObfuscationReflectionHelper.findField(EntitySectionStorage.class, ObfuscationMapping.getFieldMapping("EntitySectionStorage.sections"));
-        MethodHandles.Lookup sectionStorageLookup = MethodHandles.privateLookupIn(EntitySectionStorage.class, MethodHandles.lookup());
-        VH_ENTITY_SECTION_STORAGE_SECTIONS = sectionStorageLookup.unreflectVarHandle(sectionsField);
+        try {
+            Field sectionsField = ObfuscationReflectionHelper.findField(EntitySectionStorage.class, ObfuscationMapping.getFieldMapping("EntitySectionStorage.sections"));
+            MethodHandles.Lookup sectionStorageLookup = MethodHandles.privateLookupIn(EntitySectionStorage.class, MethodHandles.lookup());
+            VH_ENTITY_SECTION_STORAGE_SECTIONS = sectionStorageLookup.unreflectVarHandle(sectionsField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init EntitySectionStorage handles: {}", e.getMessage());
+        }
 
         // EntitySection
-        Field storageField = ObfuscationReflectionHelper.findField(EntitySection.class, ObfuscationMapping.getFieldMapping("EntitySection.storage"));
-        MethodHandles.Lookup sectionLookup = MethodHandles.privateLookupIn(EntitySection.class, MethodHandles.lookup());
-        VH_ENTITY_SECTION_STORAGE = sectionLookup.unreflectVarHandle(storageField);
+        try {
+            Field storageField = ObfuscationReflectionHelper.findField(EntitySection.class, ObfuscationMapping.getFieldMapping("EntitySection.storage"));
+            MethodHandles.Lookup sectionLookup = MethodHandles.privateLookupIn(EntitySection.class, MethodHandles.lookup());
+            VH_ENTITY_SECTION_STORAGE = sectionLookup.unreflectVarHandle(storageField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init EntitySection handles: {}", e.getMessage());
+        }
 
         // ClassInstanceMultiMap
-        Field byClassField = ObfuscationReflectionHelper.findField(ClassInstanceMultiMap.class, ObfuscationMapping.getFieldMapping("ClassInstanceMultiMap.byClass"));
-        MethodHandles.Lookup multiMapLookup = MethodHandles.privateLookupIn(ClassInstanceMultiMap.class, MethodHandles.lookup());
-        VH_CLASS_INSTANCE_MULTI_MAP_BY_CLASS = multiMapLookup.unreflectVarHandle(byClassField);
+        try {
+            Field byClassField = ObfuscationReflectionHelper.findField(ClassInstanceMultiMap.class, ObfuscationMapping.getFieldMapping("ClassInstanceMultiMap.byClass"));
+            MethodHandles.Lookup multiMapLookup = MethodHandles.privateLookupIn(ClassInstanceMultiMap.class, MethodHandles.lookup());
+            VH_CLASS_INSTANCE_MULTI_MAP_BY_CLASS = multiMapLookup.unreflectVarHandle(byClassField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init ClassInstanceMultiMap handles: {}", e.getMessage());
+        }
     }
 
     private static void initClientRemovalHandles() throws Exception {
         // ClientLevel
-        Field tickingEntitiesField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.tickingEntities"));
-        Field entityStorageField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.entityStorage"));
-        Field playersField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.players"));
-        Field partEntitiesField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.partEntities"));
+        try {
+            Field tickingEntitiesField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.tickingEntities"));
+            Field entityStorageField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.entityStorage"));
+            Field playersField = ObfuscationReflectionHelper.findField(ClientLevel.class, ObfuscationMapping.getFieldMapping("ClientLevel.players"));
 
-        MethodHandles.Lookup clientLevelLookup = MethodHandles.privateLookupIn(ClientLevel.class, MethodHandles.lookup());
-        VH_CLIENT_LEVEL_TICKING_ENTITIES = clientLevelLookup.unreflectVarHandle(tickingEntitiesField);
-        VH_CLIENT_LEVEL_ENTITY_STORAGE = clientLevelLookup.unreflectVarHandle(entityStorageField);
-        VH_CLIENT_LEVEL_PLAYERS = clientLevelLookup.unreflectVarHandle(playersField);
-        VH_CLIENT_LEVEL_PART_ENTITIES = clientLevelLookup.unreflectVarHandle(partEntitiesField);
+            MethodHandles.Lookup clientLevelLookup = MethodHandles.privateLookupIn(ClientLevel.class, MethodHandles.lookup());
+            VH_CLIENT_LEVEL_TICKING_ENTITIES = clientLevelLookup.unreflectVarHandle(tickingEntitiesField);
+            VH_CLIENT_LEVEL_ENTITY_STORAGE = clientLevelLookup.unreflectVarHandle(entityStorageField);
+            VH_CLIENT_LEVEL_PLAYERS = clientLevelLookup.unreflectVarHandle(playersField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init ClientLevel handles: {}", e.getMessage());
+        }
 
         // TransientEntitySectionManager
-        Field transientEntityStorageField = ObfuscationReflectionHelper.findField(TransientEntitySectionManager.class, ObfuscationMapping.getFieldMapping("TransientEntitySectionManager.entityStorage"));
-        Field transientSectionStorageField = ObfuscationReflectionHelper.findField(TransientEntitySectionManager.class, ObfuscationMapping.getFieldMapping("TransientEntitySectionManager.sectionStorage"));
+        try {
+            Field transientEntityStorageField = ObfuscationReflectionHelper.findField(TransientEntitySectionManager.class, ObfuscationMapping.getFieldMapping("TransientEntitySectionManager.entityStorage"));
+            Field transientSectionStorageField = ObfuscationReflectionHelper.findField(TransientEntitySectionManager.class, ObfuscationMapping.getFieldMapping("TransientEntitySectionManager.sectionStorage"));
 
-        MethodHandles.Lookup transientLookup = MethodHandles.privateLookupIn(TransientEntitySectionManager.class, MethodHandles.lookup());
-        VH_TRANSIENT_ENTITY_MANAGER_ENTITY_STORAGE = transientLookup.unreflectVarHandle(transientEntityStorageField);
-        VH_TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE = transientLookup.unreflectVarHandle(transientSectionStorageField);
+            MethodHandles.Lookup transientLookup = MethodHandles.privateLookupIn(TransientEntitySectionManager.class, MethodHandles.lookup());
+            VH_TRANSIENT_ENTITY_MANAGER_ENTITY_STORAGE = transientLookup.unreflectVarHandle(transientEntityStorageField);
+            VH_TRANSIENT_ENTITY_MANAGER_SECTION_STORAGE = transientLookup.unreflectVarHandle(transientSectionStorageField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init TransientEntitySectionManager handles: {}", e.getMessage());
+        }
 
         // BossHealthOverlay
-        Field bossEventsField = ObfuscationReflectionHelper.findField(BossHealthOverlay.class, ObfuscationMapping.getFieldMapping("BossHealthOverlay.events"));
-        MethodHandles.Lookup bossOverlayLookup = MethodHandles.privateLookupIn(BossHealthOverlay.class, MethodHandles.lookup());
-        VH_BOSS_HEALTH_OVERLAY_EVENTS = bossOverlayLookup.unreflectVarHandle(bossEventsField);
+        try {
+            Field bossEventsField = ObfuscationReflectionHelper.findField(BossHealthOverlay.class, ObfuscationMapping.getFieldMapping("BossHealthOverlay.events"));
+            MethodHandles.Lookup bossOverlayLookup = MethodHandles.privateLookupIn(BossHealthOverlay.class, MethodHandles.lookup());
+            VH_BOSS_HEALTH_OVERLAY_EVENTS = bossOverlayLookup.unreflectVarHandle(bossEventsField);
+        } catch (Exception e) {
+            EcaLogger.info("[VarHandleUtil] Failed to init BossHealthOverlay handles: {}", e.getMessage());
+        }
     }
 
     // ==================== 通用工具方法 ====================

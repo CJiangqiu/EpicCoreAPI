@@ -11,7 +11,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.BossHealthOverlay;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.SectionPos;
-import net.minecraftforge.entity.PartEntity;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.player.Player;
@@ -97,7 +96,6 @@ public class LwjglUtil {
     private static long CLIENT_LEVEL_TICKING_ENTITIES_OFFSET = -1;
     private static long CLIENT_LEVEL_ENTITY_STORAGE_OFFSET = -1;
     private static long CLIENT_LEVEL_PLAYERS_OFFSET = -1;
-    private static long CLIENT_LEVEL_PART_ENTITIES_OFFSET = -1;
 
     // BossHealthOverlay 相关
     private static long BOSS_HEALTH_OVERLAY_EVENTS_OFFSET = -1;
@@ -272,9 +270,6 @@ public class LwjglUtil {
                 ObfuscationMapping.getFieldMapping("ClientLevel.entityStorage"));
             CLIENT_LEVEL_PLAYERS_OFFSET = getFieldOffset(ClientLevel.class,
                 ObfuscationMapping.getFieldMapping("ClientLevel.players"));
-            CLIENT_LEVEL_PART_ENTITIES_OFFSET = getFieldOffset(ClientLevel.class,
-                ObfuscationMapping.getFieldMapping("ClientLevel.partEntities"));
-
             // BossHealthOverlay 相关字段
             Class<?> bossOverlayClass = Class.forName("net.minecraft.client.gui.components.BossHealthOverlay");
             BOSS_HEALTH_OVERLAY_EVENTS_OFFSET = getFieldOffset(bossOverlayClass,
@@ -403,10 +398,7 @@ public class LwjglUtil {
             // 3.2 从 players 列表移除
             removeFromClientPlayersViaLwjgl(clientLevel, entity);
 
-            // 3.3 从 partEntities 移除（末影龙等）
-            removeFromClientPartEntitiesViaLwjgl(clientLevel, entity);
-
-            // 3.4 从 EntitySectionStorage 移除
+            // 3.3 从 EntitySectionStorage 移除
             removeFromClientEntitySectionStorageViaLwjgl(clientLevel, entity);
 
             // 3.5 清理空的 EntitySection
@@ -862,27 +854,6 @@ public class LwjglUtil {
             Object events = lwjglGetObject(bossOverlay, BOSS_HEALTH_OVERLAY_EVENTS_OFFSET);
             if (events instanceof Map<?, ?> eventsMap) {
                 eventsMap.clear();
-            }
-        } catch (Exception ignored) {}
-    }
-
-    // 从客户端 partEntities 移除（末影龙等多部分实体）
-    private static void removeFromClientPartEntitiesViaLwjgl(ClientLevel clientLevel, Entity entity) {
-        try {
-            if (CLIENT_LEVEL_PART_ENTITIES_OFFSET < 0) return;
-            if (!entity.isMultipartEntity()) return;
-
-            Int2ObjectMap<Entity> partEntities = (Int2ObjectMap<Entity>)
-                lwjglGetObject(clientLevel, CLIENT_LEVEL_PART_ENTITIES_OFFSET);
-            if (partEntities == null) return;
-
-            PartEntity<?>[] parts = entity.getParts();
-            if (parts != null) {
-                for (PartEntity<?> part : parts) {
-                    if (part != null) {
-                        partEntities.remove(part.getId());
-                    }
-                }
             }
         } catch (Exception ignored) {}
     }
