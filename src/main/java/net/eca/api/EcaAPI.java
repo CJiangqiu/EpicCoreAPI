@@ -1,6 +1,7 @@
 package net.eca.api;
 
 import net.eca.agent.EcaAgent;
+import net.eca.agent.PackageWhitelist;
 import net.eca.agent.ReturnToggle;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
@@ -605,6 +606,48 @@ public final class EcaAPI {
             fallback = clazz;
         }
         return fallback;
+    }
+
+    // ==================== 包名白名单 API ====================
+
+    // 添加受保护的包名前缀（保护 mod 免受 AllReturn 等危险操作影响）
+    /**
+     * Add a protected package prefix to the whitelist.
+     * Classes in protected packages will not be affected by AllReturn and other dangerous operations.
+     * @param packagePrefix the package prefix to protect (e.g., "com.yourmod.")
+     */
+    public static void addProtectedPackage(String packagePrefix) {
+        PackageWhitelist.addProtection(packagePrefix);
+    }
+
+    // 移除受保护的包名前缀（不能移除内置保护）
+    /**
+     * Remove a protected package prefix from the whitelist.
+     * Built-in protections (JDK, Minecraft, Forge, etc.) cannot be removed.
+     * @param packagePrefix the package prefix to unprotect
+     * @return true if successfully removed, false if it was a built-in protection or not found
+     */
+    public static boolean removeProtectedPackage(String packagePrefix) {
+        return PackageWhitelist.removeProtection(packagePrefix);
+    }
+
+    // 检查包名是否受保护
+    /**
+     * Check if a class is protected by the whitelist.
+     * @param className the binary class name (e.g., "com.yourmod.MyClass")
+     * @return true if the class is protected
+     */
+    public static boolean isPackageProtected(String className) {
+        return PackageWhitelist.isProtectedBinary(className);
+    }
+
+    // 获取所有受保护的包名前缀
+    /**
+     * Get all protected package prefixes (built-in + custom).
+     * @return unmodifiable set of all protected prefixes
+     */
+    public static Set<String> getAllProtectedPackages() {
+        return PackageWhitelist.getAll();
     }
 
     //AllReturn 内部方法

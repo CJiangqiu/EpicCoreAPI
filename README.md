@@ -77,7 +77,10 @@ side="BOTH"
 - `setGlobalAllReturn(enable)` - DANGER! Requires Attack Radical Logic config. Enable/disable global AllReturn for all non-whitelisted mods
 - `disableAllReturn()` - Disable AllReturn and clear targets
 - `isAllReturnEnabled()` - Check if AllReturn is enabled
-- `PackageWhitelist.addProtection(prefix)` - Add custom package prefix to whitelist (e.g., "com.example.")
+- `addProtectedPackage(prefix)` - Add custom package prefix to whitelist, protecting it from AllReturn (e.g., "com.yourmod.")
+- `removeProtectedPackage(prefix)` - Remove custom package prefix from whitelist (built-in protections cannot be removed)
+- `isPackageProtected(className)` - Check if a class is protected by the whitelist
+- `getAllProtectedPackages()` - Get all protected package prefixes (built-in + custom)
 - `addSpawnBan(level, entityType, seconds)` - Ban entity type from spawning for specified duration
 - `isSpawnBanned(level, entityType)` - Check if entity type is banned from spawning
 - `getSpawnBanTime(level, entityType)` - Get remaining spawn ban time in seconds
@@ -119,10 +122,9 @@ EcaAPI.setInvulnerable(entity, false);
 EcaAPI.enableAllReturn(entity);  // Enable for entity's mod
 EcaAPI.setGlobalAllReturn(true);  // Enable for ALL non-whitelisted mods
 boolean enabled = EcaAPI.isAllReturnEnabled();
-EcaAPI.setGlobalAllReturn(false);  // Disable global
 EcaAPI.disableAllReturn();  // Disable and clear all
 
-// Custom Package Whitelist (protect your mod from AllReturn)
+// Custom Package Whitelist
 PackageWhitelist.addProtection("com.yourmod.");
 
 // Spawn Ban
@@ -215,7 +217,10 @@ side="BOTH"
 - `setGlobalAllReturn(enable)` - 危险！需要开启激进攻击逻辑配置，启用/禁用全局AllReturn，影响所有非白名单mod
 - `disableAllReturn()` - 关闭AllReturn并清除目标
 - `isAllReturnEnabled()` - 检查AllReturn是否启用
-- `PackageWhitelist.addProtection(prefix)` - 添加自定义包名前缀到白名单（如 "com.example."）
+- `addProtectedPackage(prefix)` - 添加受保护的包名前缀，使其免受 AllReturn 影响（如 "com.yourmod."）
+- `removeProtectedPackage(prefix)` - 移除自定义包名保护（内置保护名单不能移除）
+- `isPackageProtected(className)` - 检查类是否受白名单保护
+- `getAllProtectedPackages()` - 获取所有受保护的包名前缀（内置保护名单 + 自定义）
 - `addSpawnBan(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
 - `isSpawnBanned(level, entityType)` - 检查实体类型是否被禁生成
 - `getSpawnBanTime(level, entityType)` - 获取禁生成剩余秒数
@@ -257,10 +262,9 @@ EcaAPI.setInvulnerable(entity, false);
 EcaAPI.enableAllReturn(entity);  // 对实体所属mod启用
 EcaAPI.setGlobalAllReturn(true);  // 对所有非白名单mod启用
 boolean enabled = EcaAPI.isAllReturnEnabled();
-EcaAPI.setGlobalAllReturn(false);  // 禁用全局
 EcaAPI.disableAllReturn();  // 关闭并清除全部
 
-// 自定义包名白名单（保护你的mod免受AllReturn影响）
+// 自定义包名白名单
 PackageWhitelist.addProtection("com.yourmod.");
 
 // 禁生成
