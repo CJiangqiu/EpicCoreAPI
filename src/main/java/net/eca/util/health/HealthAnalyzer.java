@@ -1,14 +1,18 @@
 package net.eca.util.health;
 
-import net.eca.agent.PackageWhitelist;
+import net.eca.agent.ReturnToggle.PackageWhitelist;
 import net.eca.util.EcaLogger;
 import org.objectweb.asm.*;
 
 import java.io.IOException;
 import java.io.InputStream;
+import net.minecraft.world.entity.LivingEntity;
+
+import java.lang.invoke.VarHandle;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Stack;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 //Health value analyzer: analyzes getHealth() method implementation and builds reverse formula
@@ -882,6 +886,144 @@ public class HealthAnalyzer {
 
 
             super.visitEnd();
+        }
+    }
+
+    // 生命值字段缓存
+    /**
+     * Cache for entity health field access information.
+     * Stores the analyzed access pattern and transformation formulas for each entity class.
+     */
+    public static class HealthFieldCache {
+
+        // 统一的访问模式
+        /**
+         * Unified access pattern for both fields and containers
+         */
+        public ContainerAccessPattern accessPattern;
+
+        // 逆向公式
+        /**
+         * Reverse transformation formula: converts target health to the value that needs to be written
+         */
+        public Function<Float, Float> reverseTransform;
+
+        // 统一的写入函数
+        /**
+         * Unified write function for modifying health values
+         */
+        public BiFunction<LivingEntity, Float, Boolean> writePath;
+
+        // 容器检测标志
+        /**
+         * Container detection flag (used for active scanning)
+         */
+        public boolean containerDetected = false;
+
+        // 容器类名
+        /**
+         * Container class name (for HashMap, etc.)
+         */
+        public String containerClass;
+
+        // 容器getter方法名
+        /**
+         * Container getter method name
+         */
+        public String containerGetterMethod;
+
+        // 容器类型
+        /**
+         * Container type (HashMap, WeakHashMap, etc.)
+         */
+        public String containerType;
+    }
+
+    // 容器访问模式
+    /**
+     * Container access pattern for describing how to access and modify values in containers.
+     * Supports various container types including HashMap, EntityData, and ArrayList.
+     */
+    public static class ContainerAccessPattern {
+
+        // 容器获取器
+        /**
+         * Container getter (static method/instance field/static field)
+         */
+        public ContainerGetter containerGetter;
+
+        // Key构造器
+        /**
+         * Key builder (this/getId()/static field/instance field)
+         */
+        public KeyBuilder keyBuilder;
+
+        // 值定位器
+        /**
+         * Value locator: finds the value holder object based on container and key
+         */
+        public ValueLocator valueLocator;
+
+        // 值的VarHandle
+        /**
+         * VarHandle for the value field
+         */
+        public VarHandle valueHandle;
+
+        // 是否是数组元素访问
+        /**
+         * Flag indicating whether this is an array element access (ArrayList, etc.)
+         */
+        public boolean isArrayElement;
+
+        // 容器获取器接口
+        /**
+         * Functional interface for getting the container from an entity.
+         */
+        @FunctionalInterface
+        public interface ContainerGetter {
+            /**
+             * Get the container from the entity.
+             * @param entity the living entity
+             * @return the container object
+             * @throws Exception if container cannot be retrieved
+             */
+            Object getContainer(LivingEntity entity) throws Exception;
+        }
+
+        // Key构造器接口
+        /**
+         * Functional interface for building the key from an entity.
+         */
+        @FunctionalInterface
+        public interface KeyBuilder {
+            /**
+             * Build the key from the entity.
+             * @param entity the living entity
+             * @return the key object
+             * @throws Exception if key cannot be built
+             */
+            Object buildKey(LivingEntity entity) throws Exception;
+        }
+
+        // 值定位器接口
+        /**
+         * Functional interface for locating the value holder object.
+         */
+        @FunctionalInterface
+        public interface ValueLocator {
+            /**
+             * Locate the value holder object.
+             * For HashMap: returns the Node
+             * For ArrayList: returns the elementData array
+             * For EntityData: returns the DataItem
+             * For field: returns the Entity itself
+             * @param container the container object
+             * @param key the key object
+             * @return the value holder object
+             * @throws Exception if value holder cannot be located
+             */
+            Object locateValueHolder(Object container, Object key) throws Exception;
         }
     }
 }

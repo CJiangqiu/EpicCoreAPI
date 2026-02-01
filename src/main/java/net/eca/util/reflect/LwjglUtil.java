@@ -18,6 +18,7 @@ import net.minecraft.world.level.entity.*;
 import net.minecraft.util.ClassInstanceMultiMap;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
 import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -550,7 +551,7 @@ public class LwjglUtil {
         } catch (Exception ignored) {}
     }
 
-    // 从 EntityTickList (active + passive) 移除
+    // 从 EntityTickList (active + passive) 移除（仿照原版 ensureActiveIsNotIterated + remove 逻辑）
     private static void removeFromEntityTickListViaLwjgl(ServerLevel serverLevel, int entityId) {
         try {
             if (SERVER_LEVEL_ENTITY_TICK_LIST_OFFSET < 0) return;
@@ -558,7 +559,6 @@ public class LwjglUtil {
             Object entityTickList = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_TICK_LIST_OFFSET);
             if (entityTickList == null) return;
 
-            // 获取 active、passive、iterated
             Int2ObjectLinkedOpenHashMap<Entity> active = null;
             Int2ObjectLinkedOpenHashMap<Entity> passive = null;
             Object iterated = null;
@@ -577,23 +577,18 @@ public class LwjglUtil {
 
             if (active == null || passive == null) return;
 
-            // 检查是否正在迭代 active
+            // 仿照原版 ensureActiveIsNotIterated：绝不修改正在被遍历的 map
             if (iterated == active) {
-                // 正在迭代，使用双缓冲切换
                 passive.clear();
-                for (Int2ObjectMap.Entry<Entity> entry : active.int2ObjectEntrySet()) {
-                    int id = entry.getIntKey();
-                    if (id != entityId) {
-                        passive.put(id, entry.getValue());
-                    }
+                for (Int2ObjectMap.Entry<Entity> entry : Int2ObjectMaps.fastIterable(active)) {
+                    passive.put(entry.getIntKey(), entry.getValue());
                 }
-                // 交换 active 和 passive
                 lwjglPutObject(entityTickList, ENTITY_TICK_LIST_ACTIVE_OFFSET, passive);
                 lwjglPutObject(entityTickList, ENTITY_TICK_LIST_PASSIVE_OFFSET, active);
-            } else {
-                // 未在迭代，直接删除
-                active.remove(entityId);
+                active = passive;
             }
+
+            active.remove(entityId);
         } catch (Exception ignored) {}
     }
 
@@ -710,7 +705,7 @@ public class LwjglUtil {
 
     // ==================== 客户端底层容器清除 ====================
 
-    // 从客户端 EntityTickList 移除
+    // 从客户端 EntityTickList 移除（仿照原版 ensureActiveIsNotIterated + remove 逻辑）
     private static void removeFromClientTickListViaLwjgl(ClientLevel clientLevel, int entityId) {
         try {
             if (CLIENT_LEVEL_TICKING_ENTITIES_OFFSET < 0) return;
@@ -718,7 +713,6 @@ public class LwjglUtil {
             Object entityTickList = lwjglGetObject(clientLevel, CLIENT_LEVEL_TICKING_ENTITIES_OFFSET);
             if (entityTickList == null) return;
 
-            // 获取 active、passive、iterated
             Int2ObjectLinkedOpenHashMap<Entity> active = null;
             Int2ObjectLinkedOpenHashMap<Entity> passive = null;
             Object iterated = null;
@@ -737,23 +731,18 @@ public class LwjglUtil {
 
             if (active == null || passive == null) return;
 
-            // 检查是否正在迭代 active（与服务端相同的双缓冲逻辑）
+            // 仿照原版 ensureActiveIsNotIterated：绝不修改正在被遍历的 map
             if (iterated == active) {
-                // 正在迭代，使用双缓冲切换
                 passive.clear();
-                for (Int2ObjectMap.Entry<Entity> entry : active.int2ObjectEntrySet()) {
-                    int id = entry.getIntKey();
-                    if (id != entityId) {
-                        passive.put(id, entry.getValue());
-                    }
+                for (Int2ObjectMap.Entry<Entity> entry : Int2ObjectMaps.fastIterable(active)) {
+                    passive.put(entry.getIntKey(), entry.getValue());
                 }
-                // 交换 active 和 passive
                 lwjglPutObject(entityTickList, ENTITY_TICK_LIST_ACTIVE_OFFSET, passive);
                 lwjglPutObject(entityTickList, ENTITY_TICK_LIST_PASSIVE_OFFSET, active);
-            } else {
-                // 未在迭代，直接删除
-                active.remove(entityId);
+                active = passive;
             }
+
+            active.remove(entityId);
         } catch (Exception ignored) {}
     }
 

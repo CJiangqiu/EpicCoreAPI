@@ -3,7 +3,7 @@ package net.eca.util;
 import net.eca.config.EcaConfiguration;
 import net.eca.network.EcaClientRemovePacket;
 import net.eca.network.NetworkHandler;
-import net.eca.util.health.HealthFieldCache;
+import net.eca.util.health.HealthAnalyzer.HealthFieldCache;
 import net.eca.util.health.HealthAnalyzerManager;
 import net.eca.util.reflect.VarHandleUtil;
 import net.minecraft.network.syncher.EntityDataSerializer;
@@ -30,6 +30,7 @@ import net.minecraft.network.protocol.game.ClientboundBossEventPacket;
 import net.minecraft.core.SectionPos;
 import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
@@ -836,12 +837,17 @@ public class EntityUtil {
         if (entity == null) return;
 
         try {
+            // 清除死亡标志
             if (VH_DEAD != null) {
                 VH_DEAD.set(entity, false);
             }
+            // 重置死亡时间
             if (VH_DEATH_TIME != null) {
                 VH_DEATH_TIME.set(entity, 0);
             }
+            // 安全清除移除原因（保护维度切换和区块卸载）
+            clearRemovalReasonIfProtected(entity);
+            // 恢复满血
             setHealth(entity, entity.getMaxHealth());
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to revive entity: {}", e.getMessage());
@@ -1101,7 +1107,7 @@ public class EntityUtil {
         }
     }
 
-    //从 EntityTickList.active、passive、iterated 移除（使用双缓冲机制）
+    //从 EntityTickList.active、passive、iterated 移除（仿照原版 ensureActiveIsNotIterated + remove 逻辑）
     private static void removeFromEntityTickList(ServerLevel serverLevel, int entityId) {
         if (VH_SERVER_LEVEL_ENTITY_TICK_LIST == null) return;
 
@@ -1114,23 +1120,21 @@ public class EntityUtil {
 
         if (active == null || passive == null) return;
 
-        if (iterated != null) {
-            iterated.remove(entityId);
-        }
-
+        // 仿照原版 ensureActiveIsNotIterated：如果正在遍历 active，先完整复制到 passive 再交换
+        // 绝不直接修改正在被遍历的 map
         if (iterated == active) {
             passive.clear();
-            for (Int2ObjectMap.Entry<Entity> entry : active.int2ObjectEntrySet()) {
-                int id = entry.getIntKey();
-                if (id != entityId) {
-                    passive.put(id, entry.getValue());
-                }
+            for (Int2ObjectMap.Entry<Entity> entry : Int2ObjectMaps.fastIterable(active)) {
+                passive.put(entry.getIntKey(), entry.getValue());
             }
             VH_ENTITY_TICK_LIST_ACTIVE.set(entityTickList, passive);
             VH_ENTITY_TICK_LIST_PASSIVE.set(entityTickList, active);
-        } else {
-            active.remove(entityId);
+            // 交换后 active 引用已变，重新读取新的 active
+            active = passive;
         }
+
+        // 在新的 active 上安全移除（此时 active 不是被遍历的 map）
+        active.remove(entityId);
     }
 
     //从 EntityLookup (byUuid + byId) 移除
@@ -1236,7 +1240,7 @@ public class EntityUtil {
         }
     }
 
-    //从客户端 EntityTickList 移除（双缓冲机制）
+    //从客户端 EntityTickList 移除（仿照原版 ensureActiveIsNotIterated + remove 逻辑）
     private static void removeFromClientEntityTickList(ClientLevel clientLevel, int entityId) {
         if (VH_CLIENT_LEVEL_TICKING_ENTITIES == null) return;
 
@@ -1249,23 +1253,20 @@ public class EntityUtil {
 
         if (active == null || passive == null) return;
 
-        if (iterated != null) {
-            iterated.remove(entityId);
-        }
-
+        // 仿照原版 ensureActiveIsNotIterated：如果正在遍历 active，先完整复制到 passive 再交换
+        // 绝不直接修改正在被遍历的 map
         if (iterated == active) {
             passive.clear();
-            for (Int2ObjectMap.Entry<Entity> entry : active.int2ObjectEntrySet()) {
-                int id = entry.getIntKey();
-                if (id != entityId) {
-                    passive.put(id, entry.getValue());
-                }
+            for (Int2ObjectMap.Entry<Entity> entry : Int2ObjectMaps.fastIterable(active)) {
+                passive.put(entry.getIntKey(), entry.getValue());
             }
             VH_ENTITY_TICK_LIST_ACTIVE.set(entityTickList, passive);
             VH_ENTITY_TICK_LIST_PASSIVE.set(entityTickList, active);
-        } else {
-            active.remove(entityId);
+            active = passive;
         }
+
+        // 在新的 active 上安全移除
+        active.remove(entityId);
     }
 
     //从客户端 EntityLookup (byUuid + byId) 移除

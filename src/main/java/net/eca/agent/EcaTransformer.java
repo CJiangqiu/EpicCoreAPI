@@ -101,14 +101,21 @@ public class EcaTransformer implements ClassFileTransformer {
         return transformed ? currentBuffer : null;
     }
 
-    // 判断是否应该跳过该类
+    // 判断是否应该跳过该类（仅跳过 JDK 和 ECA 自身，各模块自行决定其他过滤）
     /**
      * Check if the class should be skipped.
+     * Only skips JDK internals and ECA agent classes.
+     * Each module handles its own package filtering via shouldTransform().
      * @param className the internal class name
      * @return true if the class should be skipped
      */
     private boolean shouldSkipClass(String className) {
-        return PackageWhitelist.isProtected(className);
+        return className.startsWith("java/") ||
+               className.startsWith("javax/") ||
+               className.startsWith("sun/") ||
+               className.startsWith("jdk/") ||
+               className.startsWith("com/sun/") ||
+               className.startsWith("net/eca/agent/");
     }
 
     private EcaTransformer() {}

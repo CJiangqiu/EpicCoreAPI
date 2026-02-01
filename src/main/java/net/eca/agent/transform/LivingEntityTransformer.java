@@ -4,7 +4,6 @@ import net.eca.agent.AgentLogWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
@@ -20,19 +19,22 @@ public class LivingEntityTransformer implements ITransformModule {
     private static final String GET_HEALTH_METHOD_NAME = "m_21223_";
     private static final String GET_HEALTH_METHOD_DESC = "()F";
 
+    // isDeadOrDying()/isAlive() methods (SRG names)
+    private static final String IS_DEAD_OR_DYING_METHOD_NAME = "m_21224_";
+    private static final String IS_DEAD_OR_DYING_METHOD_DESC = "()Z";
+    private static final String IS_ALIVE_METHOD_NAME = "m_6084_";
+    private static final String IS_ALIVE_METHOD_DESC = "()Z";
+
     // Hook处理器类（由使用者设置）
-    private static String hookClassName = "net/eca/util/health/GetHealthHook";
+    private static String hookClassName = "net/eca/util/health/LivingEntityHook";
     private static String hookMethodName = "processGetHealth";
     private static String hookMethodDesc = "(Lnet/minecraft/world/entity/LivingEntity;F)F";
 
+    private static final String STATUS_HOOK_CLASS_NAME = "net/eca/util/health/LivingEntityHook";
+    private static final String STATUS_HOOK_METHOD_DESC = "(Lnet/minecraft/world/entity/LivingEntity;Z)Z";
+
     // 转换计数器（用于验证转换是否生效）
     private static volatile int transformCount = 0;
-
-    // 标签字段名（用于验证转换是否被拦截）
-    private static final String MARK_FIELD_NAME = "__ECA_LIVING_ENTITY_MARK__";
-
-    // 第一个被转换的类名（用于验证）
-    private static volatile String firstTransformedClass = null;
 
     /**
      * 获取转换计数
@@ -40,14 +42,6 @@ public class LivingEntityTransformer implements ITransformModule {
      */
     public static int getTransformCount() {
         return transformCount;
-    }
-
-    /**
-     * 获取第一个被转换的类名
-     * @return 第一个被转换的类名，如果没有则返回null
-     */
-    public static String getFirstTransformed() {
-        return firstTransformedClass;
     }
 
     // 设置Hook处理器
@@ -103,16 +97,6 @@ public class LivingEntityTransformer implements ITransformModule {
     }
 
     @Override
-    public String getMarkFieldName() {
-        return MARK_FIELD_NAME;
-    }
-
-    @Override
-    public String getFirstTransformedClass() {
-        return firstTransformedClass;
-    }
-
-    @Override
     public boolean shouldTransform(String className, ClassLoader classLoader) {
         // 跳过ECA自己的类
         if (className.startsWith("net/eca/")) {
@@ -138,21 +122,12 @@ public class LivingEntityTransformer implements ITransformModule {
             ClassReader cr = new ClassReader(classfileBuffer);
             ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_MAXS);
 
-            // 判断是否是第一个转换的类（需要注入标签）
-            boolean isFirstClass = (firstTransformedClass == null);
-
-            GetHealthClassVisitor cv = new GetHealthClassVisitor(cw, className, isFirstClass);
+            GetHealthClassVisitor cv = new GetHealthClassVisitor(cw, className);
             cr.accept(cv, ClassReader.EXPAND_FRAMES);
 
             if (cv.transformed) {
                 byte[] transformedBytes = cw.toByteArray();
                 transformCount++;
-
-                // 记录第一个被转换的类
-                if (isFirstClass) {
-                    firstTransformedClass = className.replace('/', '.');
-                    AgentLogWriter.info("[LivingEntityTransformer] First transformed class: " + firstTransformedClass + " (mark field injected)");
-                }
 
                 AgentLogWriter.info("[LivingEntityTransformer] Hooked getHealth() in: " + className + " (total: " + transformCount + ")");
                 return transformedBytes;
@@ -175,7 +150,9 @@ public class LivingEntityTransformer implements ITransformModule {
 
         @Override
         public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
-            if (name.equals(GET_HEALTH_METHOD_NAME) && descriptor.equals(GET_HEALTH_METHOD_DESC)) {
+            if ((name.equals(GET_HEALTH_METHOD_NAME) && descriptor.equals(GET_HEALTH_METHOD_DESC)) ||
+                (name.equals(IS_DEAD_OR_DYING_METHOD_NAME) && descriptor.equals(IS_DEAD_OR_DYING_METHOD_DESC)) ||
+                (name.equals(IS_ALIVE_METHOD_NAME) && descriptor.equals(IS_ALIVE_METHOD_DESC))) {
                 hasTargetMethod = true;
             }
             return null;
@@ -198,13 +175,14 @@ public class LivingEntityTransformer implements ITransformModule {
     // ClassVisitor：遍历类的所有方法
     private static class GetHealthClassVisitor extends ClassVisitor {
         private final String className;
-        private final boolean injectMark;
         public boolean transformed = false;
+        public boolean hookedGetHealth = false;
+        public boolean hookedIsDeadOrDying = false;
+        public boolean hookedIsAlive = false;
 
-        GetHealthClassVisitor(ClassWriter cw, String className, boolean injectMark) {
+        GetHealthClassVisitor(ClassWriter cw, String className) {
             super(Opcodes.ASM9, cw);
             this.className = className;
-            this.injectMark = injectMark;
         }
 
         @Override
@@ -213,7 +191,20 @@ public class LivingEntityTransformer implements ITransformModule {
 
             if (name.equals(GET_HEALTH_METHOD_NAME) && descriptor.equals(GET_HEALTH_METHOD_DESC)) {
                 transformed = true;
+                hookedGetHealth = true;
                 return new GetHealthMethodVisitor(mv, className);
+            }
+
+            if (name.equals(IS_DEAD_OR_DYING_METHOD_NAME) && descriptor.equals(IS_DEAD_OR_DYING_METHOD_DESC)) {
+                transformed = true;
+                hookedIsDeadOrDying = true;
+                return new BooleanStatusMethodVisitor(mv, "processIsDeadOrDying");
+            }
+
+            if (name.equals(IS_ALIVE_METHOD_NAME) && descriptor.equals(IS_ALIVE_METHOD_DESC)) {
+                transformed = true;
+                hookedIsAlive = true;
+                return new BooleanStatusMethodVisitor(mv, "processIsAlive");
             }
 
             return mv;
@@ -221,10 +212,6 @@ public class LivingEntityTransformer implements ITransformModule {
 
         @Override
         public void visitEnd() {
-            // 如果是第一个转换的类，注入标签字段
-            if (injectMark && transformed) {
-                ITransformModule.injectMarkField(cv, MARK_FIELD_NAME);
-            }
             super.visitEnd();
         }
     }
@@ -250,6 +237,32 @@ public class LivingEntityTransformer implements ITransformModule {
                         hookClassName,
                         hookMethodName,
                         hookMethodDesc,
+                        false
+                );
+            }
+            super.visitInsn(opcode);
+        }
+    }
+
+    private static class BooleanStatusMethodVisitor extends MethodVisitor {
+        private final String hookMethod;
+
+        BooleanStatusMethodVisitor(MethodVisitor mv, String hookMethod) {
+            super(Opcodes.ASM9, mv);
+            this.hookMethod = hookMethod;
+        }
+
+        @Override
+        public void visitInsn(int opcode) {
+            if (opcode == Opcodes.IRETURN) {
+                // Stack: [originalBool] -> [this, originalBool] -> [finalBool]
+                mv.visitVarInsn(Opcodes.ALOAD, 0);
+                mv.visitInsn(Opcodes.SWAP);
+                mv.visitMethodInsn(
+                        Opcodes.INVOKESTATIC,
+                        STATUS_HOOK_CLASS_NAME,
+                        hookMethod,
+                        STATUS_HOOK_METHOD_DESC,
                         false
                 );
             }

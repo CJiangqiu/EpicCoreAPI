@@ -1,12 +1,16 @@
 package net.eca;
 
 import net.eca.agent.AgentLoader;
+import net.eca.agent.BytecodeVerifier;
 import net.eca.agent.EcaAgent;
+import net.eca.agent.EcaTransformer;
 import net.eca.agent.ReturnToggle;
+import net.eca.config.EcaConfiguration;
 import net.eca.event.EcaEventHandler;
 import net.eca.init.ModConfigs;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
@@ -15,7 +19,9 @@ import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import net.minecraftforge.forgespi.language.IModInfo;
 
 import java.lang.instrument.Instrumentation;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 @SuppressWarnings("removal")
@@ -67,7 +73,74 @@ public final class EcaMod {
      */
     private void onLoadComplete(FMLLoadCompleteEvent event) {
         loadComplete = true;
-        EcaLogger.info("Forge load complete,start check");
+        EcaLogger.info("Forge load complete");
+
+        // 激进防御：重新注册 transformer 并 retransform LivingEntity 类
+        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+            event.enqueueWork(this::triggerLivingEntityRetransform);
+        }
+    }
+
+    // 标志：是否已执行过延迟 retransform
+    private static volatile boolean hasDelayedRetransform = false;
+
+    /**
+     * 触发 LivingEntity 相关类的延迟 retransform
+     * 通过重新注册 transformer 确保 ECA 的修改优先级最高
+     */
+    private void triggerLivingEntityRetransform() {
+        if (hasDelayedRetransform) {
+            return;
+        }
+
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst == null) {
+            EcaLogger.warn("Cannot trigger delayed retransform: Instrumentation not available");
+            return;
+        }
+
+        EcaTransformer transformer = EcaTransformer.getInstance();
+        if (transformer == null) {
+            EcaLogger.warn("Cannot trigger delayed retransform: EcaTransformer not available");
+            return;
+        }
+
+        try {
+            EcaLogger.info("Starting delayed LivingEntity retransform...");
+
+            // 1. 移除旧的 transformer
+            inst.removeTransformer(transformer);
+
+            // 2. 重新注册（排在所有其他 transformer 之后）
+            inst.addTransformer(transformer, true);
+
+            // 3. 收集所有 LivingEntity 相关的类
+            List<Class<?>> targets = new ArrayList<>();
+            for (Class<?> clazz : inst.getAllLoadedClasses()) {
+                if (!inst.isModifiableClass(clazz)) {
+                    continue;
+                }
+                if (LivingEntity.class.isAssignableFrom(clazz)) {
+                    targets.add(clazz);
+                }
+            }
+
+            // 4. Retransform
+            if (!targets.isEmpty()) {
+                long startTime = System.currentTimeMillis();
+                inst.retransformClasses(targets.toArray(new Class[0]));
+                long elapsed = System.currentTimeMillis() - startTime;
+                EcaLogger.info("Delayed retransform completed: {} classes in {}ms", targets.size(), elapsed);
+
+                // 5. 验证字节码转换（验证第一个 LivingEntity 子类）
+                BytecodeVerifier.verifyAndLog(inst, targets.get(0));
+            }
+
+            hasDelayedRetransform = true;
+
+        } catch (Throwable e) {
+            EcaLogger.error("Delayed retransform failed: {}", e.getMessage());
+        }
     }
 
     /**

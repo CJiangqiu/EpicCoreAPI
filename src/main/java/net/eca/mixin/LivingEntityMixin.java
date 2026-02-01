@@ -21,7 +21,7 @@ public abstract class LivingEntityMixin {
     private static final String NBT_HEALTH_LOCK_VALUE = "ecaHealthLockValue";
 
 
-    //静态初始化注入：定�?EntityDataAccessor
+    //静态初始化注入EntityDataAccessor
     @Inject(method = "<clinit>", at = @At("TAIL"))
     private static void eca$onClinit(CallbackInfo ci) {
         EntityUtil.HEALTH_LOCK_ENABLED = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.BOOLEAN);
@@ -29,7 +29,7 @@ public abstract class LivingEntityMixin {
         EntityUtil.INVULNERABLE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.BOOLEAN);
     }
 
-    //注册实体数据（在每个实例�?defineSynchedData 中调用）
+    //注册实体数据（在每个实例的defineSynchedData 中调用）
     @Inject(method = "defineSynchedData", at = @At("TAIL"))
     private void eca$onDefineSynchedData(CallbackInfo ci) {
         LivingEntity entity = (LivingEntity) (Object) this;
@@ -153,7 +153,8 @@ public abstract class LivingEntityMixin {
     @Inject(method = "isDeadOrDying", at = @At("HEAD"), cancellable = true)
     private void onIsDeadOrDying(CallbackInfoReturnable<Boolean> cir) {
         LivingEntity self = (LivingEntity) (Object) this;
-        if (EcaAPI.isInvulnerable(self) || EcaAPI.isHealthLocked(self)) {
+        Float locked = HealthLockManager.getLock(self);
+        if (EcaAPI.isInvulnerable(self) || (locked != null && locked > 0.0f)) {
             cir.setReturnValue(false);
         }
     }
@@ -161,7 +162,8 @@ public abstract class LivingEntityMixin {
     @Inject(method = "isAlive", at = @At("HEAD"), cancellable = true)
     private void onIsAlive(CallbackInfoReturnable<Boolean> cir) {
         LivingEntity self = (LivingEntity) (Object) this;
-        if (EcaAPI.isInvulnerable(self) || EcaAPI.isHealthLocked(self)) {
+        Float locked = HealthLockManager.getLock(self);
+        if (EcaAPI.isInvulnerable(self) || (locked != null && locked > 0.0f)) {
             cir.setReturnValue(true);
         }
     }

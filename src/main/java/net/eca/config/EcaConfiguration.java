@@ -15,7 +15,7 @@ public class EcaConfiguration {
         BUILDER.push("Attack");
 
         ATTACK_ENABLE_RADICAL_LOGIC = BUILDER
-            .comment("Enable radical logic for attack system, which increases attack processing strength but may cause performance overhead and mod conflicts")
+            .comment("Enable radical attack logic: memoryRemove, AllReturn, aggressive setHealth, etc. WARNING: This may cause game instability!")
             .define("Enable Radical Logic", false);
 
         BUILDER.pop();
@@ -24,25 +24,13 @@ public class EcaConfiguration {
         BUILDER.push("Defence");
 
         DEFENCE_ENABLE_RADICAL_LOGIC = BUILDER
-            .comment(
-                "Enable radical logic for defence system",
-                "When enabled:",
-                "  - Increases defence processing strength",
-                "  - Enables EntityData protection to block unauthorized modifications from other mods",
-                "WARNING: May cause performance overhead and mod conflicts"
-            )
+            .comment("Enable radical defence logic: ReTransformer after all mods loaded, etc.")
             .define("Enable Radical Logic", false);
 
         BUILDER.pop();
 
         ATTRIBUTE_UNLOCK_LIMITS = BUILDER
-            .comment(
-                "Unlock vanilla attribute limits to allow extreme values",
-                "When enabled, all vanilla attributes (health, armor, damage, etc.) can exceed their normal limits",
-                "Limits will be extended to Double.MAX_VALUE (±1.7976931348623157E308)",
-                "WARNING: This may cause compatibility issues with some mods or game instability",
-                "Requires game restart to take effect"
-            )
+            .comment("Unlock vanilla attribute min/max limits to ±Double.MAX_VALUE (±1.7976931348623157E308)")
             .define("Unlock Attribute Limits", true);
         SPEC = BUILDER.build();
     }

@@ -25,58 +25,9 @@ import static org.objectweb.asm.Opcodes.*;
  */
 public class ContainerReplacementTransformer implements ITransformModule {
 
-    // 标签字段名（用于验证转换是否被拦截）
-    private static final String MARK_FIELD_NAME = "__ECA_CONTAINER_MARK__";
-
-    // 第一个被转换的类名（用于验证）
-    private static volatile String firstTransformedClass = null;
-
-    /**
-     * 获取第一个被转换的类名
-     * @return 第一个被转换的类名，如果没有则返回null
-     */
-    public static String getFirstTransformed() {
-        return firstTransformedClass;
-    }
-
     @Override
     public String getName() {
         return "ContainerReplacementTransformer";
-    }
-
-    @Override
-    public String getMarkFieldName() {
-        return MARK_FIELD_NAME;
-    }
-
-    @Override
-    public String getFirstTransformedClass() {
-        return firstTransformedClass;
-    }
-
-    /**
-     * 为ClassNode注入标签字段（如果是第一个转换的类）
-     * @param cn ClassNode
-     * @param className 类名
-     * @return true如果注入了标签
-     */
-    private boolean tryInjectMarkField(ClassNode cn, String className) {
-        if (firstTransformedClass == null) {
-            // 注入标签字段: public static final boolean MARK_FIELD_NAME = true
-            FieldNode markField = new FieldNode(
-                Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL,
-                MARK_FIELD_NAME,
-                "Z",
-                null,
-                Boolean.TRUE
-            );
-            cn.fields.add(markField);
-
-            firstTransformedClass = className.replace('/', '.');
-            AgentLogWriter.info("[ContainerReplacementTransformer] First transformed class: " + firstTransformedClass + " (mark field injected)");
-            return true;
-        }
-        return false;
     }
 
     @Override
@@ -145,13 +96,11 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/ints/Int2ObjectLinkedOpenHashMap",
-                    "net/eca/agent/container/EcaInt2ObjectLinkedOpenHashMap"
+                    "net/eca/agent/EcaContainers$EcaInt2ObjectLinkedOpenHashMap"
                 );
             }
         }
 
-        // 尝试注入标签字段
-        tryInjectMarkField(cn, "net/minecraft/world/level/entity/EntityTickList");
 
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in EntityTickList");
 
@@ -180,7 +129,7 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/ints/Int2ObjectLinkedOpenHashMap",
-                    "net/eca/agent/container/EcaInt2ObjectLinkedOpenHashMap"
+                    "net/eca/agent/EcaContainers$EcaInt2ObjectLinkedOpenHashMap"
                 );
 
                 // 替换 HashMap（通过Guava的Maps.newHashMap创建的）
@@ -188,8 +137,6 @@ public class ContainerReplacementTransformer implements ITransformModule {
             }
         }
 
-        // 尝试注入标签字段
-        tryInjectMarkField(cn, "net/minecraft/world/level/entity/EntityLookup");
 
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in EntityLookup");
 
@@ -222,8 +169,6 @@ public class ContainerReplacementTransformer implements ITransformModule {
             }
         }
 
-        // 尝试注入标签字段
-        tryInjectMarkField(cn, "net/minecraft/util/ClassInstanceMultiMap");
 
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in ClassInstanceMultiMap");
 
@@ -250,13 +195,11 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/ints/Int2ObjectOpenHashMap",
-                    "net/eca/agent/container/EcaInt2ObjectOpenHashMap"
+                    "net/eca/agent/EcaContainers$EcaInt2ObjectOpenHashMap"
                 );
             }
         }
 
-        // 尝试注入标签字段
-        tryInjectMarkField(cn, "net/minecraft/server/level/ChunkMap");
 
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in ChunkMap");
 
@@ -325,10 +268,10 @@ public class ContainerReplacementTransformer implements ITransformModule {
 
                     // 替换为 new EcaHashMap()
                     InsnList replacement = new InsnList();
-                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/container/EcaHashMap"));
+                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/EcaContainers$EcaHashMap"));
                     replacement.add(new InsnNode(DUP));
                     replacement.add(new MethodInsnNode(INVOKESPECIAL,
-                        "net/eca/agent/container/EcaHashMap",
+                        "net/eca/agent/EcaContainers$EcaHashMap",
                         "<init>",
                         "()V",
                         false));
@@ -363,10 +306,10 @@ public class ContainerReplacementTransformer implements ITransformModule {
 
                     // 替换为 new EcaArrayList()
                     InsnList replacement = new InsnList();
-                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/container/EcaArrayList"));
+                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/EcaContainers$EcaArrayList"));
                     replacement.add(new InsnNode(DUP));
                     replacement.add(new MethodInsnNode(INVOKESPECIAL,
-                        "net/eca/agent/container/EcaArrayList",
+                        "net/eca/agent/EcaContainers$EcaArrayList",
                         "<init>",
                         "()V",
                         false));

@@ -62,11 +62,11 @@ public final class EcaAgent {
 
             // 设置 getHealth() 完整钩子处理器（分析 + 覆盖）
             LivingEntityTransformer.setHookHandler(
-                "net/eca/util/health/GetHealthHook",
+                "net/eca/util/health/LivingEntityHook",
                 "processGetHealth",
                 "(Lnet/minecraft/world/entity/LivingEntity;F)F"
             );
-            AgentLogWriter.info("[EcaAgent] Registered GetHealthHook handler");
+            AgentLogWriter.info("[EcaAgent] Registered LivingEntityHook handler");
 
             // 注册transformer（canRetransform = true用于已加载类）
             inst.addTransformer(transformer, true);
@@ -248,11 +248,7 @@ public final class EcaAgent {
 
                 String name = clazz.getName();
 
-                // 跳过受保护的类
-                if (PackageWhitelist.isProtectedBinary(name)) {
-                    continue;
-                }
-
+                // 各模块自行决定过滤逻辑（PackageWhitelist 已下沉到 AllReturnTransformer）
                 if (!module.shouldRetransform(name, clazz.getClassLoader())) {
                     continue;
                 }

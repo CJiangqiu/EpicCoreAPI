@@ -1,8 +1,8 @@
 package net.eca.api;
 
 import net.eca.agent.EcaAgent;
-import net.eca.agent.PackageWhitelist;
 import net.eca.agent.ReturnToggle;
+import net.eca.agent.ReturnToggle.PackageWhitelist;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
@@ -135,7 +135,11 @@ public final class EcaAPI {
         if (!(entity instanceof LivingEntity livingEntity)) {
             return false;
         }
-        return livingEntity.getEntityData().get(EntityUtil.INVULNERABLE);
+        if (EntityUtil.INVULNERABLE != null) {
+            return livingEntity.getEntityData().get(EntityUtil.INVULNERABLE);
+        } else {
+            return livingEntity.getPersistentData().getBoolean("ecaInvulnerable");
+        }
     }
 
     // 设置实体无敌状态
@@ -163,11 +167,21 @@ public final class EcaAPI {
             // 开启无敌：先锁血，再设置无敌状态
             float currentHealth = livingEntity.getHealth();
             lockHealth(livingEntity, currentHealth);
-            livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, true);
+            if (EntityUtil.INVULNERABLE != null) {
+                livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, true);
+            } else {
+                livingEntity.getPersistentData().putBoolean("ecaInvulnerable", true);
+            }
         } else {
             // 关闭无敌：先解除无敌状态，再解锁血量
-            livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, false);
+            if (EntityUtil.INVULNERABLE != null) {
+                livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, false);
+            } else {
+                livingEntity.getPersistentData().putBoolean("ecaInvulnerable", false);
+            }
             unlockHealth(livingEntity);
+            // 刷新血量状态，使 Minecraft 内部死亡检测恢复正常
+            livingEntity.onSyncedDataUpdated(LivingEntity.DATA_HEALTH_ID);
         }
     }
 

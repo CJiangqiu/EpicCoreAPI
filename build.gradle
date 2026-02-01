@@ -57,6 +57,7 @@ mixin {
 }
 
 processResources {
+    filteringCharset = 'UTF-8'
     inputs.property 'mod_version', project.mod_version
     filesMatching('META-INF/mods.toml') {
         expand 'mod_version': project.mod_version

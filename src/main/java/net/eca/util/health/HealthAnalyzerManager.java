@@ -5,6 +5,8 @@ import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.LivingEntity;
 import net.eca.util.EcaLogger;
 import net.eca.util.reflect.ObfuscationMapping;
+import net.eca.util.health.HealthAnalyzer.HealthFieldCache;
+import net.eca.util.health.HealthAnalyzer.ContainerAccessPattern;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 
