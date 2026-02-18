@@ -315,7 +315,7 @@ public class MyBossExtension extends EntityExtension {
 
 ### Shader Presets
 
-This mod also provides some built-in shader presets for the entity extension system. You can directly use these RenderTypes in your extension — simply replace `CustomRenderTypes` in the example above with the preset name. Each preset provides 4 RenderTypes: `BOSS_BAR_FRAME`, `BOSS_BAR_FILL`, `BOSS_LAYER`, `SKYBOX`.
+This mod also provides some built-in shader presets for the entity extension system. You can directly use these RenderTypes in your extension — simply replace `CustomRenderTypes` in the example above with the preset name. Each preset provides 4 RenderTypes: BOSS_BAR_FRAME, BOSS_BAR_FILL, BOSS_LAYER, SKYBOX.
 
 Available presets:
 - `TheLastEndRenderTypes` — The Last End
@@ -650,7 +650,7 @@ public class MyBossExtension extends EntityExtension {
 
 ### 着色器预设
 
-本 Mod 还提供了一些用于实体扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个预设均提供 4 个 RenderType：`BOSS_BAR_FRAME`、`BOSS_BAR_FILL`、`BOSS_LAYER`、`SKYBOX`。
+本 Mod 还提供了一些用于实体扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个预设均提供 4 个 RenderType：BOSS_BAR_FRAME、BOSS_BAR_FILL、BOSS_LAYER、SKYBOX。
 
 可用预设：
 - `TheLastEndRenderTypes` — 终焉
