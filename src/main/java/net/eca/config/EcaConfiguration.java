@@ -39,11 +39,9 @@ public class EcaConfiguration {
             .comment("Enable custom loading background rendered by agent transform")
             .define("Enable Custom Loading Background", true);
 
-        BUILDER.push("ForceLoading");
         FORCE_LOADING_MAX_RENDER_DISTANCE = BUILDER
             .comment("Maximum render/tracking distance (in blocks) for force-loaded entities. Prevents unlimited packet sending.")
-            .defineInRange("Max Render Distance", 128, 32, 1024);
-        BUILDER.pop();
+            .defineInRange("Force Loading Max Render Distance", 128, 32, 1024);
 
         SPEC = BUILDER.build();
     }
