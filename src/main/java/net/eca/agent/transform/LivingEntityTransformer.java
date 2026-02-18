@@ -109,6 +109,12 @@ public class LivingEntityTransformer implements ITransformModule {
     @Override
     public byte[] transform(String className, byte[] classfileBuffer) {
         try {
+            // Entity 自身定义了 isAlive/isDeadOrDying，但 hook 会 CHECKCAST 到 LivingEntity
+            // 非 LivingEntity 子类（如 ItemEntity）调用时会导致 ClassCastException
+            if (className.equals("net/minecraft/world/entity/Entity")) {
+                return null;
+            }
+
             // 第一遍：快速扫描，检查类是否定义了目标方法
             ClassReader scanReader = new ClassReader(classfileBuffer);
             MethodFinder finder = new MethodFinder();
@@ -231,6 +237,7 @@ public class LivingEntityTransformer implements ITransformModule {
                 // 在返回前修改栈顶的返回值
                 // 栈：[原始血量] → [this, 原始血量] → [最终血量]
                 mv.visitVarInsn(Opcodes.ALOAD, 0);  // 加载this（放在栈底）
+                mv.visitTypeInsn(Opcodes.CHECKCAST, "net/minecraft/world/entity/LivingEntity");  // 强制转型
                 mv.visitInsn(Opcodes.SWAP);  // 交换栈顶两个元素，变成 [this, 原始血量]
                 mv.visitMethodInsn(
                         Opcodes.INVOKESTATIC,
@@ -257,6 +264,7 @@ public class LivingEntityTransformer implements ITransformModule {
             if (opcode == Opcodes.IRETURN) {
                 // Stack: [originalBool] -> [this, originalBool] -> [finalBool]
                 mv.visitVarInsn(Opcodes.ALOAD, 0);
+                mv.visitTypeInsn(Opcodes.CHECKCAST, "net/minecraft/world/entity/LivingEntity");
                 mv.visitInsn(Opcodes.SWAP);
                 mv.visitMethodInsn(
                         Opcodes.INVOKESTATIC,

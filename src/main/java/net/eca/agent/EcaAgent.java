@@ -4,10 +4,14 @@ import net.eca.agent.transform.AllReturnTransformer;
 import net.eca.agent.transform.ContainerReplacementTransformer;
 import net.eca.agent.transform.ITransformModule;
 import net.eca.agent.transform.LivingEntityTransformer;
+import net.eca.agent.transform.LoadingScreenTransformer;
 
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -21,6 +25,7 @@ public final class EcaAgent {
 
     private static Instrumentation instrumentation;
     private static boolean initialized = false;
+    private static final String LOADING_BG_CONFIG_KEY = "Enable Custom Loading Background";
 
     // premain入口（JVM启动时加载）
     /**
@@ -59,6 +64,14 @@ public final class EcaAgent {
 
             // 注册AllReturn转换模块
             transformer.registerModule(new AllReturnTransformer());
+
+            // 注册加载界面渐变转换模块
+            if (isCustomLoadingBackgroundEnabled()) {
+                transformer.registerModule(new LoadingScreenTransformer());
+                AgentLogWriter.info("[EcaAgent] Registered LoadingScreenTransformer");
+            } else {
+                AgentLogWriter.info("[EcaAgent] Custom loading background disabled by config");
+            }
 
             // 设置 getHealth() 完整钩子处理器（分析 + 覆盖）
             LivingEntityTransformer.setHookHandler(
@@ -117,6 +130,52 @@ public final class EcaAgent {
         } catch (Throwable t) {
             AgentLogWriter.warn("[EcaAgent] Failed to bridge Instrumentation: " + t.getMessage());
         }
+    }
+
+    private static boolean isCustomLoadingBackgroundEnabled() {
+        Path configPath = Paths.get("config", "eca.toml");
+        try {
+            if (!Files.exists(configPath)) {
+                return true;
+            }
+
+            List<String> lines = Files.readAllLines(configPath);
+            for (String rawLine : lines) {
+                String line = rawLine;
+                int commentStart = line.indexOf('#');
+                if (commentStart >= 0) {
+                    line = line.substring(0, commentStart);
+                }
+                line = line.trim();
+                if (line.isEmpty() || !line.contains("=")) {
+                    continue;
+                }
+
+                int eq = line.indexOf('=');
+                String key = line.substring(0, eq).trim();
+                String value = line.substring(eq + 1).trim();
+
+                if (key.startsWith("\"") && key.endsWith("\"") && key.length() >= 2) {
+                    key = key.substring(1, key.length() - 1);
+                }
+                if (!LOADING_BG_CONFIG_KEY.equals(key)) {
+                    continue;
+                }
+
+                if ("true".equalsIgnoreCase(value)) {
+                    return true;
+                }
+                if ("false".equalsIgnoreCase(value)) {
+                    return false;
+                }
+                AgentLogWriter.warn("[EcaAgent] Invalid value for config '" + LOADING_BG_CONFIG_KEY + "': " + value + ", using default true");
+                return true;
+            }
+        } catch (Throwable t) {
+            AgentLogWriter.warn("[EcaAgent] Failed to read config/eca.toml for loading background switch: " + t.getMessage());
+            return true;
+        }
+        return true;
     }
 
     // 打开必要的模块

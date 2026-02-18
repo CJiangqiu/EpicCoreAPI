@@ -2,7 +2,7 @@ package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
-import net.eca.util.spawn.SpawnBanHook;
+import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.EntityTickList;
 import org.spongepowered.asm.mixin.Mixin;

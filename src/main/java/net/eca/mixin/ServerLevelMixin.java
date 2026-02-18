@@ -1,7 +1,7 @@
 package net.eca.mixin;
 
-import net.eca.util.spawn.SpawnBanHook;
-import net.eca.util.spawn.SpawnBanManager;
+import net.eca.util.spawn_ban.SpawnBanHook;
+import net.eca.util.spawn_ban.SpawnBanManager;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import org.spongepowered.asm.mixin.Mixin;

@@ -35,9 +35,13 @@ public class SetHealthCommand {
             float health = FloatArgumentType.getFloat(context, "health");
 
             int successCount = 0;
+            int skippedCount = 0;
 
             for (Entity entity : targets) {
-                if (!(entity instanceof LivingEntity livingEntity)) continue;
+                if (!(entity instanceof LivingEntity livingEntity)) {
+                    skippedCount++;
+                    continue;
+                }
 
                 try {
                     boolean success = EcaAPI.setHealth(livingEntity, health);
@@ -56,6 +60,7 @@ public class SetHealthCommand {
             }
 
             final int finalSuccessCount = successCount;
+            final int finalSkippedCount = skippedCount;
             final float finalHealth = health;
 
             if (finalSuccessCount > 0) {
@@ -65,6 +70,14 @@ public class SetHealthCommand {
                         finalSuccessCount == 1 ? "entity" : "entities",
                         finalHealth)
                 ), true);
+            }
+
+            if (finalSkippedCount > 0) {
+                source.sendSuccess(() -> Component.literal(
+                    String.format("§eSkipped %d %s (not living)",
+                        finalSkippedCount,
+                        finalSkippedCount == 1 ? "entity" : "entities")
+                ), false);
             }
 
             return finalSuccessCount;

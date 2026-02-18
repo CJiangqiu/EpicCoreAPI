@@ -5,16 +5,22 @@
   "priority": 0,
   "minVersion": "0.8",
   "client": [
+    "BossHealthOverlayMixin",
     "ClientEntityCallbacksMixin",
     "ClientLevelMixin",
     "DeathScreenMixin",
+    "FogRendererMixin",
+    "GameRendererPostLevelMixin",
+    "LevelRendererMixin",
+    "LivingEntityRendererMixin",
     "LocalPlayerMixin",
-    "MinecraftMixin"
+    "MinecraftMixin",
+    "SoundManagerMixin"
   ],
   "mixins": [
     "ChunkMapMixin",
+    "TrackedEntityMixin",
     "ClassInstanceMultiMapMixin",
-    "EntityDimensionChangeMixin",
     "EntityLookupMixin",
     "EntityMixin",
     "EntitySectionMixin",
@@ -25,10 +31,12 @@
     "NetworkDefenceMixin$InventoryClearPrevent",
     "NetworkDefenceMixin$ServerPacketListenerKickPrevent",
     "PersistentEntitySectionManagerMixin",
+    "PersistentEntitySectionManagerMixin$CallbackMixin",
     "PlayerMixin",
     "RangedAttributeMixin",
     "ServerLevelMixin",
-    "TransientEntitySectionManagerMixin"
+    "TransientEntitySectionManagerMixin",
+    "TransientEntitySectionManagerMixin$CallbackMixin"
   ],
   "injectors": {
     "defaultRequire": 1

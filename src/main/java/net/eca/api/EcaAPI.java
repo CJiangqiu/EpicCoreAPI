@@ -5,15 +5,20 @@ import net.eca.agent.ReturnToggle;
 import net.eca.agent.ReturnToggle.PackageWhitelist;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
+import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
+import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.LwjglUtil;
-import net.eca.util.spawn.SpawnBanManager;
+import net.eca.util.entity_extension.EntityExtension;
+import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.spawn_ban.SpawnBanManager;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.phys.Vec3;
 
 import java.lang.instrument.Instrumentation;
 import java.net.URL;
@@ -33,16 +38,13 @@ public final class EcaAPI {
      * When enabled, the entity's health is locked in two ways:
      * 1. getHealth() always returns the locked value (via bytecode hook)
      * 2. Real health is reset to the locked value every tick (via Mixin)
-     *
      * This provides true health locking - the entity cannot die from damage
      * as long as the lock is active (unless killed instantly with damage > locked value).
-     *
      * Use cases:
      * - Boss invincibility phases
      * - Tutorial mode (beginner protection)
      * - PVP damage limitation
      * - Heal negation effects
-     *
      * The locked value is synchronized to clients via SynchedEntityData.
      * @param entity the living entity
      * @param value the health lock value
@@ -65,6 +67,67 @@ public final class EcaAPI {
             throw new IllegalArgumentException("Entity cannot be null");
         }
         HealthLockManager.removeLock(entity);
+    }
+
+    // ==================== 禁疗系统 ====================
+
+    // 设置禁疗
+    /**
+     * Ban healing for an entity.
+     * The entity cannot receive healing, but can still take damage.
+     * The heal ban value will be updated when the entity is damaged.
+     * Use cases:
+     * - Grievous Wounds effect
+     * - Poison with anti-heal
+     * - Boss phase mechanics
+     * The heal ban value is synchronized to clients via SynchedEntityData.
+     * @param entity the living entity
+     * @param value the heal ban value (current health that will be maintained)
+     */
+    public static void banHealing(LivingEntity entity, float value) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        HealthLockManager.setHealBan(entity, value);
+    }
+
+    // 解除禁疗
+    /**
+     * Unban healing for an entity.
+     * After unbanning, the entity can receive healing normally.
+     * @param entity the living entity
+     */
+    public static void unbanHealing(LivingEntity entity) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        HealthLockManager.removeHealBan(entity);
+    }
+
+    // 获取当前禁疗值
+    /**
+     * Get the current heal ban value for an entity.
+     * @param entity the living entity
+     * @return the heal ban value, or null if healing is not banned
+     */
+    public static Float getHealBanValue(LivingEntity entity) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        return HealthLockManager.getHealBan(entity);
+    }
+
+    // 检查是否被禁疗
+    /**
+     * Check if an entity has healing banned.
+     * @param entity the living entity
+     * @return true if healing is banned, false otherwise
+     */
+    public static boolean isHealingBanned(LivingEntity entity) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        return HealthLockManager.getHealBan(entity) != null;
     }
 
     // 获取当前锁定值（如果没有锁定返回 null）
@@ -90,7 +153,7 @@ public final class EcaAPI {
         if (entity == null) {
             throw new IllegalArgumentException("Entity cannot be null");
         }
-        return HealthLockManager.hasLock(entity);
+        return HealthLockManager.getLock(entity) != null;
     }
 
     // 获取实体真实血量
@@ -147,11 +210,11 @@ public final class EcaAPI {
      * Set the invulnerability state of an entity (ECA system).
      * Uses EntityData for LivingEntity types (synchronized to clients automatically).
      * Non-LivingEntity types are ignored.
-     *
-     * IMPORTANT: This method automatically manages health lock:
-     * - When enabling invulnerability: locks health at current value
-     * - When disabling invulnerability: unlocks health
-     *
+     * IMPORTANT: This method automatically manages multiple protection systems:
+     * - When enabling invulnerability: revives entity and locks health
+     * - When disabling invulnerability: clears invulnerability and unlocks health
+     * - Prevents death through LivingDeathEvent cancellation
+     * - Prevents removal through Entity kill/discard/remove/setRemoved Mixin interception
      * @param entity the entity to modify
      * @param invulnerable true to make the entity invulnerable, false otherwise
      */
@@ -164,7 +227,8 @@ public final class EcaAPI {
         }
 
         if (invulnerable) {
-            // 开启无敌：先锁血，再设置无敌状态
+            // 开启无敌：复活 + 锁血 + 设置无敌状态 + 添加记录
+            reviveEntity(livingEntity);
             float currentHealth = livingEntity.getHealth();
             lockHealth(livingEntity, currentHealth);
             if (EntityUtil.INVULNERABLE != null) {
@@ -172,14 +236,16 @@ public final class EcaAPI {
             } else {
                 livingEntity.getPersistentData().putBoolean("ecaInvulnerable", true);
             }
+            InvulnerableEntityManager.addInvulnerable(entity);
         } else {
-            // 关闭无敌：先解除无敌状态，再解锁血量
+            // 关闭无敌：解除无敌状态 + 解锁血量 + 移除记录
             if (EntityUtil.INVULNERABLE != null) {
                 livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, false);
             } else {
                 livingEntity.getPersistentData().putBoolean("ecaInvulnerable", false);
             }
             unlockHealth(livingEntity);
+            InvulnerableEntityManager.removeInvulnerable(entity);
             // 刷新血量状态，使 Minecraft 内部死亡检测恢复正常
             livingEntity.onSyncedDataUpdated(LivingEntity.DATA_HEALTH_ID);
         }
@@ -269,6 +335,130 @@ public final class EcaAPI {
         return EntityUtil.teleportEntity(entity, x, y, z);
     }
 
+    // ==================== 位置锁定系统 ====================
+
+    // 锁定实体位置
+    /**
+     * Lock entity location at its current position.
+     * When location is locked, any abnormal position changes (not through Entity.move()) will be reverted.
+     * Normal movement through Entity.move() is still allowed and the locked position will be updated accordingly.
+     * Dimension changes are automatically handled and the locked position will be updated to the new dimension.
+     * Use cases:
+     * - Prevent teleportation exploits
+     * - Create stationary NPCs
+     * - Boss fight mechanics
+     * - Anti-cheat for position modifications
+     * @param entity the entity to lock
+     */
+    public static void lockEntityLocation(Entity entity) {
+        EntityLocationManager.lockLocation(entity);
+    }
+
+    // 解锁实体位置
+    /**
+     * Unlock entity location.
+     * After unlocking, the entity can be moved/teleported freely.
+     * @param entity the entity to unlock
+     */
+    public static void unlockEntityLocation(Entity entity) {
+        EntityLocationManager.unlockLocation(entity);
+    }
+
+    // 检查位置是否被锁定
+    /**
+     * Check if an entity's location is locked.
+     * @param entity the entity to check
+     * @return true if location is locked, false otherwise
+     */
+    public static boolean isLocationLocked(Entity entity) {
+        return EntityLocationManager.isLocationLocked(entity);
+    }
+
+    // 获取锁定的位置
+    /**
+     * Get the locked position of an entity.
+     * @param entity the entity
+     * @return the locked position, or null if not locked
+     */
+    public static Vec3 getLockedPosition(Entity entity) {
+        return EntityLocationManager.getLockedPosition(entity);
+    }
+
+    // ==================== 最大生命值 API ====================
+
+    // 设置实体最大生命值
+    /**
+     * Set entity max health to a precise target value.
+     * This method reverse-calculates the required base value from current attribute modifiers,
+     * so that getMaxHealth() returns exactly the target value after all modifiers are applied.
+     * Requires "Unlock Attribute Limits" config to be enabled for values above 1024.
+     * @param entity the living entity
+     * @param maxHealth the target max health value (must be > 0)
+     * @return true if modification succeeded
+     */
+    public static boolean setMaxHealth(LivingEntity entity, float maxHealth) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        return EntityUtil.setMaxHealth(entity, maxHealth);
+    }
+
+    // 锁定最大生命值
+    /**
+     * Lock entity max health at a specific value.
+     * When locked, the entity's max health is forced to the locked value every tick
+     * via reverse-calculating the attribute base value.
+     * Any external modifications (equipment, potions, other mods) will be overridden each tick.
+     * @param entity the living entity
+     * @param value the max health lock value
+     */
+    public static void lockMaxHealth(LivingEntity entity, float value) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        HealthLockManager.setMaxHealthLock(entity, value);
+        EntityUtil.setMaxHealth(entity, value);
+    }
+
+    // 解锁最大生命值
+    /**
+     * Unlock entity max health.
+     * After unlocking, the entity's max health can be modified normally by equipment, potions, etc.
+     * @param entity the living entity
+     */
+    public static void unlockMaxHealth(LivingEntity entity) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        HealthLockManager.removeMaxHealthLock(entity);
+    }
+
+    // 获取最大生命值锁定值
+    /**
+     * Get the current max health lock value for an entity.
+     * @param entity the living entity
+     * @return the locked max health value, or null if not locked
+     */
+    public static Float getLockedMaxHealth(LivingEntity entity) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        return HealthLockManager.getMaxHealthLock(entity);
+    }
+
+    // 检查最大生命值是否被锁定
+    /**
+     * Check if an entity has max health locked.
+     * @param entity the living entity
+     * @return true if max health is locked, false otherwise
+     */
+    public static boolean isMaxHealthLocked(LivingEntity entity) {
+        if (entity == null) {
+            throw new IllegalArgumentException("Entity cannot be null");
+        }
+        return HealthLockManager.getMaxHealthLock(entity) != null;
+    }
+
     // 生命值白名单管理
     /**
      * Add a keyword to the health whitelist.
@@ -319,6 +509,61 @@ public final class EcaAPI {
      */
     public static Set<String> getHealthBlacklistKeywords() {
         return EntityUtil.getHealthBlacklistKeywords();
+    }
+
+
+    // ============ 实体扩展 API ============
+
+    // 获取实体扩展注册表
+    /**
+     * Get the entity extension registry.
+     * @return unmodifiable map of EntityType to EntityExtension
+     */
+    public static Map<EntityType<?>, EntityExtension> getEntityExtensionRegistry() {
+        return EntityExtensionManager.getRegistryView();
+    }
+
+    // 获取当前维度活跃实体扩展类型列表
+    /**
+     * Get active entity extension types for a level.
+     * @param level the server level
+     * @return unmodifiable map of EntityType to active count
+     * @throws IllegalArgumentException if level is null
+     */
+    public static Map<EntityType<?>, Integer> getActiveEntityExtensionTypes(ServerLevel level) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        return EntityExtensionManager.getActiveTypeCounts(level);
+    }
+
+    // 获取当前维度生效的实体扩展
+    /**
+     * Get the active entity extension for a level.
+     * @param level the server level
+     * @return active EntityExtension, or null if none
+     * @throws IllegalArgumentException if level is null
+     */
+    public static EntityExtension getActiveEntityExtension(ServerLevel level) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        EntityType<?> type = EntityExtensionManager.getActiveType(level);
+        return type != null ? EntityExtensionManager.getExtension(type) : null;
+    }
+
+    // 清空当前维度活跃表
+    /**
+     * Clear the active entity extension table for a level.
+     * @param level the server level
+     * @return void
+     * @throws IllegalArgumentException if level is null
+     */
+    public static void clearActiveEntityExtensionTable(ServerLevel level) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        EntityExtensionManager.clearActiveTable(level);
     }
 
 

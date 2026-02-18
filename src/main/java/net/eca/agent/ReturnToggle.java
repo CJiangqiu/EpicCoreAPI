@@ -13,7 +13,6 @@ public final class ReturnToggle {
     private static final Set<String> allowedPackagePrefixes = ConcurrentHashMap.newKeySet();
     private static final Set<String> explicitTargets = ConcurrentHashMap.newKeySet();
     private static final Set<String> activeClassNames = ConcurrentHashMap.newKeySet();
-    private static final Set<String> returnHitLogged = ConcurrentHashMap.newKeySet();
     private static final Set<String> modPackagePrefixes = ConcurrentHashMap.newKeySet();
 
     public static boolean isAllReturnEnabled() {
@@ -55,12 +54,8 @@ public final class ReturnToggle {
         if (PackageWhitelist.isProtected(internalClassName)) {
             return false;
         }
-        boolean shouldReturn = activeClassNames.contains(internalClassName)
+        return activeClassNames.contains(internalClassName)
             || matchesAllowedPrefix(internalClassName);
-        if (shouldReturn && returnHitLogged.add(internalClassName)) {
-            EcaLogger.info("AllReturn hit: {}", internalClassName);
-        }
-        return shouldReturn;
     }
 
     public static boolean shouldTransformClass(String internalClassName) {
@@ -145,7 +140,6 @@ public final class ReturnToggle {
         allowedPackagePrefixes.clear();
         explicitTargets.clear();
         activeClassNames.clear();
-        returnHitLogged.clear();
         // 注意：不清除 modPackagePrefixes，它是永久的
     }
 
@@ -222,8 +216,10 @@ public final class ReturnToggle {
             "org.embeddedt.modernfix.", "org.embeddedt.embeddium.", "com.supermartijn642.fusion.", "com.supermartijn642.core.", "dev.architectury.",
             "dev.kosmx.playerAnim.", "dev.tr7zw.entityculling.",  "malte0811.ferritecore.", "net.irisshaders.",
             "net.raphimc.immediatelyfast.", "net.tslat.smartbrainlib.", "top.theillusivec4.caelus.", "top.theillusivec4.curios.", "virtuoel.pehkui.",
+            // KotlinForForge
+            "thedarkcolour.",
             // 友好mod
-            "net.eca.","net.mcreator.ultimateskeletons."
+            "net.eca.", "net.the_last_sword.","net.mcreator.ultimateskeletons.", "com.core.dream_sakura.","com.github.tartaricacid."
         );
 
         /**

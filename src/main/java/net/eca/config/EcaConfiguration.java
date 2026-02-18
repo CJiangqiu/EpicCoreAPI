@@ -9,6 +9,8 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_ENABLE_RADICAL_LOGIC;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_ENABLE_RADICAL_LOGIC;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ENABLE_CUSTOM_LOADING_BACKGROUND;
+    public static ForgeConfigSpec.IntValue FORCE_LOADING_MAX_RENDER_DISTANCE;
 
     static {
         // Attack Configuration | 攻击系统配置
@@ -32,6 +34,17 @@ public class EcaConfiguration {
         ATTRIBUTE_UNLOCK_LIMITS = BUILDER
             .comment("Unlock vanilla attribute min/max limits to ±Double.MAX_VALUE (±1.7976931348623157E308)")
             .define("Unlock Attribute Limits", true);
+
+        ENABLE_CUSTOM_LOADING_BACKGROUND = BUILDER
+            .comment("Enable custom loading background rendered by agent transform")
+            .define("Enable Custom Loading Background", true);
+
+        BUILDER.push("ForceLoading");
+        FORCE_LOADING_MAX_RENDER_DISTANCE = BUILDER
+            .comment("Maximum render/tracking distance (in blocks) for force-loaded entities. Prevents unlimited packet sending.")
+            .defineInRange("Max Render Distance", 128, 32, 1024);
+        BUILDER.pop();
+
         SPEC = BUILDER.build();
     }
 
@@ -54,6 +67,14 @@ public class EcaConfiguration {
 
     public static boolean getAttributeUnlockLimitsSafely() {
         return safeGet(ATTRIBUTE_UNLOCK_LIMITS, true);
+    }
+
+    public static boolean getEnableCustomLoadingBackgroundSafely() {
+        return safeGet(ENABLE_CUSTOM_LOADING_BACKGROUND, true);
+    }
+
+    public static int getForceLoadingMaxRenderDistanceSafely() {
+        return safeGet(FORCE_LOADING_MAX_RENDER_DISTANCE, 128);
     }
 
 }

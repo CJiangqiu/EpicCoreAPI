@@ -6,16 +6,21 @@
   "minVersion": "0.8",
   "refmap": "mixins.eca.refmap.json",
   "client": [
+    "BossHealthOverlayMixin",
     "ClientEntityCallbacksMixin",
     "ClientLevelMixin",
     "DeathScreenMixin",
+    "FogRendererMixin",
+    "GameRendererPostLevelMixin",
+    "LevelRendererMixin",
+    "LivingEntityRendererMixin",
     "LocalPlayerMixin",
-    "MinecraftMixin"
+    "MinecraftMixin",
+    "SoundManagerMixin"
   ],
   "mixins": [
     "ChunkMapMixin",
     "ClassInstanceMultiMapMixin",
-    "EntityDimensionChangeMixin",
     "EntityLookupMixin",
     "EntityMixin",
     "EntitySectionMixin",
@@ -26,10 +31,13 @@
     "NetworkDefenceMixin$InventoryClearPrevent",
     "NetworkDefenceMixin$ServerPacketListenerKickPrevent",
     "PersistentEntitySectionManagerMixin",
+    "PersistentEntitySectionManagerMixin$CallbackMixin",
     "PlayerMixin",
     "RangedAttributeMixin",
     "ServerLevelMixin",
-    "TransientEntitySectionManagerMixin"
+    "TrackedEntityMixin",
+    "TransientEntitySectionManagerMixin",
+    "TransientEntitySectionManagerMixin$CallbackMixin"
   ],
   "injectors": {
     "defaultRequire": 1

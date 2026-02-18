@@ -11,19 +11,18 @@ public class HealthLockManager {
     private static final float ENCRYPTION_OFFSET = 1024.0f;
 
     //NBT Key（mixin失效时的回退存储）
-    private static final String NBT_HEALTH_LOCK_ENABLED = "ecaHealthLockEnabled";
     private static final String NBT_HEALTH_LOCK_VALUE = "ecaHealthLockValue";
+    private static final String NBT_HEAL_BAN_VALUE = "ecaHealBanValue";
+    private static final String NBT_MAX_HEALTH_LOCK_VALUE = "ecaMaxHealthLockValue";
 
     //设置血量锁定
     public static void setLock(LivingEntity entity, float value) {
         if (entity == null) return;
         String encrypted = encryptHealth(value);
-        if (EntityUtil.HEALTH_LOCK_ENABLED != null && EntityUtil.HEALTH_LOCK_VALUE != null) {
-            entity.getEntityData().set(EntityUtil.HEALTH_LOCK_ENABLED, true);
+        if (EntityUtil.HEALTH_LOCK_VALUE != null) {
             entity.getEntityData().set(EntityUtil.HEALTH_LOCK_VALUE, encrypted);
         } else {
             CompoundTag data = entity.getPersistentData();
-            data.putBoolean(NBT_HEALTH_LOCK_ENABLED, true);
             data.putString(NBT_HEALTH_LOCK_VALUE, encrypted);
         }
     }
@@ -31,39 +30,96 @@ public class HealthLockManager {
     //移除血量锁定
     public static void removeLock(LivingEntity entity) {
         if (entity == null) return;
-        if (EntityUtil.HEALTH_LOCK_ENABLED != null) {
-            entity.getEntityData().set(EntityUtil.HEALTH_LOCK_ENABLED, false);
+        String unlockedValue = encryptHealth(0.0f);
+        if (EntityUtil.HEALTH_LOCK_VALUE != null) {
+            entity.getEntityData().set(EntityUtil.HEALTH_LOCK_VALUE, unlockedValue);
         } else {
-            entity.getPersistentData().putBoolean(NBT_HEALTH_LOCK_ENABLED, false);
+            entity.getPersistentData().putString(NBT_HEALTH_LOCK_VALUE, unlockedValue);
         }
     }
 
     //获取锁定值（如果没有锁定返回 null）
     public static Float getLock(LivingEntity entity) {
         if (entity == null) return null;
-        boolean enabled;
         String encrypted;
-        if (EntityUtil.HEALTH_LOCK_ENABLED != null && EntityUtil.HEALTH_LOCK_VALUE != null) {
-            enabled = entity.getEntityData().get(EntityUtil.HEALTH_LOCK_ENABLED);
-            if (!enabled) return null;
+        if (EntityUtil.HEALTH_LOCK_VALUE != null) {
             encrypted = entity.getEntityData().get(EntityUtil.HEALTH_LOCK_VALUE);
         } else {
             CompoundTag data = entity.getPersistentData();
-            enabled = data.getBoolean(NBT_HEALTH_LOCK_ENABLED);
-            if (!enabled) return null;
             encrypted = data.getString(NBT_HEALTH_LOCK_VALUE);
         }
-        return decryptHealth(encrypted);
+        if (encrypted == null || encrypted.isEmpty()) {
+            return null;
+        }
+        float decrypted = decryptHealth(encrypted);
+        return decrypted > 0.0f ? decrypted : null;
     }
 
-    //检查是否被锁定
-    public static boolean hasLock(LivingEntity entity) {
-        if (entity == null) return false;
-        if (EntityUtil.HEALTH_LOCK_ENABLED != null) {
-            return entity.getEntityData().get(EntityUtil.HEALTH_LOCK_ENABLED);
+    //设置禁疗
+    public static void setHealBan(LivingEntity entity, float value) {
+        if (entity == null) return;
+        if (EntityUtil.HEAL_BAN_VALUE != null) {
+            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, value);
         } else {
-            return entity.getPersistentData().getBoolean(NBT_HEALTH_LOCK_ENABLED);
+            CompoundTag data = entity.getPersistentData();
+            data.putFloat(NBT_HEAL_BAN_VALUE, value);
         }
+    }
+
+    //移除禁疗
+    public static void removeHealBan(LivingEntity entity) {
+        if (entity == null) return;
+        if (EntityUtil.HEAL_BAN_VALUE != null) {
+            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, 0.0f);
+        } else {
+            CompoundTag data = entity.getPersistentData();
+            data.putFloat(NBT_HEAL_BAN_VALUE, 0.0f);
+        }
+    }
+
+    //获取禁疗值（如果没有禁疗返回 null）
+    public static Float getHealBan(LivingEntity entity) {
+        if (entity == null) return null;
+        Float value;
+        if (EntityUtil.HEAL_BAN_VALUE != null) {
+            value = entity.getEntityData().get(EntityUtil.HEAL_BAN_VALUE);
+        } else {
+            CompoundTag data = entity.getPersistentData();
+            value = data.getFloat(NBT_HEAL_BAN_VALUE);
+        }
+        return value != null && value > 0.0f ? value : null;
+    }
+
+    //设置最大生命值锁定
+    public static void setMaxHealthLock(LivingEntity entity, float value) {
+        if (entity == null) return;
+        if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
+            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, value);
+        } else {
+            entity.getPersistentData().putFloat(NBT_MAX_HEALTH_LOCK_VALUE, value);
+        }
+    }
+
+    //移除最大生命值锁定
+    public static void removeMaxHealthLock(LivingEntity entity) {
+        if (entity == null) return;
+        if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
+            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, 0.0f);
+        } else {
+            entity.getPersistentData().putFloat(NBT_MAX_HEALTH_LOCK_VALUE, 0.0f);
+        }
+    }
+
+    //获取最大生命值锁定值（如果没有锁定返回 null）
+    public static Float getMaxHealthLock(LivingEntity entity) {
+        if (entity == null) return null;
+        Float value;
+        if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
+            value = entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_VALUE);
+        } else {
+            value = entity.getPersistentData().getFloat(NBT_MAX_HEALTH_LOCK_VALUE);
+        }
+        return value != null && value > 0.0f ? value : null;
     }
 
     //加密血量值

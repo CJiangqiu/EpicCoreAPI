@@ -47,6 +47,25 @@ public class NetworkHandler {
                 .decoder(LwjglClientRemovePacket::decode)
                 .consumerMainThread(LwjglClientRemovePacket::handle)
                 .add();
+
+        CHANNEL.messageBuilder(EntityExtensionActiveTypePacket.class, id())
+                .encoder(EntityExtensionActiveTypePacket::encode)
+                .decoder(EntityExtensionActiveTypePacket::decode)
+                .consumerMainThread(EntityExtensionActiveTypePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(EntityExtensionBossEventTypePacket.class, id())
+                .encoder(EntityExtensionBossEventTypePacket::encode)
+                .decoder(EntityExtensionBossEventTypePacket::decode)
+                .consumerMainThread(EntityExtensionBossEventTypePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(EntityHealthSyncPacket.class, id())
+                .encoder(EntityHealthSyncPacket::encode)
+                .decoder(EntityHealthSyncPacket::decode)
+                .consumerMainThread(EntityHealthSyncPacket::handle)
+                .add();
+
     }
 
     /**
@@ -78,5 +97,17 @@ public class NetworkHandler {
                     message
             );
         }
+    }
+
+    /**
+     * Send a message to all players in a specific dimension.
+     * @param message the message to send
+     * @param level the server level (dimension)
+     */
+    public static <MSG> void sendToDimension(MSG message, ServerLevel level) {
+        CHANNEL.send(
+                PacketDistributor.DIMENSION.with(() -> level.dimension()),
+                message
+        );
     }
 }

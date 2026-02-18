@@ -2,7 +2,9 @@ package net.eca.util;
 
 import net.eca.config.EcaConfiguration;
 import net.eca.network.EcaClientRemovePacket;
+import net.eca.network.EntityHealthSyncPacket;
 import net.eca.network.NetworkHandler;
+import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.HealthAnalyzer.HealthFieldCache;
 import net.eca.util.health.HealthAnalyzerManager;
 import net.eca.util.reflect.VarHandleUtil;
@@ -15,6 +17,9 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.Pose;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.server.level.*;
 import net.minecraft.client.Minecraft;
@@ -26,7 +31,6 @@ import net.minecraft.advancements.CriteriaTriggers;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
-import net.minecraft.network.protocol.game.ClientboundBossEventPacket;
 import net.minecraft.core.SectionPos;
 import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
@@ -49,12 +53,16 @@ import static net.eca.util.reflect.VarHandleUtil.*;
 //实体工具类
 public class EntityUtil {
 
-    //EntityDataAccessor 血量锁定（神秘文本血）+无敌状态
-    public static EntityDataAccessor<Boolean> HEALTH_LOCK_ENABLED;
+    //EntityDataAccessor 血量锁定（神秘文本血）+ 禁疗 + 无敌状态 + 最大生命值锁定
     public static EntityDataAccessor<String> HEALTH_LOCK_VALUE;
+    public static EntityDataAccessor<Float> HEAL_BAN_VALUE;
     public static EntityDataAccessor<Boolean> INVULNERABLE;
+    public static EntityDataAccessor<Float> MAX_HEALTH_LOCK_VALUE;
 
-    // 正在切换维度的实体UUID集合（线程安全）
+    //标记当前调用来自同步包，防止重复发包
+    private static final ThreadLocal<Boolean> IS_FROM_SYNC = ThreadLocal.withInitial(() -> false);
+
+    //正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
 
     //生命值关键词白名单（可动态添加）
@@ -62,6 +70,7 @@ public class EntityUtil {
 
     //生命值修改黑名单（可动态添加）
     private static final Set<String> HEALTH_BLACKLIST_KEYWORDS = ConcurrentHashMap.newKeySet();
+
 
     static {
         //初始化生命值白名单默认值
@@ -162,6 +171,7 @@ public class EntityUtil {
         }
     }
 
+
     //获取实体真实生命值
     public static float getHealth(LivingEntity entity) {
         if (entity == null) return 0.0f;
@@ -194,11 +204,16 @@ public class EntityUtil {
     public static boolean setHealth(LivingEntity entity, float expectedHealth) {
         if (entity == null) return false;
         try {
+            float beforeHealth = getHealth(entity);
+
             //阶段1：修改原版血量
             setBasicHealth(entity, expectedHealth);
 
             //玩家只执行阶段1
-            if (entity instanceof Player) return true;
+            if (entity instanceof Player) {
+                syncHealthToClients(entity, expectedHealth, beforeHealth);
+                return true;
+            }
 
             //阶段2：修改符合条件的EntityDataAccessor和实例字段
             setHealthViaPhase2(entity, expectedHealth);
@@ -211,6 +226,7 @@ public class EntityUtil {
             //验证是否成功
             boolean verify1 = verifyHealthChange(entity, expectedHealth);
             if (verify1) {
+                syncHealthToClients(entity, expectedHealth, beforeHealth);
                 return true;
             }
 
@@ -218,10 +234,35 @@ public class EntityUtil {
             setHealthViaPhase3(entity, expectedHealth);
 
             boolean verify2 = verifyHealthChange(entity, expectedHealth);
+            syncHealthToClients(entity, expectedHealth, beforeHealth);
             return verify2;
         } catch (Exception e) {
             return false;
         }
+    }
+
+    //从同步包调用，在客户端执行改血（不再发包）
+    public static void setHealthFromSync(LivingEntity entity, float expectedHealth) {
+        IS_FROM_SYNC.set(true);
+        try {
+            setHealth(entity, expectedHealth);
+        } finally {
+            IS_FROM_SYNC.set(false);
+        }
+    }
+
+    //服务端改血后同步到客户端
+    private static void syncHealthToClients(LivingEntity entity, float expectedHealth, float beforeHealth) {
+        if (IS_FROM_SYNC.get()) return;
+        if (entity.level() == null || entity.level().isClientSide) return;
+        if (Math.abs(expectedHealth - beforeHealth) <= 0.001f) return;
+
+        try {
+            NetworkHandler.sendToTrackingClients(
+                new EntityHealthSyncPacket(entity.getId(), expectedHealth),
+                entity
+            );
+        } catch (Exception ignored) {}
     }
 
     //验证血量修改是否成功
@@ -835,8 +876,10 @@ public class EntityUtil {
     //复活实体（清除死亡状态）
     public static void reviveEntity(LivingEntity entity) {
         if (entity == null) return;
-
         try {
+            entity.revive();
+            // 恢复满血
+            setHealth(entity, entity.getMaxHealth());
             // 清除死亡标志
             if (VH_DEAD != null) {
                 VH_DEAD.set(entity, false);
@@ -845,10 +888,10 @@ public class EntityUtil {
             if (VH_DEATH_TIME != null) {
                 VH_DEATH_TIME.set(entity, 0);
             }
+            // 恢复站立姿势（清除DYING姿势）
+            entity.setPose(Pose.STANDING);
             // 安全清除移除原因（保护维度切换和区块卸载）
             clearRemovalReasonIfProtected(entity);
-            // 恢复满血
-            setHealth(entity, entity.getMaxHealth());
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to revive entity: {}", e.getMessage());
         }
@@ -945,6 +988,10 @@ public class EntityUtil {
     public static void cleanupBossBar(Entity entity) {
         if (entity == null) return;
 
+        if (entity instanceof LivingEntity livingEntity) {
+            EntityExtensionManager.cleanupBossBar(livingEntity);
+        }
+
         //收集所有 ServerBossEvent
         List<ServerBossEvent> bossEvents = new ArrayList<>();
 
@@ -962,25 +1009,9 @@ public class EntityUtil {
             }
         }
 
-        //发送移除网络包并清理
-        if (!bossEvents.isEmpty() && !entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
-            for (ServerBossEvent bossEvent : bossEvents) {
-                //发送移除网络包给所有玩家
-                for (ServerPlayer player : serverLevel.players()) {
-                    try {
-                        player.connection.send(ClientboundBossEventPacket.createRemovePacket(bossEvent.getId()));
-                    } catch (Exception ignored) {}
-                }
-                //服务端清理
-                bossEvent.removeAllPlayers();
-                bossEvent.setVisible(false);
-            }
-        } else {
-            //客户端或无法获取 ServerLevel 时只做基本清理
-            for (ServerBossEvent bossEvent : bossEvents) {
-                bossEvent.removeAllPlayers();
-                bossEvent.setVisible(false);
-            }
+        for (ServerBossEvent bossEvent : bossEvents) {
+            bossEvent.removeAllPlayers();
+            bossEvent.setVisible(false);
         }
     }
 
@@ -1415,6 +1446,64 @@ public class EntityUtil {
         } catch (Exception e) {
             EcaLogger.error("Failed to sync teleport to clients: {}", e.getMessage());
         }
+    }
+
+    // ==================== 最大生命值模块 ====================
+
+    //设置实体最大生命值（反算baseValue，使 getMaxHealth() 精确返回目标值）
+    public static boolean setMaxHealth(LivingEntity entity, float targetMaxHealth) {
+        if (entity == null) return false;
+
+        try {
+            AttributeInstance instance = entity.getAttribute(Attributes.MAX_HEALTH);
+            if (instance == null) return false;
+
+            double newBaseValue = reverseCalculateBaseValue(instance, targetMaxHealth);
+            instance.setBaseValue(newBaseValue);
+
+            //验证结果
+            double actual = instance.getValue();
+
+            //当前血量超过新上限时，主动 clamp（原版不会自动处理）
+            if (entity.getHealth() > actual) {
+                entity.setHealth((float) actual);
+            }
+
+            return Math.abs(actual - targetMaxHealth) < 0.01;
+        } catch (Exception e) {
+            EcaLogger.info("[EntityUtil] Failed to set max health: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    //反算 baseValue：根据当前 modifier 计算需要什么 baseValue 才能使 getValue() == target
+    private static double reverseCalculateBaseValue(AttributeInstance instance, double target) {
+        //收集三层 modifier 的叠加系数
+        double additionSum = 0.0;
+        for (AttributeModifier mod : instance.getModifiers(AttributeModifier.Operation.ADDITION)) {
+            additionSum += mod.getAmount();
+        }
+
+        double multiplyBaseSum = 0.0;
+        for (AttributeModifier mod : instance.getModifiers(AttributeModifier.Operation.MULTIPLY_BASE)) {
+            multiplyBaseSum += mod.getAmount();
+        }
+
+        double multiplyTotalProduct = 1.0;
+        for (AttributeModifier mod : instance.getModifiers(AttributeModifier.Operation.MULTIPLY_TOTAL)) {
+            multiplyTotalProduct *= (1.0 + mod.getAmount());
+        }
+
+        // 原版公式: result = (base + additionSum) * (1 + multiplyBaseSum) * multiplyTotalProduct
+        // 反算: base = target / [multiplyTotalProduct * (1 + multiplyBaseSum)] - additionSum
+        double divisor = multiplyTotalProduct * (1.0 + multiplyBaseSum);
+        if (Math.abs(divisor) < 1e-10) {
+            // modifier 乘积为0，无法反算，直接清除所有 modifier 并设 baseValue
+            instance.removeModifiers();
+            return target;
+        }
+
+        return (target / divisor) - additionSum;
     }
 
     // ==================== 关键词名单管理 API ====================

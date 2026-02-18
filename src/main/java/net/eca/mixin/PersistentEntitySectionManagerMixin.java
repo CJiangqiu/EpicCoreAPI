@@ -2,7 +2,8 @@ package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
-import net.eca.util.spawn.SpawnBanHook;
+import net.eca.util.entity_extension.ForceLoadingManager;
+import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.EntityAccess;
@@ -41,7 +42,6 @@ public class PersistentEntitySectionManagerMixin {
     @Inject(method = "unloadEntity", at = @At("HEAD"), cancellable = true)
     private void eca$onUnloadEntity(EntityAccess entity, CallbackInfo ci) {
         if (entity instanceof Entity realEntity) {
-            // Allow dimension change operations even for invulnerable entities
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {
                 ci.cancel();
             }
@@ -51,8 +51,16 @@ public class PersistentEntitySectionManagerMixin {
     @Inject(method = "stopTicking", at = @At("HEAD"), cancellable = true)
     private void eca$onStopTicking(EntityAccess entity, CallbackInfo ci) {
         if (entity instanceof Entity realEntity) {
-            // Allow dimension change operations even for invulnerable entities
+            // 实体已被移除（死亡/kill等），允许清理
+            if (realEntity.isRemoved()) {
+                return;
+            }
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {
+                ci.cancel();
+                return;
+            }
+            // 强加载实体：区块状态降级时保持ticking
+            if (ForceLoadingManager.isForceLoadedType(realEntity.getType())) {
                 ci.cancel();
             }
         }
@@ -61,8 +69,16 @@ public class PersistentEntitySectionManagerMixin {
     @Inject(method = "stopTracking", at = @At("HEAD"), cancellable = true)
     private void eca$onStopTracking(EntityAccess entity, CallbackInfo ci) {
         if (entity instanceof Entity realEntity) {
-            // Allow dimension change operations even for invulnerable entities
+            // 实体已被移除（死亡/kill等），允许清理
+            if (realEntity.isRemoved()) {
+                return;
+            }
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {
+                ci.cancel();
+                return;
+            }
+            // 强加载实体：区块状态降级时保持tracking，防止从ChunkMap移除
+            if (ForceLoadingManager.isForceLoadedType(realEntity.getType())) {
                 ci.cancel();
             }
         }
@@ -77,7 +93,6 @@ public class PersistentEntitySectionManagerMixin {
         @Inject(method = "onRemove", at = @At("HEAD"), cancellable = true)
         private void eca$onRemove(Entity.RemovalReason reason, CallbackInfo ci) {
             if (this.entity instanceof Entity realEntity) {
-                // Allow dimension change operations even for invulnerable entities
                 if (EcaAPI.isInvulnerable(realEntity) && reason != Entity.RemovalReason.CHANGED_DIMENSION) {
                     ci.cancel();
                 }

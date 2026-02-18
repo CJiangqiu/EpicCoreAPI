@@ -38,7 +38,7 @@ public final class AgentLogWriter {
             }
 
             Path logFile = logsDir.resolve(LOG_FILE_NAME);
-            writer = new BufferedWriter(new FileWriter(logFile.toFile(), false));
+            writer = new BufferedWriter(new FileWriter(logFile.toFile(), true));
 
             writer.write("========================================\n");
             writer.write("EpicCoreAPI - Agent Log\n");

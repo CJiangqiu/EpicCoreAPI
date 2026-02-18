@@ -1,4 +1,4 @@
-package net.eca.util.spawn;
+package net.eca.util.spawn_ban;
 
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;

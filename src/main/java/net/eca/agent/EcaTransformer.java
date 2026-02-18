@@ -3,9 +3,15 @@ package net.eca.agent;
 import net.eca.agent.transform.ITransformModule;
 
 import java.lang.instrument.ClassFileTransformer;
+import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 // ECA主字节码转换器
@@ -18,6 +24,7 @@ public class EcaTransformer implements ClassFileTransformer {
     private static final EcaTransformer INSTANCE = new EcaTransformer();
 
     private final List<ITransformModule> modules = new CopyOnWriteArrayList<>();
+    private final Set<Module> accessGrantedModules = ConcurrentHashMap.newKeySet();
 
     // 获取单例实例
     /**
@@ -65,6 +72,25 @@ public class EcaTransformer implements ClassFileTransformer {
 
     @Override
     public byte[] transform(
+            Module module,
+            ClassLoader loader,
+            String className,
+            Class<?> classBeingRedefined,
+            ProtectionDomain protectionDomain,
+            byte[] classfileBuffer
+    ) {
+        byte[] result = transform(loader, className, classBeingRedefined, protectionDomain, classfileBuffer);
+
+        // 转换成功且目标类在命名模块中时，确保模块访问权限
+        if (result != null && module != null && module.isNamed()) {
+            ensureModuleAccess(module);
+        }
+
+        return result;
+    }
+
+    @Override
+    public byte[] transform(
             ClassLoader loader,
             String className,
             Class<?> classBeingRedefined,
@@ -84,21 +110,88 @@ public class EcaTransformer implements ClassFileTransformer {
         boolean transformed = false;
 
         // 遍历所有模块进行转换
-        for (ITransformModule module : modules) {
+        for (ITransformModule m : modules) {
             try {
-                if (module.shouldTransform(className, loader)) {
-                    byte[] result = module.transform(className, currentBuffer);
+                if (m.shouldTransform(className, loader)) {
+                    byte[] result = m.transform(className, currentBuffer);
                     if (result != null) {
                         currentBuffer = result;
                         transformed = true;
                     }
                 }
             } catch (Throwable t) {
-                AgentLogWriter.error("[EcaTransformer] Module " + module.getName() + " failed to transform: " + className, t);
+                AgentLogWriter.error("[EcaTransformer] Module " + m.getName() + " failed to transform: " + className, t);
             }
         }
 
         return transformed ? currentBuffer : null;
+    }
+
+    /**
+     * Ensure the target module can access ECA classes referenced by injected bytecode.
+     * Adds reads and exports via Instrumentation.redefineModule().
+     */
+    private void ensureModuleAccess(Module targetModule) {
+        if (accessGrantedModules.contains(targetModule)) {
+            return;
+        }
+
+        try {
+            ModuleLayer layer = targetModule.getLayer();
+            if (layer == null) {
+                return;
+            }
+
+            Module ecaModule = layer.findModule("eca").orElse(null);
+            if (ecaModule == null || targetModule == ecaModule) {
+                accessGrantedModules.add(targetModule);
+                return;
+            }
+
+            Instrumentation inst = EcaAgent.getInstrumentation();
+            if (inst == null) {
+                return;
+            }
+
+            // 添加 reads：目标模块 -> eca 模块
+            if (!targetModule.canRead(ecaModule)) {
+                inst.redefineModule(
+                    targetModule,
+                    Set.of(ecaModule),
+                    Collections.emptyMap(),
+                    Collections.emptyMap(),
+                    Collections.emptySet(),
+                    Collections.emptyMap()
+                );
+            }
+
+            // 导出 eca 的包到目标模块
+            if (ecaModule.isNamed()) {
+                Map<String, Set<Module>> extraExports = new HashMap<>();
+                Set<Module> targetSet = Set.of(targetModule);
+                for (String pkg : ecaModule.getPackages()) {
+                    if (!ecaModule.isExported(pkg, targetModule)) {
+                        extraExports.put(pkg, targetSet);
+                    }
+                }
+                if (!extraExports.isEmpty()) {
+                    inst.redefineModule(
+                        ecaModule,
+                        Collections.emptySet(),
+                        extraExports,
+                        Collections.emptyMap(),
+                        Collections.emptySet(),
+                        Collections.emptyMap()
+                    );
+                }
+            }
+
+            accessGrantedModules.add(targetModule);
+            AgentLogWriter.info("[EcaTransformer] Granted module access: " + targetModule.getName() + " -> eca");
+
+        } catch (Throwable t) {
+            AgentLogWriter.warn("[EcaTransformer] Failed to grant module access for " + targetModule.getName() + ": " + t.getMessage());
+        }
     }
 
     // 判断是否应该跳过该类（仅跳过 JDK 和 ECA 自身，各模块自行决定其他过滤）

@@ -1,7 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
-import net.eca.util.spawn.SpawnBanHook;
+import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.EntityAccess;

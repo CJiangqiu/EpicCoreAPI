@@ -5,6 +5,7 @@ import cpw.mods.modlauncher.api.IEnvironment;
 import cpw.mods.modlauncher.api.IModuleLayerManager;
 import cpw.mods.modlauncher.api.ITransformationService;
 import cpw.mods.modlauncher.api.ITransformer;
+import net.eca.agent.AgentLoader;
 import org.jetbrains.annotations.NotNull;
 import sun.misc.Unsafe;
 
@@ -16,17 +17,13 @@ import java.nio.file.Path;
 import java.util.*;
 
 /**
- * ECA CoreMod 转换服务
- * 这是 ECA 最早的入口点，由 ModLauncher 在所有模组之前加载。
- * 主要用于启用双重加载模式（CoreMod + Mod）。
- * Agent 加载已移至 EcaMod 构造函数中以避免 ClassLoader 问题。
+ * ECA CoreMod （目前测试ing：启动agent来替代原来的主类构造函数启动agent）
  */
 @SuppressWarnings("unchecked")
 public class EcaTransformationService implements ITransformationService {
 
     static {
-        System.out.println("[ECA CoreMod] Static block - earliest entry point");
-        // Agent 加载已移至 EcaMod 构造函数，避免多 ClassLoader 桥接问题
+        System.out.println("[ECA CoreMod] Static block : I'm first?");
     }
 
     private static final String SERVICE_NAME = "eca_coremod";
@@ -46,6 +43,24 @@ public class EcaTransformationService implements ITransformationService {
     @Override
     public void onLoad(@NotNull IEnvironment env, @NotNull Set<String> otherServices) {
         System.out.println("[ECA CoreMod] onLoad - other services count: " + otherServices.size());
+        attachAgentEarly();
+    }
+
+    /**
+     * 在 CoreMod 阶段提前挂载 Java Agent
+     * 此时游戏窗口尚未创建，Agent 的 ClassFileTransformer 能拦截所有后续类加载
+     */
+    private void attachAgentEarly() {
+        try {
+            boolean selfAttachEnabled = AgentLoader.enableSelfAttach();
+            System.out.println("[ECA CoreMod] Self-attach enabled: " + selfAttachEnabled);
+
+            boolean agentLoaded = AgentLoader.loadAgent(null);
+            System.out.println("[ECA CoreMod] Agent early attach: " + agentLoaded);
+        } catch (Throwable t) {
+            System.err.println("[ECA CoreMod] Failed to attach agent early: " + t.getMessage());
+            t.printStackTrace();
+        }
     }
 
     @Override

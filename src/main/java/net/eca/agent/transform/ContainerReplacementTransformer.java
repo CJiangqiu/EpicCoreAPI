@@ -14,7 +14,6 @@ import static org.objectweb.asm.Opcodes.*;
 /**
  * 容器替换Transformer
  * 将MC原版的底层容器替换为ECA自定义容器
- *
  * 替换策略：
  * 1. EntityTickList: Int2ObjectLinkedOpenHashMap → EcaInt2ObjectLinkedOpenHashMap
  * 2. EntityLookup: Int2ObjectLinkedOpenHashMap → EcaInt2ObjectOpenHashMap (byId)
@@ -22,6 +21,15 @@ import static org.objectweb.asm.Opcodes.*;
  * 3. ClassInstanceMultiMap: HashMap → EcaHashMap (byClass)
  *                           ArrayList → EcaArrayList (allInstances)
  * 4. ChunkMap: Int2ObjectOpenHashMap → EcaInt2ObjectOpenHashMap (entityMap)
+ * 5. PersistentEntitySectionManager:
+ *    Sets.newHashSet() → EcaHashSet (knownUuids)
+ *    Queues.newConcurrentLinkedQueue() → EcaConcurrentLinkedQueue (loadingInbox)
+ * 6. EntitySectionStorage:
+ *    Long2ObjectOpenHashMap → EcaLong2ObjectOpenHashMap (sections)
+ *    LongAVLTreeSet → EcaLongAVLTreeSet (sectionIds)
+ * 7. ServerLevel:
+ *    Lists.newArrayList() → EcaArrayList (players)
+ *    ObjectOpenHashSet → EcaHashSet (navigatingMobs)
  */
 public class ContainerReplacementTransformer implements ITransformModule {
 
@@ -36,7 +44,10 @@ public class ContainerReplacementTransformer implements ITransformModule {
             "net.minecraft.world.level.entity.EntityTickList",
             "net.minecraft.world.level.entity.EntityLookup",
             "net.minecraft.util.ClassInstanceMultiMap",
-            "net.minecraft.server.level.ChunkMap"
+            "net.minecraft.server.level.ChunkMap",
+            "net.minecraft.world.level.entity.PersistentEntitySectionManager",
+            "net.minecraft.world.level.entity.EntitySectionStorage",
+            "net.minecraft.server.level.ServerLevel"
         );
     }
 
@@ -46,7 +57,10 @@ public class ContainerReplacementTransformer implements ITransformModule {
         return className.equals("net/minecraft/world/level/entity/EntityTickList") ||
                className.equals("net/minecraft/world/level/entity/EntityLookup") ||
                className.equals("net/minecraft/util/ClassInstanceMultiMap") ||
-               className.equals("net/minecraft/server/level/ChunkMap");
+               className.equals("net/minecraft/server/level/ChunkMap") ||
+               className.equals("net/minecraft/world/level/entity/PersistentEntitySectionManager") ||
+               className.equals("net/minecraft/world/level/entity/EntitySectionStorage") ||
+               className.equals("net/minecraft/server/level/ServerLevel");
     }
 
     @Override
@@ -70,6 +84,21 @@ public class ContainerReplacementTransformer implements ITransformModule {
             // ChunkMap: 替换 entityMap
             if (className.equals("net/minecraft/server/level/ChunkMap")) {
                 return replaceChunkMapContainers(classfileBuffer);
+            }
+
+            // PersistentEntitySectionManager: 替换 knownUuids, loadingInbox
+            if (className.equals("net/minecraft/world/level/entity/PersistentEntitySectionManager")) {
+                return replacePersistentEntitySectionManagerContainers(classfileBuffer);
+            }
+
+            // EntitySectionStorage: 替换 sections, sectionIds
+            if (className.equals("net/minecraft/world/level/entity/EntitySectionStorage")) {
+                return replaceEntitySectionStorageContainers(classfileBuffer);
+            }
+
+            // ServerLevel: 替换 players, navigatingMobs
+            if (className.equals("net/minecraft/server/level/ServerLevel")) {
+                return replaceServerLevelContainers(classfileBuffer);
             }
         } catch (Exception e) {
             AgentLogWriter.error("[ContainerReplacementTransformer] Failed to transform " + className, e);
@@ -103,6 +132,71 @@ public class ContainerReplacementTransformer implements ITransformModule {
 
 
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in EntityTickList");
+
+        ClassWriter cw = new SafeClassWriter(ClassWriter.COMPUTE_FRAMES);
+        cn.accept(cw);
+        return cw.toByteArray();
+    }
+
+    /**
+     * 替换PersistentEntitySectionManager的容器
+     * knownUuids: Sets.newHashSet() → EcaHashSet
+     * loadingInbox: Queues.newConcurrentLinkedQueue() → EcaConcurrentLinkedQueue
+     */
+    private byte[] replacePersistentEntitySectionManagerContainers(byte[] classBytes) {
+        AgentLogWriter.info("[ContainerReplacementTransformer] Transforming PersistentEntitySectionManager");
+
+        ClassNode cn = new ClassNode();
+        ClassReader cr = new ClassReader(classBytes);
+        cr.accept(cn, 0);
+
+        int replacedCount = 0;
+
+        for (MethodNode mn : cn.methods) {
+            if (mn.name.equals("<init>") || mn.name.equals("<clinit>")) {
+                replacedCount += replaceGuavaHashSet(mn);
+                replacedCount += replaceGuavaConcurrentLinkedQueue(mn);
+            }
+        }
+
+        AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in PersistentEntitySectionManager");
+
+        ClassWriter cw = new SafeClassWriter(ClassWriter.COMPUTE_FRAMES);
+        cn.accept(cw);
+        return cw.toByteArray();
+    }
+
+    /**
+     * 替换EntitySectionStorage的容器
+     * sections: Long2ObjectOpenHashMap → EcaLong2ObjectOpenHashMap
+     * sectionIds: LongAVLTreeSet → EcaLongAVLTreeSet
+     */
+    private byte[] replaceEntitySectionStorageContainers(byte[] classBytes) {
+        AgentLogWriter.info("[ContainerReplacementTransformer] Transforming EntitySectionStorage");
+
+        ClassNode cn = new ClassNode();
+        ClassReader cr = new ClassReader(classBytes);
+        cr.accept(cn, 0);
+
+        int replacedCount = 0;
+
+        for (MethodNode mn : cn.methods) {
+            if (mn.name.equals("<init>") || mn.name.equals("<clinit>")) {
+                replacedCount += replaceContainerInstantiation(
+                    mn,
+                    "it/unimi/dsi/fastutil/longs/Long2ObjectOpenHashMap",
+                    "net/eca/agent/EcaContainers$EcaLong2ObjectOpenHashMap"
+                );
+
+                replacedCount += replaceContainerInstantiation(
+                    mn,
+                    "it/unimi/dsi/fastutil/longs/LongAVLTreeSet",
+                    "net/eca/agent/EcaContainers$EcaLongAVLTreeSet"
+                );
+            }
+        }
+
+        AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in EntitySectionStorage");
 
         ClassWriter cw = new SafeClassWriter(ClassWriter.COMPUTE_FRAMES);
         cn.accept(cw);
@@ -202,6 +296,38 @@ public class ContainerReplacementTransformer implements ITransformModule {
 
 
         AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in ChunkMap");
+
+        ClassWriter cw = new SafeClassWriter(ClassWriter.COMPUTE_FRAMES);
+        cn.accept(cw);
+        return cw.toByteArray();
+    }
+
+    /**
+     * 替换ServerLevel的容器
+     * players: Lists.newArrayList() → EcaArrayList
+     * navigatingMobs: ObjectOpenHashSet → EcaHashSet
+     */
+    private byte[] replaceServerLevelContainers(byte[] classBytes) {
+        AgentLogWriter.info("[ContainerReplacementTransformer] Transforming ServerLevel");
+
+        ClassNode cn = new ClassNode();
+        ClassReader cr = new ClassReader(classBytes);
+        cr.accept(cn, 0);
+
+        int replacedCount = 0;
+
+        for (MethodNode mn : cn.methods) {
+            if (mn.name.equals("<init>") || mn.name.equals("<clinit>")) {
+                replacedCount += replaceGuavaArrayList(mn);
+                replacedCount += replaceContainerInstantiation(
+                    mn,
+                    "it/unimi/dsi/fastutil/objects/ObjectOpenHashSet",
+                    "net/eca/agent/EcaContainers$EcaHashSet"
+                );
+            }
+        }
+
+        AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + replacedCount + " containers in ServerLevel");
 
         ClassWriter cw = new SafeClassWriter(ClassWriter.COMPUTE_FRAMES);
         cn.accept(cw);
@@ -310,6 +436,80 @@ public class ContainerReplacementTransformer implements ITransformModule {
                     replacement.add(new InsnNode(DUP));
                     replacement.add(new MethodInsnNode(INVOKESPECIAL,
                         "net/eca/agent/EcaContainers$EcaArrayList",
+                        "<init>",
+                        "()V",
+                        false));
+
+                    mn.instructions.insert(insn, replacement);
+                    mn.instructions.remove(insn);
+                    count++;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    /**
+     * 替换通过Guava Sets.newHashSet()创建的HashSet
+     * 将 Sets.newHashSet() 替换为 new EcaHashSet()
+     */
+    private int replaceGuavaHashSet(MethodNode mn) {
+        int count = 0;
+        AbstractInsnNode[] insns = mn.instructions.toArray();
+
+        for (int i = 0; i < insns.length; i++) {
+            AbstractInsnNode insn = insns[i];
+
+            if (insn.getOpcode() == INVOKESTATIC) {
+                MethodInsnNode methodInsn = (MethodInsnNode) insn;
+
+                if (methodInsn.owner.equals("com/google/common/collect/Sets") &&
+                    methodInsn.name.equals("newHashSet") &&
+                    methodInsn.desc.startsWith("()")) {
+
+                    InsnList replacement = new InsnList();
+                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/EcaContainers$EcaHashSet"));
+                    replacement.add(new InsnNode(DUP));
+                    replacement.add(new MethodInsnNode(INVOKESPECIAL,
+                        "net/eca/agent/EcaContainers$EcaHashSet",
+                        "<init>",
+                        "()V",
+                        false));
+
+                    mn.instructions.insert(insn, replacement);
+                    mn.instructions.remove(insn);
+                    count++;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    /**
+     * 替换通过Guava Queues.newConcurrentLinkedQueue()创建的队列
+     * 将 Queues.newConcurrentLinkedQueue() 替换为 new EcaConcurrentLinkedQueue()
+     */
+    private int replaceGuavaConcurrentLinkedQueue(MethodNode mn) {
+        int count = 0;
+        AbstractInsnNode[] insns = mn.instructions.toArray();
+
+        for (int i = 0; i < insns.length; i++) {
+            AbstractInsnNode insn = insns[i];
+
+            if (insn.getOpcode() == INVOKESTATIC) {
+                MethodInsnNode methodInsn = (MethodInsnNode) insn;
+
+                if (methodInsn.owner.equals("com/google/common/collect/Queues") &&
+                    methodInsn.name.equals("newConcurrentLinkedQueue") &&
+                    methodInsn.desc.startsWith("()")) {
+
+                    InsnList replacement = new InsnList();
+                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/EcaContainers$EcaConcurrentLinkedQueue"));
+                    replacement.add(new InsnNode(DUP));
+                    replacement.add(new MethodInsnNode(INVOKESPECIAL,
+                        "net/eca/agent/EcaContainers$EcaConcurrentLinkedQueue",
                         "<init>",
                         "()V",
                         false));

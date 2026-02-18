@@ -1,4 +1,4 @@
-package net.eca.util.spawn;
+package net.eca.util.spawn_ban;
 
 import net.eca.util.EcaLogger;
 import net.minecraft.core.registries.BuiltInRegistries;
