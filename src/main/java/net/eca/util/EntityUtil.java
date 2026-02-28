@@ -247,10 +247,10 @@ public class EntityUtil {
         } catch (Exception ignored) {}
     }
 
-    //验证血量修改是否成功
+    //验证血量修改是否成功（必须用实体自身的 getHealth()，不能读 DATA_HEALTH_ID）
     private static boolean verifyHealthChange(LivingEntity entity, float expectedHealth) {
         try {
-            float actualHealth = getHealth(entity);
+            float actualHealth = entity.getHealth();
             return Math.abs(actualHealth - expectedHealth) <= 10.0f;
         } catch (Exception e) {
             return false;
@@ -617,10 +617,7 @@ public class EntityUtil {
     private static boolean isNumericType(Class<?> type) {
         return type == float.class || type == Float.class ||
                type == double.class || type == Double.class ||
-               type == int.class || type == Integer.class ||
-               type == long.class || type == Long.class ||
-               type == short.class || type == Short.class ||
-               type == byte.class || type == Byte.class;
+               type == int.class || type == Integer.class;
     }
 
     //查找血量相关的数据访问器（值接近血量 或 字段名匹配白名单）
@@ -677,12 +674,6 @@ public class EntityUtil {
             } else if (serializer == EntityDataSerializers.INT) {
                 entityData.set((EntityDataAccessor<Integer>) accessor, (int) expectedHealth);
                 success = true;
-            } else if (serializer == EntityDataSerializers.BYTE) {
-                entityData.set((EntityDataAccessor<Byte>) accessor, (byte) expectedHealth);
-                success = true;
-            } else if (serializer == EntityDataSerializers.LONG) {
-                entityData.set((EntityDataAccessor<Long>) accessor, (long) expectedHealth);
-                success = true;
             }
 
             if (success) {
@@ -719,14 +710,12 @@ public class EntityUtil {
             //容器检测
             if (cache.containerDetected) {
                 scanAndModifyHealthContainer(entity, valueToWrite, cache);
-
                 return;
             }
 
             //字段访问路径
             if (cache.writePath != null) {
                 cache.writePath.apply(entity, valueToWrite);
-
             }
         } catch (Exception ignored) {}
     }

@@ -53,7 +53,6 @@ public class HealthAnalyzer {
             depth++;
         }
 
-        EcaLogger.warn("[HealthAnalyzer] Method not found in entire class hierarchy starting from: {}", startClass.getName());
         return null;
     }
 
@@ -149,14 +148,12 @@ public class HealthAnalyzer {
 
         //检查是否是 Java 核心类（bootstrap 类加载器加载的类）
         if (clazz.getClassLoader() == null) {
-            EcaLogger.warn("[HealthAnalyzer] Skipping Java core class (bootstrap classloader): {}", clazz.getName());
             return null;
         }
 
         //检查是否是受保护的类（避免递归分析）
         String className = clazz.getName();
         if (PackageWhitelist.isProtectedBinary(className)) {
-            EcaLogger.warn("[HealthAnalyzer] Skipping protected class: {}", className);
             return null;
         }
 

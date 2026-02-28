@@ -62,13 +62,11 @@ public class HealthAnalyzerManager {
             HealthAnalyzer.AnalysisResult analysisResult = HealthAnalyzer.analyze(entityClass);
 
             if (analysisResult == null || !analysisResult.foundMethod) {
-                EcaLogger.warn("[HealthAnalyzerManager] getHealth() method not found in {}", className);
                 createDefaultCache(entityClass);
                 return;
             }
 
             if (!analysisResult.foundMinimalUnit) {
-                EcaLogger.warn("[HealthAnalyzerManager] No minimal writable unit found for {}", className);
                 createDefaultCache(entityClass);
                 return;
             }
@@ -260,7 +258,7 @@ public class HealthAnalyzerManager {
         }
     }
 
-    //通用 Unsafe Map Entry 修改：遍历 entrySet，用引用匹配找到 value 字段，Unsafe 写入
+    //通用 Unsafe Map Entry 修改：遍历 entrySet，用字段名定位 value 字段，Unsafe 写入绕过 mod 拦截
     @SuppressWarnings("rawtypes")
     private static boolean unsafeModifyMapEntry(Map<?, ?> map, Object targetKey, float newValue) {
         try {
@@ -280,8 +278,8 @@ public class HealthAnalyzerManager {
                         boxedValue = newValue;
                     }
 
-                    //获取 Entry value 字段的偏移量（缓存）
-                    long offset = getEntryValueOffset(entry, currentValue);
+                    //通过字段名定位 value 字段偏移量（缓存）
+                    long offset = getEntryValueOffset(entry);
                     if (offset == -1) return false;
 
                     //Unsafe 直接写入
@@ -295,32 +293,30 @@ public class HealthAnalyzerManager {
         return false;
     }
 
-    //获取 Entry 对象中 value 字段的内存偏移量（按 Entry class 缓存）
-    private static long getEntryValueOffset(Object entry, Object currentValue) {
+    //通过字段名定位 Entry 的 value 字段偏移量（按 Entry class 缓存）
+    private static long getEntryValueOffset(Object entry) {
         Class<?> entryClass = entry.getClass();
 
         Long cached = ENTRY_VALUE_OFFSET_CACHE.get(entryClass);
         if (cached != null) return cached;
 
-        //扫描 Entry 类层次结构的所有字段，用引用匹配找到存 value 的字段
+        //按字段名匹配：覆盖 HashMap$Node.value、WeakHashMap$Entry.value、ConcurrentHashMap$Node.val
         Class<?> cls = entryClass;
         while (cls != null && cls != Object.class) {
             for (Field f : cls.getDeclaredFields()) {
-                try {
+                String name = f.getName();
+                if (name.equals("value") || name.equals("val")) {
                     long offset = LwjglUtil.lwjglObjectFieldOffset(f);
-                    if (offset == -1) continue;
-
-                    Object fieldValue = LwjglUtil.lwjglGetObject(entry, offset);
-                    if (fieldValue == currentValue && currentValue != null) {
+                    if (offset != -1) {
                         ENTRY_VALUE_OFFSET_CACHE.put(entryClass, offset);
                         return offset;
                     }
-                } catch (Exception ignored) {}
+                }
             }
             cls = cls.getSuperclass();
         }
 
-        EcaLogger.warn("[HealthAnalyzerManager] Cannot find value field in Entry class: {}", entryClass.getName());
+        EcaLogger.warn("[HealthAnalyzerManager] Cannot find value/val field in Entry class: {}", entryClass.getName());
         return -1;
     }
 
