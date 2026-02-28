@@ -55,7 +55,7 @@ public class EcaEventHandler {
     @SubscribeEvent
     public void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
-            EntityExtensionManager.syncActiveType(player);
+            EntityExtensionManager.onPlayerChangedDimension(player, event.getFrom());
         }
     }
 

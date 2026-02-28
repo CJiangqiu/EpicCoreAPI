@@ -23,6 +23,20 @@ public final class ForceLoadingManager {
 
     private static final Map<UUID, TrackedChunk> TRACKED = new ConcurrentHashMap<>();
 
+    private static final ThreadLocal<Entity> CURRENT_RENDERING_ENTITY = new ThreadLocal<>();
+
+    public static void setCurrentRenderingEntity(Entity entity) {
+        CURRENT_RENDERING_ENTITY.set(entity);
+    }
+
+    public static Entity getCurrentRenderingEntity() {
+        return CURRENT_RENDERING_ENTITY.get();
+    }
+
+    public static void clearCurrentRenderingEntity() {
+        CURRENT_RENDERING_ENTITY.remove();
+    }
+
     public static void onEntityJoin(LivingEntity entity, ServerLevel level) {
         if (!shouldForceLoad(entity)) {
             return;
@@ -33,8 +47,6 @@ public final class ForceLoadingManager {
 
         ForgeChunkManager.forceChunk(level, EcaMod.MOD_ID, uuid, chunkPos.x, chunkPos.z, true, true);
         TRACKED.put(uuid, new TrackedChunk(level, chunkPos));
-        EcaLogger.info("Force loaded chunk ({}, {}) for entity {} [{}]",
-                chunkPos.x, chunkPos.z, entity.getType(), uuid);
     }
 
     public static void onEntityTick(LivingEntity entity, ServerLevel level) {
@@ -67,7 +79,6 @@ public final class ForceLoadingManager {
 
         ForgeChunkManager.forceChunk(tracked.level, EcaMod.MOD_ID, uuid,
                 tracked.chunkPos.x, tracked.chunkPos.z, false, true);
-        EcaLogger.info("Removed force loaded chunk for entity {} [{}]", entity.getType(), uuid);
     }
 
     /**
@@ -79,8 +90,6 @@ public final class ForceLoadingManager {
             // 保留所有实体票据，让 Forge 恢复区块加载。
             // 实体加载后会通过 onEntityJoin 重新纳入 TRACKED 管理。
             // 如果实体已不存在，票据会在下次 onEntityLeave/清理时移除。
-            EcaLogger.info("Validating force-loaded chunk tickets for dimension {}",
-                    level.dimension().location());
         });
     }
 
@@ -90,12 +99,22 @@ public final class ForceLoadingManager {
         }
 
         for (Map.Entry<UUID, TrackedChunk> entry : TRACKED.entrySet()) {
+            UUID uuid = entry.getKey();
             TrackedChunk tracked = entry.getValue();
             if (tracked.level != level) {
                 continue;
             }
 
-            Entity entity = level.getEntity(entry.getKey());
+            Entity entity = level.getEntity(uuid);
+            if (entity == null) {
+                // UUID 对应实体不存在，移除陈旧票据
+                if (TRACKED.remove(uuid, tracked)) {
+                    ForgeChunkManager.forceChunk(tracked.level, EcaMod.MOD_ID, uuid,
+                            tracked.chunkPos.x, tracked.chunkPos.z, false, true);
+                }
+                continue;
+            }
+
             if (entity instanceof LivingEntity living) {
                 onEntityTick(living, level);
             }

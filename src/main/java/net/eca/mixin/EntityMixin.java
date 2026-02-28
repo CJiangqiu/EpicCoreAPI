@@ -107,32 +107,19 @@ public class EntityMixin {
         Entity entity = (Entity) (Object) this;
 
         if (EntityLocationManager.isLocationLocked(entity)) {
-            EcaLogger.info("[LocationLock] setPosRaw called for {}: ({}, {}, {})",
-                entity.getName().getString(), x, y, z);
-
-            // 如果是维度切换，允许通过
             if (EntityUtil.isChangingDimension(entity)) {
-                EcaLogger.info("[LocationLock] Allowing setPosRaw - dimension change");
                 return;
             }
 
             Vec3 lockedPos = EntityLocationManager.getLockedPosition(entity);
             if (lockedPos != null) {
-                // 检查是否试图设置到非锁定位置
                 double dx = x - lockedPos.x;
                 double dy = y - lockedPos.y;
                 double dz = z - lockedPos.z;
                 double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-                EcaLogger.info("[LocationLock] Locked position: ({}, {}, {}), distance: {}",
-                    lockedPos.x, lockedPos.y, lockedPos.z, distance);
-
-                // 如果试图移动到其他位置，阻止
                 if (distance > 0.001) {
-                    EcaLogger.info("[LocationLock] CANCELING setPosRaw!");
                     ci.cancel();
-                } else {
-                    EcaLogger.info("[LocationLock] Allowing setPosRaw - same position");
                 }
             }
         }
@@ -141,11 +128,8 @@ public class EntityMixin {
     @Inject(method = "changeDimension*", at = @At("RETURN"))
     private void afterChangeDimension(ServerLevel destination, CallbackInfoReturnable<Entity> cir) {
         Entity oldEntity = (Entity) (Object) this;
-        Entity newEntity = cir.getReturnValue();
-
-        if (newEntity != null && newEntity != oldEntity) {
-            EntityUtil.unmarkDimensionChanging(oldEntity);
-        }
+        // 维度切换完成后无条件清除标记（玩家的changeDimension返回this，之前的条件导致永远不会unmark）
+        EntityUtil.unmarkDimensionChanging(oldEntity);
     }
 
     @Inject(method = "shouldBeSaved", at = @At("HEAD"), cancellable = true)

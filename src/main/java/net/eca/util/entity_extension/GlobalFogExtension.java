@@ -16,16 +16,20 @@ public interface GlobalFogExtension {
         return 48.0f;
     }
 
+    default int fogColor() {
+        return 0x808080;
+    }
+
     default float fogRed() {
-        return 0.5f;
+        return ((fogColor() >> 16) & 0xFF) / 255.0f;
     }
 
     default float fogGreen() {
-        return 0.5f;
+        return ((fogColor() >> 8) & 0xFF) / 255.0f;
     }
 
     default float fogBlue() {
-        return 0.5f;
+        return (fogColor() & 0xFF) / 255.0f;
     }
 
     default float terrainFogStart(float renderDistance) {

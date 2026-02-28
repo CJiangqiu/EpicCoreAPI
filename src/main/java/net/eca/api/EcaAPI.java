@@ -825,9 +825,6 @@ public final class EcaAPI {
         ReturnToggle.addExplicitTargets(targets.toArray(new String[0]));
         invokeAgentReturnToggle(inst, "addExplicitTargets", new Class<?>[] { String[].class }, (Object) targets.toArray(new String[0]));
 
-        EcaLogger.info("GlobalAllReturn: Retransforming {} classes from {} package prefixes",
-            candidates.size(), collectedPrefixes.size());
-
         try {
             inst.retransformClasses(candidates.toArray(new Class<?>[0]));
         } catch (Throwable t) {

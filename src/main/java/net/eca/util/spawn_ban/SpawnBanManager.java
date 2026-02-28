@@ -1,6 +1,5 @@
 package net.eca.util.spawn_ban;
 
-import net.eca.util.EcaLogger;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
@@ -26,10 +25,6 @@ public class SpawnBanManager {
 
         SpawnBanData data = SpawnBanData.get(level);
         data.addBan(typeId, timeInSeconds);
-
-        EcaLogger.info("[SpawnBan] Added ban for {} in {} for {} seconds",
-            typeId, level.dimension().location(), timeInSeconds);
-
         return true;
     }
 
@@ -75,14 +70,7 @@ public class SpawnBanManager {
         }
 
         SpawnBanData data = SpawnBanData.get(level);
-        boolean removed = data.removeBan(typeId);
-
-        if (removed) {
-            EcaLogger.info("[SpawnBan] Cleared ban for {} in {}",
-                typeId, level.dimension().location());
-        }
-
-        return removed;
+        return data.removeBan(typeId);
     }
 
     // 获取所有禁生成
@@ -111,8 +99,6 @@ public class SpawnBanManager {
 
         SpawnBanData data = SpawnBanData.get(level);
         data.clearAll();
-
-        EcaLogger.info("[SpawnBan] Cleared all bans in {}", level.dimension().location());
     }
 
     // 更新禁生成倒计时（每秒调用）

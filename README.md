@@ -238,10 +238,10 @@ public class MyBossExtension extends EntityExtension {
             @Override public ResourceLocation getFillTexture() { return texture("boss/bar_fill.png"); }  // fill texture (null to skip). If both texture and RenderType are set, shader renders masked by texture alpha
             @Override public RenderType getFrameRenderType() { return CustomRenderTypes.BOSS_BAR_FRAME; }  // frame shader/render type (null to skip)
             @Override public RenderType getFillRenderType() { return CustomRenderTypes.BOSS_BAR_FILL; }  // fill shader/render type (null to skip)
-            @Override public int getFrameWidth() { return 460; }  // frame width in pixels (only used when RenderType only, texture auto-detects size)
-            @Override public int getFrameHeight() { return 50; }  // frame height in pixels (only used when RenderType only, texture auto-detects size)
-            @Override public int getFillWidth() { return 420; }  // fill bar width in pixels (only used when RenderType only, texture auto-detects size)
-            @Override public int getFillHeight() { return 40; }  // fill bar height in pixels (only used when RenderType only, texture auto-detects size)
+            @Override public int getFrameWidth() { return 460; }  // frame pixel width (RenderType-only mode, texture mode auto-detects)
+            @Override public int getFrameHeight() { return 50; }  // frame pixel height (RenderType-only mode, texture mode auto-detects)
+            @Override public int getFillWidth() { return 420; }  // fill bar pixel width (RenderType-only mode, texture mode auto-detects)
+            @Override public int getFillHeight() { return 40; }  // fill bar pixel height (RenderType-only mode, texture mode auto-detects)
             @Override public int getFrameOffsetX() { return 0; }  // frame X offset
             @Override public int getFrameOffsetY() { return 0; }  // frame Y offset
             @Override public int getFillOffsetX() { return 0; }  // fill bar X offset
@@ -268,9 +268,7 @@ public class MyBossExtension extends EntityExtension {
             @Override public boolean enabled() { return true; }  // enable fog
             @Override public boolean globalMode() { return true; }  // global mode (ignore radius, always active in dimension)
             @Override public float radius() { return 8.0f; }  // fog activation radius around entity
-            @Override public float fogRed() { return 0.0f; }  // fog color red (0.0 ~ 1.0)
-            @Override public float fogGreen() { return 0.0f; }  // fog color green (0.0 ~ 1.0)
-            @Override public float fogBlue() { return 0.0f; }  // fog color blue (0.0 ~ 1.0)
+            @Override public int fogColor() { return 0x000000; }  // fog color as packed RGB int (e.g. 0xFF0000 = red, 0x800080 = purple, 0x000000 = black). Override fogRed/Green/Blue() instead to mix your own color.
             @Override public float terrainFogStart(float renderDistance) { return renderDistance * 0.02f; }  // terrain fog start distance
             @Override public float terrainFogEnd(float renderDistance) { return renderDistance * 0.25f; }  // terrain fog end distance
             @Override public float skyFogStart(float renderDistance) { return 0.0f; }  // sky fog start distance
@@ -531,7 +529,7 @@ public class MyBossExtension extends EntityExtension {
 
     @Override
     public boolean enableForceLoading() {
-        return true;  // 设置该类型为强加载实体，请勿用于会大量生成的实体避免卡顿
+        return true;  // 设置该类型实体为强加载实体，请勿用于会大量生成的实体避免卡顿
     }
 
     @Override
@@ -573,10 +571,10 @@ public class MyBossExtension extends EntityExtension {
             @Override public ResourceLocation getFillTexture() { return texture("boss/bar_fill.png"); }  // 填充纹理（null 则跳过）。同时设置纹理和渲染类型时，着色器将以纹理 alpha 为遮罩渲染
             @Override public RenderType getFrameRenderType() { return CustomRenderTypes.BOSS_BAR_FRAME; }  // 边框着色器/渲染类型（null 则跳过）
             @Override public RenderType getFillRenderType() { return CustomRenderTypes.BOSS_BAR_FILL; }  // 填充着色器/渲染类型（null 则跳过）
-            @Override public int getFrameWidth() { return 460; }  // 边框宽度（像素，仅渲染类型模式使用，纹理模式自动检测尺寸）
-            @Override public int getFrameHeight() { return 50; }  // 边框高度（像素，仅渲染类型模式使用，纹理模式自动检测尺寸）
-            @Override public int getFillWidth() { return 420; }  // 填充条宽度（像素，仅渲染类型模式使用，纹理模式自动检测尺寸）
-            @Override public int getFillHeight() { return 40; }  // 填充条高度（像素，仅渲染类型模式使用，纹理模式自动检测尺寸）
+            @Override public int getFrameWidth() { return 460; }  // 边框像素宽度（仅渲染类型模式使用，纹理模式自动检测）
+            @Override public int getFrameHeight() { return 50; }  // 边框像素高度（仅渲染类型模式使用，纹理模式自动检测）
+            @Override public int getFillWidth() { return 420; }  // 填充条像素宽度（仅渲染类型模式使用，纹理模式自动检测）
+            @Override public int getFillHeight() { return 40; }  // 填充条像素高度（仅渲染类型模式使用，纹理模式自动检测）
             @Override public int getFrameOffsetX() { return 0; }  // 边框 X 偏移
             @Override public int getFrameOffsetY() { return 0; }  // 边框 Y 偏移
             @Override public int getFillOffsetX() { return 0; }  // 填充条 X 偏移
@@ -603,9 +601,7 @@ public class MyBossExtension extends EntityExtension {
             @Override public boolean enabled() { return true; }  // 启用迷雾
             @Override public boolean globalMode() { return true; }  // 全局模式（忽略半径，在维度内始终生效）
             @Override public float radius() { return 8.0f; }  // 迷雾激活半径（围绕实体）
-            @Override public float fogRed() { return 0.0f; }  // 迷雾颜色 红（0.0 ~ 1.0）
-            @Override public float fogGreen() { return 0.0f; }  // 迷雾颜色 绿（0.0 ~ 1.0）
-            @Override public float fogBlue() { return 0.0f; }  // 迷雾颜色 蓝（0.0 ~ 1.0）
+            @Override public int fogColor() { return 0x000000; }  // 迷雾颜色，十六进制 RGB（如 0xFF0000 = 红，0x800080 = 紫，0x000000 = 黑）。如需自行进行颜色调配，可 override fogRed/Green/Blue() 方法代替。
             @Override public float terrainFogStart(float renderDistance) { return renderDistance * 0.02f; }  // 地形迷雾起始距离
             @Override public float terrainFogEnd(float renderDistance) { return renderDistance * 0.25f; }  // 地形迷雾结束距离
             @Override public float skyFogStart(float renderDistance) { return 0.0f; }  // 天空迷雾起始距离

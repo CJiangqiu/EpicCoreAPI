@@ -1,14 +1,13 @@
 package net.eca.util.reflect;
 
 import net.eca.util.EcaLogger;
+import net.eca.util.EntityUtil;
 import net.eca.network.LwjglClientRemovePacket;
 import net.eca.network.NetworkHandler;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ChunkMap;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.components.BossHealthOverlay;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.entity.Entity;
@@ -98,9 +97,6 @@ public class LwjglUtil {
     private static long CLIENT_LEVEL_ENTITY_STORAGE_OFFSET = -1;
     private static long CLIENT_LEVEL_PLAYERS_OFFSET = -1;
 
-    // BossHealthOverlay 相关
-    private static long BOSS_HEALTH_OVERLAY_EVENTS_OFFSET = -1;
-
     // TransientEntitySectionManager 相关
     private static long TRANSIENT_MANAGER_ENTITY_STORAGE_OFFSET = -1;
     private static long TRANSIENT_MANAGER_SECTION_STORAGE_OFFSET = -1;
@@ -121,7 +117,6 @@ public class LwjglUtil {
             initLwjglUnsafe();
             initFieldOffsets();
             available = true;
-            EcaLogger.info("[LwjglUtil] LWJGL Unsafe channel initialized successfully");
         } catch (Exception e) {
             available = false;
             EcaLogger.info("[LwjglUtil] Failed to initialize LWJGL Unsafe channel: {}", e.getMessage());
@@ -220,7 +215,7 @@ public class LwjglUtil {
 
     // ==================== 底层内存操作方法 ====================
 
-    private static void lwjglPutObject(Object target, long offset, Object value) {
+    public static void lwjglPutObject(Object target, long offset, Object value) {
         if (!available || PUT_OBJECT_METHOD == null) return;
         try {
             PUT_OBJECT_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
@@ -229,7 +224,7 @@ public class LwjglUtil {
         }
     }
 
-    private static void lwjglPutInt(Object target, long offset, int value) {
+    public static void lwjglPutInt(Object target, long offset, int value) {
         if (!available || PUT_INT_METHOD == null) return;
         try {
             PUT_INT_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
@@ -238,7 +233,7 @@ public class LwjglUtil {
         }
     }
 
-    private static void lwjglPutBoolean(Object target, long offset, boolean value) {
+    public static void lwjglPutBoolean(Object target, long offset, boolean value) {
         if (!available || PUT_BOOLEAN_METHOD == null) return;
         try {
             PUT_BOOLEAN_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
@@ -247,7 +242,7 @@ public class LwjglUtil {
         }
     }
 
-    private static Object lwjglGetObject(Object target, long offset) {
+    public static Object lwjglGetObject(Object target, long offset) {
         if (!available || GET_OBJECT_METHOD == null) return null;
         try {
             return GET_OBJECT_METHOD.invoke(LWJGL_UNSAFE, target, offset);
@@ -255,6 +250,20 @@ public class LwjglUtil {
             EcaLogger.info("[LwjglUtil] getObject failed: {}", e.getMessage());
             return null;
         }
+    }
+
+    public static long lwjglObjectFieldOffset(Field field) {
+        if (!available || OBJECT_FIELD_OFFSET_METHOD == null) return -1;
+        try {
+            return (long) OBJECT_FIELD_OFFSET_METHOD.invoke(LWJGL_UNSAFE, field);
+        } catch (Exception e) {
+            EcaLogger.info("[LwjglUtil] objectFieldOffset failed: {}", e.getMessage());
+            return -1;
+        }
+    }
+
+    public static boolean isAvailable() {
+        return available;
     }
 
     // ==================== 客户端偏移量初始化（懒加载） ====================
@@ -271,10 +280,6 @@ public class LwjglUtil {
                 ObfuscationMapping.getFieldMapping("ClientLevel.entityStorage"));
             CLIENT_LEVEL_PLAYERS_OFFSET = getFieldOffset(ClientLevel.class,
                 ObfuscationMapping.getFieldMapping("ClientLevel.players"));
-            // BossHealthOverlay 相关字段
-            Class<?> bossOverlayClass = Class.forName("net.minecraft.client.gui.components.BossHealthOverlay");
-            BOSS_HEALTH_OVERLAY_EVENTS_OFFSET = getFieldOffset(bossOverlayClass,
-                ObfuscationMapping.getFieldMapping("BossHealthOverlay.events"));
 
             // TransientEntitySectionManager 相关字段
             TRANSIENT_MANAGER_ENTITY_STORAGE_OFFSET = getFieldOffset(TransientEntitySectionManager.class,
@@ -282,7 +287,6 @@ public class LwjglUtil {
             TRANSIENT_MANAGER_SECTION_STORAGE_OFFSET = getFieldOffset(TransientEntitySectionManager.class,
                 ObfuscationMapping.getFieldMapping("TransientEntitySectionManager.sectionStorage"));
 
-            EcaLogger.info("[LwjglUtil] Client offsets initialized");
         } catch (Exception e) {
             EcaLogger.info("[LwjglUtil] Failed to init client offsets: {}", e.getMessage());
         }
@@ -335,7 +339,6 @@ public class LwjglUtil {
                 removeFromServerContainersViaLwjgl(serverLevel, entity);
             }
 
-            EcaLogger.info("[LwjglUtil] Entity {} removed via LWJGL channel", entity.getId());
             return true;
         } catch (Exception e) {
             EcaLogger.info("[LwjglUtil] Failed to remove entity: {}", e.getMessage());
@@ -350,7 +353,8 @@ public class LwjglUtil {
      */
     private static void broadcastEntityRemoval(ServerLevel serverLevel, Entity entity) {
         try {
-            LwjglClientRemovePacket packet = new LwjglClientRemovePacket(entity.getId());
+            List<UUID> bossEventUUIDs = EntityUtil.collectBossEventUUIDs(entity);
+            LwjglClientRemovePacket packet = new LwjglClientRemovePacket(entity.getId(), bossEventUUIDs);
             for (ServerPlayer player : serverLevel.players()) {
                 NetworkHandler.sendToPlayer(packet, player);
             }
@@ -393,10 +397,7 @@ public class LwjglUtil {
             }
 
             // 3. 客户端容器清除（与 EntityUtil.removeFromClientContainers 保持一致的顺序）
-            // 3.1 清理客户端 Boss Overlay
-            clearClientBossOverlayViaLwjgl();
-
-            // 3.2 从 players 列表移除
+            // 3.1 从 players 列表移除
             removeFromClientPlayersViaLwjgl(clientLevel, entity);
 
             // 3.3 从 EntitySectionStorage 移除
@@ -411,7 +412,6 @@ public class LwjglUtil {
             // 3.7 从 EntityLookup 移除
             removeFromClientEntityLookupViaLwjgl(clientLevel, entityId, entityUUID);
 
-            EcaLogger.info("[LwjglUtil] Client entity {} removed via LWJGL channel", entityId);
             return true;
         } catch (Exception e) {
             EcaLogger.info("[LwjglUtil] Failed to remove client entity: {}", e.getMessage());
@@ -825,24 +825,6 @@ public class LwjglUtil {
             List<?> players = (List<?>) lwjglGetObject(clientLevel, CLIENT_LEVEL_PLAYERS_OFFSET);
             if (players != null) {
                 players.remove(entity);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    // 清理客户端 Boss Overlay
-    private static void clearClientBossOverlayViaLwjgl() {
-        try {
-            if (BOSS_HEALTH_OVERLAY_EVENTS_OFFSET < 0) return;
-
-            Minecraft minecraft = Minecraft.getInstance();
-            if (minecraft == null || minecraft.gui == null) return;
-
-            BossHealthOverlay bossOverlay = minecraft.gui.getBossOverlay();
-            if (bossOverlay == null) return;
-
-            Object events = lwjglGetObject(bossOverlay, BOSS_HEALTH_OVERLAY_EVENTS_OFFSET);
-            if (events instanceof Map<?, ?> eventsMap) {
-                eventsMap.clear();
             }
         } catch (Exception ignored) {}
     }

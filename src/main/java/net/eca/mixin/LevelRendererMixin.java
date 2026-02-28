@@ -9,7 +9,7 @@ import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.math.Axis;
 import net.eca.client.render.shader.EcaShaderInstance;
-import net.eca.config.EcaConfiguration;
+
 import net.eca.util.entity_extension.EntityExtensionClientState;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
@@ -20,8 +20,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.RenderType;
-import net.minecraft.client.renderer.culling.Frustum;
-import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
@@ -30,47 +28,23 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.material.FogType;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(LevelRenderer.class)
 public abstract class LevelRendererMixin {
 
-    @Shadow
-    public abstract boolean isChunkCompiled(BlockPos pos);
-
-    @Unique
-    private Entity eca$currentEntity;
-
     // ==================== 强加载实体渲染 ====================
 
-    // 强加载实体：绕过 frustum culling，改用配置的最大渲染距离限制
-    @Redirect(method = "renderLevel",
-              at = @At(value = "INVOKE",
-                       target = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;shouldRender(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/client/renderer/culling/Frustum;DDD)Z"))
-    private boolean eca$captureShouldRender(EntityRenderDispatcher dispatcher, Entity entity, Frustum frustum, double x, double y, double z) {
-        this.eca$currentEntity = entity;
-        if (ForceLoadingManager.isForceLoadedType(entity.getType())) {
-            double maxDist = EcaConfiguration.getForceLoadingMaxRenderDistanceSafely();
-            double distSqr = entity.distanceToSqr(x, y, z);
-            return distSqr <= maxDist * maxDist;
+    @Inject(method = "isChunkCompiled", at = @At("HEAD"), cancellable = true)
+    private void eca$forceLoadedChunkCheck(BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
+        Entity entity = ForceLoadingManager.getCurrentRenderingEntity();
+        if (entity != null && ForceLoadingManager.isForceLoadedType(entity.getType())) {
+            cir.setReturnValue(true);
         }
-        return dispatcher.shouldRender(entity, frustum, x, y, z);
-    }
-
-    // 强加载实体：绕过区块编译检查，允许在未加载区块中渲染
-    @Redirect(method = "renderLevel",
-              at = @At(value = "INVOKE",
-                       target = "Lnet/minecraft/client/renderer/LevelRenderer;isChunkCompiled(Lnet/minecraft/core/BlockPos;)Z"))
-    private boolean eca$forceLoadedChunkCheck(LevelRenderer instance, BlockPos blockPos) {
-        if (this.eca$currentEntity != null && ForceLoadingManager.isForceLoadedType(this.eca$currentEntity.getType())) {
-            return true;
-        }
-        return isChunkCompiled(blockPos);
     }
 
     // ==================== 全局天空盒渲染 ====================
@@ -157,28 +131,44 @@ public abstract class LevelRendererMixin {
     }
 
     @Unique
-    private static void drawShaderSkybox(PoseStack poseStack, RenderType renderType, float size, float alpha) {
+    private static void drawShaderSkybox(PoseStack poseStack, RenderType renderType, float radius, float alpha) {
         int alphaInt = (int) (Mth.clamp(alpha, 0.0f, 1.0f) * 255.0f);
         int light = 15728880;
+        int segments = 32;
+        int rings = 16;
 
         Tesselator tesselator = Tesselator.getInstance();
         BufferBuilder bufferBuilder = tesselator.getBuilder();
+        Matrix4f matrix = poseStack.last().pose();
 
         renderType.setupRenderState();
+        bufferBuilder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.BLOCK);
 
-        for (int i = 0; i < 6; ++i) {
-            poseStack.pushPose();
-            rotateToFace(poseStack, i);
-            Matrix4f matrix = poseStack.last().pose();
-            bufferBuilder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.BLOCK);
-            bufferBuilder.vertex(matrix, -size, -size, -size).color(255, 255, 255, alphaInt).uv(0.0f, 0.0f).uv2(light).normal(0.0f, 1.0f, 0.0f).endVertex();
-            bufferBuilder.vertex(matrix, -size, -size, size).color(255, 255, 255, alphaInt).uv(0.0f, 0.0f).uv2(light).normal(0.0f, 1.0f, 0.0f).endVertex();
-            bufferBuilder.vertex(matrix, size, -size, size).color(255, 255, 255, alphaInt).uv(0.0f, 0.0f).uv2(light).normal(0.0f, 1.0f, 0.0f).endVertex();
-            bufferBuilder.vertex(matrix, size, -size, -size).color(255, 255, 255, alphaInt).uv(0.0f, 0.0f).uv2(light).normal(0.0f, 1.0f, 0.0f).endVertex();
-            BufferUploader.drawWithShader(bufferBuilder.end());
-            poseStack.popPose();
+        for (int ring = 0; ring < rings; ring++) {
+            float phi1 = (float) Math.PI * ring / rings;
+            float phi2 = (float) Math.PI * (ring + 1) / rings;
+            float y1 = (float) Math.cos(phi1) * radius;
+            float y2 = (float) Math.cos(phi2) * radius;
+            float r1 = (float) Math.sin(phi1) * radius;
+            float r2 = (float) Math.sin(phi2) * radius;
+
+            for (int seg = 0; seg < segments; seg++) {
+                float theta1 = (float) (2.0 * Math.PI * seg / segments);
+                float theta2 = (float) (2.0 * Math.PI * (seg + 1) / segments);
+
+                float x1 = (float) Math.cos(theta1);
+                float z1 = (float) Math.sin(theta1);
+                float x2 = (float) Math.cos(theta2);
+                float z2 = (float) Math.sin(theta2);
+
+                bufferBuilder.vertex(matrix, x1 * r1, y1, z1 * r1).color(255, 255, 255, alphaInt).uv(0.0f, 0.0f).uv2(light).normal(x1, y1 / radius, z1).endVertex();
+                bufferBuilder.vertex(matrix, x1 * r2, y2, z1 * r2).color(255, 255, 255, alphaInt).uv(0.0f, 0.0f).uv2(light).normal(x1, y2 / radius, z1).endVertex();
+                bufferBuilder.vertex(matrix, x2 * r2, y2, z2 * r2).color(255, 255, 255, alphaInt).uv(0.0f, 0.0f).uv2(light).normal(x2, y2 / radius, z2).endVertex();
+                bufferBuilder.vertex(matrix, x2 * r1, y1, z2 * r1).color(255, 255, 255, alphaInt).uv(0.0f, 0.0f).uv2(light).normal(x2, y1 / radius, z2).endVertex();
+            }
         }
 
+        BufferUploader.drawWithShader(bufferBuilder.end());
         renderType.clearRenderState();
     }
 

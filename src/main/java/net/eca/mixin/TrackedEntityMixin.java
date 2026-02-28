@@ -1,6 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.config.EcaConfiguration;
+
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerEntity;
@@ -24,7 +25,7 @@ public class TrackedEntityMixin {
     @Shadow @Final public ServerEntity serverEntity;
     @Shadow @Final public Set<ServerPlayerConnection> seenBy;
 
-    // 强加载实体：替换原版距离判断，使用配置的最大渲染距离
+    // 强加载实体：替换原版距离判断，取配置值与原版范围的较大者，避免降低原版可见性
     @Inject(method = "updatePlayer", at = @At("HEAD"), cancellable = true)
     private void eca$forceTrackPlayer(ServerPlayer player, CallbackInfo ci) {
         if (player == this.entity) {
@@ -34,8 +35,14 @@ public class TrackedEntityMixin {
             return;
         }
 
-        double maxDist = EcaConfiguration.getForceLoadingMaxRenderDistanceSafely();
-        double distSqr = player.distanceToSqr(this.entity);
+        // 以配置值与原版 clientTrackingRange 的较大者为准，确保不低于原版可见距离
+        double vanillaRange = this.entity.getType().clientTrackingRange() * 16.0;
+        double maxDist = Math.max(EcaConfiguration.getForceLoadingMaxRenderDistanceSafely(), vanillaRange);
+
+        // 使用水平距离（与原版 updatePlayer 一致，不含 Y 轴）
+        double dx = player.getX() - this.entity.getX();
+        double dz = player.getZ() - this.entity.getZ();
+        double distSqr = dx * dx + dz * dz;
 
         if (distSqr <= maxDist * maxDist) {
             if (this.seenBy.add(player.connection)) {

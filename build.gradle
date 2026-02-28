@@ -49,6 +49,7 @@ dependencies {
     implementation 'org.reflections:reflections:0.9.12'
     implementation 'org.ow2.asm:asm:9.2'
     implementation 'org.ow2.asm:asm-commons:9.2'
+    implementation fg.deobf("curse.maven:geckolib-388172:7553267")
 }
 
 mixin {

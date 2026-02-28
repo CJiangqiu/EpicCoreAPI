@@ -19,9 +19,11 @@ import net.minecraft.world.level.Level;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.forgespi.language.IModInfo;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -36,20 +38,13 @@ public final class EntityExtensionManager {
     private static final AtomicLong ORDER_COUNTER = new AtomicLong(0);
 
     public static void scanAndRegisterAll() {
-        EcaLogger.info("Starting Entity Extension scan...");
-
         ModList.get().forEachModFile(modFile -> {
             for (IModInfo modInfo : modFile.getModInfos()) {
-                String modId = modInfo.getModId();
-
                 modFile.getScanResult().getAnnotations().forEach(annotationData -> {
                     if (RegisterEntityExtension.class.getName().equals(annotationData.annotationType().getClassName())) {
                         String className = annotationData.clazz().getClassName();
-                        EcaLogger.info("Found @RegisterEntityExtension: {} (from mod: {})", className, modId);
-
                         try {
                             Class.forName(className, true, Thread.currentThread().getContextClassLoader());
-                            EcaLogger.info("Triggered static initialization for: {}", className);
                         } catch (ClassNotFoundException e) {
                             EcaLogger.error("Failed to load extension class {}: {}", className, e.getMessage());
                         }
@@ -57,8 +52,6 @@ public final class EntityExtensionManager {
                 });
             }
         });
-
-        EcaLogger.info("Entity Extension scan completed. Registered {} extensions", REGISTRY.size());
     }
 
     public static boolean register(EntityExtension extension) {
@@ -78,8 +71,6 @@ public final class EntityExtensionManager {
         }
 
         REGISTRY.put(type, extension);
-        EcaLogger.info("Registered EntityExtension: {} -> {} (priority: {})",
-            type, extension.getClass().getSimpleName(), extension.getPriority());
         return true;
     }
 
@@ -151,7 +142,6 @@ public final class EntityExtensionManager {
         if (state.activeType == null) {
             state.activate(type, typeState);
             sendActiveTypeUpdate(level, type);
-            EcaLogger.info("Activated initial type for dimension {}: {}", dimension.location(), type);
             return;
         }
 
@@ -161,7 +151,6 @@ public final class EntityExtensionManager {
             if (previous != type) {
                 sendActiveTypeUpdate(level, type);
             }
-            EcaLogger.info("Replaced active type for dimension {}: {}", dimension.location(), type);
         }
     }
 
@@ -307,7 +296,6 @@ public final class EntityExtensionManager {
                 if (type.equals(state.activeType)) {
                     state.clearActive();
                     sendActiveTypeUpdate(level, null);
-                    EcaLogger.info("Cleared active type {} - no alive entities", type);
                 }
                 return true;
             }
@@ -387,6 +375,23 @@ public final class EntityExtensionManager {
             state.clearActive();
             sendActiveTypeUpdate(level, null);
         }
+    }
+
+    public static void onPlayerChangedDimension(ServerPlayer player, ResourceKey<Level> fromDimension) {
+        if (player == null || fromDimension == null) {
+            return;
+        }
+
+        DimensionState fromState = DIMENSION_STATES.get(fromDimension);
+        if (fromState != null) {
+            for (CustomBossEventState customBossEventState : fromState.customBossEvents.values()) {
+                if (customBossEventState != null) {
+                    customBossEventState.bossEvent.removePlayer(player);
+                }
+            }
+        }
+
+        syncActiveType(player);
     }
 
     public static void syncActiveType(ServerPlayer player) {
@@ -493,6 +498,22 @@ public final class EntityExtensionManager {
         }
 
         return bossEventIds;
+    }
+
+    public static List<UUID> collectCustomBossEventUUIDs(LivingEntity entity) {
+        List<UUID> uuids = new ArrayList<>();
+        if (entity == null || !(entity.level() instanceof ServerLevel level)) {
+            return uuids;
+        }
+        DimensionState state = DIMENSION_STATES.get(level.dimension());
+        if (state == null) {
+            return uuids;
+        }
+        CustomBossEventState cbs = state.customBossEvents.get(entity.getUUID());
+        if (cbs != null) {
+            uuids.add(cbs.bossEvent.getId());
+        }
+        return uuids;
     }
 
     private static void removeCustomBossEvent(UUID entityUuid, DimensionState state) {

@@ -31,27 +31,8 @@ public final class ObfuscationMapping {
         Map<String, String> fields = new HashMap<>();
 
         // Entity
-        fields.put("Entity.entityData", "f_19804_");
-        fields.put("Entity.position", "f_19825_");
-        fields.put("Entity.xOld", "f_19790_");
-        fields.put("Entity.yOld", "f_19791_");
-        fields.put("Entity.zOld", "f_19792_");
-        fields.put("Entity.bb", "f_19828_");
         fields.put("Entity.removalReason", "f_146795_");
         fields.put("Entity.levelCallback", "f_146801_");
-
-        // LivingEntity
-        fields.put("LivingEntity.hurtTime", "f_20915_");
-        fields.put("LivingEntity.deathTime", "f_20919_");
-        fields.put("LivingEntity.dead", "f_20890_");
-
-        // SynchedEntityData
-        fields.put("SynchedEntityData.itemsById", "f_135345_");
-        fields.put("SynchedEntityData.isDirty", "f_135348_");
-
-        // SynchedEntityData.DataItem
-        fields.put("DataItem.value", "f_135391_");
-        fields.put("DataItem.dirty", "f_135392_");
 
         // ServerLevel
         fields.put("ServerLevel.players", "f_8546_");
@@ -99,9 +80,6 @@ public final class ObfuscationMapping {
         // TransientEntitySectionManager
         fields.put("TransientEntitySectionManager.entityStorage", "f_157637_");
         fields.put("TransientEntitySectionManager.sectionStorage", "f_157638_");
-
-        // BossHealthOverlay
-        fields.put("BossHealthOverlay.events", "f_93699_");
 
         FIELD_MAPPINGS.put(CURRENT_VERSION, fields);
     }

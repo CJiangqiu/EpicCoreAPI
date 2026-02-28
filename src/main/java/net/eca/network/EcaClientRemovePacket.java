@@ -3,12 +3,16 @@ package net.eca.network;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.BossHealthOverlay;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraftforge.network.NetworkEvent;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
@@ -18,9 +22,11 @@ import java.util.function.Supplier;
 public class EcaClientRemovePacket {
 
     private final int entityId;
+    private final List<UUID> bossEventUUIDs;
 
-    public EcaClientRemovePacket(int entityId) {
+    public EcaClientRemovePacket(int entityId, List<UUID> bossEventUUIDs) {
         this.entityId = entityId;
+        this.bossEventUUIDs = bossEventUUIDs;
     }
 
     /**
@@ -30,6 +36,10 @@ public class EcaClientRemovePacket {
      */
     public static void encode(EcaClientRemovePacket msg, FriendlyByteBuf buf) {
         buf.writeInt(msg.entityId);
+        buf.writeInt(msg.bossEventUUIDs.size());
+        for (UUID uuid : msg.bossEventUUIDs) {
+            buf.writeUUID(uuid);
+        }
     }
 
     /**
@@ -38,7 +48,13 @@ public class EcaClientRemovePacket {
      * @return the decoded packet
      */
     public static EcaClientRemovePacket decode(FriendlyByteBuf buf) {
-        return new EcaClientRemovePacket(buf.readInt());
+        int entityId = buf.readInt();
+        int count = buf.readInt();
+        List<UUID> uuids = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            uuids.add(buf.readUUID());
+        }
+        return new EcaClientRemovePacket(entityId, uuids);
     }
 
     /**
@@ -47,7 +63,8 @@ public class EcaClientRemovePacket {
      * 1. Lifecycle callback (onClientRemoval)
      * 2. Capabilities invalidation
      * 3. State marking (setRemoved, levelCallback)
-     * 4. Container removal
+     * 4. Boss bar cleanup (specific UUIDs only)
+     * 5. Container removal
      *
      * @param msg the packet to handle
      * @param ctx the network context
@@ -64,12 +81,27 @@ public class EcaClientRemovePacket {
                     entity.setRemoved(Entity.RemovalReason.DISCARDED);
                     entity.levelCallback = EntityInLevelCallback.NULL;
                     EntityUtil.removeFromClientContainers(clientLevel, entity);
-                    EcaLogger.info("[EcaClientRemovePacket] Client entity removal executed for entity ID: {}", msg.entityId);
                 } else {
                     EcaLogger.info("[EcaClientRemovePacket] Client entity removal: entity not found (ID: {})", msg.entityId);
                 }
+
+                //精确清理目标实体对应的 boss 血条
+                removeBossOverlayEntries(minecraft, msg.bossEventUUIDs);
             }
         });
         ctx.get().setPacketHandled(true);
+    }
+
+    //从 BossHealthOverlay.events 移除指定 UUID 的 boss 血条
+    private static void removeBossOverlayEntries(Minecraft minecraft, List<UUID> bossEventUUIDs) {
+        if (bossEventUUIDs.isEmpty()) return;
+        try {
+            BossHealthOverlay bossOverlay = minecraft.gui.getBossOverlay();
+            for (UUID uuid : bossEventUUIDs) {
+                bossOverlay.events.remove(uuid);
+            }
+        } catch (Exception e) {
+            EcaLogger.info("[EcaClientRemovePacket] Failed to remove boss overlay entries: {}", e.getMessage());
+        }
     }
 }

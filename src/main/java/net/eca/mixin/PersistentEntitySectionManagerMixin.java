@@ -1,6 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
+
 import net.eca.util.EntityUtil;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.spawn_ban.SpawnBanHook;

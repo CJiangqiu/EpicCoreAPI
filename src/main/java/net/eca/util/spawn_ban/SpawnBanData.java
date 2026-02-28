@@ -1,6 +1,5 @@
 package net.eca.util.spawn_ban;
 
-import net.eca.util.EcaLogger;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
@@ -103,7 +102,6 @@ public class SpawnBanData extends SavedData {
             if (newTime <= 0) {
                 iterator.remove();
                 modified = true;
-                EcaLogger.info("[SpawnBan] Ban expired for: {}", entry.getKey());
             } else {
                 entry.setValue(newTime);
                 modified = true;

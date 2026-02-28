@@ -33,7 +33,7 @@ public class ServerLevelMixin {
         }
     }
 
-    @Inject(method = "tick", at = @At("TAIL"))
+    @Inject(method = "tick(Ljava/util/function/BooleanSupplier;)V", at = @At("TAIL"))
     private void eca$onTick(CallbackInfo ci) {
         ServerLevel self = (ServerLevel) (Object) this;
         long currentTime = self.getGameTime();

@@ -4,6 +4,7 @@ import net.eca.agent.AgentLoader;
 import net.eca.agent.EcaAgent;
 import net.eca.agent.EcaTransformer;
 import net.eca.agent.ReturnToggle;
+import net.eca.compat.GeckoLibCompat;
 import net.eca.config.EcaConfiguration;
 import net.eca.event.EcaEventHandler;
 import net.eca.init.ModConfigs;
@@ -12,11 +13,13 @@ import net.eca.util.EcaLogger;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import net.minecraftforge.forgespi.language.IModInfo;
 
 import java.lang.instrument.Instrumentation;
@@ -40,8 +43,6 @@ public final class EcaMod {
     }
 
     public EcaMod() {
-        EcaLogger.info("EpicCoreAPI initializing...");
-
         // 注册配置
         ModConfigs.register();
 
@@ -50,6 +51,11 @@ public final class EcaMod {
 
         // 注册事件处理器
         MinecraftForge.EVENT_BUS.register(new EcaEventHandler());
+
+        // GeckoLib 兼容：仅客户端且 GeckoLib 存在时注册渲染层
+        if (FMLEnvironment.dist == Dist.CLIENT && ModList.get().isLoaded("geckolib")) {
+            GeckoLibCompat.register();
+        }
 
         // 注册强加载区块票据验证回调
         ForceLoadingManager.registerValidationCallback();
@@ -66,8 +72,6 @@ public final class EcaMod {
             AgentLoader.loadAgent(EcaMod.class);
             agentReady = EcaAgent.isInitialized();
         }
-        EcaLogger.info("Agent ready: {}", agentReady);
-
         // 收集 mod 包名用于 AllReturn
         if (EcaAgent.isInitialized()) {
             collectAndSetModPackages();
@@ -75,7 +79,6 @@ public final class EcaMod {
             EcaLogger.warn("Agent not initialized - some features may be unavailable");
         }
 
-        EcaLogger.info("EpicCoreAPI initialized");
     }
 
     /**
@@ -83,7 +86,6 @@ public final class EcaMod {
      */
     private void onLoadComplete(FMLLoadCompleteEvent event) {
         loadComplete = true;
-        EcaLogger.info("Forge load complete");
 
         // 扫描并注册 Entity Extensions
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
@@ -119,8 +121,6 @@ public final class EcaMod {
         }
 
         try {
-            EcaLogger.info("Starting delayed retransform (LivingEntity + Containers)...");
-
             // 1. 移除旧的 transformer
             inst.removeTransformer(transformer);
 
@@ -159,11 +159,7 @@ public final class EcaMod {
 
             // 4. Retransform
             if (!targets.isEmpty()) {
-                long startTime = System.currentTimeMillis();
                 inst.retransformClasses(targets.toArray(new Class[0]));
-                long elapsed = System.currentTimeMillis() - startTime;
-                EcaLogger.info("Delayed retransform completed: {} LivingEntity classes + {} container classes in {}ms",
-                    livingEntityCount, containerCount, elapsed);
             }
 
             hasDelayedRetransform = true;
@@ -192,7 +188,6 @@ public final class EcaMod {
 
             Class<?> localAgentClass = EcaAgent.class;
             if (localAgentClass == agentClass) {
-                EcaLogger.info("Agent on same ClassLoader, no bridge needed");
                 return EcaAgent.isInitialized();
             }
 
@@ -206,7 +201,6 @@ public final class EcaMod {
 
             openModulesForGameLayer(inst);
 
-            EcaLogger.info("Bridged Instrumentation from early agent to GAME layer");
             return true;
         } catch (Throwable t) {
             EcaLogger.warn("Failed to bridge from early agent: {}", t.getMessage());
@@ -236,7 +230,6 @@ public final class EcaMod {
                     }
                 }
             }
-            EcaLogger.info("Opened required modules for GAME layer");
         } catch (Throwable t) {
             EcaLogger.warn("Failed to open modules for GAME layer: {}", t.getMessage());
         }
@@ -276,11 +269,6 @@ public final class EcaMod {
 
                 setModPackagePrefixesInAgent(modPackages);
                 setLoadTimeTransformEnabledInAgent(true);
-
-                EcaLogger.info("Collected {} mod package prefixes for AllReturn", modPackages.size());
-                if (modPackages.size() <= 10) {
-                    EcaLogger.info("Mod packages: {}", modPackages);
-                }
             }
         } catch (Throwable t) {
             EcaLogger.warn("Failed to collect mod packages: {}", t.getMessage());
@@ -329,7 +317,6 @@ public final class EcaMod {
             if (agentReturnToggle != null) {
                 agentReturnToggle.getMethod("setModPackagePrefixes", Set.class)
                     .invoke(null, packages);
-                EcaLogger.info("Set mod packages to agent ReturnToggle");
             }
         } catch (Throwable t) {
             EcaLogger.warn("Failed to set mod packages to agent: {}", t.getMessage());
@@ -362,7 +349,6 @@ public final class EcaMod {
             if (agentReturnToggle != null) {
                 agentReturnToggle.getMethod("setLoadTimeTransformEnabled", boolean.class)
                     .invoke(null, enabled);
-                EcaLogger.info("Set loadTimeTransformEnabled to {} in agent ReturnToggle", enabled);
             }
         } catch (Throwable t) {
             EcaLogger.warn("Failed to set loadTimeTransformEnabled to agent: {}", t.getMessage());

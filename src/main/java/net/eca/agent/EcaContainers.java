@@ -5,13 +5,13 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongAVLTreeSet;
 import net.eca.api.EcaAPI;
-import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.ChunkEntities;
 import net.minecraft.world.level.entity.EntitySection;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.util.AbstractCollection;
 import java.util.AbstractSet;
@@ -25,8 +25,10 @@ import java.util.ListIterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -36,11 +38,41 @@ import java.util.function.Predicate;
  * These containers replace vanilla Minecraft containers via bytecode transformation
  * to intercept removal operations on invulnerable entities.
  */
+@SuppressWarnings({"rawtypes", "unchecked"})
 public final class EcaContainers {
 
     private EcaContainers() {}
 
-    private static final boolean DEBUG = false;    // 是否启用调试日志
+    // ==================== 回调系统 ====================
+
+    public interface RemovalCallback {
+        void onRemove(Entity entity);
+    }
+
+    private static final List<WeakReference<RemovalCallback>> REMOVAL_CALLBACKS = new CopyOnWriteArrayList<>();
+
+    private static void registerRemovalCallback(RemovalCallback callback) {
+        REMOVAL_CALLBACKS.add(new WeakReference<>(callback));
+    }
+
+    public static void callRemove(Entity entity) {
+        if (entity == null) return;
+        Iterator<WeakReference<RemovalCallback>> it = REMOVAL_CALLBACKS.iterator();
+        while (it.hasNext()) {
+            RemovalCallback cb = it.next().get();
+            if (cb == null) {
+                it.remove();
+                continue;
+            }
+            try {
+                cb.onRemove(entity);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    // ==================== 保护逻辑 ====================
+
     private static final Map<Class<?>, Field> ENTITY_FIELD_CACHE = new ConcurrentHashMap<>();
     private static final Set<Class<?>> NO_ENTITY_FIELD_CLASSES = ConcurrentHashMap.newKeySet();
     private static final ThreadLocal<SectionRemovalContext> SECTION_REMOVAL_CONTEXT = new ThreadLocal<>();
@@ -145,20 +177,28 @@ public final class EcaContainers {
      * ECA自定义的ArrayList容器
      * 用于替换MC原版的ClassInstanceMultiMap.allInstances
      */
-    public static class EcaArrayList<E> extends ArrayList<E> {
+    public static class EcaArrayList<E> extends ArrayList<E> implements RemovalCallback {
 
         private static final long serialVersionUID = 1L;
 
         public EcaArrayList() {
             super();
+            registerRemovalCallback(this);
         }
 
         public EcaArrayList(int initialCapacity) {
             super(initialCapacity);
+            registerRemovalCallback(this);
         }
 
         public EcaArrayList(Collection<? extends E> c) {
             super(c);
+            registerRemovalCallback(this);
+        }
+
+        @Override
+        public void onRemove(Entity entity) {
+            super.remove(entity);
         }
 
         private boolean isProtectedElement(Object element) {
@@ -168,9 +208,6 @@ public final class EcaContainers {
         @Override
         public boolean remove(Object o) {
             if (isProtectedElement(o)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaArrayList] Blocked removal of: {}", o);
-                }
                 return false;
             }
             return super.remove(o);
@@ -180,9 +217,6 @@ public final class EcaContainers {
         public E remove(int index) {
             E element = super.get(index);
             if (isProtectedElement(element)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaArrayList] Blocked removal at index {}: {}", index, element);
-                }
                 return null;
             }
             return super.remove(index);
@@ -210,9 +244,6 @@ public final class EcaContainers {
         @Override
         public void clear() {
             if (hasProtectedEntity(this)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaArrayList] Blocked clear due to protected entities");
-                }
                 super.removeIf(item -> !isProtectedElement(item));
                 return;
             }
@@ -277,9 +308,6 @@ public final class EcaContainers {
             @Override
             public void remove() {
                 if (isProtectedElement(current)) {
-                    if (DEBUG) {
-                        EcaLogger.info("[EcaArrayList] Blocked iterator removal: {}", current);
-                    }
                     return;
                 }
                 delegate.remove();
@@ -304,24 +332,40 @@ public final class EcaContainers {
      * 用于替换MC原版的EntityLookup.byUuid和ClassInstanceMultiMap.byClass
      */
     @SuppressWarnings("unchecked")
-    public static class EcaHashMap<K, V> extends HashMap<K, V> {
+    public static class EcaHashMap<K, V> extends HashMap<K, V> implements RemovalCallback {
 
         private static final long serialVersionUID = 1L;
 
         public EcaHashMap() {
             super();
+            registerRemovalCallback(this);
         }
 
         public EcaHashMap(int initialCapacity) {
             super(initialCapacity);
+            registerRemovalCallback(this);
         }
 
         public EcaHashMap(int initialCapacity, float loadFactor) {
             super(initialCapacity, loadFactor);
+            registerRemovalCallback(this);
         }
 
         public EcaHashMap(Map<? extends K, ? extends V> m) {
             super(m);
+            registerRemovalCallback(this);
+        }
+
+        @Override
+        public void onRemove(Entity entity) {
+            // EntityLookup.byUuid: UUID → Entity
+            super.remove((K) entity.getUUID());
+            // ClassInstanceMultiMap.byClass: Class → List，遍历每个 List 移除
+            for (V value : super.values()) {
+                if (value instanceof List<?> list) {
+                    list.remove(entity);
+                }
+            }
         }
 
         private transient Set<K> keySetView;
@@ -347,9 +391,6 @@ public final class EcaContainers {
         @Override
         public V remove(Object key) {
             if (shouldProtectRemoval(key)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaHashMap] Blocked removal of key: {}", key);
-                }
                 return null;
             }
             return super.remove(key);
@@ -359,9 +400,6 @@ public final class EcaContainers {
         public boolean remove(Object key, Object value) {
             V existing = super.get(key);
             if (existing != null && Objects.equals(existing, value) && shouldProtectRemoval(key)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaHashMap] Blocked keyed value removal of key: {}", key);
-                }
                 return false;
             }
             return super.remove(key, value);
@@ -370,9 +408,6 @@ public final class EcaContainers {
         @Override
         public void clear() {
             if (containsProtectedValue()) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaHashMap] Blocked clear due to protected values");
-                }
                 super.entrySet().removeIf(entry -> !isProtectedValue(entry.getValue()));
                 return;
             }
@@ -387,9 +422,6 @@ public final class EcaContainers {
             }
             V newValue = remappingFunction.apply(key, oldValue);
             if (newValue == null && isProtectedValue(oldValue)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaHashMap] Blocked computeIfPresent deletion of key: {}", key);
-                }
                 return oldValue;
             }
             return super.computeIfPresent(key, remappingFunction);
@@ -400,9 +432,6 @@ public final class EcaContainers {
             V oldValue = super.get(key);
             V newValue = remappingFunction.apply(key, oldValue);
             if (newValue == null && oldValue != null && isProtectedValue(oldValue)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaHashMap] Blocked compute deletion of key: {}", key);
-                }
                 return oldValue;
             }
             return super.compute(key, remappingFunction);
@@ -414,9 +443,6 @@ public final class EcaContainers {
             if (oldValue != null) {
                 V newValue = remappingFunction.apply(oldValue, value);
                 if (newValue == null && isProtectedValue(oldValue)) {
-                    if (DEBUG) {
-                        EcaLogger.info("[EcaHashMap] Blocked merge deletion of key: {}", key);
-                    }
                     return oldValue;
                 }
             }
@@ -447,9 +473,6 @@ public final class EcaContainers {
                             @Override
                             public void remove() {
                                 if (current != null && isProtectedValue(current.getValue())) {
-                                    if (DEBUG) {
-                                        EcaLogger.info("[EcaHashMap] Blocked key iterator removal: {}", current.getKey());
-                                    }
                                     return;
                                 }
                                 entryIterator.remove();
@@ -501,9 +524,6 @@ public final class EcaContainers {
                             @Override
                             public void remove() {
                                 if (current != null && isProtectedValue(current.getValue())) {
-                                    if (DEBUG) {
-                                        EcaLogger.info("[EcaHashMap] Blocked values iterator removal");
-                                    }
                                     return;
                                 }
                                 entryIterator.remove();
@@ -563,9 +583,6 @@ public final class EcaContainers {
                             @Override
                             public void remove() {
                                 if (current != null && isProtectedValue(current.getValue())) {
-                                    if (DEBUG) {
-                                        EcaLogger.info("[EcaHashMap] Blocked entry iterator removal: {}", current.getKey());
-                                    }
                                     return;
                                 }
                                 delegate.remove();
@@ -625,32 +642,47 @@ public final class EcaContainers {
         }
     }
 
-    public static class EcaHashSet<E> extends HashSet<E> {
+    public static class EcaHashSet<E> extends HashSet<E> implements RemovalCallback {
 
         private static final long serialVersionUID = 1L;
 
         public EcaHashSet() {
             super();
+            registerRemovalCallback(this);
         }
 
         public EcaHashSet(int initialCapacity) {
             super(initialCapacity);
+            registerRemovalCallback(this);
         }
 
         public EcaHashSet(int initialCapacity, float loadFactor) {
             super(initialCapacity, loadFactor);
+            registerRemovalCallback(this);
         }
 
         public EcaHashSet(Collection<? extends E> c) {
             super(c);
+            registerRemovalCallback(this);
+        }
+
+        @Override
+        public void onRemove(Entity entity) {
+            // PersistentEntitySectionManager.knownUuids: Set<UUID>
+            super.remove(entity.getUUID());
+            // ServerLevel.navigatingMobs: Set<Mob>
+            super.remove(entity);
+        }
+
+        private boolean shouldProtectUUID(Object o) {
+            return o instanceof java.util.UUID uuid
+                && InvulnerableEntityManager.isInvulnerable(uuid)
+                && !EntityUtil.isChangingDimension(uuid);
         }
 
         @Override
         public boolean remove(Object o) {
-            if (o instanceof java.util.UUID uuid && InvulnerableEntityManager.isInvulnerable(uuid)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaHashSet] Blocked removal of invulnerable UUID: {}", uuid);
-                }
+            if (shouldProtectUUID(o)) {
                 return false;
             }
             return super.remove(o);
@@ -659,7 +691,7 @@ public final class EcaContainers {
         @Override
         public boolean removeAll(Collection<?> c) {
             Collection<?> filtered = c.stream()
-                .filter(item -> !(item instanceof java.util.UUID uuid && InvulnerableEntityManager.isInvulnerable(uuid)))
+                .filter(item -> !shouldProtectUUID(item))
                 .toList();
             return super.removeAll(filtered);
         }
@@ -667,19 +699,19 @@ public final class EcaContainers {
         @Override
         public boolean removeIf(java.util.function.Predicate<? super E> filter) {
             java.util.function.Predicate<E> protectedFilter = item ->
-                !(item instanceof java.util.UUID uuid && InvulnerableEntityManager.isInvulnerable(uuid)) && filter.test(item);
+                !shouldProtectUUID(item) && filter.test(item);
             return super.removeIf(protectedFilter);
         }
 
         @Override
         public boolean retainAll(Collection<?> c) {
             return super.removeIf(item ->
-                !(item instanceof java.util.UUID uuid && InvulnerableEntityManager.isInvulnerable(uuid)) && !c.contains(item));
+                !shouldProtectUUID(item) && !c.contains(item));
         }
 
         @Override
         public void clear() {
-            super.removeIf(item -> !(item instanceof java.util.UUID uuid && InvulnerableEntityManager.isInvulnerable(uuid)));
+            super.removeIf(item -> !shouldProtectUUID(item));
         }
 
         @Override
@@ -701,10 +733,7 @@ public final class EcaContainers {
 
                 @Override
                 public void remove() {
-                    if (current instanceof java.util.UUID uuid && InvulnerableEntityManager.isInvulnerable(uuid)) {
-                        if (DEBUG) {
-                            EcaLogger.info("[EcaHashSet] Blocked iterator removal of invulnerable UUID: {}", uuid);
-                        }
+                    if (shouldProtectUUID(current)) {
                         return;
                     }
                     delegate.remove();
@@ -714,20 +743,33 @@ public final class EcaContainers {
         }
     }
 
-    public static class EcaLong2ObjectOpenHashMap<V> extends Long2ObjectOpenHashMap<V> {
+    public static class EcaLong2ObjectOpenHashMap<V> extends Long2ObjectOpenHashMap<V> implements RemovalCallback {
 
         private static final long serialVersionUID = 1L;
 
         public EcaLong2ObjectOpenHashMap() {
             super();
+            registerRemovalCallback(this);
         }
 
         public EcaLong2ObjectOpenHashMap(int expected) {
             super(expected);
+            registerRemovalCallback(this);
         }
 
         public EcaLong2ObjectOpenHashMap(int expected, float f) {
             super(expected, f);
+            registerRemovalCallback(this);
+        }
+
+        @Override
+        public void onRemove(Entity entity) {
+            // EntitySectionStorage.sections: Long → EntitySection，遍历所有 section 移除实体
+            for (V value : super.values()) {
+                if (value instanceof EntitySection section) {
+                    section.remove(entity);
+                }
+            }
         }
 
         @Override
@@ -735,9 +777,6 @@ public final class EcaContainers {
             V value = super.get(key);
             if (hasProtectedEntityInSection(value)) {
                 SECTION_REMOVAL_CONTEXT.set(new SectionRemovalContext(this, key));
-                if (DEBUG) {
-                    EcaLogger.info("[EcaLong2ObjectOpenHashMap] Blocked removal of protected section: {}", key);
-                }
                 return null;
             }
             return super.remove(key);
@@ -747,9 +786,6 @@ public final class EcaContainers {
         public boolean remove(long key, Object value) {
             V existing = super.get(key);
             if (existing != null && Objects.equals(existing, value) && hasProtectedEntityInSection(existing)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaLong2ObjectOpenHashMap] Blocked keyed section removal: {}", key);
-                }
                 return false;
             }
             return super.remove(key, value);
@@ -758,9 +794,6 @@ public final class EcaContainers {
         @Override
         public void clear() {
             if (super.values().stream().anyMatch(EcaContainers::hasProtectedEntityInSection)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaLong2ObjectOpenHashMap] Blocked clear due to protected sections");
-                }
                 super.long2ObjectEntrySet().removeIf(entry -> !hasProtectedEntityInSection(entry.getValue()));
                 return;
             }
@@ -783,9 +816,6 @@ public final class EcaContainers {
                 try {
                     Object section = context.sections.get(k);
                     if (hasProtectedEntityInSection(section)) {
-                        if (DEBUG) {
-                            EcaLogger.info("[EcaLongAVLTreeSet] Blocked section id removal: {}", k);
-                        }
                         return false;
                     }
                 } finally {
@@ -798,17 +828,25 @@ public final class EcaContainers {
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
-    public static class EcaConcurrentLinkedQueue<E> extends ConcurrentLinkedQueue<E> {
+    public static class EcaConcurrentLinkedQueue<E> extends ConcurrentLinkedQueue<E> implements RemovalCallback {
 
         private static final long serialVersionUID = 1L;
 
         public EcaConcurrentLinkedQueue() {
             super();
+            registerRemovalCallback(this);
         }
 
         public EcaConcurrentLinkedQueue(Collection<? extends E> c) {
             super();
             addAll(c);
+            registerRemovalCallback(this);
+        }
+
+        @Override
+        public void onRemove(Entity entity) {
+            // loadingInbox 内部的 ChunkEntities.entities 已被包装为 EcaArrayList
+            // EcaArrayList 自身的 onRemove 回调会处理实体移除
         }
 
         @Override
@@ -833,9 +871,6 @@ public final class EcaContainers {
         @Override
         public boolean remove(Object o) {
             if (containsProtectedEntityFromChunkEntities(o)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaConcurrentLinkedQueue] Blocked removal containing protected entities");
-                }
                 return false;
             }
             return super.remove(o);
@@ -877,28 +912,34 @@ public final class EcaContainers {
      * ECA自定义的Int2ObjectOpenHashMap容器
      * 用于替换MC原版的ChunkMap.entityMap和EntityLookup.byId
      */
-    public static class EcaInt2ObjectOpenHashMap<V> extends Int2ObjectOpenHashMap<V> {
+    public static class EcaInt2ObjectOpenHashMap<V> extends Int2ObjectOpenHashMap<V> implements RemovalCallback {
 
         private static final long serialVersionUID = 1L;
 
         public EcaInt2ObjectOpenHashMap() {
             super();
+            registerRemovalCallback(this);
         }
 
         public EcaInt2ObjectOpenHashMap(int expected) {
             super(expected);
+            registerRemovalCallback(this);
         }
 
         public EcaInt2ObjectOpenHashMap(int expected, float f) {
             super(expected, f);
+            registerRemovalCallback(this);
+        }
+
+        @Override
+        public void onRemove(Entity entity) {
+            // ChunkMap.entityMap / EntityLookup.byId
+            super.remove(entity.getId());
         }
 
         @Override
         public V remove(int key) {
             if (shouldProtectRemoval(key)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaInt2ObjectOpenHashMap] Blocked removal of entity id: {}", key);
-                }
                 return null;
             }
             return super.remove(key);
@@ -916,9 +957,6 @@ public final class EcaContainers {
         public boolean remove(int key, Object value) {
             V existing = super.get(key);
             if (existing != null && Objects.equals(existing, value) && shouldProtectRemoval(key)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaInt2ObjectOpenHashMap] Blocked keyed value removal of entity id: {}", key);
-                }
                 return false;
             }
             return super.remove(key, value);
@@ -927,9 +965,6 @@ public final class EcaContainers {
         @Override
         public void clear() {
             if (hasProtectedEntity(super.values())) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaInt2ObjectOpenHashMap] Blocked clear due to protected entities");
-                }
                 super.int2ObjectEntrySet().removeIf(entry -> !shouldProtectTarget(entry.getValue()));
                 return;
             }
@@ -950,28 +985,34 @@ public final class EcaContainers {
      * ECA自定义的Int2ObjectLinkedOpenHashMap容器
      * 用于替换MC原版的EntityTickList.active和EntityTickList.passive
      */
-    public static class EcaInt2ObjectLinkedOpenHashMap<V> extends Int2ObjectLinkedOpenHashMap<V> {
+    public static class EcaInt2ObjectLinkedOpenHashMap<V> extends Int2ObjectLinkedOpenHashMap<V> implements RemovalCallback {
 
         private static final long serialVersionUID = 1L;
 
         public EcaInt2ObjectLinkedOpenHashMap() {
             super();
+            registerRemovalCallback(this);
         }
 
         public EcaInt2ObjectLinkedOpenHashMap(int expected) {
             super(expected);
+            registerRemovalCallback(this);
         }
 
         public EcaInt2ObjectLinkedOpenHashMap(int expected, float f) {
             super(expected, f);
+            registerRemovalCallback(this);
+        }
+
+        @Override
+        public void onRemove(Entity entity) {
+            // EntityTickList.active/passive, EntityLookup.byId
+            super.remove(entity.getId());
         }
 
         @Override
         public V remove(int key) {
             if (shouldProtectRemoval(key)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaInt2ObjectLinkedOpenHashMap] Blocked removal of entity id: {}", key);
-                }
                 return null;
             }
             return super.remove(key);
@@ -989,9 +1030,6 @@ public final class EcaContainers {
         public boolean remove(int key, Object value) {
             V existing = super.get(key);
             if (existing != null && Objects.equals(existing, value) && shouldProtectRemoval(key)) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaInt2ObjectLinkedOpenHashMap] Blocked keyed value removal of entity id: {}", key);
-                }
                 return false;
             }
             return super.remove(key, value);
@@ -1000,9 +1038,6 @@ public final class EcaContainers {
         @Override
         public void clear() {
             if (hasProtectedEntity(super.values())) {
-                if (DEBUG) {
-                    EcaLogger.info("[EcaInt2ObjectLinkedOpenHashMap] Blocked clear due to protected entities");
-                }
                 super.int2ObjectEntrySet().removeIf(entry -> !shouldProtectTarget(entry.getValue()));
                 return;
             }

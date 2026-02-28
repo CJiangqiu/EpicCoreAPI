@@ -33,17 +33,12 @@ public class EntityLocationManager {
     public static void lockLocation(Entity entity, Vec3 position) {
         if (entity == null || position == null) return;
         LOCKED_ENTITIES.put(entity.getUUID(), new LocationLockData(position));
-        EcaLogger.info("Locked entity {} at position ({}, {}, {})",
-                entity.getName().getString(), position.x, position.y, position.z);
     }
 
     //解除锁定
     public static void unlockLocation(Entity entity) {
         if (entity == null) return;
-        LocationLockData removed = LOCKED_ENTITIES.remove(entity.getUUID());
-        if (removed != null) {
-            EcaLogger.info("Unlocked entity {}", entity.getName().getString());
-        }
+        LOCKED_ENTITIES.remove(entity.getUUID());
     }
 
     //检查是否锁定
@@ -112,7 +107,6 @@ public class EntityLocationManager {
     //清理所有锁定
     public static void clearAll() {
         LOCKED_ENTITIES.clear();
-        EcaLogger.info("Cleared all location locks");
     }
 
     //获取锁定实体数量

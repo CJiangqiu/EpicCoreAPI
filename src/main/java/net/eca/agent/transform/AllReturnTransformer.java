@@ -11,6 +11,10 @@ import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
 /**
  * Inserts an early-return guard into void and boolean methods only.
  * When ReturnToggle is enabled, matching classes will return immediately.
@@ -20,6 +24,9 @@ public class AllReturnTransformer implements ITransformModule {
     private static final String CHECK_CLASS = "net/eca/agent/ReturnToggle";
     private static final String CHECK_METHOD = "shouldReturn";
     private static final String CHECK_DESC = "(Ljava/lang/String;)Z";
+
+    private final Set<String> loggedPackages = ConcurrentHashMap.newKeySet();
+    private final AtomicInteger transformedCount = new AtomicInteger(0);
 
     @Override
     public String getName() {
@@ -44,7 +51,11 @@ public class AllReturnTransformer implements ITransformModule {
 
             if (cv.transformed) {
                 ReturnToggle.registerTransformedClass(className);
-                AgentLogWriter.info("[AllReturnTransformer] Instrumented: " + className);
+                int count = transformedCount.incrementAndGet();
+                String rootPackage = extractRootPackage(className);
+                if (loggedPackages.add(rootPackage)) {
+                    AgentLogWriter.info("[AllReturnTransformer] Transforming package: " + rootPackage + " (" + count + " classes so far)");
+                }
                 return cw.toByteArray();
             }
             return null;
@@ -52,6 +63,38 @@ public class AllReturnTransformer implements ITransformModule {
             AgentLogWriter.error("[AllReturnTransformer] Failed to transform: " + className, t);
             return null;
         }
+    }
+
+    public int getTransformedCount() {
+        return transformedCount.get();
+    }
+
+    public Set<String> getLoggedPackages() {
+        return Set.copyOf(loggedPackages);
+    }
+
+    /**
+     * 提取类名的根包（前3段路径），如 com/example/mymod/entity/Foo → com/example/mymod
+     * 不足3段时返回完整包路径
+     */
+    private static String extractRootPackage(String className) {
+        int depth = 0;
+        int endIndex = -1;
+        for (int i = 0; i < className.length(); i++) {
+            if (className.charAt(i) == '/') {
+                depth++;
+                if (depth == 3) {
+                    endIndex = i;
+                    break;
+                }
+            }
+        }
+        if (endIndex > 0) {
+            return className.substring(0, endIndex);
+        }
+        // 不足3段，取最后一个 / 之前的部分作为包名
+        int lastSlash = className.lastIndexOf('/');
+        return lastSlash > 0 ? className.substring(0, lastSlash) : className;
     }
 
     private static class AllReturnClassVisitor extends ClassVisitor {

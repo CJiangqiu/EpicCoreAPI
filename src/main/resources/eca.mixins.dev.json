@@ -9,6 +9,7 @@
     "ClientEntityCallbacksMixin",
     "ClientLevelMixin",
     "DeathScreenMixin",
+    "EntityRenderDispatcherMixin",
     "FogRendererMixin",
     "GameRendererPostLevelMixin",
     "LevelRendererMixin",

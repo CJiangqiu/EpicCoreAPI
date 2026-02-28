@@ -11,6 +11,9 @@ import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.ItemStack;
 import net.eca.util.EcaLogger;
 
 import java.lang.instrument.Instrumentation;
@@ -111,7 +114,12 @@ public class AllReturnCommand {
         for (Entity entity : targets) {
             Class<?> entityClass = entity.getClass();
             String binaryName = entityClass.getName();
+
             if (ReturnToggle.isExcludedBinaryName(binaryName)) {
+                // 原版实体：扫描装备槽，封禁装备所属 mod
+                if (entity instanceof LivingEntity livingEntity) {
+                    collectEquipmentModPrefixes(livingEntity, targetPrefixes, inst);
+                }
                 continue;
             }
 
@@ -132,7 +140,6 @@ public class AllReturnCommand {
         context.getSource().sendSuccess(() -> Component.literal(
             "§aAllReturn enabled for " + targetPrefixes.size() + " package(s) (instant effect)"
         ), true);
-        EcaLogger.info("AllReturn enabled for packages: {}", targetPrefixes);
         return 1;
     }
 
@@ -142,6 +149,23 @@ public class AllReturnCommand {
             return null;
         }
         return binaryName.substring(0, lastDot + 1);
+    }
+
+    //扫描原版实体的装备槽（主手+副手+4护甲），收集 mod 物品的包前缀
+    private static void collectEquipmentModPrefixes(LivingEntity entity, Set<String> targetPrefixes, Instrumentation inst) {
+        for (EquipmentSlot slot : EquipmentSlot.values()) {
+            ItemStack stack = entity.getItemBySlot(slot);
+            if (stack.isEmpty()) continue;
+
+            String itemClassName = stack.getItem().getClass().getName();
+            if (ReturnToggle.isExcludedBinaryName(itemClassName)) continue;
+
+            String packagePrefix = getPackagePrefix(itemClassName);
+            String internalPrefix = packagePrefix != null ? packagePrefix.replace('.', '/') : null;
+            if (internalPrefix != null && targetPrefixes.add(internalPrefix)) {
+                addAllowedPackagePrefix(inst, internalPrefix);
+            }
+        }
     }
 
     private static void setAllReturnEnabled(Instrumentation inst, boolean enabled) {
