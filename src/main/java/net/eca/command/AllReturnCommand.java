@@ -37,10 +37,9 @@ public class AllReturnCommand {
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
         return Commands.literal("allReturn")
             .then(Commands.argument("targets", EntityArgument.entities())
-                .executes(AllReturnCommand::applyAllReturnToTargets)
-            )
-            .then(Commands.literal("off")
-                .executes(AllReturnCommand::disableAllReturn)
+                .then(Commands.argument("enable", BoolArgumentType.bool())
+                    .executes(AllReturnCommand::applyAllReturnToTargets)
+                )
             )
             .then(Commands.literal("global")
                 .then(Commands.argument("enable", BoolArgumentType.bool())
@@ -73,17 +72,8 @@ public class AllReturnCommand {
         }
     }
 
-    private static int disableAllReturn(CommandContext<CommandSourceStack> context) {
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        setAllReturnEnabled(inst, false);
-        clearAllTargets(inst);
-        context.getSource().sendSuccess(() -> Component.literal(
-            "§aAllReturn disabled and targets cleared"
-        ), true);
-        return 1;
-    }
-
     private static int applyAllReturnToTargets(CommandContext<CommandSourceStack> context) {
+        boolean enable = BoolArgumentType.getBool(context, "enable");
         Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst == null) {
             context.getSource().sendFailure(Component.literal(
@@ -106,17 +96,13 @@ public class AllReturnCommand {
             return 0;
         }
 
-        // 启用 AllReturn
-        setAllReturnEnabled(inst, true);
-
-        // 收集目标实体的包名前缀并添加到 allowedPackagePrefixes
+        // 收集目标实体的包名前缀
         Set<String> targetPrefixes = new HashSet<>();
         for (Entity entity : targets) {
             Class<?> entityClass = entity.getClass();
             String binaryName = entityClass.getName();
 
             if (ReturnToggle.isExcludedBinaryName(binaryName)) {
-                // 原版实体：扫描装备槽，封禁装备所属 mod
                 if (entity instanceof LivingEntity livingEntity) {
                     collectEquipmentModPrefixes(livingEntity, targetPrefixes, inst);
                 }
@@ -127,7 +113,6 @@ public class AllReturnCommand {
             String internalPrefix = packagePrefix != null ? packagePrefix.replace('.', '/') : null;
             if (internalPrefix != null) {
                 targetPrefixes.add(internalPrefix);
-                addAllowedPackagePrefix(inst, internalPrefix);
             }
         }
 
@@ -136,10 +121,22 @@ public class AllReturnCommand {
             return 0;
         }
 
-        // 即时生效（无需 retransform）
-        context.getSource().sendSuccess(() -> Component.literal(
-            "§aAllReturn enabled for " + targetPrefixes.size() + " package(s) (instant effect)"
-        ), true);
+        if (enable) {
+            setAllReturnEnabled(inst, true);
+            for (String prefix : targetPrefixes) {
+                addAllowedPackagePrefix(inst, prefix);
+            }
+            context.getSource().sendSuccess(() -> Component.literal(
+                "§aAllReturn enabled for " + targetPrefixes.size() + " package(s)"
+            ), true);
+        } else {
+            for (String prefix : targetPrefixes) {
+                removeAllowedPackagePrefix(inst, prefix);
+            }
+            context.getSource().sendSuccess(() -> Component.literal(
+                "§aAllReturn disabled for " + targetPrefixes.size() + " package(s)"
+            ), true);
+        }
         return 1;
     }
 
@@ -190,10 +187,16 @@ public class AllReturnCommand {
         if (internalPrefix == null) {
             return;
         }
-        // 总是添加到本地的
         ReturnToggle.addAllowedPackagePrefix(internalPrefix);
-        // 也尝试添加到 agent 的
         invokeReturnToggle(inst, "addAllowedPackagePrefix", new Class<?>[] { String.class }, internalPrefix);
+    }
+
+    private static void removeAllowedPackagePrefix(Instrumentation inst, String internalPrefix) {
+        if (internalPrefix == null) {
+            return;
+        }
+        ReturnToggle.removeAllowedPackagePrefix(internalPrefix);
+        invokeReturnToggle(inst, "removeAllowedPackagePrefix", new Class<?>[] { String.class }, internalPrefix);
     }
 
     private static boolean invokeReturnToggle(Instrumentation inst, String method, Class<?>[] paramTypes, Object... args) {

@@ -20,13 +20,17 @@ Use `/eca` command (requires OP permission level 2):
 - `/eca remove <targets> [reason]` - Remove entities from world
 - `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities via LWJGL internal channel
 - `/eca teleport <targets> <x> <y> <z>` - Teleport entities
-- `/eca locationLock <targets> <true|false>` - Lock/unlock entity location
-- `/eca cleanbossbar <targets>` - Clean up boss bars
-- `/eca allreturn <targets>` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the target entity's mod
-- `/eca allreturn global <true|false>` - DANGER! Enable/disable global AllReturn for all non-whitelisted mods
-- `/eca allreturn off` - Disable AllReturn and clear targets
-- `/eca spawnban <targets> <seconds>` - Ban spawning of selected entities' types for specified duration
-- `/eca spawnban clear` - Clear all spawn bans in current dimension
+- `/eca lockLocation <targets> <true|false> [x y z]` - Lock/unlock entity location (optional position, defaults to current)
+- `/eca cleanBossBar <targets>` - Clean up boss bars
+- `/eca allReturn <targets> <true|false>` - DANGER! Requires Attack Radical Logic config. Enable/disable return transformation on all boolean and void methods of the target entity's mod
+- `/eca allReturn global <true|false>` - DANGER! Enable/disable global AllReturn for all non-whitelisted mods
+- `/eca banSpawn <targets> <seconds>` - Ban spawning of selected entities' types for specified duration
+- `/eca banSpawn clear` - Unban all spawns in current dimension
+- `/eca setInvulnerable show_all` - Show all invulnerable entities
+- `/eca entityExtension get_registry` - Show entity extension registry
+- `/eca entityExtension get_active` - Show active entity extension types in current dimension
+- `/eca entityExtension get_current` - Show the currently effective entity extension
+- `/eca entityExtension clear` - Clear active entity extension table in current dimension
 
 ## Usage for Developers
 
@@ -83,10 +87,11 @@ side="BOTH"
 - `killEntity(entity, damageSource)` - Kill entity (loot + advancements + removal)
 - `reviveEntity(entity)` - Clear death state and restore health
 - `teleportEntity(entity, x, y, z)` - Teleport via VarHandle with client sync
-- `lockEntityLocation(entity)` - Lock entity location at current position
-- `unlockEntityLocation(entity)` - Unlock entity location
+- `lockLocation(entity)` - Lock entity location at current position
+- `lockLocation(entity, position)` - Lock entity location at specified position
+- `unlockLocation(entity)` - Unlock entity location
 - `isLocationLocked(entity)` - Check if entity location is locked
-- `getLockedPosition(entity)` - Get locked position (null if not locked)
+- `getLockedLocation(entity)` - Get locked position (null if not locked)
 - `removeEntity(entity, reason)` - Complete removal (AI, boss bars, containers, passengers)
 - `memoryRemoveEntity(entity)` - DANGER! Requires Attack Radical Logic config. Remove entity via LWJGL internal channel
 - `cleanupBossBar(entity)` - Remove boss bars without removing entity
@@ -100,12 +105,16 @@ side="BOTH"
 - `removeProtectedPackage(prefix)` - Remove custom package prefix from whitelist (built-in protections cannot be removed)
 - `isPackageProtected(className)` - Check if a class is protected by the whitelist
 - `getAllProtectedPackages()` - Get all protected package prefixes (built-in + custom)
-- `addSpawnBan(level, entityType, seconds)` - Ban entity type from spawning for specified duration
+- `getEntityExtensionRegistry()` - Get all registered entity extensions (Map<EntityType, EntityExtension>)
+- `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
+- `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
+- `clearActiveEntityExtensionTable(level)` - Clear active entity extension table in current dimension
+- `banSpawn(level, entityType, seconds)` - Ban entity type from spawning for specified duration
 - `isSpawnBanned(level, entityType)` - Check if entity type is banned from spawning
 - `getSpawnBanTime(level, entityType)` - Get remaining spawn ban time in seconds
-- `clearSpawnBan(level, entityType)` - Clear spawn ban for entity type
+- `unbanSpawn(level, entityType)` - Unban entity type, allowing it to spawn again
 - `getAllSpawnBans(level)` - Get all spawn bans in level (Map<EntityType, Integer>)
-- `clearAllSpawnBans(level)` - Clear all spawn bans in level
+- `unbanAllSpawns(level)` - Unban all entity types in level
 
 ```java
 import net.eca.api.EcaAPI;
@@ -142,10 +151,11 @@ EcaAPI.removeHealthBlacklistKeyword("timer");
 EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
 EcaAPI.teleportEntity(entity, x, y, z);
-EcaAPI.lockEntityLocation(entity);
+EcaAPI.lockLocation(entity);  // Lock at current position
+EcaAPI.lockLocation(entity, new Vec3(100, 64, 200));  // Lock at specified position
 boolean locationLocked = EcaAPI.isLocationLocked(entity);
-Vec3 lockedPos = EcaAPI.getLockedPosition(entity);
-EcaAPI.unlockEntityLocation(entity);
+Vec3 lockedPos = EcaAPI.getLockedLocation(entity);
+EcaAPI.unlockLocation(entity);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
 EcaAPI.memoryRemoveEntity(entity);  // Remove using LWJGL internal Unsafe instance
 EcaAPI.cleanupBossBar(entity);
@@ -168,12 +178,18 @@ boolean protected = EcaAPI.isPackageProtected("com.yourmod.YourClass");
 Set<String> allProtected = EcaAPI.getAllProtectedPackages();  // Get all protected packages
 
 // Spawn Ban
-EcaAPI.addSpawnBan(serverLevel, EntityType.ZOMBIE, 300);  // Ban zombies for 5 minutes
+EcaAPI.banSpawn(serverLevel, EntityType.ZOMBIE, 300);  // Ban zombies for 5 minutes
 boolean banned = EcaAPI.isSpawnBanned(serverLevel, EntityType.ZOMBIE);
 int remaining = EcaAPI.getSpawnBanTime(serverLevel, EntityType.ZOMBIE);
-EcaAPI.clearSpawnBan(serverLevel, EntityType.ZOMBIE);
+EcaAPI.unbanSpawn(serverLevel, EntityType.ZOMBIE);
 Map<EntityType<?>, Integer> allBans = EcaAPI.getAllSpawnBans(serverLevel);
-EcaAPI.clearAllSpawnBans(serverLevel);
+EcaAPI.unbanAllSpawns(serverLevel);
+
+// Entity Extension
+Map<EntityType<?>, EntityExtension> registry = EcaAPI.getEntityExtensionRegistry();
+Map<EntityType<?>, Integer> activeTypes = EcaAPI.getActiveEntityExtensionTypes(serverLevel);
+EntityExtension active = EcaAPI.getActiveEntityExtension(serverLevel);
+EcaAPI.clearActiveEntityExtensionTable(serverLevel);
 ```
 
 ### Entity Extension System
@@ -353,13 +369,17 @@ Available presets:
 - `/eca remove <目标> [原因]` - 从世界中移除实体
 - `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
 - `/eca teleport <目标> <x> <y> <z>` - 传送实体
-- `/eca locationLock <目标> <true|false>` - 锁定/解除实体位置
-- `/eca cleanbossbar <目标>` - 清理 Boss 血条
-- `/eca allreturn <目标>` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
-- `/eca allreturn global <true|false>` - 危险！启用/禁用全局AllReturn，影响所有非白名单mod
-- `/eca allreturn off` - 关闭AllReturn并清除目标
-- `/eca spawnban <目标> <秒数>` - 禁止选中实体的类型生成指定时长
-- `/eca spawnban clear` - 清除当前维度所有禁生成
+- `/eca lockLocation <目标> <true|false> [x y z]` - 锁定/解除实体位置（可选指定坐标，默认当前位置）
+- `/eca cleanBossBar <目标>` - 清理 Boss 血条
+- `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体的所属mod的全部布尔和void方法的return transformation
+- `/eca allReturn global <true|false>` - 危险！启用/禁用全局AllReturn，影响所有非白名单mod
+- `/eca banSpawn <目标> <秒数>` - 禁止选中实体的类型生成指定时长
+- `/eca banSpawn clear` - 解除当前维度所有禁生成
+- `/eca setInvulnerable show_all` - 显示所有无敌实体
+- `/eca entityExtension get_registry` - 查看实体扩展注册表
+- `/eca entityExtension get_active` - 查看当前维度活跃的扩展类型
+- `/eca entityExtension get_current` - 查看当前生效的实体扩展
+- `/eca entityExtension clear` - 清空当前维度活跃扩展表
 
 ## 开发者使用
 
@@ -416,10 +436,11 @@ side="BOTH"
 - `killEntity(entity, damageSource)` - 击杀实体（掉落 + 成就 + 移除）
 - `reviveEntity(entity)` - 复活实体（清除死亡状态）
 - `teleportEntity(entity, x, y, z)` - VarHandle 传送并同步到客户端
-- `lockEntityLocation(entity)` - 锁定实体当前位置
-- `unlockEntityLocation(entity)` - 解除实体位置锁定
+- `lockLocation(entity)` - 锁定实体当前位置
+- `lockLocation(entity, position)` - 锁定实体到指定位置
+- `unlockLocation(entity)` - 解除实体位置锁定
 - `isLocationLocked(entity)` - 检查实体位置是否锁定
-- `getLockedPosition(entity)` - 获取锁定位置（未锁定返回 null）
+- `getLockedLocation(entity)` - 获取锁定位置（未锁定返回 null）
 - `removeEntity(entity, reason)` - 完整移除（AI、Boss 血条、容器、乘客等）
 - `memoryRemoveEntity(entity)` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
@@ -433,12 +454,16 @@ side="BOTH"
 - `removeProtectedPackage(prefix)` - 移除自定义包名保护（内置保护名单不能移除）
 - `isPackageProtected(className)` - 检查类是否受白名单保护
 - `getAllProtectedPackages()` - 获取所有受保护的包名前缀（内置保护名单 + 自定义）
-- `addSpawnBan(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
+- `getEntityExtensionRegistry()` - 获取所有已注册的实体扩展（Map<EntityType, EntityExtension>）
+- `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
+- `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）
+- `clearActiveEntityExtensionTable(level)` - 清空当前维度活跃扩展表
+- `banSpawn(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
 - `isSpawnBanned(level, entityType)` - 检查实体类型是否被禁生成
 - `getSpawnBanTime(level, entityType)` - 获取禁生成剩余秒数
-- `clearSpawnBan(level, entityType)` - 清除指定实体类型的禁生成
+- `unbanSpawn(level, entityType)` - 解除指定实体类型的禁生成
 - `getAllSpawnBans(level)` - 获取所有禁生成（Map<EntityType, Integer>）
-- `clearAllSpawnBans(level)` - 清除所有禁生成
+- `unbanAllSpawns(level)` - 解除所有禁生成
 
 ```java
 import net.eca.api.EcaAPI;
@@ -475,10 +500,11 @@ EcaAPI.removeHealthBlacklistKeyword("timer");
 EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
 EcaAPI.teleportEntity(entity, x, y, z);
-EcaAPI.lockEntityLocation(entity);
+EcaAPI.lockLocation(entity);  // 锁定到当前位置
+EcaAPI.lockLocation(entity, new Vec3(100, 64, 200));  // 锁定到指定位置
 boolean locationLocked = EcaAPI.isLocationLocked(entity);
-Vec3 lockedPos = EcaAPI.getLockedPosition(entity);
-EcaAPI.unlockEntityLocation(entity);
+Vec3 lockedPos = EcaAPI.getLockedLocation(entity);
+EcaAPI.unlockLocation(entity);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
 EcaAPI.memoryRemoveEntity(entity);  // 提供使用LWJGL内部Unsafe实例进行清除
 EcaAPI.cleanupBossBar(entity);
@@ -501,12 +527,18 @@ boolean protected = EcaAPI.isPackageProtected("com.yourmod.YourClass");
 Set<String> allProtected = EcaAPI.getAllProtectedPackages();  // 获取所有受保护的包名
 
 // 禁生成
-EcaAPI.addSpawnBan(serverLevel, EntityType.ZOMBIE, 300);  // 禁止僵尸生成5分钟
+EcaAPI.banSpawn(serverLevel, EntityType.ZOMBIE, 300);  // 禁止僵尸生成5分钟
 boolean banned = EcaAPI.isSpawnBanned(serverLevel, EntityType.ZOMBIE);
 int remaining = EcaAPI.getSpawnBanTime(serverLevel, EntityType.ZOMBIE);
-EcaAPI.clearSpawnBan(serverLevel, EntityType.ZOMBIE);
+EcaAPI.unbanSpawn(serverLevel, EntityType.ZOMBIE);
 Map<EntityType<?>, Integer> allBans = EcaAPI.getAllSpawnBans(serverLevel);
-EcaAPI.clearAllSpawnBans(serverLevel);
+EcaAPI.unbanAllSpawns(serverLevel);
+
+// 实体扩展
+Map<EntityType<?>, EntityExtension> registry = EcaAPI.getEntityExtensionRegistry();
+Map<EntityType<?>, Integer> activeTypes = EcaAPI.getActiveEntityExtensionTypes(serverLevel);
+EntityExtension active = EcaAPI.getActiveEntityExtension(serverLevel);
+EcaAPI.clearActiveEntityExtensionTable(serverLevel);
 ```
 
 ### 实体扩展

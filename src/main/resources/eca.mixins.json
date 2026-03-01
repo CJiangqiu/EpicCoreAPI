@@ -20,6 +20,7 @@
     "SoundManagerMixin"
   ],
   "mixins": [
+    "CapabilityDispatcherMixin",
     "ChunkMapMixin",
     "ClassInstanceMultiMapMixin",
     "EntityLookupMixin",

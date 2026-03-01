@@ -24,6 +24,8 @@ public class EcaTransformationService implements ITransformationService {
 
     static {
         System.out.println("[ECA CoreMod] Static block : I'm first?");
+        // 在 static block 中完成双加载，确保在其他 service 类加载之前生效
+        enableEcaDualLoading();
     }
 
     private static final String SERVICE_NAME = "eca_coremod";
@@ -70,10 +72,7 @@ public class EcaTransformationService implements ITransformationService {
 
     @Override
     public @NotNull List<Resource> beginScanning(@NotNull IEnvironment environment) {
-        System.out.println("[ECA CoreMod] beginScanning - enabling dual loading");
-        // 必须在 FML 的 beginScanning() 之前调用，否则 mod 扫描已经完成
-        // 由于 service 按名称字母顺序加载，eca_coremod 在 fml 之前
-        enableEcaDualLoading();
+        System.out.println("[ECA CoreMod] beginScanning");
         return List.of();
     }
 

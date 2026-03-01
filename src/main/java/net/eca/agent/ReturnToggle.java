@@ -94,6 +94,13 @@ public final class ReturnToggle {
         }
     }
 
+    public static void removeAllowedPackagePrefix(String internalPrefix) {
+        String normalized = normalizePrefix(internalPrefix);
+        if (normalized != null) {
+            allowedPackagePrefixes.remove(normalized);
+        }
+    }
+
     public static void addExplicitTarget(String internalClassName) {
         if (internalClassName != null) {
             explicitTargets.add(internalClassName);
@@ -211,10 +218,13 @@ public final class ReturnToggle {
             "org.antlr.", "com.github.benmanes.caffeine.", "org.codehaus.", "org.yaml.", "com.typesafe.",
             "joptsimple.", "org.jline.", "org.w3c.", "org.xml.", "oshi.", "com.ibm.",
             "netscape.javascript.", "kotlin.", "org.ow2.", "ca.weblite.", "paulscode.",
+            // 渲染管线（Embeddium/Oculus/Iris 及其依赖）
+            "net.caffeinemc.", "org.embeddedt.", "oculus.", "kroppeb.", "io.github.douira.",
+            "org.anarres.", "net.jodah.",
             // 常见 Mod
-            "mezz.jei.", "snownee.jade.", "software.bernie.geckolib.", "com.github.alexthe666.citadel.", "me.jellysquid.mods.sodium.",
-            "org.embeddedt.modernfix.", "org.embeddedt.embeddium.", "com.supermartijn642.fusion.", "com.supermartijn642.core.", "dev.architectury.",
-            "dev.kosmx.playerAnim.", "dev.tr7zw.entityculling.",  "malte0811.ferritecore.", "net.irisshaders.",
+            "mezz.jei.", "snownee.jade.", "software.bernie.", "com.github.alexthe666.citadel.", "me.jellysquid.mods.sodium.",
+            "com.supermartijn642.fusion.", "com.supermartijn642.core.", "dev.architectury.",
+            "dev.kosmx.playerAnim.", "dev.tr7zw.entityculling.", "malte0811.ferritecore.", "net.irisshaders.",
             "net.raphimc.immediatelyfast.", "net.tslat.smartbrainlib.", "top.theillusivec4.caelus.", "top.theillusivec4.curios.", "virtuoel.pehkui.",
             // KotlinForForge
             "thedarkcolour.",

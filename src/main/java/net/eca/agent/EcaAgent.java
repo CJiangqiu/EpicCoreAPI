@@ -55,23 +55,22 @@ public final class EcaAgent {
             // 获取EcaTransformer并注册模块
             EcaTransformer transformer = EcaTransformer.getInstance();
 
-            // 注册容器替换模块（优先级最高，需要最先执行）
-            transformer.registerModule(new ContainerReplacementTransformer());
-            AgentLogWriter.info("[EcaAgent] Registered ContainerReplacementTransformer");
-
-            // 注册LivingEntity转换模块
-            transformer.registerModule(new LivingEntityTransformer());
-
-            // 注册AllReturn转换模块
-            transformer.registerModule(new AllReturnTransformer());
-
-            // 注册加载界面渐变转换模块
+            // 注册加载界面渐变转换模块（最先 retransform，确保视觉反馈不被后续模块阻塞）
             if (isCustomLoadingBackgroundEnabled()) {
                 transformer.registerModule(new LoadingScreenTransformer());
                 AgentLogWriter.info("[EcaAgent] Registered LoadingScreenTransformer");
             } else {
                 AgentLogWriter.info("[EcaAgent] Custom loading background disabled by config");
             }
+
+            // 注册容器替换模块
+            transformer.registerModule(new ContainerReplacementTransformer());
+
+            // 注册LivingEntity转换模块
+            transformer.registerModule(new LivingEntityTransformer());
+
+            // 注册AllReturn转换模块
+            transformer.registerModule(new AllReturnTransformer());
 
             // 设置 getHealth() 完整钩子处理器（分析 + 覆盖）
             LivingEntityTransformer.setHookHandler(

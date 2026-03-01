@@ -24,7 +24,7 @@ public class SpawnBanCommand {
 
     // 注册子命令
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
-        return Commands.literal("spawnBan")
+        return Commands.literal("banSpawn")
             .then(Commands.argument("targets", EntityArgument.entities())
                 .then(Commands.argument("seconds", IntegerArgumentType.integer(1))
                     .executes(SpawnBanCommand::addBan)
@@ -52,7 +52,7 @@ public class SpawnBanCommand {
 
             int successCount = 0;
             for (EntityType<?> type : types) {
-                if (EcaAPI.addSpawnBan(level, type, seconds)) {
+                if (EcaAPI.banSpawn(level, type, seconds)) {
                     successCount++;
                     ResourceLocation typeId = BuiltInRegistries.ENTITY_TYPE.getKey(type);
                     source.sendSuccess(() -> Component.literal(
@@ -78,7 +78,7 @@ public class SpawnBanCommand {
             Map<EntityType<?>, Integer> bans = EcaAPI.getAllSpawnBans(level);
             int count = bans.size();
 
-            EcaAPI.clearAllSpawnBans(level);
+            EcaAPI.unbanAllSpawns(level);
 
             source.sendSuccess(() -> Component.literal(
                 String.format("§aCleared %d spawn ban(s) in %s", count, level.dimension().location())

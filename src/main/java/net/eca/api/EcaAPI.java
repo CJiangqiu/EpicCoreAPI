@@ -337,21 +337,26 @@ public final class EcaAPI {
 
     // ==================== 位置锁定系统 ====================
 
-    // 锁定实体位置
+    // 锁定实体位置（当前位置）
     /**
      * Lock entity location at its current position.
-     * When location is locked, any abnormal position changes (not through Entity.move()) will be reverted.
-     * Normal movement through Entity.move() is still allowed and the locked position will be updated accordingly.
+     * When location is locked, any position changes will be reverted.
      * Dimension changes are automatically handled and the locked position will be updated to the new dimension.
-     * Use cases:
-     * - Prevent teleportation exploits
-     * - Create stationary NPCs
-     * - Boss fight mechanics
-     * - Anti-cheat for position modifications
      * @param entity the entity to lock
      */
-    public static void lockEntityLocation(Entity entity) {
+    public static void lockLocation(Entity entity) {
         EntityLocationManager.lockLocation(entity);
+    }
+
+    // 锁定实体到指定位置
+    /**
+     * Lock entity location at the specified position.
+     * The entity will be teleported to and held at the given coordinates.
+     * @param entity the entity to lock
+     * @param position the position to lock the entity at
+     */
+    public static void lockLocation(Entity entity, Vec3 position) {
+        EntityLocationManager.lockLocation(entity, position);
     }
 
     // 解锁实体位置
@@ -360,7 +365,7 @@ public final class EcaAPI {
      * After unlocking, the entity can be moved/teleported freely.
      * @param entity the entity to unlock
      */
-    public static void unlockEntityLocation(Entity entity) {
+    public static void unlockLocation(Entity entity) {
         EntityLocationManager.unlockLocation(entity);
     }
 
@@ -376,11 +381,11 @@ public final class EcaAPI {
 
     // 获取锁定的位置
     /**
-     * Get the locked position of an entity.
+     * Get the locked location of an entity.
      * @param entity the entity
-     * @return the locked position, or null if not locked
+     * @return the locked location, or null if not locked
      */
-    public static Vec3 getLockedPosition(Entity entity) {
+    public static Vec3 getLockedLocation(Entity entity) {
         return EntityLocationManager.getLockedPosition(entity);
     }
 
@@ -569,9 +574,9 @@ public final class EcaAPI {
 
     // ============ 禁生成 API ============
 
-    // 添加禁生成
+    // 禁止生成
     /**
-     * Add a spawn ban for the specified entity type in a level.
+     * Ban the specified entity type from spawning in a level.
      * Entities of this type will be blocked from spawning for the specified duration.
      * The ban is stored per-dimension and persists with world saves.
      *
@@ -586,7 +591,7 @@ public final class EcaAPI {
      * @return true if ban was added successfully
      * @throws IllegalArgumentException if level or type is null
      */
-    public static boolean addSpawnBan(ServerLevel level, EntityType<?> type, int timeInSeconds) {
+    public static boolean banSpawn(ServerLevel level, EntityType<?> type, int timeInSeconds) {
         if (level == null) {
             throw new IllegalArgumentException("Level cannot be null");
         }
@@ -632,15 +637,15 @@ public final class EcaAPI {
         return SpawnBanManager.getRemainingTime(level, type);
     }
 
-    // 清除禁生成
+    // 解除禁生成
     /**
-     * Clear the spawn ban for an entity type.
+     * Unban the specified entity type, allowing it to spawn again.
      * @param level the server level
      * @param type the entity type to unban
      * @return true if a ban was removed
      * @throws IllegalArgumentException if level or type is null
      */
-    public static boolean clearSpawnBan(ServerLevel level, EntityType<?> type) {
+    public static boolean unbanSpawn(ServerLevel level, EntityType<?> type) {
         if (level == null) {
             throw new IllegalArgumentException("Level cannot be null");
         }
@@ -664,13 +669,13 @@ public final class EcaAPI {
         return SpawnBanManager.getAllBans(level);
     }
 
-    // 清除所有禁生成
+    // 解除所有禁生成
     /**
-     * Clear all spawn bans for a level.
+     * Unban all entity types, allowing all spawning in the level.
      * @param level the server level
      * @throws IllegalArgumentException if level is null
      */
-    public static void clearAllSpawnBans(ServerLevel level) {
+    public static void unbanAllSpawns(ServerLevel level) {
         if (level == null) {
             throw new IllegalArgumentException("Level cannot be null");
         }
@@ -817,18 +822,28 @@ public final class EcaAPI {
             invokeAgentReturnToggle(inst, "addAllowedPackagePrefix", new Class<?>[] { String.class }, prefix);
         }
 
-        // 添加显式目标
-        List<String> targets = new ArrayList<>();
-        for (Class<?> clazz : candidates) {
-            targets.add(clazz.getName().replace('.', '/'));
-        }
-        ReturnToggle.addExplicitTargets(targets.toArray(new String[0]));
-        invokeAgentReturnToggle(inst, "addExplicitTargets", new Class<?>[] { String[].class }, (Object) targets.toArray(new String[0]));
+        // 只 retransform 尚未被转换过的类（load time 已转换的类只需开启 flag 即可生效）
+        Set<String> alreadyTransformed = ReturnToggle.getActiveClassNames();
+        List<Class<?>> needRetransform = new ArrayList<>();
+        List<String> newTargets = new ArrayList<>();
 
-        try {
-            inst.retransformClasses(candidates.toArray(new Class<?>[0]));
-        } catch (Throwable t) {
-            EcaLogger.warn("GlobalAllReturn: Batch retransform failed: {}", t.getMessage());
+        for (Class<?> clazz : candidates) {
+            String internalName = clazz.getName().replace('.', '/');
+            if (!alreadyTransformed.contains(internalName)) {
+                needRetransform.add(clazz);
+                newTargets.add(internalName);
+            }
+        }
+
+        if (!newTargets.isEmpty()) {
+            ReturnToggle.addExplicitTargets(newTargets.toArray(new String[0]));
+            invokeAgentReturnToggle(inst, "addExplicitTargets", new Class<?>[] { String[].class }, (Object) newTargets.toArray(new String[0]));
+
+            try {
+                inst.retransformClasses(needRetransform.toArray(new Class<?>[0]));
+            } catch (Throwable t) {
+                EcaLogger.warn("GlobalAllReturn: Batch retransform failed: {}", t.getMessage());
+            }
         }
 
         return true;

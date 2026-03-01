@@ -7,8 +7,10 @@ import net.eca.api.EcaAPI;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.commands.arguments.coordinates.Vec3Argument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.Collection;
 
@@ -17,25 +19,38 @@ public class LocationLockCommand {
 
     //注册子命令
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
-        return Commands.literal("locationLock")
+        return Commands.literal("lockLocation")
             .then(Commands.argument("targets", EntityArgument.entities())
                 .then(Commands.argument("enabled", BoolArgumentType.bool())
                     .executes(LocationLockCommand::handleLocationLock)
+                    .then(Commands.argument("position", Vec3Argument.vec3())
+                        .executes(LocationLockCommand::handleLocationLockWithPosition)
+                    )
                 )
             );
     }
 
-    //处理位置锁定
+    //处理位置锁定（当前位置）
     private static int handleLocationLock(CommandContext<CommandSourceStack> context) {
         boolean enabled = BoolArgumentType.getBool(context, "enabled");
         if (enabled) {
-            return lockLocation(context);
+            return lockLocation(context, null);
+        }
+        return unlockLocation(context);
+    }
+
+    //处理位置锁定（指定位置）
+    private static int handleLocationLockWithPosition(CommandContext<CommandSourceStack> context) {
+        boolean enabled = BoolArgumentType.getBool(context, "enabled");
+        if (enabled) {
+            Vec3 position = Vec3Argument.getVec3(context, "position");
+            return lockLocation(context, position);
         }
         return unlockLocation(context);
     }
 
     //执行位置锁定
-    private static int lockLocation(CommandContext<CommandSourceStack> context) {
+    private static int lockLocation(CommandContext<CommandSourceStack> context, Vec3 position) {
         CommandSourceStack source = context.getSource();
 
         try {
@@ -45,7 +60,11 @@ public class LocationLockCommand {
 
             for (Entity entity : targets) {
                 try {
-                    EcaAPI.lockEntityLocation(entity);
+                    if (position != null) {
+                        EcaAPI.lockLocation(entity, position);
+                    } else {
+                        EcaAPI.lockLocation(entity);
+                    }
                     successCount++;
                 } catch (Exception e) {
                     source.sendFailure(Component.literal(
@@ -57,11 +76,20 @@ public class LocationLockCommand {
             final int finalSuccessCount = successCount;
 
             if (finalSuccessCount > 0) {
-                source.sendSuccess(() -> Component.literal(
-                    String.format("§aLocked location for %d %s",
-                        finalSuccessCount,
-                        finalSuccessCount == 1 ? "entity" : "entities")
-                ), true);
+                if (position != null) {
+                    source.sendSuccess(() -> Component.literal(
+                        String.format("§aLocked location for %d %s at %.1f %.1f %.1f",
+                            finalSuccessCount,
+                            finalSuccessCount == 1 ? "entity" : "entities",
+                            position.x, position.y, position.z)
+                    ), true);
+                } else {
+                    source.sendSuccess(() -> Component.literal(
+                        String.format("§aLocked location for %d %s",
+                            finalSuccessCount,
+                            finalSuccessCount == 1 ? "entity" : "entities")
+                    ), true);
+                }
             }
 
             return finalSuccessCount;
@@ -89,7 +117,7 @@ public class LocationLockCommand {
                         continue;
                     }
 
-                    EcaAPI.unlockEntityLocation(entity);
+                    EcaAPI.unlockLocation(entity);
                     successCount++;
                 } catch (Exception e) {
                     source.sendFailure(Component.literal(
