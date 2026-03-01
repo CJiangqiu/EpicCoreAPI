@@ -13,7 +13,6 @@ import net.minecraft.client.renderer.FogRenderer;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.material.FogType;
 import net.minecraft.world.phys.Vec3;
@@ -103,38 +102,14 @@ public class FogRendererMixin {
             return null;
         }
 
-        GlobalFogExtension global = eca$resolveGlobalFogContext(level);
-        if (global != null) {
+        ResourceLocation dimensionId = level.dimension().location();
+        GlobalFogExtension cached = EntityExtensionClientState.getActiveFog(dimensionId);
+        if (cached != null && cached.enabled() && cached.globalMode()) {
             strengthHolder[0] = 1.0f;
-            return global;
+            return cached;
         }
 
         return eca$resolveLocalFogContext(level, camera, strengthHolder);
-    }
-
-    @Unique
-    private static GlobalFogExtension eca$resolveGlobalFogContext(ClientLevel level) {
-        if (level == null) {
-            return null;
-        }
-
-        ResourceLocation dimensionId = level.dimension().location();
-        EntityType<?> activeType = EntityExtensionClientState.getActiveType(dimensionId);
-        if (activeType == null) {
-            return null;
-        }
-
-        EntityExtension extension = EntityExtensionManager.getExtension(activeType);
-        if (extension == null) {
-            return null;
-        }
-
-        GlobalFogExtension fog = extension.globalFogExtension();
-        if (fog == null || !fog.enabled() || !fog.globalMode()) {
-            return null;
-        }
-
-        return fog;
     }
 
     @Unique

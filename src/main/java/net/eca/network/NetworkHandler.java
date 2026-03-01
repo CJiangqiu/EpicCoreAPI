@@ -66,6 +66,12 @@ public class NetworkHandler {
                 .consumerMainThread(EntityHealthSyncPacket::handle)
                 .add();
 
+        CHANNEL.messageBuilder(EntityExtensionOverridePacket.class, id())
+                .encoder(EntityExtensionOverridePacket::encode)
+                .decoder(EntityExtensionOverridePacket::decode)
+                .consumerMainThread(EntityExtensionOverridePacket::handle)
+                .add();
+
     }
 
     /**

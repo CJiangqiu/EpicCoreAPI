@@ -3,6 +3,7 @@ package net.eca.command;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import net.eca.api.EcaAPI;
+import net.eca.network.EntityExtensionOverridePacket.SkyboxData;
 import net.eca.util.entity_extension.EntityExtension;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -13,12 +14,24 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.EntityType;
 
 import java.util.Map;
-
-// 实体扩展命令
+@SuppressWarnings("removal")
 public class EntityExtensionCommand {
+
+    private static final String[] SKYBOX_PRESETS = {
+        "the_last_end", "dream_sakura", "forest", "ocean",
+        "storm", "volcano", "arcane", "aurora",
+        "hacker", "starlight", "cosmos", "black_hole"
+    };
 
     // 注册子命令
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
+        LiteralArgumentBuilder<CommandSourceStack> setSkybox = Commands.literal("set_skybox");
+        for (String preset : SKYBOX_PRESETS) {
+            setSkybox.then(Commands.literal(preset)
+                .executes(ctx -> applySkyboxPreset(ctx, preset))
+            );
+        }
+
         return Commands.literal("entityExtension")
             .then(Commands.literal("get_registry")
                 .executes(EntityExtensionCommand::getRegistry)
@@ -30,8 +43,9 @@ public class EntityExtensionCommand {
                 .executes(EntityExtensionCommand::getCurrent)
             )
             .then(Commands.literal("clear")
-                .executes(EntityExtensionCommand::clearActive)
-            );
+                .executes(EntityExtensionCommand::clearAll)
+            )
+            .then(setSkybox);
     }
 
     // 获取注册总表
@@ -111,15 +125,41 @@ public class EntityExtensionCommand {
         }
     }
 
-    // 清空当前维度活跃表
-    private static int clearActive(CommandContext<CommandSourceStack> context) {
+    // 清空当前维度活跃表 + 全局效果覆盖
+    private static int clearAll(CommandContext<CommandSourceStack> context) {
         CommandSourceStack source = context.getSource();
 
         try {
             ServerLevel level = source.getLevel();
             EcaAPI.clearActiveEntityExtensionTable(level);
+            EcaAPI.clearAllGlobalEffects(level);
             source.sendSuccess(() -> Component.literal(
-                String.format("§aCleared active entity extension table in %s", level.dimension().location())
+                String.format("§aCleared entity extensions and global effects in %s", level.dimension().location())
+            ), true);
+            return 1;
+        } catch (Exception e) {
+            source.sendFailure(Component.literal("§cCommand execution failed: " + e.getMessage()));
+            return 0;
+        }
+    }
+
+    // 设置天空盒预设
+    private static int applySkyboxPreset(CommandContext<CommandSourceStack> context, String preset) {
+        CommandSourceStack source = context.getSource();
+
+        try {
+            ServerLevel level = source.getLevel();
+            ResourceLocation presetId = new ResourceLocation("eca", preset);
+
+            SkyboxData data = new SkyboxData(
+                false, null,
+                true, presetId,
+                1.0f, 100.0f, 1.0f,
+                1.0f, 1.0f, 1.0f
+            );
+            EcaAPI.setGlobalSkybox(level, data);
+            source.sendSuccess(() -> Component.literal(
+                String.format("§aSet global skybox to %s in %s", preset, level.dimension().location())
             ), true);
             return 1;
         } catch (Exception e) {

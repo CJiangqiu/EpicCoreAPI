@@ -2,9 +2,7 @@ package net.eca.client.music;
 
 import net.eca.EcaMod;
 import net.eca.util.entity_extension.CombatMusicExtension;
-import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionClientState;
-import net.eca.util.entity_extension.EntityExtensionManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
@@ -13,7 +11,6 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundSource;
-import net.minecraft.world.entity.EntityType;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -51,21 +48,7 @@ public final class CombatMusicManager {
         tickCounter = 0;
 
         ResourceLocation dimensionId = minecraft.level.dimension().location();
-        EntityType<?> activeType = EntityExtensionClientState.getActiveType(dimensionId);
-        if (activeType == null) {
-            clearStrictLock();
-            stopCurrent(minecraft);
-            return;
-        }
-
-        EntityExtension extension = EntityExtensionManager.getExtension(activeType);
-        if (extension == null) {
-            clearStrictLock();
-            stopCurrent(minecraft);
-            return;
-        }
-
-        CombatMusicExtension musicExtension = extension.combatMusicExtension();
+        CombatMusicExtension musicExtension = EntityExtensionClientState.getActiveMusic(dimensionId);
         if (musicExtension == null || !musicExtension.enabled()) {
             clearStrictLock();
             stopCurrent(minecraft);

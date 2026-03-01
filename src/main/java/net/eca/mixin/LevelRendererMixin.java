@@ -11,8 +11,6 @@ import com.mojang.math.Axis;
 import net.eca.client.render.shader.EcaShaderInstance;
 
 import net.eca.util.entity_extension.EntityExtensionClientState;
-import net.eca.util.entity_extension.EntityExtension;
-import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalSkyboxExtension;
 import net.minecraft.client.Camera;
@@ -82,17 +80,7 @@ public abstract class LevelRendererMixin {
 
     @Unique
     private static GlobalSkyboxExtension getGlobalSkyboxExtension(ResourceLocation dimensionId) {
-        EntityType<?> activeType = EntityExtensionClientState.getActiveType(dimensionId);
-        if (activeType == null) {
-            return null;
-        }
-
-        EntityExtension extension = EntityExtensionManager.getExtension(activeType);
-        if (extension == null) {
-            return null;
-        }
-
-        return extension.globalSkyboxExtension();
+        return EntityExtensionClientState.getActiveSkybox(dimensionId);
     }
 
     @Unique

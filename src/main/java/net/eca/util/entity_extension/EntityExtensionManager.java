@@ -36,6 +36,8 @@ public final class EntityExtensionManager {
 
     private static final Map<ResourceKey<Level>, DimensionState> DIMENSION_STATES = new ConcurrentHashMap<>();
     private static final AtomicLong ORDER_COUNTER = new AtomicLong(0);
+    private static final int VALIDATE_INTERVAL = 20;
+    private static int validateTickCounter = 0;
 
     public static void scanAndRegisterAll() {
         ModList.get().forEachModFile(modFile -> {
@@ -266,7 +268,10 @@ public final class EntityExtensionManager {
         }
 
         tickCustomBossEvents(level, state);
-        validateActiveTypes(level, state);
+        if (++validateTickCounter >= VALIDATE_INTERVAL) {
+            validateTickCounter = 0;
+            validateActiveTypes(level, state);
+        }
 
         if (state.activeType == null) {
             refreshActiveTable(level);

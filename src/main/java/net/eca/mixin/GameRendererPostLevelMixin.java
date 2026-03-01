@@ -9,9 +9,7 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.math.Axis;
 import net.eca.client.render.EntityLayerRenderQueue;
 import net.eca.client.render.shader.EcaShaderInstance;
-import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionClientState;
-import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.GlobalSkyboxExtension;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
@@ -19,7 +17,6 @@ import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
-import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.material.FogType;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -82,17 +79,7 @@ public class GameRendererPostLevelMixin {
     }
 
     private GlobalSkyboxExtension getGlobalSkyboxExtension(ResourceLocation dimensionId) {
-        EntityType<?> activeType = EntityExtensionClientState.getActiveType(dimensionId);
-        if (activeType == null) {
-            return null;
-        }
-
-        EntityExtension extension = EntityExtensionManager.getExtension(activeType);
-        if (extension == null) {
-            return null;
-        }
-
-        return extension.globalSkyboxExtension();
+        return EntityExtensionClientState.getActiveSkybox(dimensionId);
     }
 
     private void drawPostLevelSkybox(PoseStack poseStack, RenderType renderType, float size, float alpha) {

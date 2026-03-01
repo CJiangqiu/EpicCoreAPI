@@ -4,6 +4,7 @@ import net.eca.api.EcaAPI;
 import net.eca.util.EntityLocationManager;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
+import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.LivingEntity;
@@ -49,6 +50,7 @@ public class EcaEventHandler {
     public void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             EntityExtensionManager.syncActiveType(player);
+            GlobalEffectOverrideManager.syncToPlayer(player);
         }
     }
 
@@ -56,6 +58,7 @@ public class EcaEventHandler {
     public void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             EntityExtensionManager.onPlayerChangedDimension(player, event.getFrom());
+            GlobalEffectOverrideManager.syncToPlayer(player);
         }
     }
 

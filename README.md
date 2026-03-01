@@ -30,7 +30,8 @@ Use `/eca` command (requires OP permission level 2):
 - `/eca entityExtension get_registry` - Show entity extension registry
 - `/eca entityExtension get_active` - Show active entity extension types in current dimension
 - `/eca entityExtension get_current` - Show the currently effective entity extension
-- `/eca entityExtension clear` - Clear active entity extension table in current dimension
+- `/eca entityExtension clear` - Clear active entity extension table and all global effects in current dimension
+- `/eca entityExtension set_skybox <preset>` - Set global skybox shader preset (e.g. the_last_end, dream_sakura, forest, ocean, storm, volcano, arcane, aurora, hacker, starlight, cosmos, black_hole)
 
 ## Usage for Developers
 
@@ -109,6 +110,13 @@ side="BOTH"
 - `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
 - `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
 - `clearActiveEntityExtensionTable(level)` - Clear active entity extension table in current dimension
+- `setGlobalFog(level, fogData)` - Set global fog effect override for a dimension (does not change effect priority)
+- `clearGlobalFog(level)` - Clear global fog effect override
+- `setGlobalSkybox(level, skyboxData)` - Set global skybox effect override for a dimension (does not change effect priority)
+- `clearGlobalSkybox(level)` - Clear global skybox effect override
+- `setGlobalMusic(level, musicData)` - Set global combat music effect override for a dimension (does not change effect priority)
+- `clearGlobalMusic(level)` - Clear global combat music effect override
+- `clearAllGlobalEffects(level)` - Clear all global effect overrides (fog, skybox, music) for a dimension
 - `banSpawn(level, entityType, seconds)` - Ban entity type from spawning for specified duration
 - `isSpawnBanned(level, entityType)` - Check if entity type is banned from spawning
 - `getSpawnBanTime(level, entityType)` - Get remaining spawn ban time in seconds
@@ -174,7 +182,7 @@ EcaAPI.disableAllReturn();  // Disable and clear all AllReturn
 // Package Whitelist
 EcaAPI.addProtectedPackage("com.yourmod.");
 boolean removed = EcaAPI.removeProtectedPackage("com.yourmod.");  // Note: built-in hardcoded entries cannot be removed
-boolean protected = EcaAPI.isPackageProtected("com.yourmod.YourClass");
+boolean isProtected = EcaAPI.isPackageProtected("com.yourmod.YourClass");
 Set<String> allProtected = EcaAPI.getAllProtectedPackages();  // Get all protected packages
 
 // Spawn Ban
@@ -190,6 +198,15 @@ Map<EntityType<?>, EntityExtension> registry = EcaAPI.getEntityExtensionRegistry
 Map<EntityType<?>, Integer> activeTypes = EcaAPI.getActiveEntityExtensionTypes(serverLevel);
 EntityExtension active = EcaAPI.getActiveEntityExtension(serverLevel);
 EcaAPI.clearActiveEntityExtensionTable(serverLevel);
+
+// Global Effect Override (directly override fog/skybox/music without entity extension, does not change effect priority)
+EcaAPI.setGlobalFog(serverLevel, new FogData(true, 8.0f, 0.0f, 0.0f, 0.0f, 0.02f, 0.25f, 0.0f, 1.0f, 0));
+EcaAPI.clearGlobalFog(serverLevel);
+EcaAPI.setGlobalSkybox(serverLevel, new SkyboxData(false, null, true, new ResourceLocation("eca", "the_last_end"), 1.0f, 100.0f, 1.0f, 1.0f, 1.0f, 1.0f));
+EcaAPI.clearGlobalSkybox(serverLevel);
+EcaAPI.setGlobalMusic(serverLevel, new MusicData(new ResourceLocation("your_mod", "music.boss"), 0, 1.0f, 1.0f, true, true));
+EcaAPI.clearGlobalMusic(serverLevel);
+EcaAPI.clearAllGlobalEffects(serverLevel);
 ```
 
 ### Entity Extension System
@@ -379,7 +396,8 @@ Available presets:
 - `/eca entityExtension get_registry` - 查看实体扩展注册表
 - `/eca entityExtension get_active` - 查看当前维度活跃的扩展类型
 - `/eca entityExtension get_current` - 查看当前生效的实体扩展
-- `/eca entityExtension clear` - 清空当前维度活跃扩展表
+- `/eca entityExtension clear` - 清空当前维度活跃扩展表和所有全局效果覆盖
+- `/eca entityExtension set_skybox <预设名>` - 设置全局天空盒着色器预设（如 the_last_end, dream_sakura, forest, ocean, storm, volcano, arcane, aurora, hacker, starlight, cosmos, black_hole）
 
 ## 开发者使用
 
@@ -458,6 +476,13 @@ side="BOTH"
 - `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
 - `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）
 - `clearActiveEntityExtensionTable(level)` - 清空当前维度活跃扩展表
+- `setGlobalFog(level, fogData)` - 设置维度全局雾气效果覆盖（不改变效果优先级）
+- `clearGlobalFog(level)` - 清除全局雾气效果覆盖
+- `setGlobalSkybox(level, skyboxData)` - 设置维度全局天空盒效果覆盖（不改变效果优先级）
+- `clearGlobalSkybox(level)` - 清除全局天空盒效果覆盖
+- `setGlobalMusic(level, musicData)` - 设置维度全局战斗音乐效果覆盖（不改变效果优先级）
+- `clearGlobalMusic(level)` - 清除全局战斗音乐效果覆盖
+- `clearAllGlobalEffects(level)` - 清除维度所有全局效果覆盖（雾气、天空盒、音乐）
 - `banSpawn(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
 - `isSpawnBanned(level, entityType)` - 检查实体类型是否被禁生成
 - `getSpawnBanTime(level, entityType)` - 获取禁生成剩余秒数
@@ -523,7 +548,7 @@ EcaAPI.disableAllReturn();  // 关闭并清除全部AllReturn
 // 包名白名单
 EcaAPI.addProtectedPackage("com.yourmod.");
 boolean removed = EcaAPI.removeProtectedPackage("com.yourmod.");  // 注意内置硬编码名单无法移除
-boolean protected = EcaAPI.isPackageProtected("com.yourmod.YourClass");
+boolean isProtected = EcaAPI.isPackageProtected("com.yourmod.YourClass");
 Set<String> allProtected = EcaAPI.getAllProtectedPackages();  // 获取所有受保护的包名
 
 // 禁生成
@@ -539,6 +564,15 @@ Map<EntityType<?>, EntityExtension> registry = EcaAPI.getEntityExtensionRegistry
 Map<EntityType<?>, Integer> activeTypes = EcaAPI.getActiveEntityExtensionTypes(serverLevel);
 EntityExtension active = EcaAPI.getActiveEntityExtension(serverLevel);
 EcaAPI.clearActiveEntityExtensionTable(serverLevel);
+
+// 全局效果覆盖（直接覆盖雾气/天空盒/音乐，无需实体扩展，不改变效果优先级）
+EcaAPI.setGlobalFog(serverLevel, new FogData(true, 8.0f, 0.0f, 0.0f, 0.0f, 0.02f, 0.25f, 0.0f, 1.0f, 0));
+EcaAPI.clearGlobalFog(serverLevel);
+EcaAPI.setGlobalSkybox(serverLevel, new SkyboxData(false, null, true, new ResourceLocation("eca", "the_last_end"), 1.0f, 100.0f, 1.0f, 1.0f, 1.0f, 1.0f));
+EcaAPI.clearGlobalSkybox(serverLevel);
+EcaAPI.setGlobalMusic(serverLevel, new MusicData(new ResourceLocation("your_mod", "music.boss"), 0, 1.0f, 1.0f, true, true));
+EcaAPI.clearGlobalMusic(serverLevel);
+EcaAPI.clearAllGlobalEffects(serverLevel);
 ```
 
 ### 实体扩展

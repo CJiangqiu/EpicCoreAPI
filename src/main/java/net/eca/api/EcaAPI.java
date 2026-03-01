@@ -10,9 +10,16 @@ import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.LwjglUtil;
+import net.eca.util.entity_extension.CombatMusicExtension;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.entity_extension.GlobalEffectOverrideManager;
+import net.eca.util.entity_extension.GlobalFogExtension;
+import net.eca.network.EntityExtensionOverridePacket.FogData;
+import net.eca.network.EntityExtensionOverridePacket.SkyboxData;
+import net.eca.network.EntityExtensionOverridePacket.MusicData;
 import net.eca.util.spawn_ban.SpawnBanManager;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
@@ -569,6 +576,116 @@ public final class EcaAPI {
             throw new IllegalArgumentException("Level cannot be null");
         }
         EntityExtensionManager.clearActiveTable(level);
+    }
+
+
+    // ============ 全局效果覆盖 API ============
+
+    // 设置全局雾气效果
+    /**
+     * Set global fog effect override for a dimension.
+     * This directly overrides the fog effect in the effect cache without changing the current priority.
+     * Any entity extension with priority >= current cached priority can still take over later.
+     * @param level the server level (dimension)
+     * @param data the fog data to apply
+     * @throws IllegalArgumentException if level or data is null
+     */
+    public static void setGlobalFog(ServerLevel level, FogData data) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        if (data == null) {
+            throw new IllegalArgumentException("FogData cannot be null");
+        }
+        GlobalEffectOverrideManager.setFog(level, data);
+    }
+
+    // 清除全局雾气效果
+    /**
+     * Clear global fog effect override for a dimension.
+     * @param level the server level (dimension)
+     * @throws IllegalArgumentException if level is null
+     */
+    public static void clearGlobalFog(ServerLevel level) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        GlobalEffectOverrideManager.clearFog(level);
+    }
+
+    // 设置全局天空盒效果
+    /**
+     * Set global skybox effect override for a dimension.
+     * This directly overrides the skybox effect in the effect cache without changing the current priority.
+     * @param level the server level (dimension)
+     * @param data the skybox data to apply
+     * @throws IllegalArgumentException if level or data is null
+     */
+    public static void setGlobalSkybox(ServerLevel level, SkyboxData data) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        if (data == null) {
+            throw new IllegalArgumentException("SkyboxData cannot be null");
+        }
+        GlobalEffectOverrideManager.setSkybox(level, data);
+    }
+
+    // 清除全局天空盒效果
+    /**
+     * Clear global skybox effect override for a dimension.
+     * @param level the server level (dimension)
+     * @throws IllegalArgumentException if level is null
+     */
+    public static void clearGlobalSkybox(ServerLevel level) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        GlobalEffectOverrideManager.clearSkybox(level);
+    }
+
+    // 设置全局战斗音乐效果
+    /**
+     * Set global combat music effect override for a dimension.
+     * This directly overrides the combat music in the effect cache without changing the current priority.
+     * @param level the server level (dimension)
+     * @param data the music data to apply
+     * @throws IllegalArgumentException if level or data is null
+     */
+    public static void setGlobalMusic(ServerLevel level, MusicData data) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        if (data == null) {
+            throw new IllegalArgumentException("MusicData cannot be null");
+        }
+        GlobalEffectOverrideManager.setMusic(level, data);
+    }
+
+    // 清除全局战斗音乐效果
+    /**
+     * Clear global combat music effect override for a dimension.
+     * @param level the server level (dimension)
+     * @throws IllegalArgumentException if level is null
+     */
+    public static void clearGlobalMusic(ServerLevel level) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        GlobalEffectOverrideManager.clearMusic(level);
+    }
+
+    // 清除维度所有全局效果覆盖
+    /**
+     * Clear all global effect overrides (fog, skybox, music) for a dimension.
+     * @param level the server level (dimension)
+     * @throws IllegalArgumentException if level is null
+     */
+    public static void clearAllGlobalEffects(ServerLevel level) {
+        if (level == null) {
+            throw new IllegalArgumentException("Level cannot be null");
+        }
+        GlobalEffectOverrideManager.clearAll(level);
     }
 
 
