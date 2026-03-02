@@ -50,7 +50,7 @@ public abstract class LevelRendererMixin {
     @Inject(method = "renderSky", at = @At("TAIL"))
     private void eca$renderGlobalSkybox(PoseStack poseStack, Matrix4f projectionMatrix, float partialTick, Camera camera, boolean foggy, Runnable setupFog, CallbackInfo ci) {
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.level == null || camera == null || foggy) {
+        if (minecraft.level == null || camera == null) {
             return;
         }
         if (camera.getFluidInCamera() != FogType.NONE) {

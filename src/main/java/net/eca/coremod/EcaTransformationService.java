@@ -24,8 +24,10 @@ public class EcaTransformationService implements ITransformationService {
 
     static {
         System.out.println("[ECA CoreMod] Static block : I'm first?");
-        // 在 static block 中完成双加载，确保在其他 service 类加载之前生效
+        // 在 static block 中完成双加载，确保在其他service类加载之前生效
         enableEcaDualLoading();
+        // 双加载完成后立即启动Agent
+        attachAgentEarly();
     }
 
     private static final String SERVICE_NAME = "eca_coremod";
@@ -45,14 +47,13 @@ public class EcaTransformationService implements ITransformationService {
     @Override
     public void onLoad(@NotNull IEnvironment env, @NotNull Set<String> otherServices) {
         System.out.println("[ECA CoreMod] onLoad - other services count: " + otherServices.size());
-        attachAgentEarly();
     }
 
     /**
      * 在 CoreMod 阶段提前挂载 Java Agent
      * 此时游戏窗口尚未创建，Agent 的 ClassFileTransformer 能拦截所有后续类加载
      */
-    private void attachAgentEarly() {
+    private static void attachAgentEarly() {
         try {
             boolean selfAttachEnabled = AgentLoader.enableSelfAttach();
             System.out.println("[ECA CoreMod] Self-attach enabled: " + selfAttachEnabled);

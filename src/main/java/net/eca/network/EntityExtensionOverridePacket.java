@@ -112,21 +112,21 @@ public class EntityExtensionOverridePacket {
         NetworkEvent.Context ctx = context.get();
         ctx.enqueueWork(() -> {
             if (msg.fogAction == ACTION_SET && msg.fogData != null) {
-                EntityExtensionClientState.setActiveFog(msg.dimensionId, msg.fogData.toExtension());
+                EntityExtensionClientState.setActiveFog(msg.dimensionId, msg.fogData.toExtension(), true);
             } else if (msg.fogAction == ACTION_CLEAR) {
-                EntityExtensionClientState.setActiveFog(msg.dimensionId, null);
+                EntityExtensionClientState.setActiveFog(msg.dimensionId, null, true);
             }
 
             if (msg.skyboxAction == ACTION_SET && msg.skyboxData != null) {
-                EntityExtensionClientState.setActiveSkybox(msg.dimensionId, msg.skyboxData.toExtension());
+                EntityExtensionClientState.setActiveSkybox(msg.dimensionId, msg.skyboxData.toExtension(), true);
             } else if (msg.skyboxAction == ACTION_CLEAR) {
-                EntityExtensionClientState.setActiveSkybox(msg.dimensionId, null);
+                EntityExtensionClientState.setActiveSkybox(msg.dimensionId, null, true);
             }
 
             if (msg.musicAction == ACTION_SET && msg.musicData != null) {
-                EntityExtensionClientState.setActiveMusic(msg.dimensionId, msg.musicData.toExtension());
+                EntityExtensionClientState.setActiveMusic(msg.dimensionId, msg.musicData.toExtension(), true);
             } else if (msg.musicAction == ACTION_CLEAR) {
-                EntityExtensionClientState.setActiveMusic(msg.dimensionId, null);
+                EntityExtensionClientState.setActiveMusic(msg.dimensionId, null, true);
             }
         });
         ctx.setPacketHandled(true);

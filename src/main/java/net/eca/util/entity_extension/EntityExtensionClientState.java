@@ -7,6 +7,7 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -20,6 +21,10 @@ public final class EntityExtensionClientState {
     private static final Map<ResourceLocation, GlobalSkyboxExtension> ACTIVE_SKYBOXES = new ConcurrentHashMap<>();
     private static final Map<ResourceLocation, CombatMusicExtension> ACTIVE_MUSICS = new ConcurrentHashMap<>();
     private static final Map<ResourceLocation, Integer> ACTIVE_PRIORITIES = new ConcurrentHashMap<>();
+
+    private static final Set<ResourceLocation> OVERRIDE_FOGS = ConcurrentHashMap.newKeySet();
+    private static final Set<ResourceLocation> OVERRIDE_SKYBOXES = ConcurrentHashMap.newKeySet();
+    private static final Set<ResourceLocation> OVERRIDE_MUSICS = ConcurrentHashMap.newKeySet();
 
     public static void setActiveType(ResourceLocation dimensionId, ResourceLocation typeId) {
         if (dimensionId == null) {
@@ -82,35 +87,59 @@ public final class EntityExtensionClientState {
     }
 
     public static void setActiveFog(ResourceLocation dimensionId, GlobalFogExtension fog) {
+        setActiveFog(dimensionId, fog, false);
+    }
+
+    public static void setActiveFog(ResourceLocation dimensionId, GlobalFogExtension fog, boolean override) {
         if (dimensionId == null) {
             return;
         }
         if (fog == null) {
             ACTIVE_FOGS.remove(dimensionId);
+            OVERRIDE_FOGS.remove(dimensionId);
         } else {
             ACTIVE_FOGS.put(dimensionId, fog);
+            if (override) {
+                OVERRIDE_FOGS.add(dimensionId);
+            }
         }
     }
 
     public static void setActiveSkybox(ResourceLocation dimensionId, GlobalSkyboxExtension skybox) {
+        setActiveSkybox(dimensionId, skybox, false);
+    }
+
+    public static void setActiveSkybox(ResourceLocation dimensionId, GlobalSkyboxExtension skybox, boolean override) {
         if (dimensionId == null) {
             return;
         }
         if (skybox == null) {
             ACTIVE_SKYBOXES.remove(dimensionId);
+            OVERRIDE_SKYBOXES.remove(dimensionId);
         } else {
             ACTIVE_SKYBOXES.put(dimensionId, skybox);
+            if (override) {
+                OVERRIDE_SKYBOXES.add(dimensionId);
+            }
         }
     }
 
     public static void setActiveMusic(ResourceLocation dimensionId, CombatMusicExtension music) {
+        setActiveMusic(dimensionId, music, false);
+    }
+
+    public static void setActiveMusic(ResourceLocation dimensionId, CombatMusicExtension music, boolean override) {
         if (dimensionId == null) {
             return;
         }
         if (music == null) {
             ACTIVE_MUSICS.remove(dimensionId);
+            OVERRIDE_MUSICS.remove(dimensionId);
         } else {
             ACTIVE_MUSICS.put(dimensionId, music);
+            if (override) {
+                OVERRIDE_MUSICS.add(dimensionId);
+            }
         }
     }
 
@@ -147,9 +176,15 @@ public final class EntityExtensionClientState {
     }
 
     private static void clearEffectCaches(ResourceLocation dimensionId) {
-        ACTIVE_FOGS.remove(dimensionId);
-        ACTIVE_SKYBOXES.remove(dimensionId);
-        ACTIVE_MUSICS.remove(dimensionId);
+        if (!OVERRIDE_FOGS.contains(dimensionId)) {
+            ACTIVE_FOGS.remove(dimensionId);
+        }
+        if (!OVERRIDE_SKYBOXES.contains(dimensionId)) {
+            ACTIVE_SKYBOXES.remove(dimensionId);
+        }
+        if (!OVERRIDE_MUSICS.contains(dimensionId)) {
+            ACTIVE_MUSICS.remove(dimensionId);
+        }
         ACTIVE_PRIORITIES.remove(dimensionId);
     }
 
