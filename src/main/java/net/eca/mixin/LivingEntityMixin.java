@@ -4,6 +4,8 @@ import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.health.HealthLockManager;
+import net.minecraft.world.effect.MobEffectCategory;
+import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -14,6 +16,8 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+import java.util.ArrayList;
 
 @Mixin(LivingEntity.class)
 public abstract class LivingEntityMixin {
@@ -119,6 +123,13 @@ public abstract class LivingEntityMixin {
         }
 
         if (invulnerable) {
+            if (!self.level().isClientSide && !self.getActiveEffects().isEmpty()) {
+                for (MobEffectInstance effectInstance : new ArrayList<>(self.getActiveEffects())) {
+                    if (effectInstance.getEffect().getCategory() == MobEffectCategory.HARMFUL) {
+                        self.removeEffect(effectInstance.getEffect());
+                    }
+                }
+            }
             EntityUtil.clearRemovalReasonIfProtected(self);
         }
     }
