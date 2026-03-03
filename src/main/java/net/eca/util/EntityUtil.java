@@ -859,37 +859,22 @@ public class EntityUtil {
         boolean isServerSide = !entity.level().isClientSide;
 
         try {
-
-            // 在 cleanupBossBar 之前收集所有 boss event UUID（包括 ECA 扩展的）
-            List<UUID> bossEventUUIDs = collectBossEventUUIDs(entity);
-            if (isServerSide && entity instanceof LivingEntity living) {
-                bossEventUUIDs.addAll(EntityExtensionManager.collectCustomBossEventUUIDs(living));
-            }
-
+            List<UUID> bossEventUUIDs = collectAllBossEventUUIDsForRemoval(entity);
             cleanupAI(entity);
             cleanupBossBar(entity);
             entity.stopRiding();
             removeAllPassengers(entity);
             entity.invalidateCaps();
+            if (isServerSide) {
+                notifyServerScoreboardRemoval(entity);
+            }
             if (isServerSide && entity.level() instanceof ServerLevel serverLevel) {
-                serverLevel.getScoreboard().entityRemoved(entity);
                 NetworkHandler.sendToTrackingClients(
                         new EcaClientRemovePacket(entity.getId(), bossEventUUIDs),
                         entity
                 );
             }
-
-            entity.setRemoved(reason);
-            entity.onRemovedFromWorld();
-            //调用 levelCallback.onRemove() 在设置 NULL 之前
-            EntityInLevelCallback callback = entity.levelCallback;
-            if (callback != EntityInLevelCallback.NULL) {
-                callback.onRemove(reason);
-            }
-            entity.levelCallback = EntityInLevelCallback.NULL;
-            if (entity instanceof LivingEntity livingEntity) {
-                livingEntity.updateDynamicGameEventListener(DynamicGameEventListener::remove);
-            }
+            applyRemovalLifecycle(entity, reason);
 
 
             if (isServerSide && entity.level() instanceof ServerLevel serverLevel) {
@@ -902,9 +887,43 @@ public class EntityUtil {
         }
     }
 
+    public static List<UUID> collectAllBossEventUUIDsForRemoval(Entity entity) {
+        List<UUID> bossEventUUIDs = collectBossEventUUIDs(entity);
+        if (entity != null && !entity.level().isClientSide && entity instanceof LivingEntity living) {
+            bossEventUUIDs.addAll(EntityExtensionManager.collectCustomBossEventUUIDs(living));
+        }
+        return bossEventUUIDs;
+    }
+
+    public static void notifyServerScoreboardRemoval(Entity entity) {
+        if (entity == null || entity.level() == null || entity.level().isClientSide) {
+            return;
+        }
+        if (entity.level() instanceof ServerLevel serverLevel) {
+            serverLevel.getScoreboard().entityRemoved(entity);
+        }
+    }
+
+    public static void applyRemovalLifecycle(Entity entity, Entity.RemovalReason reason) {
+        if (entity == null) {
+            return;
+        }
+
+        entity.setRemoved(reason);
+        entity.onRemovedFromWorld();
+        EntityInLevelCallback callback = entity.levelCallback;
+        if (callback != EntityInLevelCallback.NULL) {
+            callback.onRemove(reason);
+        }
+        entity.levelCallback = EntityInLevelCallback.NULL;
+        if (entity instanceof LivingEntity livingEntity) {
+            livingEntity.updateDynamicGameEventListener(DynamicGameEventListener::remove);
+        }
+    }
+
 
     //AI清理
-    private static void cleanupAI(Entity entity) {
+    public static void cleanupAI(Entity entity) {
         if (entity instanceof Mob mob) {
             mob.goalSelector.removeAllGoals(goal -> true);
             mob.targetSelector.removeAllGoals(goal -> true);
@@ -963,7 +982,7 @@ public class EntityUtil {
     }
 
     //清除所有乘客的骑乘关系
-    private static void removeAllPassengers(Entity entity) {
+    public static void removeAllPassengers(Entity entity) {
         List<Entity> passengers = entity.getPassengers();
         for (int i = passengers.size() - 1; i >= 0; i--) {
             Entity passenger = passengers.get(i);

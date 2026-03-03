@@ -1,9 +1,11 @@
 package net.eca.util.reflect;
 
+import net.eca.agent.EcaContainers;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.network.LwjglClientRemovePacket;
 import net.eca.network.NetworkHandler;
+import net.eca.util.entity_extension.EntityExtensionManager;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -14,6 +16,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.entity.*;
+import net.minecraft.world.level.gameevent.DynamicGameEventListener;
 import net.minecraft.util.ClassInstanceMultiMap;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
@@ -321,10 +324,25 @@ public class LwjglUtil {
         }
 
         try {
+            List<UUID> bossEventUUIDs = EntityUtil.collectAllBossEventUUIDsForRemoval(entity);
+
+            EntityUtil.cleanupAI(entity);
+            EntityUtil.cleanupBossBar(entity);
+            entity.stopRiding();
+            EntityUtil.removeAllPassengers(entity);
+            entity.invalidateCaps();
+
             // 1. 设置清除原因为 CHANGED_DIMENSION（维度切换）
             if (REMOVAL_REASON_OFFSET > 0) {
                 lwjglPutObject(entity, REMOVAL_REASON_OFFSET, Entity.RemovalReason.CHANGED_DIMENSION);
             }
+
+            if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
+                EntityUtil.notifyServerScoreboardRemoval(entity);
+                broadcastEntityRemoval(serverLevel, entity, bossEventUUIDs);
+            }
+
+            EntityUtil.applyRemovalLifecycle(entity, Entity.RemovalReason.CHANGED_DIMENSION);
 
             // 2. 设置回调为 NULL
             if (LEVEL_CALLBACK_OFFSET > 0) {
@@ -333,8 +351,6 @@ public class LwjglUtil {
 
             // 3. 底层容器清除（仅服务端）
             if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
-                // 先发送移除包给客户端
-                broadcastEntityRemoval(serverLevel, entity);
                 // 再清除服务端容器
                 removeFromServerContainersViaLwjgl(serverLevel, entity);
             }
@@ -351,9 +367,8 @@ public class LwjglUtil {
     /**
      * 广播 LWJGL 移除包给所有玩（绕过原版包拦截）
      */
-    private static void broadcastEntityRemoval(ServerLevel serverLevel, Entity entity) {
+    private static void broadcastEntityRemoval(ServerLevel serverLevel, Entity entity, List<UUID> bossEventUUIDs) {
         try {
-            List<UUID> bossEventUUIDs = EntityUtil.collectBossEventUUIDs(entity);
             LwjglClientRemovePacket packet = new LwjglClientRemovePacket(entity.getId(), bossEventUUIDs);
             for (ServerPlayer player : serverLevel.players()) {
                 NetworkHandler.sendToPlayer(packet, player);
@@ -412,6 +427,8 @@ public class LwjglUtil {
             // 3.7 从 EntityLookup 移除
             removeFromClientEntityLookupViaLwjgl(clientLevel, entityId, entityUUID);
 
+            EcaContainers.callRemove(entity);
+
             return true;
         } catch (Exception e) {
             EcaLogger.info("[LwjglUtil] Failed to remove client entity: {}", e.getMessage());
@@ -453,6 +470,8 @@ public class LwjglUtil {
 
             // 9. KnownUuids
             removeFromKnownUuidsViaLwjgl(serverLevel, entityUUID);
+
+            EcaContainers.callRemove(entity);
 
         } catch (Exception e) {
             EcaLogger.info("[LwjglUtil] Container cleanup failed: {}", e.getMessage());

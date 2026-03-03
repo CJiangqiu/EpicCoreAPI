@@ -126,6 +126,18 @@ side="BOTH"
 
 ```java
 import net.eca.api.EcaAPI;
+import net.eca.network.EntityExtensionOverridePacket.FogData;
+import net.eca.network.EntityExtensionOverridePacket.MusicData;
+import net.eca.network.EntityExtensionOverridePacket.SkyboxData;
+import net.eca.util.entity_extension.EntityExtension;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.phys.Vec3;
+
+import java.util.Map;
+import java.util.Set;
 
 // Health Lock
 EcaAPI.lockHealth(entity, 20.0f);
@@ -492,6 +504,18 @@ side="BOTH"
 
 ```java
 import net.eca.api.EcaAPI;
+import net.eca.network.EntityExtensionOverridePacket.FogData;
+import net.eca.network.EntityExtensionOverridePacket.MusicData;
+import net.eca.network.EntityExtensionOverridePacket.SkyboxData;
+import net.eca.util.entity_extension.EntityExtension;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.phys.Vec3;
+
+import java.util.Map;
+import java.util.Set;
 
 // 血量锁定
 EcaAPI.lockHealth(entity, 20.0f);
