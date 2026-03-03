@@ -31,7 +31,7 @@ public class SetMaxHealthCommand {
         CommandSourceStack source = context.getSource();
 
         try {
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
             float maxHealth = FloatArgumentType.getFloat(context, "maxHealth");
 
             int successCount = 0;

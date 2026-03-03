@@ -31,7 +31,7 @@ public class SetHealthCommand {
         CommandSourceStack source = context.getSource();
 
         try {
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
             float health = FloatArgumentType.getFloat(context, "health");
 
             int successCount = 0;

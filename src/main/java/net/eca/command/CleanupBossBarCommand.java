@@ -27,7 +27,7 @@ public class CleanupBossBarCommand {
         CommandSourceStack source = context.getSource();
 
         try {
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
             int successCount = 0;
 
             for (Entity entity : targets) {

@@ -41,7 +41,7 @@ public class SpawnBanCommand {
 
         try {
             ServerLevel level = source.getLevel();
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
             int seconds = IntegerArgumentType.getInteger(context, "seconds");
 
             // 收集所有选中实体的类型（去重）

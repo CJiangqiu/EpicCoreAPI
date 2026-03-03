@@ -20,11 +20,14 @@ import net.eca.network.EntityExtensionOverridePacket.SkyboxData;
 import net.eca.network.EntityExtensionOverridePacket.MusicData;
 import net.eca.util.spawn_ban.SpawnBanManager;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.lang.instrument.Instrumentation;
@@ -36,6 +39,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.function.Predicate;
 
 public final class EcaAPI {
 
@@ -341,6 +346,162 @@ public final class EcaAPI {
      */
     public static boolean teleportEntity(Entity entity, double x, double y, double z) {
         return EntityUtil.teleportEntity(entity, x, y, z);
+    }
+
+    // 按ID获取实体
+    /**
+     * Resolve an entity by numeric id from the specified level using ECA resolver.
+     * @param level the level to query
+     * @param entityId the runtime entity id
+     * @return the resolved entity, or null if not found
+     */
+    public static Entity getEntity(Level level, int entityId) {
+        return EntityUtil.getEntity(level, entityId);
+    }
+
+    // 按UUID获取实体
+    /**
+     * Resolve an entity by UUID from the specified level using ECA resolver.
+     * @param level the level to query
+     * @param uuid the entity UUID
+     * @return the resolved entity, or null if not found
+     */
+    public static Entity getEntity(Level level, UUID uuid) {
+        return EntityUtil.getEntity(level, uuid);
+    }
+
+    // 按ID获取指定类型实体
+    /**
+     * Resolve an entity by id and cast it to the expected type.
+     * @param level the level to query
+     * @param entityId the runtime entity id
+     * @param entityClass expected entity class
+     * @return typed entity instance, or null if not found/type mismatch
+     */
+    public static <T extends Entity> T getEntity(Level level, int entityId, Class<T> entityClass) {
+        return EntityUtil.getEntity(level, entityId, entityClass);
+    }
+
+    // 按UUID获取指定类型实体
+    /**
+     * Resolve an entity by UUID and cast it to the expected type.
+     * @param level the level to query
+     * @param uuid the entity UUID
+     * @param entityClass expected entity class
+     * @return typed entity instance, or null if not found/type mismatch
+     */
+    public static <T extends Entity> T getEntity(Level level, UUID uuid, Class<T> entityClass) {
+        return EntityUtil.getEntity(level, uuid, entityClass);
+    }
+
+    // 全服按ID获取实体
+    /**
+     * Resolve an entity by id across all server levels.
+     * @param server the minecraft server
+     * @param entityId the runtime entity id
+     * @return the resolved entity, or null if not found
+     */
+    public static Entity getEntity(MinecraftServer server, int entityId) {
+        return EntityUtil.getEntity(server, entityId);
+    }
+
+    // 全服按UUID获取实体
+    /**
+     * Resolve an entity by UUID across all server levels.
+     * @param server the minecraft server
+     * @param uuid the entity UUID
+     * @return the resolved entity, or null if not found
+     */
+    public static Entity getEntity(MinecraftServer server, UUID uuid) {
+        return EntityUtil.getEntity(server, uuid);
+    }
+
+    // 获取维度全部实体
+    /**
+     * Get all entities in a level using ECA resolver.
+     * @param level the level to query
+     * @return list of entities, empty list if none
+     */
+    public static List<Entity> getEntities(Level level) {
+        return EntityUtil.getEntities(level);
+    }
+
+    // 获取维度范围实体
+    /**
+     * Get entities in the specified area from a level.
+     * @param level the level to query
+     * @param area query area
+     * @return entities whose bounding boxes intersect the area
+     */
+    public static List<Entity> getEntities(Level level, AABB area) {
+        return EntityUtil.getEntities(level, area);
+    }
+
+    // 获取维度筛选实体
+    /**
+     * Get entities in a level with a custom filter.
+     * @param level the level to query
+     * @param filter filter predicate
+     * @return filtered entities
+     */
+    public static List<Entity> getEntities(Level level, Predicate<Entity> filter) {
+        return EntityUtil.getEntities(level, filter);
+    }
+
+    // 获取维度范围筛选实体
+    /**
+     * Get entities in area with an additional custom filter.
+     * @param level the level to query
+     * @param area query area
+     * @param filter filter predicate
+     * @return filtered entities in area
+     */
+    public static List<Entity> getEntities(Level level, AABB area, Predicate<Entity> filter) {
+        return EntityUtil.getEntities(level, area, filter);
+    }
+
+    // 获取维度全部指定类型实体
+    /**
+     * Get all entities of the specified type in a level.
+     * @param level the level to query
+     * @param entityClass expected class
+     * @return typed entity list
+     */
+    public static <T extends Entity> List<T> getEntities(Level level, Class<T> entityClass) {
+        return EntityUtil.getEntities(level, entityClass);
+    }
+
+    // 获取维度范围指定类型实体
+    /**
+     * Get entities of the specified type in the given area.
+     * @param level the level to query
+     * @param area query area
+     * @param entityClass expected class
+     * @return typed entity list in area
+     */
+    public static <T extends Entity> List<T> getEntities(Level level, AABB area, Class<T> entityClass) {
+        return EntityUtil.getEntities(level, area, entityClass);
+    }
+
+    // 获取全服全部实体
+    /**
+     * Get all entities across all server levels.
+     * @param server the minecraft server
+     * @return all resolved entities
+     */
+    public static List<Entity> getEntities(MinecraftServer server) {
+        return EntityUtil.getEntities(server);
+    }
+
+    // 获取全服筛选实体
+    /**
+     * Get entities across all server levels with custom filter.
+     * @param server the minecraft server
+     * @param filter filter predicate
+     * @return filtered entities from all levels
+     */
+    public static List<Entity> getEntities(MinecraftServer server, Predicate<Entity> filter) {
+        return EntityUtil.getEntities(server, filter);
     }
 
     // ==================== 位置锁定系统 ====================

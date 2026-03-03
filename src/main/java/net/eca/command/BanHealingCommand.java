@@ -57,7 +57,7 @@ public class BanHealingCommand {
         CommandSourceStack source = context.getSource();
 
         try {
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
 
             int successCount = 0;
 
@@ -98,7 +98,7 @@ public class BanHealingCommand {
         CommandSourceStack source = context.getSource();
 
         try {
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
             float value = FloatArgumentType.getFloat(context, "value");
 
             int successCount = 0;
@@ -141,7 +141,7 @@ public class BanHealingCommand {
         CommandSourceStack source = context.getSource();
 
         try {
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
 
             int successCount = 0;
             int skippedCount = 0;

@@ -36,7 +36,7 @@ public class MemoryRemoveCommand {
         }
 
         try {
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
 
             int successCount = 0;
             int failCount = 0;

@@ -22,9 +22,11 @@ import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.server.level.*;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.BossHealthOverlay;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.entity.*;
 import net.minecraft.world.level.gameevent.DynamicGameEventListener;
 import net.minecraft.advancements.CriteriaTriggers;
@@ -33,6 +35,7 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.core.SectionPos;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import net.eca.util.selector.EcaEntitySelector;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -41,6 +44,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 
 @SuppressWarnings({"unchecked", "rawtypes"})
 //实体工具类
@@ -104,6 +108,62 @@ public class EntityUtil {
     //通过UUID检查实体是否正在切换维度（供容器层使用）
     public static boolean isChangingDimension(UUID uuid) {
         return uuid != null && DIMENSION_CHANGING_ENTITIES.contains(uuid);
+    }
+
+    public static Entity getEntity(Level level, int entityId) {
+        return EcaEntitySelector.getEntity(level, entityId);
+    }
+
+    public static Entity getEntity(Level level, UUID uuid) {
+        return EcaEntitySelector.getEntity(level, uuid);
+    }
+
+    public static Entity getEntity(MinecraftServer server, int entityId) {
+        return EcaEntitySelector.getEntity(server, entityId);
+    }
+
+    public static Entity getEntity(MinecraftServer server, UUID uuid) {
+        return EcaEntitySelector.getEntity(server, uuid);
+    }
+
+    public static <T extends Entity> T getEntity(Level level, int entityId, Class<T> entityClass) {
+        return EcaEntitySelector.getEntity(level, entityId, entityClass);
+    }
+
+    public static <T extends Entity> T getEntity(Level level, UUID uuid, Class<T> entityClass) {
+        return EcaEntitySelector.getEntity(level, uuid, entityClass);
+    }
+
+    public static List<Entity> getEntities(Level level) {
+        return EcaEntitySelector.getEntities(level);
+    }
+
+    public static List<Entity> getEntities(Level level, AABB area) {
+        return EcaEntitySelector.getEntities(level, area);
+    }
+
+    public static List<Entity> getEntities(Level level, Predicate<Entity> filter) {
+        return EcaEntitySelector.getEntities(level, filter);
+    }
+
+    public static List<Entity> getEntities(Level level, AABB area, Predicate<Entity> filter) {
+        return EcaEntitySelector.getEntities(level, area, filter);
+    }
+
+    public static <T extends Entity> List<T> getEntities(Level level, Class<T> entityClass) {
+        return EcaEntitySelector.getEntities(level, entityClass);
+    }
+
+    public static <T extends Entity> List<T> getEntities(Level level, AABB area, Class<T> entityClass) {
+        return EcaEntitySelector.getEntities(level, area, entityClass);
+    }
+
+    public static List<Entity> getEntities(MinecraftServer server) {
+        return EcaEntitySelector.getEntities(server);
+    }
+
+    public static List<Entity> getEntities(MinecraftServer server, Predicate<Entity> filter) {
+        return EcaEntitySelector.getEntities(server, filter);
     }
 
     /**

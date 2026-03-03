@@ -84,7 +84,7 @@ public class AllReturnCommand {
 
         Collection<? extends Entity> targets;
         try {
-            targets = EntityArgument.getEntities(context, "targets");
+            targets = EcaCommandSelector.getEntities(context);
         } catch (CommandSyntaxException e) {
             context.getSource().sendFailure(Component.literal(
                 "§cFailed to resolve targets: " + e.getMessage()

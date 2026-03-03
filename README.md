@@ -20,7 +20,7 @@ Use `/eca` command (requires OP permission level 2):
 - `/eca remove <targets> [reason]` - Remove entities from world
 - `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities via LWJGL internal channel
 - `/eca teleport <targets> <x> <y> <z>` - Teleport entities
-- `/eca lockLocation <targets> <true|false> [x y z]` - Lock/unlock entity location (optional position, defaults to current)
+- `/eca lockLocation <targets> <true|false> [x y z]` - Lock/unlock entity location
 - `/eca cleanBossBar <targets>` - Clean up boss bars
 - `/eca allReturn <targets> <true|false>` - DANGER! Requires Attack Radical Logic config. Enable/disable return transformation on all boolean and void methods of the target entity's mod
 - `/eca allReturn global <true|false>` - DANGER! Enable/disable global AllReturn for all non-whitelisted mods
@@ -31,7 +31,14 @@ Use `/eca` command (requires OP permission level 2):
 - `/eca entityExtension get_active` - Show active entity extension types in current dimension
 - `/eca entityExtension get_current` - Show the currently effective entity extension
 - `/eca entityExtension clear` - Clear active entity extension table and all global effects in current dimension
-- `/eca entityExtension set_skybox <preset>` - Set global skybox shader preset (e.g. the_last_end, dream_sakura, forest, ocean, storm, volcano, arcane, aurora, hacker, starlight, cosmos, black_hole)
+- `/eca entityExtension set_skybox <preset>` - Set global skybox shader preset
+
+Added new command selectors implemented by the ECA selector system:
+- `@eca_e[...]` - all entities
+- `@eca_p[...]` - nearest player
+- `@eca_a[...]` - all players
+- `@eca_r[...]` - random player
+- `@eca_s[...]` - command source entity (self)
 
 ## Usage for Developers
 
@@ -123,6 +130,20 @@ side="BOTH"
 - `unbanSpawn(level, entityType)` - Unban entity type, allowing it to spawn again
 - `getAllSpawnBans(level)` - Get all spawn bans in level (Map<EntityType, Integer>)
 - `unbanAllSpawns(level)` - Unban all entity types in level
+- `getEntity(level, entityId)` - Resolve entity by runtime id in specified level (ECA selector path)
+- `getEntity(level, uuid)` - Resolve entity by UUID in specified level (ECA selector path)
+- `getEntity(level, entityId, entityClass)` - Resolve typed entity by id
+- `getEntity(level, uuid, entityClass)` - Resolve typed entity by UUID
+- `getEntity(server, entityId)` - Resolve entity by id across all levels
+- `getEntity(server, uuid)` - Resolve entity by UUID across all levels
+- `getEntities(level)` - Get all entities in level
+- `getEntities(level, area)` - Get entities in AABB area
+- `getEntities(level, filter)` - Get entities using custom predicate
+- `getEntities(level, area, filter)` - Get entities in area using custom predicate
+- `getEntities(level, entityClass)` - Get all entities of specified type in level
+- `getEntities(level, area, entityClass)` - Get entities of specified type in area
+- `getEntities(server)` - Get all entities across all server levels
+- `getEntities(server, filter)` - Get entities across all levels using custom predicate
 
 ```java
 import net.eca.api.EcaAPI;
@@ -134,6 +155,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Map;
@@ -179,6 +202,15 @@ EcaAPI.unlockLocation(entity);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
 EcaAPI.memoryRemoveEntity(entity);  // Remove using LWJGL internal Unsafe instance
 EcaAPI.cleanupBossBar(entity);
+
+// ECA Entity Selector API
+Entity byId = EcaAPI.getEntity(serverLevel, 123);
+Entity byUuid = EcaAPI.getEntity(serverLevel, uuid);
+List<Entity> allInLevel = EcaAPI.getEntities(serverLevel);
+List<Entity> inArea = EcaAPI.getEntities(serverLevel, new AABB(0, 0, 0, 16, 256, 16));
+List<Entity> filtered = EcaAPI.getEntities(serverLevel, e -> e.getType() == EntityType.ZOMBIE);
+List<LivingEntity> livingInArea = EcaAPI.getEntities(serverLevel, new AABB(0, 0, 0, 32, 256, 32), LivingEntity.class);
+List<Entity> allServerEntities = EcaAPI.getEntities(server);
 
 // Invulnerability
 EcaAPI.setInvulnerable(entity, true);
@@ -398,7 +430,7 @@ Available presets:
 - `/eca remove <目标> [原因]` - 从世界中移除实体
 - `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
 - `/eca teleport <目标> <x> <y> <z>` - 传送实体
-- `/eca lockLocation <目标> <true|false> [x y z]` - 锁定/解除实体位置（可选指定坐标，默认当前位置）
+- `/eca lockLocation <目标> <true|false> [x y z]` - 锁定/解除实体位置
 - `/eca cleanBossBar <目标>` - 清理 Boss 血条
 - `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体的所属mod的全部布尔和void方法的return transformation
 - `/eca allReturn global <true|false>` - 危险！启用/禁用全局AllReturn，影响所有非白名单mod
@@ -409,7 +441,14 @@ Available presets:
 - `/eca entityExtension get_active` - 查看当前维度活跃的扩展类型
 - `/eca entityExtension get_current` - 查看当前生效的实体扩展
 - `/eca entityExtension clear` - 清空当前维度活跃扩展表和所有全局效果覆盖
-- `/eca entityExtension set_skybox <预设名>` - 设置全局天空盒着色器预设（如 the_last_end, dream_sakura, forest, ocean, storm, volcano, arcane, aurora, hacker, starlight, cosmos, black_hole）
+- `/eca entityExtension set_skybox <预设名>` - 设置全局天空盒着色器预设
+
+新增了由 ECA 选择器实现的命令选择器：
+- `@eca_e[...]` - 所有实体
+- `@eca_p[...]` - 最近玩家
+- `@eca_a[...]` - 所有玩家
+- `@eca_r[...]` - 随机玩家
+- `@eca_s[...]` - 命令执行源实体（自身）
 
 ## 开发者使用
 
@@ -501,6 +540,20 @@ side="BOTH"
 - `unbanSpawn(level, entityType)` - 解除指定实体类型的禁生成
 - `getAllSpawnBans(level)` - 获取所有禁生成（Map<EntityType, Integer>）
 - `unbanAllSpawns(level)` - 解除所有禁生成
+- `getEntity(level, entityId)` - 在指定维度按运行时 id 获取实体（ECA 选择器路径）
+- `getEntity(level, uuid)` - 在指定维度按 UUID 获取实体（ECA 选择器路径）
+- `getEntity(level, entityId, entityClass)` - 按 id 获取指定类型实体
+- `getEntity(level, uuid, entityClass)` - 按 UUID 获取指定类型实体
+- `getEntity(server, entityId)` - 跨全部维度按 id 获取实体
+- `getEntity(server, uuid)` - 跨全部维度按 UUID 获取实体
+- `getEntities(level)` - 获取维度内全部实体
+- `getEntities(level, area)` - 获取维度内 AABB 范围实体
+- `getEntities(level, filter)` - 使用自定义条件获取维度实体
+- `getEntities(level, area, filter)` - 使用自定义条件获取范围内实体
+- `getEntities(level, entityClass)` - 获取维度内指定类型的全部实体
+- `getEntities(level, area, entityClass)` - 获取范围内指定类型实体
+- `getEntities(server)` - 获取全服全部实体
+- `getEntities(server, filter)` - 使用自定义条件获取全服实体
 
 ```java
 import net.eca.api.EcaAPI;
@@ -512,6 +565,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Map;
@@ -557,6 +612,15 @@ EcaAPI.unlockLocation(entity);
 EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
 EcaAPI.memoryRemoveEntity(entity);  // 提供使用LWJGL内部Unsafe实例进行清除
 EcaAPI.cleanupBossBar(entity);
+
+// ECA 实体选择 API
+Entity byId = EcaAPI.getEntity(serverLevel, 123);
+Entity byUuid = EcaAPI.getEntity(serverLevel, uuid);
+List<Entity> allInLevel = EcaAPI.getEntities(serverLevel);
+List<Entity> inArea = EcaAPI.getEntities(serverLevel, new AABB(0, 0, 0, 16, 256, 16));
+List<Entity> filtered = EcaAPI.getEntities(serverLevel, e -> e.getType() == EntityType.ZOMBIE);
+List<LivingEntity> livingInArea = EcaAPI.getEntities(serverLevel, new AABB(0, 0, 0, 32, 256, 32), LivingEntity.class);
+List<Entity> allServerEntities = EcaAPI.getEntities(server);
 
 // 无敌状态
 EcaAPI.setInvulnerable(entity, true);

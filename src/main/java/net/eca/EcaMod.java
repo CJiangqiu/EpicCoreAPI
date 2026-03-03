@@ -10,6 +10,7 @@ import net.eca.event.EcaEventHandler;
 import net.eca.init.ModConfigs;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
+import net.eca.util.selector.EcaSelectorRegistry;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.minecraft.world.entity.LivingEntity;
@@ -51,6 +52,9 @@ public final class EcaMod {
 
         // 注册事件处理器
         MinecraftForge.EVENT_BUS.register(new EcaEventHandler());
+
+        // 注册全局 ECA 实体选择器（@eca_e / @eca_p）
+        EcaSelectorRegistry.register();
 
         // GeckoLib 兼容：仅客户端且 GeckoLib 存在时注册渲染层
         if (FMLEnvironment.dist == Dist.CLIENT && ModList.get().isLoaded("geckolib")) {

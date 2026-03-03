@@ -43,7 +43,7 @@ public class RemoveEntityCommand {
         CommandSourceStack source = context.getSource();
 
         try {
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
 
             //解析移除原因
             Entity.RemovalReason reason;

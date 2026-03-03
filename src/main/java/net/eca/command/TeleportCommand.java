@@ -32,7 +32,7 @@ public class TeleportCommand {
         CommandSourceStack source = context.getSource();
 
         try {
-            Collection<? extends Entity> targets = EntityArgument.getEntities(context, "targets");
+            Collection<? extends Entity> targets = EcaCommandSelector.getEntities(context);
             Vec3 location = Vec3Argument.getVec3(context, "location");
 
             int successCount = 0;
