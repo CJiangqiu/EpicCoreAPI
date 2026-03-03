@@ -202,13 +202,14 @@ public final class EcaAPI {
         if (entity == null) {
             return false;
         }
+        boolean managerInvulnerable = InvulnerableEntityManager.isInvulnerable(entity.getUUID());
         if (!(entity instanceof LivingEntity livingEntity)) {
-            return false;
+            return managerInvulnerable;
         }
         if (EntityUtil.INVULNERABLE != null) {
-            return livingEntity.getEntityData().get(EntityUtil.INVULNERABLE);
+            return livingEntity.getEntityData().get(EntityUtil.INVULNERABLE) || managerInvulnerable;
         } else {
-            return livingEntity.getPersistentData().getBoolean("ecaInvulnerable");
+            return livingEntity.getPersistentData().getBoolean("ecaInvulnerable") || managerInvulnerable;
         }
     }
 

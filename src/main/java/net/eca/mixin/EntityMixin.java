@@ -74,11 +74,6 @@ public class EntityMixin {
 
         if (callback == EntityInLevelCallback.NULL) {
             ci.cancel();
-            return;
-        }
-
-        if (callback != entity.levelCallback) {
-            ci.cancel();
         }
 
     }

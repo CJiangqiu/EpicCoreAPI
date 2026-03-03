@@ -23,6 +23,7 @@
     "CapabilityDispatcherMixin",
     "ChunkMapMixin",
     "ClassInstanceMultiMapMixin",
+    "DistanceManagerMixin",
     "EntityLookupMixin",
     "EntityMixin",
     "EntitySectionMixin",

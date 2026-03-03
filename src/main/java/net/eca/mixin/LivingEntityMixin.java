@@ -2,6 +2,7 @@ package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
+import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.health.HealthLockManager;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.syncher.EntityDataSerializers;
@@ -68,7 +69,13 @@ public abstract class LivingEntityMixin {
         }
 
         if (tag.contains(NBT_INVULNERABLE)) {
-            entity.getEntityData().set(EntityUtil.INVULNERABLE, tag.getBoolean(NBT_INVULNERABLE));
+            boolean invulnerable = tag.getBoolean(NBT_INVULNERABLE);
+            entity.getEntityData().set(EntityUtil.INVULNERABLE, invulnerable);
+            if (invulnerable) {
+                InvulnerableEntityManager.addInvulnerable(entity);
+            } else {
+                InvulnerableEntityManager.removeInvulnerable(entity);
+            }
         }
         if (tag.contains(NBT_HEALTH_LOCK_VALUE, 8)) {
             entity.getEntityData().set(EntityUtil.HEALTH_LOCK_VALUE, tag.getString(NBT_HEALTH_LOCK_VALUE));
