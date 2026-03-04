@@ -10,7 +10,6 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
@@ -48,20 +47,28 @@ public class ServerLevelMixin {
         }
     }
 
-    @Redirect(
-        method = "addPlayer",
-        at = @At(
-            value = "INVOKE",
-            target = "Lnet/minecraft/server/level/ServerLevel;removePlayerImmediately(Lnet/minecraft/server/level/ServerPlayer;Lnet/minecraft/world/entity/Entity$RemovalReason;)V"
-        )
-    )
-    private void eca$redirectDuplicateRemove(ServerLevel self, ServerPlayer oldPlayer, Entity.RemovalReason reason) {
-        self.removePlayerImmediately(oldPlayer, reason);
-        if (reason == Entity.RemovalReason.DISCARDED) {
-            Entity current = self.getEntities().get(oldPlayer.getUUID());
-            if (current == oldPlayer) {
-                EntityUtil.removeEntity(oldPlayer, Entity.RemovalReason.CHANGED_DIMENSION);
-            }
+    @Unique
+    private ServerPlayer eca$oldDuplicate = null;
+
+    @Inject(method = "addPlayer", at = @At("HEAD"))
+    private void eca$captureOldDuplicate(ServerPlayer newPlayer, CallbackInfo ci) {
+        ServerLevel self = (ServerLevel)(Object)this;
+        Entity entity = self.getEntities().get(newPlayer.getUUID());
+        if (entity instanceof ServerPlayer sp && entity != newPlayer) {
+            eca$oldDuplicate = sp;
+        } else {
+            eca$oldDuplicate = null;
         }
+    }
+
+    @Inject(method = "addPlayer", at = @At("TAIL"))
+    private void eca$cleanupOldDuplicate(ServerPlayer newPlayer, CallbackInfo ci) {
+        if (eca$oldDuplicate == null) return;
+        ServerLevel self = (ServerLevel)(Object)this;
+        Entity current = self.getEntities().get(eca$oldDuplicate.getUUID());
+        if (current == eca$oldDuplicate) {
+            EntityUtil.removeEntity(eca$oldDuplicate, Entity.RemovalReason.CHANGED_DIMENSION);
+        }
+        eca$oldDuplicate = null;
     }
 }
