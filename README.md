@@ -311,18 +311,12 @@ public class MyBossExtension extends EntityExtension {
     public BossBarExtension bossBarExtension() {
         return new BossBarExtension() {
             @Override public boolean enabled() { return true; }  // enable boss bar
-            @Override public ResourceLocation getFrameTexture() { return texture("boss/bar_frame.png"); }  // frame texture (null to skip). If both texture and RenderType are set, shader renders masked by texture alpha
-            @Override public ResourceLocation getFillTexture() { return texture("boss/bar_fill.png"); }  // fill texture (null to skip). If both texture and RenderType are set, shader renders masked by texture alpha
-            @Override public RenderType getFrameRenderType() { return CustomRenderTypes.BOSS_BAR_FRAME; }  // frame shader/render type (null to skip)
-            @Override public RenderType getFillRenderType() { return CustomRenderTypes.BOSS_BAR_FILL; }  // fill shader/render type (null to skip)
-            @Override public int getFrameWidth() { return 460; }  // frame pixel width (RenderType-only mode, texture mode auto-detects)
-            @Override public int getFrameHeight() { return 50; }  // frame pixel height (RenderType-only mode, texture mode auto-detects)
-            @Override public int getFillWidth() { return 420; }  // fill bar pixel width (RenderType-only mode, texture mode auto-detects)
-            @Override public int getFillHeight() { return 40; }  // fill bar pixel height (RenderType-only mode, texture mode auto-detects)
-            @Override public int getFrameOffsetX() { return 0; }  // frame X offset
-            @Override public int getFrameOffsetY() { return 0; }  // frame Y offset
-            @Override public int getFillOffsetX() { return 0; }  // fill bar X offset
-            @Override public int getFillOffsetY() { return -10; }  // fill bar Y offset
+            @Override public ResourceLocation texture() { return texture("boss/bar.png"); }  // texture (null to skip). If both texture and RenderType are set, shader renders masked by texture alpha
+            @Override public RenderType renderType() { return CustomRenderTypes.BOSS_BAR; }  // shader/render type (null to skip)
+            @Override public int width() { return 420; }  // pixel width (RenderType-only mode requires this, texture mode auto-detects)
+            @Override public int height() { return 40; }  // pixel height (RenderType-only mode requires this, texture mode auto-detects)
+            @Override public int offsetX() { return 0; }  // X offset
+            @Override public int offsetY() { return -10; }  // Y offset
         };
     }
 
@@ -390,7 +384,7 @@ public class MyBossExtension extends EntityExtension {
 
 ### Shader Presets
 
-This mod also provides some built-in shader presets for the entity extension system. You can directly use these RenderTypes in your extension — simply replace `CustomRenderTypes` in the example above with the preset name. Each preset provides 4 RenderTypes: BOSS_BAR_FRAME, BOSS_BAR_FILL, BOSS_LAYER, SKYBOX.
+This mod also provides some built-in shader presets for the entity extension system. You can directly use these RenderTypes in your extension — simply replace `CustomRenderTypes` in the example above with the preset name. Each preset provides 3 RenderTypes: BOSS_BAR, BOSS_LAYER, SKYBOX.
 
 Available presets:
 - `TheLastEndRenderTypes` — The Last End
@@ -721,18 +715,12 @@ public class MyBossExtension extends EntityExtension {
     public BossBarExtension bossBarExtension() {
         return new BossBarExtension() {
             @Override public boolean enabled() { return true; }  // 启用 Boss 血条
-            @Override public ResourceLocation getFrameTexture() { return texture("boss/bar_frame.png"); }  // 边框纹理（null 则跳过）。同时设置纹理和渲染类型时，着色器将以纹理 alpha 为遮罩渲染
-            @Override public ResourceLocation getFillTexture() { return texture("boss/bar_fill.png"); }  // 填充纹理（null 则跳过）。同时设置纹理和渲染类型时，着色器将以纹理 alpha 为遮罩渲染
-            @Override public RenderType getFrameRenderType() { return CustomRenderTypes.BOSS_BAR_FRAME; }  // 边框着色器/渲染类型（null 则跳过）
-            @Override public RenderType getFillRenderType() { return CustomRenderTypes.BOSS_BAR_FILL; }  // 填充着色器/渲染类型（null 则跳过）
-            @Override public int getFrameWidth() { return 460; }  // 边框像素宽度（仅渲染类型模式使用，纹理模式自动检测）
-            @Override public int getFrameHeight() { return 50; }  // 边框像素高度（仅渲染类型模式使用，纹理模式自动检测）
-            @Override public int getFillWidth() { return 420; }  // 填充条像素宽度（仅渲染类型模式使用，纹理模式自动检测）
-            @Override public int getFillHeight() { return 40; }  // 填充条像素高度（仅渲染类型模式使用，纹理模式自动检测）
-            @Override public int getFrameOffsetX() { return 0; }  // 边框 X 偏移
-            @Override public int getFrameOffsetY() { return 0; }  // 边框 Y 偏移
-            @Override public int getFillOffsetX() { return 0; }  // 填充条 X 偏移
-            @Override public int getFillOffsetY() { return -10; }  // 填充条 Y 偏移
+            @Override public ResourceLocation texture() { return texture("boss/bar.png"); }  // 纹理（null 则跳过）。同时设置纹理和渲染类型时，着色器将以纹理 alpha 为遮罩渲染
+            @Override public RenderType renderType() { return CustomRenderTypes.BOSS_BAR; }  // 着色器/渲染类型（null 则跳过）
+            @Override public int width() { return 420; }  // 像素宽度（仅渲染类型模式必须设置，纹理模式自动检测）
+            @Override public int height() { return 40; }  // 像素高度（仅渲染类型模式必须设置，纹理模式自动检测）
+            @Override public int offsetX() { return 0; }  // X 偏移
+            @Override public int offsetY() { return -10; }  // Y 偏移
         };
     }
 
@@ -800,7 +788,7 @@ public class MyBossExtension extends EntityExtension {
 
 ### 着色器预设
 
-本 Mod 还提供了一些用于实体扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个预设均提供 4 个 RenderType：BOSS_BAR_FRAME、BOSS_BAR_FILL、BOSS_LAYER、SKYBOX。
+本 Mod 还提供了一些用于实体扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个预设均提供 3 个 RenderType：BOSS_BAR、BOSS_LAYER、SKYBOX。
 
 可用预设：
 - `TheLastEndRenderTypes` — 终焉

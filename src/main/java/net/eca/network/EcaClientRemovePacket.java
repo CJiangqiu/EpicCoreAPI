@@ -82,7 +82,7 @@ public class EcaClientRemovePacket {
                     entity.levelCallback = EntityInLevelCallback.NULL;
                     EntityUtil.removeFromClientContainers(clientLevel, entity);
                 } else {
-                    EcaLogger.info("[EcaClientRemovePacket] Client entity removal: entity not found (ID: {})", msg.entityId);
+                    EcaLogger.debug("[EcaClientRemovePacket] Client entity removal: entity not found (ID: {})", msg.entityId);
                 }
 
                 //精确清理目标实体对应的 boss 血条

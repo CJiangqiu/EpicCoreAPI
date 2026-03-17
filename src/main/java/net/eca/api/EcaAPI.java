@@ -287,6 +287,19 @@ public final class EcaAPI {
         EntityUtil.reviveEntity(entity);
     }
 
+    public static void reviveEntity(ServerLevel level, UUID uuid) {
+        EntityUtil.reviveEntity(level, uuid);
+    }
+
+    public static Map<String, Boolean> reviveAllContainers(LivingEntity entity) {
+        return EntityUtil.reviveAllContainers(entity);
+    }
+
+    //复活实体关键容器（按UUID）
+    public static Map<String, Boolean> reviveAllContainers(ServerLevel level, UUID uuid) {
+        return EntityUtil.reviveAllContainers(level, uuid);
+    }
+
 
     // 完整清除实体
     /**

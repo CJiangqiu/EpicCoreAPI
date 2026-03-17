@@ -51,6 +51,7 @@ public final class ObfuscationMapping {
 
         // ChunkMap
         fields.put("ChunkMap.entityMap", "f_140150_");
+        fields.put("ChunkMap.TrackedEntity.seenBy", "f_140475_");
 
         // PersistentEntitySectionManager
         fields.put("PersistentEntitySectionManager.visibleEntityStorage", "f_157494_");

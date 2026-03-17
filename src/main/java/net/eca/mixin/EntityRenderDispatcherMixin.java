@@ -18,7 +18,7 @@ public class EntityRenderDispatcherMixin {
     private void eca$forceLoadedShouldRender(Entity entity, Frustum frustum, double camX, double camY, double camZ, CallbackInfoReturnable<Boolean> cir) {
         ForceLoadingManager.setCurrentRenderingEntity(entity);
 
-        if (ForceLoadingManager.isForceLoadedType(entity.getType())) {
+        if (ForceLoadingManager.shouldForceLoad(entity)) {
             double maxDist = EcaConfiguration.getForceLoadingMaxRenderDistanceSafely();
             double distSqr = entity.distanceToSqr(camX, camY, camZ);
             boolean inRange = distSqr <= maxDist * maxDist;

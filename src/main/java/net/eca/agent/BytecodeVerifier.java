@@ -20,6 +20,7 @@ public final class BytecodeVerifier {
 
     // 目标方法的 SRG 名称
     private static final String GET_HEALTH_METHOD = "m_21223_";
+    private static final String GET_MAX_HEALTH_METHOD = "m_21233_";
     private static final String IS_ALIVE_METHOD = "m_6084_";
     private static final String IS_DEAD_OR_DYING_METHOD = "m_21224_";
 
@@ -61,6 +62,7 @@ public final class BytecodeVerifier {
             AgentLogWriter.info("========================================");
             AgentLogWriter.info("Verification Summary:");
             AgentLogWriter.info("  getHealth():      " + (visitor.getHealthHooked ? "✅ HOOKED" : "❌ NOT HOOKED"));
+            AgentLogWriter.info("  getMaxHealth():   " + (visitor.getMaxHealthHooked ? "✅ HOOKED" : "❌ NOT HOOKED"));
             AgentLogWriter.info("  isAlive():        " + (visitor.isAliveHooked ? "✅ HOOKED" : "❌ NOT HOOKED"));
             AgentLogWriter.info("  isDeadOrDying():  " + (visitor.isDeadOrDyingHooked ? "✅ HOOKED" : "❌ NOT HOOKED"));
             AgentLogWriter.info("========================================");
@@ -118,6 +120,7 @@ public final class BytecodeVerifier {
      */
     private static class VerificationVisitor extends ClassVisitor {
         boolean getHealthHooked = false;
+        boolean getMaxHealthHooked = false;
         boolean isAliveHooked = false;
         boolean isDeadOrDyingHooked = false;
 
@@ -130,6 +133,11 @@ public final class BytecodeVerifier {
             if (GET_HEALTH_METHOD.equals(name) && "()F".equals(descriptor)) {
                 AgentLogWriter.info("--- Method: m_21223_ (getHealth) ---");
                 return new MethodVerifier(GET_HEALTH_HOOK, "processGetHealth", result -> getHealthHooked = result);
+            }
+
+            if (GET_MAX_HEALTH_METHOD.equals(name) && "()F".equals(descriptor)) {
+                AgentLogWriter.info("--- Method: m_21233_ (getMaxHealth) ---");
+                return new MethodVerifier(GET_HEALTH_HOOK, "processGetMaxHealth", result -> getMaxHealthHooked = result);
             }
 
             if (IS_ALIVE_METHOD.equals(name) && "()Z".equals(descriptor)) {

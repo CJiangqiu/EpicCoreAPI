@@ -20,21 +20,7 @@ public class ArcaneRenderTypes {
         }
     };
 
-    public static final RenderType BOSS_BAR_FRAME = RenderType.create("arcane_boss_bar_frame",
-        DefaultVertexFormat.BLOCK,
-        VertexFormat.Mode.QUADS,
-        256,
-        false,
-        true,
-        RenderType.CompositeState.builder()
-            .setShaderState(SHADER_STATE)
-            .setTransparencyState(RenderType.TRANSLUCENT_TRANSPARENCY)
-            .setDepthTestState(RenderType.NO_DEPTH_TEST)
-            .setWriteMaskState(RenderType.COLOR_WRITE)
-            .createCompositeState(false)
-    );
-
-    public static final RenderType BOSS_BAR_FILL = RenderType.create("arcane_boss_bar_fill",
+    public static final RenderType BOSS_BAR = RenderType.create("arcane_boss_bar",
         DefaultVertexFormat.BLOCK,
         VertexFormat.Mode.QUADS,
         256,

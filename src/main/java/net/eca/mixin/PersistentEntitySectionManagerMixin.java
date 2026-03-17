@@ -3,7 +3,6 @@ package net.eca.mixin;
 import net.eca.api.EcaAPI;
 
 import net.eca.util.EntityUtil;
-import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
@@ -60,10 +59,6 @@ public class PersistentEntitySectionManagerMixin {
                 ci.cancel();
                 return;
             }
-            // 强加载实体：区块状态降级时保持ticking
-            if (ForceLoadingManager.isForceLoadedType(realEntity.getType())) {
-                ci.cancel();
-            }
         }
     }
 
@@ -77,10 +72,6 @@ public class PersistentEntitySectionManagerMixin {
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {
                 ci.cancel();
                 return;
-            }
-            // 强加载实体：区块状态降级时保持tracking，防止从ChunkMap移除
-            if (ForceLoadingManager.isForceLoadedType(realEntity.getType())) {
-                ci.cancel();
             }
         }
     }

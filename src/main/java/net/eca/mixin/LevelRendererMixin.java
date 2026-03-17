@@ -40,7 +40,7 @@ public abstract class LevelRendererMixin {
     @Inject(method = "isChunkCompiled", at = @At("HEAD"), cancellable = true)
     private void eca$forceLoadedChunkCheck(BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
         Entity entity = ForceLoadingManager.getCurrentRenderingEntity();
-        if (entity != null && ForceLoadingManager.isForceLoadedType(entity.getType())) {
+        if (entity != null && ForceLoadingManager.shouldForceLoad(entity)) {
             cir.setReturnValue(true);
         }
     }

@@ -11,7 +11,6 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.ChunkEntities;
 import net.minecraft.world.level.entity.EntitySection;
 
-import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.util.AbstractCollection;
 import java.util.AbstractSet;
@@ -21,14 +20,16 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
-import java.util.ListIterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.Spliterator;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
+
+import it.unimi.dsi.fastutil.objects.ObjectArrayList;
+import it.unimi.dsi.fastutil.objects.ObjectCollection;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -42,34 +43,6 @@ import java.util.function.Predicate;
 public final class EcaContainers {
 
     private EcaContainers() {}
-
-    // ==================== 回调系统 ====================
-
-    public interface RemovalCallback {
-        void onRemove(Entity entity);
-    }
-
-    private static final List<WeakReference<RemovalCallback>> REMOVAL_CALLBACKS = new CopyOnWriteArrayList<>();
-
-    private static void registerRemovalCallback(RemovalCallback callback) {
-        REMOVAL_CALLBACKS.add(new WeakReference<>(callback));
-    }
-
-    public static void callRemove(Entity entity) {
-        if (entity == null) return;
-        Iterator<WeakReference<RemovalCallback>> it = REMOVAL_CALLBACKS.iterator();
-        while (it.hasNext()) {
-            RemovalCallback cb = it.next().get();
-            if (cb == null) {
-                it.remove();
-                continue;
-            }
-            try {
-                cb.onRemove(entity);
-            } catch (Exception ignored) {
-            }
-        }
-    }
 
     // ==================== 保护逻辑 ====================
 
@@ -177,28 +150,20 @@ public final class EcaContainers {
      * ECA自定义的ArrayList容器
      * 用于替换MC原版的ClassInstanceMultiMap.allInstances
      */
-    public static class EcaArrayList<E> extends ArrayList<E> implements RemovalCallback {
+    public static class EcaArrayList<E> extends ArrayList<E> {
 
         private static final long serialVersionUID = 1L;
 
         public EcaArrayList() {
             super();
-            registerRemovalCallback(this);
         }
 
         public EcaArrayList(int initialCapacity) {
             super(initialCapacity);
-            registerRemovalCallback(this);
         }
 
         public EcaArrayList(Collection<? extends E> c) {
             super(c);
-            registerRemovalCallback(this);
-        }
-
-        @Override
-        public void onRemove(Entity entity) {
-            super.remove(entity);
         }
 
         private boolean isProtectedElement(Object element) {
@@ -252,78 +217,12 @@ public final class EcaContainers {
 
         @Override
         public Iterator<E> iterator() {
-            return new ProtectedListIteratorWrapper(super.listIterator(0));
+            return new ArrayList<>(this).iterator();
         }
 
         @Override
-        public ListIterator<E> listIterator() {
-            return new ProtectedListIteratorWrapper(super.listIterator(0));
-        }
-
-        @Override
-        public ListIterator<E> listIterator(int index) {
-            return new ProtectedListIteratorWrapper(super.listIterator(index));
-        }
-
-        private class ProtectedListIteratorWrapper implements ListIterator<E> {
-            private final ListIterator<E> delegate;
-            private E current;
-
-            private ProtectedListIteratorWrapper(ListIterator<E> delegate) {
-                this.delegate = delegate;
-            }
-
-            @Override
-            public boolean hasNext() {
-                return delegate.hasNext();
-            }
-
-            @Override
-            public E next() {
-                current = delegate.next();
-                return current;
-            }
-
-            @Override
-            public boolean hasPrevious() {
-                return delegate.hasPrevious();
-            }
-
-            @Override
-            public E previous() {
-                current = delegate.previous();
-                return current;
-            }
-
-            @Override
-            public int nextIndex() {
-                return delegate.nextIndex();
-            }
-
-            @Override
-            public int previousIndex() {
-                return delegate.previousIndex();
-            }
-
-            @Override
-            public void remove() {
-                if (isProtectedElement(current)) {
-                    return;
-                }
-                delegate.remove();
-                current = null;
-            }
-
-            @Override
-            public void set(E e) {
-                delegate.set(e);
-            }
-
-            @Override
-            public void add(E e) {
-                delegate.add(e);
-                current = null;
-            }
+        public Spliterator<E> spliterator() {
+            return new ArrayList<>(this).spliterator();
         }
     }
 
@@ -332,40 +231,24 @@ public final class EcaContainers {
      * 用于替换MC原版的EntityLookup.byUuid和ClassInstanceMultiMap.byClass
      */
     @SuppressWarnings("unchecked")
-    public static class EcaHashMap<K, V> extends HashMap<K, V> implements RemovalCallback {
+    public static class EcaHashMap<K, V> extends HashMap<K, V> {
 
         private static final long serialVersionUID = 1L;
 
         public EcaHashMap() {
             super();
-            registerRemovalCallback(this);
         }
 
         public EcaHashMap(int initialCapacity) {
             super(initialCapacity);
-            registerRemovalCallback(this);
         }
 
         public EcaHashMap(int initialCapacity, float loadFactor) {
             super(initialCapacity, loadFactor);
-            registerRemovalCallback(this);
         }
 
         public EcaHashMap(Map<? extends K, ? extends V> m) {
             super(m);
-            registerRemovalCallback(this);
-        }
-
-        @Override
-        public void onRemove(Entity entity) {
-            // EntityLookup.byUuid: UUID → Entity
-            super.remove((K) entity.getUUID());
-            // ClassInstanceMultiMap.byClass: Class → List，遍历每个 List 移除
-            for (V value : super.values()) {
-                if (value instanceof List<?> list) {
-                    list.remove(entity);
-                }
-            }
         }
 
         private transient Set<K> keySetView;
@@ -636,42 +519,31 @@ public final class EcaContainers {
                 return value;
             }
             if (value instanceof List<?> list) {
+                // 子 list 统一包装为受保护列表
                 return (V) new EcaArrayList<>(list);
             }
             return value;
         }
     }
 
-    public static class EcaHashSet<E> extends HashSet<E> implements RemovalCallback {
+    public static class EcaHashSet<E> extends HashSet<E> {
 
         private static final long serialVersionUID = 1L;
 
         public EcaHashSet() {
             super();
-            registerRemovalCallback(this);
         }
 
         public EcaHashSet(int initialCapacity) {
             super(initialCapacity);
-            registerRemovalCallback(this);
         }
 
         public EcaHashSet(int initialCapacity, float loadFactor) {
             super(initialCapacity, loadFactor);
-            registerRemovalCallback(this);
         }
 
         public EcaHashSet(Collection<? extends E> c) {
             super(c);
-            registerRemovalCallback(this);
-        }
-
-        @Override
-        public void onRemove(Entity entity) {
-            // PersistentEntitySectionManager.knownUuids: Set<UUID>
-            super.remove(entity.getUUID());
-            // ServerLevel.navigatingMobs: Set<Mob>
-            super.remove(entity);
         }
 
         private boolean shouldProtectUUID(Object o) {
@@ -743,33 +615,20 @@ public final class EcaContainers {
         }
     }
 
-    public static class EcaLong2ObjectOpenHashMap<V> extends Long2ObjectOpenHashMap<V> implements RemovalCallback {
+    public static class EcaLong2ObjectOpenHashMap<V> extends Long2ObjectOpenHashMap<V> {
 
         private static final long serialVersionUID = 1L;
 
         public EcaLong2ObjectOpenHashMap() {
             super();
-            registerRemovalCallback(this);
         }
 
         public EcaLong2ObjectOpenHashMap(int expected) {
             super(expected);
-            registerRemovalCallback(this);
         }
 
         public EcaLong2ObjectOpenHashMap(int expected, float f) {
             super(expected, f);
-            registerRemovalCallback(this);
-        }
-
-        @Override
-        public void onRemove(Entity entity) {
-            // EntitySectionStorage.sections: Long → EntitySection，遍历所有 section 移除实体
-            for (V value : super.values()) {
-                if (value instanceof EntitySection section) {
-                    section.remove(entity);
-                }
-            }
         }
 
         @Override
@@ -828,25 +687,17 @@ public final class EcaContainers {
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
-    public static class EcaConcurrentLinkedQueue<E> extends ConcurrentLinkedQueue<E> implements RemovalCallback {
+    public static class EcaConcurrentLinkedQueue<E> extends ConcurrentLinkedQueue<E> {
 
         private static final long serialVersionUID = 1L;
 
         public EcaConcurrentLinkedQueue() {
             super();
-            registerRemovalCallback(this);
         }
 
         public EcaConcurrentLinkedQueue(Collection<? extends E> c) {
             super();
             addAll(c);
-            registerRemovalCallback(this);
-        }
-
-        @Override
-        public void onRemove(Entity entity) {
-            // loadingInbox 内部的 ChunkEntities.entities 已被包装为 EcaArrayList
-            // EcaArrayList 自身的 onRemove 回调会处理实体移除
         }
 
         @Override
@@ -912,29 +763,20 @@ public final class EcaContainers {
      * ECA自定义的Int2ObjectOpenHashMap容器
      * 用于替换MC原版的ChunkMap.entityMap和EntityLookup.byId
      */
-    public static class EcaInt2ObjectOpenHashMap<V> extends Int2ObjectOpenHashMap<V> implements RemovalCallback {
+    public static class EcaInt2ObjectOpenHashMap<V> extends Int2ObjectOpenHashMap<V> {
 
         private static final long serialVersionUID = 1L;
 
         public EcaInt2ObjectOpenHashMap() {
             super();
-            registerRemovalCallback(this);
         }
 
         public EcaInt2ObjectOpenHashMap(int expected) {
             super(expected);
-            registerRemovalCallback(this);
         }
 
         public EcaInt2ObjectOpenHashMap(int expected, float f) {
             super(expected, f);
-            registerRemovalCallback(this);
-        }
-
-        @Override
-        public void onRemove(Entity entity) {
-            // ChunkMap.entityMap / EntityLookup.byId
-            super.remove(entity.getId());
         }
 
         @Override
@@ -969,6 +811,13 @@ public final class EcaContainers {
                 return;
             }
             super.clear();
+        }
+
+        // ChunkMap.tick 迭代 values() 时，onRemove 可能重入修改 map，
+        // 返回快照副本避免 fastutil 迭代器状态损坏。
+        @Override
+        public ObjectCollection<V> values() {
+            return new ObjectArrayList<>(super.values());
         }
 
         private boolean shouldProtectRemoval(int entityId) {
@@ -985,29 +834,20 @@ public final class EcaContainers {
      * ECA自定义的Int2ObjectLinkedOpenHashMap容器
      * 用于替换MC原版的EntityTickList.active和EntityTickList.passive
      */
-    public static class EcaInt2ObjectLinkedOpenHashMap<V> extends Int2ObjectLinkedOpenHashMap<V> implements RemovalCallback {
+    public static class EcaInt2ObjectLinkedOpenHashMap<V> extends Int2ObjectLinkedOpenHashMap<V> {
 
         private static final long serialVersionUID = 1L;
 
         public EcaInt2ObjectLinkedOpenHashMap() {
             super();
-            registerRemovalCallback(this);
         }
 
         public EcaInt2ObjectLinkedOpenHashMap(int expected) {
             super(expected);
-            registerRemovalCallback(this);
         }
 
         public EcaInt2ObjectLinkedOpenHashMap(int expected, float f) {
             super(expected, f);
-            registerRemovalCallback(this);
-        }
-
-        @Override
-        public void onRemove(Entity entity) {
-            // EntityTickList.active/passive, EntityLookup.byId
-            super.remove(entity.getId());
         }
 
         @Override
@@ -1042,6 +882,13 @@ public final class EcaContainers {
                 return;
             }
             super.clear();
+        }
+
+        // EntityTickList.forEach 迭代 values() 时，onRemove 可能绕过 swap 机制直接修改 map，
+        // 导致 live view 返回 null。返回快照副本保证迭代安全。
+        @Override
+        public ObjectCollection<V> values() {
+            return new ObjectArrayList<>(super.values());
         }
 
         private boolean shouldProtectRemoval(int entityId) {

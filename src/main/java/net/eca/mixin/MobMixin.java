@@ -24,7 +24,7 @@ public class MobMixin {
     @Inject(method = "checkDespawn", at = @At("HEAD"), cancellable = true)
     private void eca$preventForceDespawn(CallbackInfo ci) {
         Mob self = (Mob) (Object) this;
-        if (ForceLoadingManager.isForceLoadedType(self.getType())) {
+        if (ForceLoadingManager.shouldForceLoad(self)) {
             ci.cancel();
         }
     }

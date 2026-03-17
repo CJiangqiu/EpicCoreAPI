@@ -1,6 +1,5 @@
 package net.eca.util.reflect;
 
-import net.eca.agent.EcaContainers;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.network.LwjglClientRemovePacket;
@@ -40,6 +39,28 @@ import java.util.*;
  */
 @SuppressWarnings("unchecked")
 public class LwjglUtil {
+
+    // ==================== ChunkMap tick 状态（供 Mixin 调用） ====================
+
+    private static volatile boolean chunkMapTicking = false;
+    private static final List<Runnable> pendingChunkMapOps = new ArrayList<>();
+
+    public static void onChunkMapTickStart() {
+        chunkMapTicking = true;
+    }
+
+    public static void onChunkMapTickEnd() {
+        chunkMapTicking = false;
+        if (!pendingChunkMapOps.isEmpty()) {
+            for (Runnable op : pendingChunkMapOps) {
+                try {
+                    op.run();
+                } catch (Exception ignored) {
+                }
+            }
+            pendingChunkMapOps.clear();
+        }
+    }
 
     // ==================== LWJGL Unsafe 通道 ====================
 
@@ -427,8 +448,6 @@ public class LwjglUtil {
             // 3.7 从 EntityLookup 移除
             removeFromClientEntityLookupViaLwjgl(clientLevel, entityId, entityUUID);
 
-            EcaContainers.callRemove(entity);
-
             return true;
         } catch (Exception e) {
             EcaLogger.info("[LwjglUtil] Failed to remove client entity: {}", e.getMessage());
@@ -471,15 +490,21 @@ public class LwjglUtil {
             // 9. KnownUuids
             removeFromKnownUuidsViaLwjgl(serverLevel, entityUUID);
 
-            EcaContainers.callRemove(entity);
-
         } catch (Exception e) {
             EcaLogger.info("[LwjglUtil] Container cleanup failed: {}", e.getMessage());
         }
     }
 
-    // 从 ChunkMap.entityMap 移除
+    // 从 ChunkMap.entityMap 移除（tick 期间延迟执行，避免迭代器损坏）
     private static void removeFromChunkMapViaLwjgl(ServerLevel serverLevel, int entityId) {
+        if (chunkMapTicking) {
+            pendingChunkMapOps.add(() -> doRemoveFromChunkMap(serverLevel, entityId));
+            return;
+        }
+        doRemoveFromChunkMap(serverLevel, entityId);
+    }
+
+    private static void doRemoveFromChunkMap(ServerLevel serverLevel, int entityId) {
         try {
             if (SERVER_LEVEL_CHUNK_SOURCE_OFFSET < 0) return;
 

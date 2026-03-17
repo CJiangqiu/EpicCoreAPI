@@ -72,6 +72,18 @@ public class NetworkHandler {
                 .consumerMainThread(EntityExtensionOverridePacket::handle)
                 .add();
 
+        CHANNEL.messageBuilder(EntityContainerCheckRequestPacket.class, id())
+                .encoder(EntityContainerCheckRequestPacket::encode)
+                .decoder(EntityContainerCheckRequestPacket::decode)
+                .consumerMainThread(EntityContainerCheckRequestPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(EntityContainerCheckResponsePacket.class, id())
+                .encoder(EntityContainerCheckResponsePacket::encode)
+                .decoder(EntityContainerCheckResponsePacket::decode)
+                .consumerNetworkThread(EntityContainerCheckResponsePacket::handle)
+                .add();
+
     }
 
     /**

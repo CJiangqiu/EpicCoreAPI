@@ -103,6 +103,7 @@ tasks.register('agentJar', Jar) {
 
 tasks.named('jar') {
     dependsOn tasks.named('agentJar')
+    finalizedBy 'devJar'
     from(tasks.named('agentJar').flatMap { it.archiveFile }) {
         into 'net/eca/agent'
         rename { 'agent.jar' }

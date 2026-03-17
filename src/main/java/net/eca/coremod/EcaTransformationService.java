@@ -5,7 +5,6 @@ import cpw.mods.modlauncher.api.IEnvironment;
 import cpw.mods.modlauncher.api.IModuleLayerManager;
 import cpw.mods.modlauncher.api.ITransformationService;
 import cpw.mods.modlauncher.api.ITransformer;
-import net.eca.agent.AgentLoader;
 import org.jetbrains.annotations.NotNull;
 import sun.misc.Unsafe;
 
@@ -24,10 +23,10 @@ public class EcaTransformationService implements ITransformationService {
 
     static {
         System.out.println("[ECA CoreMod] Static block : I'm first?");
-        // 在 static block 中完成双加载，确保在其他service类加载之前生效
-        enableEcaDualLoading();
-        // 双加载完成后立即启动Agent
+        // 先尝试启动 Agent，避免双加载调整后影响 AgentLoader 可见性
         attachAgentEarly();
+        // 再执行双加载，确保后续阶段按预期识别
+        enableEcaDualLoading();
     }
 
     private static final String SERVICE_NAME = "eca_coremod";
@@ -55,11 +54,14 @@ public class EcaTransformationService implements ITransformationService {
      */
     private static void attachAgentEarly() {
         try {
-            boolean selfAttachEnabled = AgentLoader.enableSelfAttach();
+            Class<?> agentLoaderClass = Class.forName("net.eca.agent.AgentLoader", true, ClassLoader.getSystemClassLoader());
+            boolean selfAttachEnabled = (boolean) agentLoaderClass.getMethod("enableSelfAttach").invoke(null);
             System.out.println("[ECA CoreMod] Self-attach enabled: " + selfAttachEnabled);
 
-            boolean agentLoaded = AgentLoader.loadAgent(null);
+            boolean agentLoaded = (boolean) agentLoaderClass.getMethod("loadAgent", Class.class).invoke(null, new Object[]{null});
             System.out.println("[ECA CoreMod] Agent early attach: " + agentLoaded);
+        } catch (ClassNotFoundException e) {
+            System.err.println("[ECA CoreMod] AgentLoader not found in early layer, fallback to mod init stage");
         } catch (Throwable t) {
             System.err.println("[ECA CoreMod] Failed to attach agent early: " + t.getMessage());
             t.printStackTrace();

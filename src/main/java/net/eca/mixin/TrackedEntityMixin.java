@@ -31,7 +31,7 @@ public class TrackedEntityMixin {
         if (player == this.entity) {
             return;
         }
-        if (!ForceLoadingManager.isForceLoadedType(this.entity.getType())) {
+        if (!ForceLoadingManager.shouldForceLoad(this.entity)) {
             return;
         }
 

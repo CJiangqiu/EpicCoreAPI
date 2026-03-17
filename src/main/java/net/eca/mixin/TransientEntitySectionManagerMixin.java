@@ -43,7 +43,7 @@ public class TransientEntitySectionManagerMixin {
     private void eca$startTickingForForceLoaded(EntityAccess entity, CallbackInfo ci) {
         if (!(entity instanceof Entity realEntity)) return;
         if (realEntity.isAlwaysTicking()) return;
-        if (!ForceLoadingManager.isForceLoadedType(realEntity.getType())) return;
+        if (!ForceLoadingManager.shouldForceLoad(realEntity)) return;
 
         // 仅在实体所在区块不在ticking集合中时手动启动（避免重复调用）
         long chunkKey = new ChunkPos(entity.blockPosition()).toLong();

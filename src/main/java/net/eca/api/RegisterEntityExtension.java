@@ -25,7 +25,7 @@ import java.lang.annotation.Target;
  * <ul>
  *   <li><b>Entity-Level</b> (always active for each entity instance):
  *     <ul>
- *       <li>{@code BossBarExtension} - Custom boss health bar with shader support</li>
+ *       <li>{@code BossBarExtension} - Custom boss health bar (single GUI layer with texture/shader support)</li>
  *       <li>{@code EntityLayerExtension} - Additional render layer on entity model</li>
  *     </ul>
  *   </li>
@@ -69,32 +69,17 @@ import java.lang.annotation.Target;
  *             }
  *
  *             @Override
- *             public ResourceLocation getFrameTexture() {
- *                 return texture("screen/custom_bar_frame.png");
+ *             public ResourceLocation texture() {
+ *                 return texture("screen/custom_bar.png");
  *             }
  *
  *             @Override
- *             public RenderType getFillRenderType() {
- *                 return YourCustomRenderTypes.BOSS_BAR_FILL;
+ *             public RenderType renderType() {
+ *                 return YourCustomRenderTypes.BOSS_BAR;
  *             }
  *
  *             @Override
- *             public int getFillWidth() {
- *                 return 420;
- *             }
- *
- *             @Override
- *             public int getFillHeight() {
- *                 return 40;
- *             }
- *
- *             @Override
- *             public int getFrameOffsetY() {
- *                 return -10;
- *             }
- *
- *             @Override
- *             public int getFillOffsetY() {
+ *             public int offsetY() {
  *                 return -10;
  *             }
  *         };

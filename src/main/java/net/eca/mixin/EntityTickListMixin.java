@@ -1,6 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
+import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.world.entity.Entity;
@@ -16,6 +17,11 @@ public class EntityTickListMixin {
     // 禁生成：阻止被禁实体添加到EntityTickList
     @Inject(method = "add", at = @At("HEAD"), cancellable = true)
     private void eca$onAdd(Entity entity, CallbackInfo ci) {
+        if (entity == null) {
+            EcaLogger.info("Blocked null entity in EntityTickList#add");
+            ci.cancel();
+            return;
+        }
         if (SpawnBanHook.shouldBlockSpawn(entity.level(), entity)) {
             ci.cancel();
         }

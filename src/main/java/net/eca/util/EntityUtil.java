@@ -1,9 +1,9 @@
 package net.eca.util;
 
-import net.eca.agent.EcaContainers;
 import net.eca.config.EcaConfiguration;
 import net.eca.network.EcaClientRemovePacket;
 import net.eca.network.EntityHealthSyncPacket;
+import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.HealthAnalyzer.HealthFieldCache;
@@ -44,6 +44,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 
 @SuppressWarnings({"unchecked", "rawtypes"})
@@ -59,8 +62,16 @@ public class EntityUtil {
     //标记当前调用来自同步包，防止重复发包
     private static final ThreadLocal<Boolean> IS_FROM_SYNC = ThreadLocal.withInitial(() -> false);
 
+    //标记是否正在调用实体自身 setHealth，防止递归重入
+    private static final ThreadLocal<Boolean> IS_IN_ENTITY_HEALTH_SETTER = ThreadLocal.withInitial(() -> false);
+
     //正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
+
+    //客户端容器检查挂起请求
+    private static final Map<ContainerCheckKey, CompletableFuture<Map<String, Boolean>>> PENDING_CLIENT_CONTAINER_CHECKS = new ConcurrentHashMap<>();
+
+    private record ContainerCheckKey(UUID requestId, UUID entityUuid) {}
 
     //生命值关键词白名单（可动态添加）
     private static final Set<String> HEALTH_WHITELIST_KEYWORDS = ConcurrentHashMap.newKeySet();
@@ -164,6 +175,360 @@ public class EntityUtil {
 
     public static List<Entity> getEntities(MinecraftServer server, Predicate<Entity> filter) {
         return EcaEntitySelector.getEntities(server, filter);
+    }
+
+    //检查实体在服务端关键容器中的存在情况
+    public static Map<String, Boolean> checkEntityInContainers(ServerLevel level, UUID entityUUID) {
+        Map<String, Boolean> result = checkEntityInServerContainers(level, entityUUID);
+        Map<String, Boolean> clientResult = requestClientContainerCheck(level, entityUUID);
+        result.put("ClientCheck.response", clientResult != null);
+        if (clientResult != null) {
+            result.putAll(clientResult);
+        }
+        return result;
+    }
+
+    private static Map<String, Boolean> checkEntityInServerContainers(ServerLevel level, UUID entityUUID) {
+        Map<String, Boolean> result = new LinkedHashMap<>();
+        if (level == null || entityUUID == null) {
+            return result;
+        }
+
+        Entity entity = getEntity(level, entityUUID);
+        result.put("ServerLevel.getEntity(uuid)", entity != null);
+
+        PersistentEntitySectionManager<Entity> entityManager = level.entityManager;
+
+        try {
+            result.put("PersistentEntitySectionManager.knownUuids", entityManager.knownUuids.contains(entityUUID));
+        } catch (Exception e) {
+            result.put("PersistentEntitySectionManager.knownUuids", false);
+        }
+
+        try {
+            boolean inCorrectSection = false;
+            if (entity != null) {
+                long sectionKey = SectionPos.asLong(entity.blockPosition());
+                EntitySection<Entity> section = entityManager.sectionStorage.sections.get(sectionKey);
+                inCorrectSection = section != null && section.getEntities().anyMatch(e -> e == entity);
+            }
+            result.put("EntitySectionStorage.sections", inCorrectSection);
+        } catch (Exception e) {
+            result.put("EntitySectionStorage.sections", false);
+        }
+
+        try {
+            result.put("EntityLookup.byUuid", entityManager.visibleEntityStorage.byUuid.containsKey(entityUUID));
+        } catch (Exception e) {
+            result.put("EntityLookup.byUuid", false);
+        }
+
+        try {
+            boolean byId = entity != null && entityManager.visibleEntityStorage.byId.containsKey(entity.getId());
+            result.put("EntityLookup.byId", byId);
+        } catch (Exception e) {
+            result.put("EntityLookup.byId", false);
+        }
+
+        try {
+            result.put("ServerLevel.entityTickList", entity != null && level.entityTickList.contains(entity));
+        } catch (Exception e) {
+            result.put("ServerLevel.entityTickList", false);
+        }
+
+        try {
+            result.put("ChunkMap.entityMap", entity != null && level.chunkSource.chunkMap.entityMap.containsKey(entity.getId()));
+        } catch (Exception e) {
+            result.put("ChunkMap.entityMap", false);
+        }
+
+        try {
+            boolean seenByValid = false;
+            if (entity != null) {
+                Object tracked = level.chunkSource.chunkMap.entityMap.get(entity.getId());
+                if (tracked != null) {
+                    ChunkMap.TrackedEntity trackedEntity = (ChunkMap.TrackedEntity) tracked;
+                    seenByValid = trackedEntity.seenBy != null;
+                }
+            }
+            result.put("ChunkMap.TrackedEntity.seenBy", seenByValid);
+        } catch (Exception e) {
+            result.put("ChunkMap.TrackedEntity.seenBy", false);
+        }
+
+        try {
+            result.put("Entity.levelCallback", entity != null && entity.levelCallback != EntityInLevelCallback.NULL);
+        } catch (Exception e) {
+            result.put("Entity.levelCallback", false);
+        }
+
+        try {
+            boolean inPlayers = !(entity instanceof ServerPlayer) || level.players.contains(entity);
+            result.put("ServerLevel.players", inPlayers);
+        } catch (Exception e) {
+            result.put("ServerLevel.players", false);
+        }
+
+        try {
+            boolean inNavigatingMobs = !(entity instanceof Mob) || level.navigatingMobs.contains(entity);
+            result.put("ServerLevel.navigatingMobs", inNavigatingMobs);
+        } catch (Exception e) {
+            result.put("ServerLevel.navigatingMobs", false);
+        }
+
+        return result;
+    }
+
+    private static Map<String, Boolean> requestClientContainerCheck(ServerLevel level, UUID entityUUID) {
+        if (level == null || entityUUID == null) {
+            return null;
+        }
+
+        List<ServerPlayer> players = level.players();
+        if (players.isEmpty()) {
+            EcaLogger.info("[EntityUtil] Client container check skipped: no player in level, uuid={}", entityUUID);
+            return null;
+        }
+
+        ServerPlayer requester = players.get(0);
+        UUID requestId = UUID.randomUUID();
+        ContainerCheckKey key = new ContainerCheckKey(requestId, entityUUID);
+        CompletableFuture<Map<String, Boolean>> future = new CompletableFuture<>();
+        PENDING_CLIENT_CONTAINER_CHECKS.put(key, future);
+
+        try {
+            NetworkHandler.sendToPlayer(new EntityContainerCheckRequestPacket(requestId, entityUUID), requester);
+            Map<String, Boolean> result = future.get(1, TimeUnit.SECONDS);
+            if (result == null) {
+                EcaLogger.info("[EntityUtil] Client container check failed, uuid={}", entityUUID);
+            }
+            return result;
+        } catch (TimeoutException e) {
+            EcaLogger.info("[EntityUtil] Client container check timeout, uuid={}", entityUUID);
+            return null;
+        } catch (Exception e) {
+            EcaLogger.info("[EntityUtil] Client container check error, uuid={}, msg={}", entityUUID, e.getMessage());
+            return null;
+        } finally {
+            PENDING_CLIENT_CONTAINER_CHECKS.remove(key);
+        }
+    }
+
+    public static void completeClientContainerCheck(UUID requestId, UUID entityUuid, Map<String, Boolean> result) {
+        if (requestId == null || entityUuid == null) {
+            return;
+        }
+        ContainerCheckKey key = new ContainerCheckKey(requestId, entityUuid);
+        CompletableFuture<Map<String, Boolean>> future = PENDING_CLIENT_CONTAINER_CHECKS.remove(key);
+        if (future != null) {
+            future.complete(result);
+        }
+    }
+
+    //按实体实例复活关键容器（服务端）
+    public static Map<String, Boolean> reviveAllContainers(LivingEntity entity) {
+        Map<String, Boolean> result = new LinkedHashMap<>();
+        if (entity == null) {
+            return result;
+        }
+        if (!EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+            return result;
+        }
+        if (!(entity.level() instanceof ServerLevel serverLevel)) {
+            return result;
+        }
+        if (isChangingDimension(entity)) {
+            EcaLogger.info("[EntityUtil] Revive containers skipped: changing dimension, uuid={}", entity.getUUID());
+            return result;
+        }
+        return reviveAllContainers(serverLevel, entity.getUUID());
+    }
+
+    //按UUID复活实体关键容器（服务端）
+    public static Map<String, Boolean> reviveAllContainers(ServerLevel level, UUID entityUUID) {
+        Map<String, Boolean> result = new LinkedHashMap<>();
+        if (!EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+            return result;
+        }
+        if (level == null || entityUUID == null) {
+            return result;
+        }
+
+        Entity entity = getEntity(level, entityUUID);
+        if (entity == null) {
+            EcaLogger.info("[EntityUtil] Revive containers skipped: entity not found, uuid={}", entityUUID);
+            return result;
+        }
+
+        if (isChangingDimension(entity)) {
+            EcaLogger.info("[EntityUtil] Revive containers skipped: changing dimension, uuid={}", entityUUID);
+            return result;
+        }
+
+        PersistentEntitySectionManager<Entity> entityManager = level.entityManager;
+        Map<String, Boolean> before = checkEntityInServerContainers(level, entityUUID);
+
+        // 先尝试修复 levelCallback，避免仅回调缺失时走 addNewEntity 造成不稳定
+        if (!Boolean.TRUE.equals(before.get("Entity.levelCallback"))) {
+            rebuildEntityLevelCallback(entityManager, entity);
+        }
+
+        //补Section/Lookup/levelCallback基础注册
+        if (!Boolean.TRUE.equals(before.get("EntitySectionStorage.sections"))
+            || !Boolean.TRUE.equals(before.get("EntityLookup.byUuid"))
+            || !Boolean.TRUE.equals(before.get("EntityLookup.byId"))) {
+            try {
+                // addNewEntity 内部会检查 knownUuids，如果已存在则直接返回 false
+                // 受保护实体的 UUID 通常不会从 knownUuids 移除，需要先临时移除再重新注册
+                entityManager.knownUuids.remove(entityUUID);
+                entityManager.addNewEntity(entity);
+            } catch (Exception e) {
+                // 确保 knownUuids 不会因异常丢失
+                entityManager.knownUuids.add(entityUUID);
+                EcaLogger.info("[EntityUtil] addNewEntity failed, uuid={}, msg={}", entityUUID, e.getMessage());
+            }
+        } else if (!Boolean.TRUE.equals(before.get("PersistentEntitySectionManager.knownUuids"))) {
+            entityManager.knownUuids.add(entityUUID);
+        }
+
+        //补TickList
+        if (!level.entityTickList.contains(entity)) {
+            level.entityTickList.add(entity);
+        }
+
+        //补ChunkMap追踪
+        if (!level.chunkSource.chunkMap.entityMap.containsKey(entity.getId())
+            || !Boolean.TRUE.equals(before.get("ChunkMap.TrackedEntity.seenBy"))) {
+            try {
+                entityManager.callbacks.onTrackingStart(entity);
+            } catch (Exception e) {
+                if (isAlreadyTrackedException(e)) {
+                    EcaLogger.info("[EntityUtil] Ignore already tracked during revive, uuid={}", entityUUID);
+                } else {
+                    EcaLogger.info("[EntityUtil] onTrackingStart failed, uuid={}, msg={}", entityUUID, e.getMessage());
+                }
+            }
+        }
+
+        //按类型补容器
+        if (entity instanceof ServerPlayer player && !level.players.contains(player)) {
+            level.players.add(player);
+        }
+        if (entity instanceof Mob mob && !level.navigatingMobs.contains(mob)) {
+            level.navigatingMobs.add(mob);
+        }
+
+        // addNewEntity 返回 false 时不会抛异常，这里再兜底一次回调重建
+        if (entity.levelCallback == EntityInLevelCallback.NULL) {
+            rebuildEntityLevelCallback(entityManager, entity);
+        }
+
+        result.putAll(checkEntityInServerContainers(level, entityUUID));
+        return result;
+    }
+
+    private static void rebuildEntityLevelCallback(PersistentEntitySectionManager<Entity> entityManager, Entity entity) {
+        if (entityManager == null || entity == null) {
+            return;
+        }
+        if (entity.levelCallback != EntityInLevelCallback.NULL) {
+            return;
+        }
+
+        try {
+            long sectionKey = SectionPos.asLong(entity.blockPosition());
+            EntitySection<Entity> section = entityManager.sectionStorage.getOrCreateSection(sectionKey);
+            if (!section.getEntities().anyMatch(current -> current == entity)) {
+                section.add(entity);
+            }
+            EntityInLevelCallback callback = entityManager.new Callback(entity, sectionKey, section);
+            entity.setLevelCallback(callback);
+        } catch (Exception e) {
+            EcaLogger.info("[EntityUtil] rebuild levelCallback failed, uuid={}, msg={}", entity.getUUID(), e.getMessage());
+        }
+    }
+
+    //按UUID复活实体（清除死亡状态 + 容器修复）
+    public static void reviveEntity(ServerLevel level, UUID entityUUID) {
+        if (level == null || entityUUID == null) {
+            return;
+        }
+        Entity entity = getEntity(level, entityUUID);
+        if (!(entity instanceof LivingEntity livingEntity)) {
+            EcaLogger.info("[EntityUtil] Revive skipped: living entity not found, uuid={}", entityUUID);
+            return;
+        }
+        reviveEntity(livingEntity);
+    }
+
+    private static boolean isAlreadyTrackedException(Exception e) {
+        if (!(e instanceof IllegalStateException)) {
+            return false;
+        }
+        String msg = e.getMessage();
+        return msg != null && msg.contains("already tracked");
+    }
+
+    //检查实体在客户端关键容器中的存在情况
+    public static Map<String, Boolean> checkEntityInClientContainers(ClientLevel clientLevel, UUID entityUUID) {
+        Map<String, Boolean> result = new LinkedHashMap<>();
+        if (clientLevel == null || entityUUID == null) {
+            return result;
+        }
+
+        Entity entity = null;
+        try {
+            entity = EcaEntitySelector.getEntity(clientLevel, entityUUID);
+        } catch (Exception ignored) {
+        }
+        result.put("ClientLevel.getEntity(uuid)", entity != null);
+
+        try {
+            result.put("ClientEntityStorage.entityLookup.byUuid", clientLevel.entityStorage.entityStorage.byUuid.containsKey(entityUUID));
+        } catch (Exception e) {
+            result.put("ClientEntityStorage.entityLookup.byUuid", false);
+        }
+
+        try {
+            boolean byId = entity != null && clientLevel.entityStorage.entityStorage.byId.containsKey(entity.getId());
+            result.put("ClientEntityStorage.entityLookup.byId", byId);
+        } catch (Exception e) {
+            result.put("ClientEntityStorage.entityLookup.byId", false);
+        }
+
+        try {
+            result.put("ClientLevel.tickingEntities", entity != null && clientLevel.tickingEntities.contains(entity));
+        } catch (Exception e) {
+            result.put("ClientLevel.tickingEntities", false);
+        }
+
+        try {
+            boolean inSection = false;
+            if (entity != null) {
+                Entity targetEntity = entity;
+                long sectionKey = SectionPos.asLong(entity.blockPosition());
+                EntitySection<Entity> section = clientLevel.entityStorage.sectionStorage.sections.get(sectionKey);
+                inSection = section != null && section.getEntities().anyMatch(e -> e == targetEntity);
+            }
+            result.put("ClientEntityStorage.sectionStorage", inSection);
+        } catch (Exception e) {
+            result.put("ClientEntityStorage.sectionStorage", false);
+        }
+
+        try {
+            result.put("ClientEntity.levelCallback", entity != null && entity.levelCallback != EntityInLevelCallback.NULL);
+        } catch (Exception e) {
+            result.put("ClientEntity.levelCallback", false);
+        }
+
+        try {
+            boolean inClientPlayers = !(entity instanceof Player) || clientLevel.players.contains(entity);
+            result.put("ClientLevel.players", inClientPlayers);
+        } catch (Exception e) {
+            result.put("ClientLevel.players", false);
+        }
+
+        return result;
     }
 
     /**
@@ -354,6 +719,10 @@ public class EntityUtil {
 
     //尝试调用实体自身的血量设置方法
     private static boolean tryCallEntityHealthSetter(LivingEntity entity, float expectedHealth) {
+        if (IS_IN_ENTITY_HEALTH_SETTER.get()) {
+            return false;
+        }
+
         Class<?> entityClass = entity.getClass();
         // 常见的血量设置方法名
         String[] methodNames = {"setHEALTS", "setHealth", "set_health", "setHP", "setHp"};
@@ -363,7 +732,12 @@ public class EntityUtil {
                 try {
                     Method method = clazz.getDeclaredMethod(methodName, float.class);
                     method.setAccessible(true);
-                    method.invoke(entity, expectedHealth);
+                    IS_IN_ENTITY_HEALTH_SETTER.set(true);
+                    try {
+                        method.invoke(entity, expectedHealth);
+                    } finally {
+                        IS_IN_ENTITY_HEALTH_SETTER.set(false);
+                    }
                     return true;
                 } catch (NoSuchMethodException ignored) {
                     // 方法不存在，尝试下一个
@@ -879,6 +1253,8 @@ public class EntityUtil {
             entity.setPose(Pose.STANDING);
             // 安全清除移除原因（保护维度切换和区块卸载）
             clearRemovalReasonIfProtected(entity);
+            // 同步修复关键容器
+            reviveAllContainers(entity);
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to revive entity: {}", e.getMessage());
         }
@@ -1070,10 +1446,10 @@ public class EntityUtil {
             entityManager.visibleEntityStorage.remove(entity);                           //3. EntityLookup (byUuid + byId)
             entityManager.knownUuids.remove(entity.getUUID());                           //4. KnownUuids
 
-            // 触发ECA容器回调清除
-            EcaContainers.callRemove(entity);
         } catch (Exception e) {
-            EcaLogger.info("[EntityUtil] Failed to remove from server containers: {}", e.getMessage());
+            EcaLogger.error("[EntityUtil] Failed to remove from server containers, entityId={}, type={}, uuid={}",
+                    entity.getId(), entity.getType(), entity.getUUID());
+            EcaLogger.error("[EntityUtil] Server container removal stacktrace", e);
         }
     }
 
@@ -1117,10 +1493,10 @@ public class EntityUtil {
             clientLevel.tickingEntities.remove(entity);                                  //2. EntityTickList
             entityStorage.entityStorage.remove(entity);                                  //3. EntityLookup
 
-            // Layer 3: 触发 ECA 容器回调
-            EcaContainers.callRemove(entity);
         } catch (Exception e) {
-            EcaLogger.info("[EntityUtil] Failed to remove from client containers: {}", e.getMessage());
+            EcaLogger.error("[EntityUtil] Failed to remove from client containers, entityId={}, type={}, uuid={}",
+                    entity.getId(), entity.getType(), entity.getUUID());
+            EcaLogger.error("[EntityUtil] Client container removal stacktrace", e);
         }
     }
 

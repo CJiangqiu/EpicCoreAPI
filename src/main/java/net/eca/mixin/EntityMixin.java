@@ -65,6 +65,19 @@ public class EntityMixin {
         }
     }
 
+    // 防止受保护实体因 removalReason 残留导致 tick 跳过、@e 选择器失效、客户端追踪丢失
+    @Inject(method = "isRemoved", at = @At("HEAD"), cancellable = true)
+    private void eca$preventRemovedState(CallbackInfoReturnable<Boolean> cir) {
+        Entity entity = (Entity) (Object) this;
+        if (entity.removalReason != null
+                && entity.removalReason != Entity.RemovalReason.CHANGED_DIMENSION
+                && !EntityUtil.isChangingDimension(entity)
+                && EcaAPI.isInvulnerable(entity)) {
+            entity.removalReason = null;
+            cir.setReturnValue(false);
+        }
+    }
+
     @Inject(method = "setLevelCallback", at = @At("HEAD"), cancellable = true)
     private void onSetLevelCallback(EntityInLevelCallback callback, CallbackInfo ci) {
         Entity entity = (Entity) (Object) this;
