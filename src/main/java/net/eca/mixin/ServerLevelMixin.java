@@ -65,6 +65,10 @@ public class ServerLevelMixin {
         long currentTime = self.getGameTime();
 
         for (UUID uuid : InvulnerableEntityManager.getAllInvulnerableUUIDs()) {
+            Entity entity = self.getEntities().get(uuid);
+            if (entity == null || EntityUtil.isChangingDimension(entity)) {
+                continue;
+            }
             EcaAPI.reviveEntity(self, uuid);
         }
 
