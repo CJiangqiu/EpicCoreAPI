@@ -12,35 +12,51 @@ public class BossBarExtension {
         return false;
     }
 
-    public ResourceLocation frameTexture() {
+    public ResourceLocation getFrameTexture() {
         return null;
     }
 
-    public ResourceLocation fillTexture() {
+    public ResourceLocation getFillTexture() {
         return null;
     }
 
-    public RenderType frameRenderType() {
+    public RenderType getFrameRenderType() {
         return null;
     }
 
-    public RenderType fillRenderType() {
+    public RenderType getFillRenderType() {
         return null;
     }
 
-    public int width() {
+    public int getFrameWidth() {
         return 0;
     }
 
-    public int height() {
+    public int getFrameHeight() {
         return 0;
     }
 
-    public int offsetX() {
+    public int getFillWidth() {
         return 0;
     }
 
-    public int offsetY() {
+    public int getFillHeight() {
+        return 0;
+    }
+
+    public int getFrameOffsetX() {
+        return 0;
+    }
+
+    public int getFrameOffsetY() {
+        return 0;
+    }
+
+    public int getFillOffsetX() {
+        return 0;
+    }
+
+    public int getFillOffsetY() {
         return 0;
     }
 }

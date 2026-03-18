@@ -317,14 +317,18 @@ public class MyBossExtension extends EntityExtension {
     public BossBarExtension bossBarExtension() {
         return new BossBarExtension() {
             @Override public boolean enabled() { return true; }  // enable boss bar
-            @Override public ResourceLocation frameTexture() { return texture("boss/frame.png"); }  // frame texture (null to skip). If both texture and RenderType are set, shader renders masked by texture alpha
-            @Override public ResourceLocation fillTexture() { return texture("boss/fill.png"); }  // fill texture (null to skip)
-            @Override public RenderType frameRenderType() { return CustomRenderTypes.BOSS_BAR; }  // frame shader/render type (null to skip)
-            @Override public RenderType fillRenderType() { return CustomRenderTypes.BOSS_BAR; }  // fill shader/render type (null to skip), can use a different preset
-            @Override public int width() { return 420; }  // pixel width (RenderType-only mode requires this, texture mode auto-detects)
-            @Override public int height() { return 40; }  // pixel height (RenderType-only mode requires this, texture mode auto-detects)
-            @Override public int offsetX() { return 0; }  // X offset
-            @Override public int offsetY() { return -10; }  // Y offset
+            @Override public ResourceLocation getFrameTexture() { return texture("boss/frame.png"); }  // frame texture (null to skip). If both texture and RenderType are set, shader renders masked by texture alpha
+            @Override public ResourceLocation getFillTexture() { return texture("boss/fill.png"); }  // fill texture (null to skip)
+            @Override public RenderType getFrameRenderType() { return CustomRenderTypes.BOSS_BAR; }  // frame shader/render type (null to skip)
+            @Override public RenderType getFillRenderType() { return CustomRenderTypes.BOSS_BAR; }  // fill shader/render type (null to skip), can use a different preset
+            @Override public int getFrameWidth() { return 420; }  // frame pixel width (RenderType-only mode requires this, texture mode auto-detects)
+            @Override public int getFrameHeight() { return 40; }  // frame pixel height
+            @Override public int getFillWidth() { return 400; }  // fill pixel width (RenderType-only mode requires this, texture mode auto-detects)
+            @Override public int getFillHeight() { return 30; }  // fill pixel height
+            @Override public int getFrameOffsetX() { return 0; }  // frame X offset
+            @Override public int getFrameOffsetY() { return -10; }  // frame Y offset
+            @Override public int getFillOffsetX() { return 0; }  // fill X offset
+            @Override public int getFillOffsetY() { return 0; }  // fill Y offset
         };
     }
 
@@ -729,14 +733,18 @@ public class MyBossExtension extends EntityExtension {
     public BossBarExtension bossBarExtension() {
         return new BossBarExtension() {
             @Override public boolean enabled() { return true; }  // 启用 Boss 血条
-            @Override public ResourceLocation frameTexture() { return texture("boss/frame.png"); }  // 外框纹理（null 则跳过）。同时设置纹理和渲染类型时，着色器将以纹理 alpha 为遮罩渲染
-            @Override public ResourceLocation fillTexture() { return texture("boss/fill.png"); }  // 填充纹理（null 则跳过）
-            @Override public RenderType frameRenderType() { return CustomRenderTypes.BOSS_BAR; }  // 外框着色器/渲染类型（null 则跳过）
-            @Override public RenderType fillRenderType() { return CustomRenderTypes.BOSS_BAR; }  // 填充着色器/渲染类型（null 则跳过），可使用不同预设
-            @Override public int width() { return 420; }  // 像素宽度（仅渲染类型模式必须设置，纹理模式自动检测）
-            @Override public int height() { return 40; }  // 像素高度（仅渲染类型模式必须设置，纹理模式自动检测）
-            @Override public int offsetX() { return 0; }  // X 偏移
-            @Override public int offsetY() { return -10; }  // Y 偏移
+            @Override public ResourceLocation getFrameTexture() { return texture("boss/frame.png"); }  // 外框纹理（null 则跳过）。同时设置纹理和渲染类型时，着色器将以纹理 alpha 为遮罩渲染
+            @Override public ResourceLocation getFillTexture() { return texture("boss/fill.png"); }  // 填充纹理（null 则跳过）
+            @Override public RenderType getFrameRenderType() { return CustomRenderTypes.BOSS_BAR; }  // 外框着色器/渲染类型（null 则跳过）
+            @Override public RenderType getFillRenderType() { return CustomRenderTypes.BOSS_BAR; }  // 填充着色器/渲染类型（null 则跳过），可使用不同预设
+            @Override public int getFrameWidth() { return 420; }  // 外框像素宽度（仅渲染类型模式必须设置，纹理模式自动检测）
+            @Override public int getFrameHeight() { return 40; }  // 外框像素高度
+            @Override public int getFillWidth() { return 400; }  // 填充像素宽度（仅渲染类型模式必须设置，纹理模式自动检测）
+            @Override public int getFillHeight() { return 30; }  // 填充像素高度
+            @Override public int getFrameOffsetX() { return 0; }  // 外框 X 偏移
+            @Override public int getFrameOffsetY() { return -10; }  // 外框 Y 偏移
+            @Override public int getFillOffsetX() { return 0; }  // 填充 X 偏移
+            @Override public int getFillOffsetY() { return 0; }  // 填充 Y 偏移
         };
     }
 

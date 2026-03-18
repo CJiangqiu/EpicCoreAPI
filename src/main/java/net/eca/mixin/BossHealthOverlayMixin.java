@@ -36,6 +36,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(BossHealthOverlay.class)
 public class BossHealthOverlayMixin {
 
+    private static final int BAR_WIDTH = 182;
+    private static final int BAR_HEIGHT = 5;
+
     @Inject(method = "drawBar(Lnet/minecraft/client/gui/GuiGraphics;IILnet/minecraft/world/BossEvent;)V", at = @At("HEAD"), cancellable = true)
     private void eca$drawCustomBossBar(GuiGraphics graphics, int x, int y, BossEvent event, CallbackInfo ci) {
         if (tryRenderCustomBossBar(graphics, x, y, event)) {
@@ -64,58 +67,95 @@ public class BossHealthOverlayMixin {
             return false;
         }
 
-        ResourceLocation frameTexture = bossBar.frameTexture();
-        ResourceLocation fillTexture = bossBar.fillTexture();
-        RenderType frameRenderType = bossBar.frameRenderType();
-        RenderType fillRenderType = bossBar.fillRenderType();
+        ResourceLocation frameTexture = bossBar.getFrameTexture();
+        ResourceLocation fillTexture = bossBar.getFillTexture();
+        RenderType frameType = bossBar.getFrameRenderType();
+        RenderType fillType = bossBar.getFillRenderType();
 
-        // 启用了 bossBarExtension 但未设置任何自定义渲染 → 隐藏原版 bar
-        if (frameTexture == null && fillTexture == null && frameRenderType == null && fillRenderType == null) {
+        // 启用了 bossBarExtension 但未设置任何自定义渲染 → 隐藏原版 bar，不渲染任何内容
+        if (frameTexture == null && fillTexture == null && frameType == null && fillType == null) {
             return true;
         }
 
-        int barWidth = bossBar.width();
-        int barHeight = bossBar.height();
+        int barWidth = BAR_WIDTH;
+        int barHeight = BAR_HEIGHT;
+        int fillTextureWidth = BAR_WIDTH;
+        int fillTextureHeight = BAR_HEIGHT;
 
-        // 贴图模式下自动获取尺寸（优先从外框贴图获取，其次填充贴图）
-        ResourceLocation sizeSource = frameTexture != null ? frameTexture : fillTexture;
-        if (sizeSource != null && (barWidth <= 0 || barHeight <= 0)) {
-            TextureSizeCache.Size size = TextureSizeCache.get(sizeSource);
-            barWidth = size.width();
-            barHeight = size.height();
+        if (frameTexture != null) {
+            TextureSizeCache.Size frameSize = TextureSizeCache.get(frameTexture);
+            barWidth = frameSize.width();
+            barHeight = frameSize.height();
+        } else if (frameType != null) {
+            barWidth = bossBar.getFrameWidth();
+            barHeight = bossBar.getFrameHeight();
         }
 
-        if (barWidth <= 0 || barHeight <= 0) {
-            EcaLogger.warn("Custom boss bar size must be set for {}", extension.getClass().getName());
+        if (fillTexture != null) {
+            TextureSizeCache.Size fillSize = TextureSizeCache.get(fillTexture);
+            fillTextureWidth = fillSize.width();
+            fillTextureHeight = fillSize.height();
+        } else if (fillType != null) {
+            fillTextureWidth = bossBar.getFillWidth();
+            fillTextureHeight = bossBar.getFillHeight();
+        } else {
+            fillTextureWidth = barWidth;
+            fillTextureHeight = barHeight;
+        }
+
+        if (frameType != null && (barWidth <= 0 || barHeight <= 0)) {
+            EcaLogger.warn("Custom boss bar frame size must be set for {}", extension.getClass().getName());
             return false;
         }
 
-        int fillWidth = (int) (event.getProgress() * (float) barWidth);
+        if (fillType != null && (fillTextureWidth <= 0 || fillTextureHeight <= 0)) {
+            EcaLogger.warn("Custom boss bar fill size must be set for {}", extension.getClass().getName());
+            return false;
+        }
 
-        // 自适应缩放
+        int fillWidth = (int) (event.getProgress() * (float) fillTextureWidth);
+
+        int layoutWidth = barWidth;
+        if (frameTexture == null && frameType == null && fillTextureWidth > 0) {
+            layoutWidth = fillTextureWidth;
+        }
+
+        float scale = 1.0f;
         int guiWidth = graphics.guiWidth();
-        float availableWidth = Math.max(1.0f, (float) guiWidth - 20.0f);
-        float scale = Math.min(1.0f, availableWidth / (float) barWidth);
+        if (layoutWidth > 0) {
+            float availableWidth = Math.max(1.0f, (float) guiWidth - 20.0f);
+            scale = Math.min(1.0f, availableWidth / (float) layoutWidth);
+        }
 
-        float scaledWidth = barWidth * scale;
+        float scaledWidth = layoutWidth * scale;
         float renderX = (guiWidth - scaledWidth) * 0.5f;
 
         graphics.pose().pushPose();
         graphics.pose().translate(renderX, y, 0.0f);
         graphics.pose().scale(scale, scale, 1.0f);
 
-        int offsetX = bossBar.offsetX();
-        int offsetY = bossBar.offsetY();
+        int frameOffsetX = bossBar.getFrameOffsetX();
+        int frameOffsetY = bossBar.getFrameOffsetY();
+        int fillOffsetX = bossBar.getFillOffsetX();
+        int fillOffsetY = bossBar.getFillOffsetY();
 
-        // 外框：满宽渲染
-        eca$renderLayer(graphics, frameTexture, frameRenderType,
-                offsetX, offsetY, barWidth, barHeight, barWidth, barHeight);
+        int baseFillOffsetX = Math.max(0, (barWidth - fillTextureWidth) / 2);
+        int baseFillOffsetY = Math.max(0, (barHeight - fillTextureHeight) / 2);
+        int fillDrawX = baseFillOffsetX + fillOffsetX;
+        int fillDrawY = baseFillOffsetY + fillOffsetY;
+
+        int frameDrawX = frameOffsetX;
+        int frameDrawY = frameOffsetY;
 
         // 填充：按 progress 裁剪渲染
         if (fillWidth > 0) {
-            eca$renderLayer(graphics, fillTexture, fillRenderType,
-                    offsetX, offsetY, fillWidth, barHeight, barWidth, barHeight);
+            eca$renderLayer(graphics, fillTexture, fillType,
+                    fillDrawX, fillDrawY, fillWidth, fillTextureHeight, fillTextureWidth, fillTextureHeight);
         }
+
+        // 外框：满宽渲染
+        eca$renderLayer(graphics, frameTexture, frameType,
+                frameDrawX, frameDrawY, barWidth, barHeight, barWidth, barHeight);
 
         graphics.pose().popPose();
 
