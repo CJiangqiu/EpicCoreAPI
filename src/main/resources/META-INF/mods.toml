@@ -10,8 +10,7 @@ displayURL = "https://www.curseforge.com/minecraft/mc-mods/epic-core-api"
 logoFile = "logo.png"
 authors = "CJiangqiu"
 credits = '''
-Contributor:WZZ
-Mascot:MCreator
+Contributor:WZZ,Mascot:MCreator
 '''
 description = '''
 A library mod that provides powerful entity manipulation APIs through CoreMod (ITransformationService), Java Agent, and VarHandle technologies.

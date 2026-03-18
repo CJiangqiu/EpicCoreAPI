@@ -94,6 +94,9 @@ side="BOTH"
 - `getHealthBlacklistKeywords()` - Get all health blacklist keywords
 - `killEntity(entity, damageSource)` - Kill entity (loot + advancements + removal)
 - `reviveEntity(entity)` - Clear death state and restore health
+- `reviveEntity(level, uuid)` - Clear death state and restore health by UUID in specified level
+- `reviveAllContainers(entity)` - Revive all critical entity containers (tickList, lookup, sections, tracker)
+- `reviveAllContainers(level, uuid)` - Revive all critical entity containers by UUID in specified level
 - `teleportEntity(entity, x, y, z)` - Teleport via VarHandle with client sync
 - `lockLocation(entity)` - Lock entity location at current position
 - `lockLocation(entity, position)` - Lock entity location at specified position
@@ -193,6 +196,9 @@ EcaAPI.removeHealthBlacklistKeyword("timer");
 // Entity Control
 EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
+EcaAPI.reviveEntity(serverLevel, uuid);  // Revive by UUID
+Map<String, Boolean> containerResults = EcaAPI.reviveAllContainers(entity);  // Revive all containers
+EcaAPI.reviveAllContainers(serverLevel, uuid);  // Revive all containers by UUID
 EcaAPI.teleportEntity(entity, x, y, z);
 EcaAPI.lockLocation(entity);  // Lock at current position
 EcaAPI.lockLocation(entity, new Vec3(100, 64, 200));  // Lock at specified position
@@ -311,8 +317,10 @@ public class MyBossExtension extends EntityExtension {
     public BossBarExtension bossBarExtension() {
         return new BossBarExtension() {
             @Override public boolean enabled() { return true; }  // enable boss bar
-            @Override public ResourceLocation texture() { return texture("boss/bar.png"); }  // texture (null to skip). If both texture and RenderType are set, shader renders masked by texture alpha
-            @Override public RenderType renderType() { return CustomRenderTypes.BOSS_BAR; }  // shader/render type (null to skip)
+            @Override public ResourceLocation frameTexture() { return texture("boss/frame.png"); }  // frame texture (null to skip). If both texture and RenderType are set, shader renders masked by texture alpha
+            @Override public ResourceLocation fillTexture() { return texture("boss/fill.png"); }  // fill texture (null to skip)
+            @Override public RenderType frameRenderType() { return CustomRenderTypes.BOSS_BAR; }  // frame shader/render type (null to skip)
+            @Override public RenderType fillRenderType() { return CustomRenderTypes.BOSS_BAR; }  // fill shader/render type (null to skip), can use a different preset
             @Override public int width() { return 420; }  // pixel width (RenderType-only mode requires this, texture mode auto-detects)
             @Override public int height() { return 40; }  // pixel height (RenderType-only mode requires this, texture mode auto-detects)
             @Override public int offsetX() { return 0; }  // X offset
@@ -498,6 +506,9 @@ side="BOTH"
 - `getHealthBlacklistKeywords()` - 获取全部黑名单关键词
 - `killEntity(entity, damageSource)` - 击杀实体（掉落 + 成就 + 移除）
 - `reviveEntity(entity)` - 复活实体（清除死亡状态）
+- `reviveEntity(level, uuid)` - 在指定维度按 UUID 复活实体
+- `reviveAllContainers(entity)` - 复活实体的所有关键容器（tickList、lookup、sections、tracker）
+- `reviveAllContainers(level, uuid)` - 在指定维度按 UUID 复活实体的所有关键容器
 - `teleportEntity(entity, x, y, z)` - VarHandle 传送并同步到客户端
 - `lockLocation(entity)` - 锁定实体当前位置
 - `lockLocation(entity, position)` - 锁定实体到指定位置
@@ -597,6 +608,9 @@ EcaAPI.removeHealthBlacklistKeyword("timer");
 // 实体控制
 EcaAPI.killEntity(entity, damageSource);
 EcaAPI.reviveEntity(entity);
+EcaAPI.reviveEntity(serverLevel, uuid);  // 按 UUID 复活
+Map<String, Boolean> containerResults = EcaAPI.reviveAllContainers(entity);  // 复活所有容器
+EcaAPI.reviveAllContainers(serverLevel, uuid);  // 按 UUID 复活所有容器
 EcaAPI.teleportEntity(entity, x, y, z);
 EcaAPI.lockLocation(entity);  // 锁定到当前位置
 EcaAPI.lockLocation(entity, new Vec3(100, 64, 200));  // 锁定到指定位置
@@ -715,8 +729,10 @@ public class MyBossExtension extends EntityExtension {
     public BossBarExtension bossBarExtension() {
         return new BossBarExtension() {
             @Override public boolean enabled() { return true; }  // 启用 Boss 血条
-            @Override public ResourceLocation texture() { return texture("boss/bar.png"); }  // 纹理（null 则跳过）。同时设置纹理和渲染类型时，着色器将以纹理 alpha 为遮罩渲染
-            @Override public RenderType renderType() { return CustomRenderTypes.BOSS_BAR; }  // 着色器/渲染类型（null 则跳过）
+            @Override public ResourceLocation frameTexture() { return texture("boss/frame.png"); }  // 外框纹理（null 则跳过）。同时设置纹理和渲染类型时，着色器将以纹理 alpha 为遮罩渲染
+            @Override public ResourceLocation fillTexture() { return texture("boss/fill.png"); }  // 填充纹理（null 则跳过）
+            @Override public RenderType frameRenderType() { return CustomRenderTypes.BOSS_BAR; }  // 外框着色器/渲染类型（null 则跳过）
+            @Override public RenderType fillRenderType() { return CustomRenderTypes.BOSS_BAR; }  // 填充着色器/渲染类型（null 则跳过），可使用不同预设
             @Override public int width() { return 420; }  // 像素宽度（仅渲染类型模式必须设置，纹理模式自动检测）
             @Override public int height() { return 40; }  // 像素高度（仅渲染类型模式必须设置，纹理模式自动检测）
             @Override public int offsetX() { return 0; }  // X 偏移
