@@ -1,6 +1,6 @@
 modLoader = "javafml"
 loaderVersion = "[47,)"
-license = "Custom license"
+license = "MIT"
 
 [[mods]]
 modId = "eca"
@@ -8,10 +8,13 @@ version = "${mod_version}"
 displayName = "Epic Core API"
 displayURL = "https://www.curseforge.com/minecraft/mc-mods/epic-core-api"
 logoFile = "logo.png"
-credits = "Mascot:MCreator"
 authors = "CJiangqiu"
+credits = '''
+Contributor:WZZ
+Mascot:MCreator
+'''
 description = '''
-This is a required dependency for various mods by CJiangqiu.
+A library mod that provides powerful entity manipulation APIs through CoreMod (ITransformationService), Java Agent, and VarHandle technologies.
 '''
 
 [[dependencies.eca]]
