@@ -44,27 +44,27 @@ Added new command selectors implemented by the ECA selector system:
 
 ### Adding ECA as Dependency
 
-**Step 1: Add CurseMaven repository** (build.gradle)
+**Step 1: Add Modrinth Maven repository** (build.gradle)
 ```groovy
 repositories {
-    maven { url = "https://cursemaven.com"; content { includeGroup "curse.maven" } }
+    maven { url = "https://api.modrinth.com/maven"; content { includeGroup "maven.modrinth" } }
 }
 ```
 
 **Step 2: Add ECA dependency** (build.gradle)
 ```groovy
 dependencies {
-    implementation fg.deobf("curse.maven:epic-core-api-977556:FILE_ID")
+    implementation fg.deobf("maven.modrinth:epic-core-api:VERSION")
 }
 ```
-> Go to [ECA CurseForge Files](https://www.curseforge.com/minecraft/mc-mods/epic-core-api/files), click on the version you need, and copy the **Curse Maven Snippet** from the file page.
+> Replace `VERSION` with the version you need (e.g. `1.1.2-fix-dev`). Go to [ECA Modrinth page](https://modrinth.com/mod/epic-core-api) to find available versions. Use the `-dev` version for development environments to avoid mixin remapping issues.
 
 **Step 3: Declare dependency** (mods.toml)
 ```toml
 [[dependencies.your_mod_id]]
 modId="eca"
 mandatory=true
-versionRange="[1.0.5,)"
+versionRange="[1.1.2,)"
 ordering="NONE"
 side="BOTH"
 ```
@@ -460,27 +460,27 @@ Available presets:
 
 ### 添加 ECA 依赖
 
-**第一步：添加 CurseMaven 仓库** (build.gradle)
+**第一步：添加 Modrinth Maven 仓库** (build.gradle)
 ```groovy
 repositories {
-    maven { url = "https://cursemaven.com"; content { includeGroup "curse.maven" } }
+    maven { url = "https://api.modrinth.com/maven"; content { includeGroup "maven.modrinth" } }
 }
 ```
 
 **第二步：添加 ECA 依赖** (build.gradle)
 ```groovy
 dependencies {
-    implementation fg.deobf("curse.maven:epic-core-api-977556:FILE_ID")
+    implementation fg.deobf("maven.modrinth:epic-core-api:VERSION")
 }
 ```
-> 前往 [ECA CurseForge 文件页](https://www.curseforge.com/minecraft/mc-mods/epic-core-api/files)，点击所需版本，从文件页面复制 **Curse Maven Snippet**。
+> 将 `VERSION` 替换为所需版本（如 `1.1.2-fix-dev`）。前往 [ECA Modrinth 页面](https://modrinth.com/mod/epic-core-api) 查看可用版本。开发环境请使用 `-dev` 版本以避免 mixin 重映射问题。
 
 **第三步：声明依赖** (mods.toml)
 ```toml
 [[dependencies.你的modId]]
 modId="eca"
 mandatory=true
-versionRange="[1.0.5,)"
+versionRange="[1.1.2,)"
 ordering="NONE"
 side="BOTH"
 ```
