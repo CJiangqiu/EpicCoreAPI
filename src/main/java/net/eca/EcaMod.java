@@ -2,33 +2,27 @@ package net.eca;
 
 import net.eca.agent.AgentLoader;
 import net.eca.agent.EcaAgent;
-import net.eca.agent.EcaTransformer;
 import net.eca.agent.ReturnToggle;
 import net.eca.compat.GeckoLibCompat;
-import net.eca.config.EcaConfiguration;
 import net.eca.event.EcaEventHandler;
+import net.eca.event.LoadCompleteHandler;
 import net.eca.init.ModConfigs;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
 import net.eca.util.selector.EcaSelectorRegistry;
-import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
-import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import net.minecraftforge.fml.loading.FMLEnvironment;
 import net.minecraftforge.forgespi.language.IModInfo;
 
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
 @SuppressWarnings("removal")
@@ -41,6 +35,10 @@ public final class EcaMod {
 
     public static boolean isLoadComplete() {
         return loadComplete;
+    }
+
+    public static void setLoadComplete(boolean value) {
+        loadComplete = value;
     }
 
     public EcaMod() {
@@ -65,7 +63,8 @@ public final class EcaMod {
         ForceLoadingManager.registerValidationCallback();
 
         // 注册 Forge 生命周期事件
-        FMLJavaModLoadingContext.get().getModEventBus().addListener(this::onLoadComplete);
+        LoadCompleteHandler loadCompleteHandler = new LoadCompleteHandler();
+        FMLJavaModLoadingContext.get().getModEventBus().addListener(loadCompleteHandler::onLoadComplete);
 
         // 从 CoreMod 阶段已挂载的 Agent 桥接 Instrumentation 到 GAME layer
         boolean agentReady = bridgeFromEarlyAgent();
@@ -83,94 +82,6 @@ public final class EcaMod {
             EcaLogger.warn("Agent not initialized - some features may be unavailable");
         }
 
-    }
-
-    /**
-     * Forge 加载完成事件
-     */
-    private void onLoadComplete(FMLLoadCompleteEvent event) {
-        loadComplete = true;
-
-        // 扫描并注册 Entity Extensions
-        event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
-
-        // 激进防御：重新注册 transformer 并 retransform LivingEntity 类
-        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            event.enqueueWork(this::triggerLivingEntityRetransform);
-        }
-    }
-
-    // 标志：是否已执行过延迟 retransform
-    private static volatile boolean hasDelayedRetransform = false;
-
-    /**
-     * 触发 LivingEntity + 容器类的延迟 retransform
-     * 通过重新注册 transformer 确保 ECA 的修改优先级最高
-     */
-    private void triggerLivingEntityRetransform() {
-        if (hasDelayedRetransform) {
-            return;
-        }
-
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
-            EcaLogger.warn("Cannot trigger delayed retransform: Instrumentation not available");
-            return;
-        }
-
-        EcaTransformer transformer = EcaTransformer.getInstance();
-        if (transformer == null) {
-            EcaLogger.warn("Cannot trigger delayed retransform: EcaTransformer not available");
-            return;
-        }
-
-        try {
-            // 1. 移除旧的 transformer
-            inst.removeTransformer(transformer);
-
-            // 2. 重新注册（排在所有其他 transformer 之后）
-            inst.addTransformer(transformer, true);
-
-            // 3. 收集目标类
-            List<Class<?>> targets = new ArrayList<>();
-            int livingEntityCount = 0;
-            int containerCount = 0;
-
-            for (Class<?> clazz : inst.getAllLoadedClasses()) {
-                if (!inst.isModifiableClass(clazz)) {
-                    continue;
-                }
-
-                // 收集 LivingEntity 子类
-                if (LivingEntity.class.isAssignableFrom(clazz)) {
-                    targets.add(clazz);
-                    livingEntityCount++;
-                    continue;
-                }
-
-                // 收集容器类
-                String className = clazz.getName();
-                if (className.equals("net.minecraft.world.level.entity.EntityTickList") ||
-                    className.equals("net.minecraft.world.level.entity.EntityLookup") ||
-                    className.equals("net.minecraft.util.ClassInstanceMultiMap") ||
-                    className.equals("net.minecraft.server.level.ChunkMap") ||
-                    className.equals("net.minecraft.world.level.entity.PersistentEntitySectionManager") ||
-                    className.equals("net.minecraft.world.level.entity.EntitySectionStorage")) {
-                    targets.add(clazz);
-                    containerCount++;
-                }
-            }
-
-            // 4. Retransform
-            if (!targets.isEmpty()) {
-                inst.retransformClasses(targets.toArray(new Class[0]));
-            }
-
-            hasDelayedRetransform = true;
-
-        } catch (Throwable e) {
-            EcaLogger.error("Delayed retransform failed: {}", e.getMessage());
-        }
     }
 
     /**

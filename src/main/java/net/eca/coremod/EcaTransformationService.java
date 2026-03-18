@@ -54,7 +54,8 @@ public class EcaTransformationService implements ITransformationService {
      */
     private static void attachAgentEarly() {
         try {
-            Class<?> agentLoaderClass = Class.forName("net.eca.agent.AgentLoader", true, ClassLoader.getSystemClassLoader());
+            ClassLoader coreLoader = EcaTransformationService.class.getClassLoader();
+            Class<?> agentLoaderClass = Class.forName("net.eca.agent.AgentLoader", true, coreLoader);
             boolean selfAttachEnabled = (boolean) agentLoaderClass.getMethod("enableSelfAttach").invoke(null);
             System.out.println("[ECA CoreMod] Self-attach enabled: " + selfAttachEnabled);
 

@@ -77,6 +77,8 @@ public class ServerLevelMixin {
 
     @Unique
     private ServerPlayer eca$oldDuplicate = null;
+    @Unique
+    private boolean eca$duplicateWasInvulnerable = false;
 
     @Inject(method = "addPlayer", at = @At("HEAD"))
     private void eca$captureOldDuplicate(ServerPlayer newPlayer, CallbackInfo ci) {
@@ -84,19 +86,49 @@ public class ServerLevelMixin {
         Entity entity = self.getEntities().get(newPlayer.getUUID());
         if (entity instanceof ServerPlayer sp && entity != newPlayer) {
             eca$oldDuplicate = sp;
+            eca$duplicateWasInvulnerable = EcaAPI.isInvulnerable(sp);
+
+            // 针对无敌玩家被第三方模组强制 respawn 的场景：
+            // 在新实例加入前，先移除旧实例，避免 knownUuids/lookup 里出现同 UUID 冲突
+            if (eca$duplicateWasInvulnerable) {
+                EntityUtil.removeEntity(sp, Entity.RemovalReason.CHANGED_DIMENSION);
+            }
         } else {
             eca$oldDuplicate = null;
+            eca$duplicateWasInvulnerable = false;
         }
     }
 
     @Inject(method = "addPlayer", at = @At("TAIL"))
     private void eca$cleanupOldDuplicate(ServerPlayer newPlayer, CallbackInfo ci) {
-        if (eca$oldDuplicate == null) return;
+        // 新玩家已正确添加到目标维度，清除维度切换标记
+        // 对于 End→Overworld 终末之诗流程，标记在 changeDimension 返回时被延迟，此处完成清除
+        EntityUtil.unmarkDimensionChanging(newPlayer);
+
+        // End→Overworld 终末之诗流程中不存在旧重复实例（旧实体在 End，新实体在 Overworld）
+        // 但 InvulnerableEntityManager 仍持有 UUID，需要同步无敌状态到新实例的 EntityData
+        if (eca$oldDuplicate == null) {
+            if (InvulnerableEntityManager.isInvulnerable(newPlayer.getUUID())) {
+                EcaAPI.setInvulnerable(newPlayer, true);
+            }
+            eca$duplicateWasInvulnerable = false;
+            return;
+        }
+
         ServerLevel self = (ServerLevel)(Object)this;
         Entity current = self.getEntities().get(eca$oldDuplicate.getUUID());
         if (current == eca$oldDuplicate) {
             EntityUtil.removeEntity(eca$oldDuplicate, Entity.RemovalReason.CHANGED_DIMENSION);
         }
+
+        // 旧实例为无敌时，将无敌状态显式补回新玩家实例，避免 respawn 过程状态丢失
+        if (eca$duplicateWasInvulnerable) {
+            EcaAPI.setInvulnerable(newPlayer, true);
+            EntityUtil.reviveEntity(newPlayer);
+            EntityUtil.unmarkDimensionChanging(newPlayer);
+        }
+
         eca$oldDuplicate = null;
+        eca$duplicateWasInvulnerable = false;
     }
 }

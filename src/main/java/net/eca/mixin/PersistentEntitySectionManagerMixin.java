@@ -51,10 +51,6 @@ public class PersistentEntitySectionManagerMixin {
     @Inject(method = "stopTicking", at = @At("HEAD"), cancellable = true)
     private void eca$onStopTicking(EntityAccess entity, CallbackInfo ci) {
         if (entity instanceof Entity realEntity) {
-            // 实体已被移除（死亡/kill等），允许清理
-            if (realEntity.isRemoved()) {
-                return;
-            }
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {
                 ci.cancel();
                 return;
@@ -65,10 +61,6 @@ public class PersistentEntitySectionManagerMixin {
     @Inject(method = "stopTracking", at = @At("HEAD"), cancellable = true)
     private void eca$onStopTracking(EntityAccess entity, CallbackInfo ci) {
         if (entity instanceof Entity realEntity) {
-            // 实体已被移除（死亡/kill等），允许清理
-            if (realEntity.isRemoved()) {
-                return;
-            }
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {
                 ci.cancel();
                 return;

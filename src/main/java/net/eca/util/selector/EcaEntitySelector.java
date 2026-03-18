@@ -2,6 +2,7 @@ package net.eca.util.selector;
 
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
+import net.eca.api.EcaAPI;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -134,7 +135,7 @@ public final class EcaEntitySelector {
         if (mode == SelectorMode.SELF) {
             result = new ArrayList<>();
             Entity self = source.getEntity();
-            if (self != null && !self.isRemoved()) {
+            if (self != null && (!self.isRemoved() || EcaAPI.isInvulnerable(self))) {
                 result.add(self);
             }
         } else {
@@ -397,7 +398,7 @@ public final class EcaEntitySelector {
 
         if (level instanceof ServerLevel serverLevel) {
             for (Entity entity : serverLevel.entityManager.visibleEntityStorage.getAllEntities()) {
-                if (entity != null && !entity.isRemoved() && filter.test(entity)) {
+                if (entity != null && (!entity.isRemoved() || EcaAPI.isInvulnerable(entity)) && filter.test(entity)) {
                     unique.put(entity.getUUID(), entity);
                 }
             }
@@ -407,7 +408,7 @@ public final class EcaEntitySelector {
                     continue;
                 }
                 section.getEntities().forEach(entity -> {
-                    if (entity != null && !entity.isRemoved() && filter.test(entity)) {
+                    if (entity != null && (!entity.isRemoved() || EcaAPI.isInvulnerable(entity)) && filter.test(entity)) {
                         unique.putIfAbsent(entity.getUUID(), entity);
                     }
                 });
@@ -417,7 +418,7 @@ public final class EcaEntitySelector {
 
         if (level instanceof ClientLevel clientLevel) {
             for (Entity entity : clientLevel.entityStorage.entityStorage.getAllEntities()) {
-                if (entity != null && !entity.isRemoved() && filter.test(entity)) {
+                if (entity != null && (!entity.isRemoved() || EcaAPI.isInvulnerable(entity)) && filter.test(entity)) {
                     unique.put(entity.getUUID(), entity);
                 }
             }
@@ -427,7 +428,7 @@ public final class EcaEntitySelector {
                     continue;
                 }
                 section.getEntities().forEach(entity -> {
-                    if (entity != null && !entity.isRemoved() && filter.test(entity)) {
+                    if (entity != null && (!entity.isRemoved() || EcaAPI.isInvulnerable(entity)) && filter.test(entity)) {
                         unique.putIfAbsent(entity.getUUID(), entity);
                     }
                 });

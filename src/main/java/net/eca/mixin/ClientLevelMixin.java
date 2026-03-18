@@ -1,6 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
+import net.eca.util.EntityUtil;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.entity.Entity;
 import org.spongepowered.asm.mixin.Mixin;
@@ -14,10 +15,13 @@ public class ClientLevelMixin {
     @Inject(method = "removeEntity", at = @At("HEAD"), cancellable = true, require = 0)
     private void eca$preventClientRemoval(int entityId, Entity.RemovalReason reason, CallbackInfo ci) {
         try {
+            if (reason == Entity.RemovalReason.CHANGED_DIMENSION) {
+                return;
+            }
             ClientLevel clientLevel = (ClientLevel) (Object) this;
             Entity entity = clientLevel.getEntity(entityId);
 
-            if (entity != null && EcaAPI.isInvulnerable(entity)) {
+            if (entity != null && EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
                 ci.cancel();
             }
         } catch (Exception ignored) {

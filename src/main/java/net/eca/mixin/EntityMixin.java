@@ -136,7 +136,12 @@ public class EntityMixin {
     @Inject(method = "changeDimension*", at = @At("RETURN"))
     private void afterChangeDimension(ServerLevel destination, CallbackInfoReturnable<Entity> cir) {
         Entity oldEntity = (Entity) (Object) this;
-        // 维度切换完成后无条件清除标记（玩家的changeDimension返回this，之前的条件导致永远不会unmark）
+        // End→Overworld 的终末之诗流程中，changeDimension 返回 this 但实体仍为 CHANGED_DIMENSION 状态
+        // 此时不应 unmark，否则无敌保护会重新激活，阻止后续 respawn 的清理操作
+        // 延迟到 addPlayer TAIL 中 unmark
+        if (oldEntity.getRemovalReason() == Entity.RemovalReason.CHANGED_DIMENSION) {
+            return;
+        }
         EntityUtil.unmarkDimensionChanging(oldEntity);
     }
 

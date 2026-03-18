@@ -1,7 +1,7 @@
 package net.eca.agent.transform;
 
 import net.eca.agent.AgentLogWriter;
-import net.eca.config.EcaConfiguration;
+import net.eca.agent.AgentConfigReader;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -91,7 +91,9 @@ public class LivingEntityTransformer implements ITransformModule {
 
     @Override
     public boolean requiresMethodOverrideCheck() {
-        return true;
+        // 非激进模式：仅重转覆写类，降低兼容影响
+        // 激进模式：全量重转 LivingEntity 子类，确保后续按“方法存在即替换”覆盖
+        return !AgentConfigReader.isDefenceRadicalEnabled();
     }
 
     @Override
@@ -136,7 +138,7 @@ public class LivingEntityTransformer implements ITransformModule {
             ClassReader cr = new ClassReader(classfileBuffer);
             ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
 
-            boolean radicalMode = isRadicalMode();
+            boolean radicalMode = AgentConfigReader.isDefenceRadicalEnabled();
             GetHealthClassVisitor cv = new GetHealthClassVisitor(cw, className, radicalMode);
             cr.accept(cv, ClassReader.EXPAND_FRAMES);
 
@@ -152,14 +154,6 @@ public class LivingEntityTransformer implements ITransformModule {
         } catch (Throwable t) {
             AgentLogWriter.error("[LivingEntityTransformer] Failed to transform: " + className, t);
             return null;
-        }
-    }
-
-    private static boolean isRadicalMode() {
-        try {
-            return EcaConfiguration.getDefenceEnableRadicalLogicSafely();
-        } catch (Throwable t) {
-            return false;
         }
     }
 

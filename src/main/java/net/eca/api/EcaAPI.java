@@ -332,6 +332,9 @@ public final class EcaAPI {
             EcaLogger.warn("memoryRemoveEntity requires Attack Radical Logic to be enabled in config");
             return false;
         }
+
+        EntityUtil.prepareForMemoryRemove(entity);
+
         return LwjglUtil.lwjglRemove(entity);
     }
 

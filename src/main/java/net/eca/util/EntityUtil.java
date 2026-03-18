@@ -6,6 +6,7 @@ import net.eca.network.EntityHealthSyncPacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.health.HealthLockManager;
 import net.eca.util.health.HealthAnalyzer.HealthFieldCache;
 import net.eca.util.health.HealthAnalyzerManager;
 import net.minecraft.network.syncher.EntityDataSerializer;
@@ -455,7 +456,10 @@ public class EntityUtil {
         }
         Entity entity = getEntity(level, entityUUID);
         if (!(entity instanceof LivingEntity livingEntity)) {
-            EcaLogger.info("[EntityUtil] Revive skipped: living entity not found, uuid={}", entityUUID);
+            return;
+        }
+        // 跳过已完成维度切换的实体，防止旧实例被错误复活到原维度
+        if (entity.getRemovalReason() == Entity.RemovalReason.CHANGED_DIMENSION) {
             return;
         }
         reviveEntity(livingEntity);
@@ -1244,6 +1248,10 @@ public class EntityUtil {
     //复活实体（清除死亡状态）
     public static void reviveEntity(LivingEntity entity) {
         if (entity == null) return;
+        // 跳过已完成维度切换的实体，防止旧实例被错误复活到原维度
+        if (entity.getRemovalReason() == Entity.RemovalReason.CHANGED_DIMENSION) {
+            return;
+        }
         try {
             entity.revive();
             setHealth(entity, entity.getMaxHealth());
@@ -1321,6 +1329,22 @@ public class EntityUtil {
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Entity removal failed: {}", e.getMessage());
         }
+    }
+
+    public static void prepareForMemoryRemove(Entity entity) {
+        if (!(entity instanceof LivingEntity livingEntity)) {
+            return;
+        }
+
+        if (INVULNERABLE != null) {
+            livingEntity.getEntityData().set(INVULNERABLE, false);
+        } else {
+            livingEntity.getPersistentData().putBoolean("ecaInvulnerable", false);
+        }
+        InvulnerableEntityManager.removeInvulnerable(livingEntity);
+        HealthLockManager.removeLock(livingEntity);
+        HealthLockManager.removeHealBan(livingEntity);
+        HealthLockManager.removeMaxHealthLock(livingEntity);
     }
 
     public static List<UUID> collectAllBossEventUUIDsForRemoval(Entity entity) {

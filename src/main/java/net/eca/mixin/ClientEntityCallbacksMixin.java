@@ -1,5 +1,6 @@
 package net.eca.mixin;
 
+import net.eca.util.EntityUtil;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.entity.Entity;
@@ -17,7 +18,7 @@ public class ClientEntityCallbacksMixin {
 
     @Inject(method = "onTrackingEnd*", at = @At("HEAD"), cancellable = true)
     private void onTrackingEnd(Entity entity, CallbackInfo ci) {
-        if (ForceLoadingManager.shouldProtect(entity)) {
+        if (ForceLoadingManager.shouldProtect(entity) && !EntityUtil.isChangingDimension(entity)) {
             ci.cancel();
         }
     }
@@ -25,14 +26,14 @@ public class ClientEntityCallbacksMixin {
     // 防止强加载实体被移出 entityTickList，确保位置插值正常推进
     @Inject(method = "onTickingEnd*", at = @At("HEAD"), cancellable = true)
     private void onTickingEnd(Entity entity, CallbackInfo ci) {
-        if (ForceLoadingManager.shouldProtect(entity) && !entity.isRemoved()) {
+        if (ForceLoadingManager.shouldProtect(entity) && !EntityUtil.isChangingDimension(entity)) {
             ci.cancel();
         }
     }
 
     @Inject(method = "onDestroyed*", at = @At("HEAD"), cancellable = true)
     private void onDestroyed(Entity entity, CallbackInfo ci) {
-        if (ForceLoadingManager.shouldProtect(entity)) {
+        if (ForceLoadingManager.shouldProtect(entity) && !EntityUtil.isChangingDimension(entity)) {
             ci.cancel();
         }
     }

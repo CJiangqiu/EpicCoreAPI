@@ -38,9 +38,10 @@
     "PlayerMixin",
     "RangedAttributeMixin",
     "ServerLevelMixin",
-    "TrackedEntityMixin",
     "TransientEntitySectionManagerMixin",
-    "TransientEntitySectionManagerMixin$CallbackMixin"
+    "TransientEntitySectionManagerMixin$CallbackMixin",
+    "TrackedEntityMixin"
+
   ],
   "injectors": {
     "defaultRequire": 1
