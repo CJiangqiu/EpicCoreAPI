@@ -64,20 +64,23 @@ public class BossHealthOverlayMixin {
             return false;
         }
 
-        ResourceLocation texture = bossBar.texture();
-        RenderType renderType = bossBar.renderType();
+        ResourceLocation frameTexture = bossBar.frameTexture();
+        ResourceLocation fillTexture = bossBar.fillTexture();
+        RenderType frameRenderType = bossBar.frameRenderType();
+        RenderType fillRenderType = bossBar.fillRenderType();
 
         // 启用了 bossBarExtension 但未设置任何自定义渲染 → 隐藏原版 bar
-        if (texture == null && renderType == null) {
+        if (frameTexture == null && fillTexture == null && frameRenderType == null && fillRenderType == null) {
             return true;
         }
 
         int barWidth = bossBar.width();
         int barHeight = bossBar.height();
 
-        // 贴图模式下自动获取尺寸
-        if (texture != null && (barWidth <= 0 || barHeight <= 0)) {
-            TextureSizeCache.Size size = TextureSizeCache.get(texture);
+        // 贴图模式下自动获取尺寸（优先从外框贴图获取，其次填充贴图）
+        ResourceLocation sizeSource = frameTexture != null ? frameTexture : fillTexture;
+        if (sizeSource != null && (barWidth <= 0 || barHeight <= 0)) {
+            TextureSizeCache.Size size = TextureSizeCache.get(sizeSource);
             barWidth = size.width();
             barHeight = size.height();
         }
@@ -87,13 +90,12 @@ public class BossHealthOverlayMixin {
             return false;
         }
 
-        int drawWidth = (int) (event.getProgress() * (float) barWidth);
+        int fillWidth = (int) (event.getProgress() * (float) barWidth);
 
         // 自适应缩放
-        float scale = 1.0f;
         int guiWidth = graphics.guiWidth();
         float availableWidth = Math.max(1.0f, (float) guiWidth - 20.0f);
-        scale = Math.min(1.0f, availableWidth / (float) barWidth);
+        float scale = Math.min(1.0f, availableWidth / (float) barWidth);
 
         float scaledWidth = barWidth * scale;
         float renderX = (guiWidth - scaledWidth) * 0.5f;
@@ -105,20 +107,35 @@ public class BossHealthOverlayMixin {
         int offsetX = bossBar.offsetX();
         int offsetY = bossBar.offsetY();
 
-        if (drawWidth > 0) {
-            if (texture != null && renderType != null) {
-                drawTextureWithShaderMask(graphics, texture, renderType,
-                        offsetX, offsetY, drawWidth, barHeight, barWidth, barHeight);
-            } else if (texture != null) {
-                graphics.blit(texture, offsetX, offsetY, 0, 0, drawWidth, barHeight, barWidth, barHeight);
-            } else {
-                drawRenderType(graphics, renderType, offsetX, offsetY, drawWidth, barHeight, barWidth);
-            }
+        // 外框：满宽渲染
+        eca$renderLayer(graphics, frameTexture, frameRenderType,
+                offsetX, offsetY, barWidth, barHeight, barWidth, barHeight);
+
+        // 填充：按 progress 裁剪渲染
+        if (fillWidth > 0) {
+            eca$renderLayer(graphics, fillTexture, fillRenderType,
+                    offsetX, offsetY, fillWidth, barHeight, barWidth, barHeight);
         }
 
         graphics.pose().popPose();
 
         return true;
+    }
+
+    @Unique
+    private void eca$renderLayer(GuiGraphics graphics, ResourceLocation texture, RenderType renderType,
+                                 int x, int y, int drawWidth, int drawHeight, int fullWidth, int fullHeight) {
+        if (texture == null && renderType == null) {
+            return;
+        }
+        if (texture != null && renderType != null) {
+            drawTextureWithShaderMask(graphics, texture, renderType,
+                    x, y, drawWidth, drawHeight, fullWidth, fullHeight);
+        } else if (texture != null) {
+            graphics.blit(texture, x, y, 0, 0, drawWidth, drawHeight, fullWidth, fullHeight);
+        } else {
+            drawRenderType(graphics, renderType, x, y, drawWidth, drawHeight, fullWidth);
+        }
     }
 
     @Unique

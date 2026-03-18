@@ -12,11 +12,19 @@ public class BossBarExtension {
         return false;
     }
 
-    public ResourceLocation texture() {
+    public ResourceLocation frameTexture() {
         return null;
     }
 
-    public RenderType renderType() {
+    public ResourceLocation fillTexture() {
+        return null;
+    }
+
+    public RenderType frameRenderType() {
+        return null;
+    }
+
+    public RenderType fillRenderType() {
         return null;
     }
 
