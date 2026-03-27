@@ -2,7 +2,7 @@ package net.eca;
 
 import net.eca.agent.AgentLoader;
 import net.eca.agent.EcaAgent;
-import net.eca.agent.ReturnToggle;
+import net.eca.agent.transform.ReturnToggle;
 import net.eca.compat.GeckoLibCompat;
 import net.eca.event.EcaEventHandler;
 import net.eca.event.LoadCompleteHandler;
@@ -42,6 +42,7 @@ public final class EcaMod {
     }
 
     public EcaMod() {
+
         // 注册配置
         ModConfigs.register();
 
@@ -220,7 +221,7 @@ public final class EcaMod {
             Class<?> agentReturnToggle = null;
 
             for (Class<?> clazz : inst.getAllLoadedClasses()) {
-                if ("net.eca.agent.ReturnToggle".equals(clazz.getName())) {
+                if ("net.eca.agent.transform.ReturnToggle".equals(clazz.getName())) {
                     ClassLoader loader = clazz.getClassLoader();
                     if (loader != localLoader) {
                         agentReturnToggle = clazz;
@@ -252,7 +253,7 @@ public final class EcaMod {
             Class<?> agentReturnToggle = null;
 
             for (Class<?> clazz : inst.getAllLoadedClasses()) {
-                if ("net.eca.agent.ReturnToggle".equals(clazz.getName())) {
+                if ("net.eca.agent.transform.ReturnToggle".equals(clazz.getName())) {
                     ClassLoader loader = clazz.getClassLoader();
                     if (loader != localLoader) {
                         agentReturnToggle = clazz;
@@ -267,6 +268,21 @@ public final class EcaMod {
             }
         } catch (Throwable t) {
             EcaLogger.warn("Failed to set loadTimeTransformEnabled to agent: {}", t.getMessage());
+        }
+    }
+
+    private void logForgeVmLaunchResult(Object launchResult) {
+        if (launchResult == null) {
+            EcaLogger.warn("ForgeVM launched with null result");
+            return;
+        }
+        try {
+            Object capability = launchResult.getClass().getMethod("capabilityLevel").invoke(launchResult);
+            Object active = launchResult.getClass().getMethod("nativeDllActive").invoke(launchResult);
+            Object reason = launchResult.getClass().getMethod("reason").invoke(launchResult);
+            EcaLogger.info("ForgeVM launched: capability={}, active={}, reason={}", capability, active, reason);
+        } catch (Throwable ignored) {
+            EcaLogger.info("ForgeVM launched: {}", launchResult.toString());
         }
     }
 }

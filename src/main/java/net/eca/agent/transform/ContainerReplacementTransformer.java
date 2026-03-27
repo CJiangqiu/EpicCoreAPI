@@ -125,7 +125,7 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/ints/Int2ObjectLinkedOpenHashMap",
-                    "net/eca/agent/EcaContainers$EcaInt2ObjectLinkedOpenHashMap"
+                    "net/eca/agent/transform/EcaContainers$EcaInt2ObjectLinkedOpenHashMap"
                 );
             }
         }
@@ -185,13 +185,13 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/longs/Long2ObjectOpenHashMap",
-                    "net/eca/agent/EcaContainers$EcaLong2ObjectOpenHashMap"
+                    "net/eca/agent/transform/EcaContainers$EcaLong2ObjectOpenHashMap"
                 );
 
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/longs/LongAVLTreeSet",
-                    "net/eca/agent/EcaContainers$EcaLongAVLTreeSet"
+                    "net/eca/agent/transform/EcaContainers$EcaLongAVLTreeSet"
                 );
             }
         }
@@ -223,7 +223,7 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/ints/Int2ObjectLinkedOpenHashMap",
-                    "net/eca/agent/EcaContainers$EcaInt2ObjectLinkedOpenHashMap"
+                    "net/eca/agent/transform/EcaContainers$EcaInt2ObjectLinkedOpenHashMap"
                 );
 
                 // 替换 HashMap（通过Guava的Maps.newHashMap创建的）
@@ -289,7 +289,7 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/ints/Int2ObjectOpenHashMap",
-                    "net/eca/agent/EcaContainers$EcaInt2ObjectOpenHashMap"
+                    "net/eca/agent/transform/EcaContainers$EcaInt2ObjectOpenHashMap"
                 );
             }
         }
@@ -322,7 +322,7 @@ public class ContainerReplacementTransformer implements ITransformModule {
                 replacedCount += replaceContainerInstantiation(
                     mn,
                     "it/unimi/dsi/fastutil/objects/ObjectOpenHashSet",
-                    "net/eca/agent/EcaContainers$EcaHashSet"
+                    "net/eca/agent/transform/EcaContainers$EcaHashSet"
                 );
             }
         }
@@ -394,10 +394,10 @@ public class ContainerReplacementTransformer implements ITransformModule {
 
                     // 替换为 new EcaHashMap()
                     InsnList replacement = new InsnList();
-                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/EcaContainers$EcaHashMap"));
+                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/transform/EcaContainers$EcaHashMap"));
                     replacement.add(new InsnNode(DUP));
                     replacement.add(new MethodInsnNode(INVOKESPECIAL,
-                        "net/eca/agent/EcaContainers$EcaHashMap",
+                        "net/eca/agent/transform/EcaContainers$EcaHashMap",
                         "<init>",
                         "()V",
                         false));
@@ -432,10 +432,10 @@ public class ContainerReplacementTransformer implements ITransformModule {
 
                     // 替换为 new EcaArrayList()
                     InsnList replacement = new InsnList();
-                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/EcaContainers$EcaArrayList"));
+                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/transform/EcaContainers$EcaArrayList"));
                     replacement.add(new InsnNode(DUP));
                     replacement.add(new MethodInsnNode(INVOKESPECIAL,
-                        "net/eca/agent/EcaContainers$EcaArrayList",
+                        "net/eca/agent/transform/EcaContainers$EcaArrayList",
                         "<init>",
                         "()V",
                         false));
@@ -469,10 +469,10 @@ public class ContainerReplacementTransformer implements ITransformModule {
                     methodInsn.desc.startsWith("()")) {
 
                     InsnList replacement = new InsnList();
-                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/EcaContainers$EcaHashSet"));
+                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/transform/EcaContainers$EcaHashSet"));
                     replacement.add(new InsnNode(DUP));
                     replacement.add(new MethodInsnNode(INVOKESPECIAL,
-                        "net/eca/agent/EcaContainers$EcaHashSet",
+                        "net/eca/agent/transform/EcaContainers$EcaHashSet",
                         "<init>",
                         "()V",
                         false));
@@ -506,10 +506,10 @@ public class ContainerReplacementTransformer implements ITransformModule {
                     methodInsn.desc.startsWith("()")) {
 
                     InsnList replacement = new InsnList();
-                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/EcaContainers$EcaConcurrentLinkedQueue"));
+                    replacement.add(new TypeInsnNode(NEW, "net/eca/agent/transform/EcaContainers$EcaConcurrentLinkedQueue"));
                     replacement.add(new InsnNode(DUP));
                     replacement.add(new MethodInsnNode(INVOKESPECIAL,
-                        "net/eca/agent/EcaContainers$EcaConcurrentLinkedQueue",
+                        "net/eca/agent/transform/EcaContainers$EcaConcurrentLinkedQueue",
                         "<init>",
                         "()V",
                         false));

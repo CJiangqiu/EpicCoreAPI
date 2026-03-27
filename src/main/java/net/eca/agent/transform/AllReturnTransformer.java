@@ -1,7 +1,6 @@
 package net.eca.agent.transform;
 
 import net.eca.agent.AgentLogWriter;
-import net.eca.agent.ReturnToggle;
 import net.eca.agent.SafeClassWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
@@ -21,7 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Only hooks void (return) and boolean (return false) methods to avoid NPE crashes.
  */
 public class AllReturnTransformer implements ITransformModule {
-    private static final String CHECK_CLASS = "net/eca/agent/ReturnToggle";
+    private static final String CHECK_CLASS = "net/eca/agent/transform/ReturnToggle";
     private static final String CHECK_METHOD = "shouldReturn";
     private static final String CHECK_DESC = "(Ljava/lang/String;)Z";
 
@@ -37,6 +36,14 @@ public class AllReturnTransformer implements ITransformModule {
     public boolean shouldTransform(String className, ClassLoader classLoader) {
         // 检查是否需要转换（explicitTargets 或 allowedPackagePrefixes）
         return ReturnToggle.shouldTransformClass(className);
+    }
+
+    @Override
+    public boolean shouldRetransform(String className, ClassLoader classLoader) {
+        if (className == null) {
+            return false;
+        }
+        return ReturnToggle.shouldTransformClass(className.replace('.', '/'));
     }
 
     @Override

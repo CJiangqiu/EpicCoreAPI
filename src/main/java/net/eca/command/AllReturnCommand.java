@@ -4,7 +4,7 @@ import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import net.eca.agent.EcaAgent;
-import net.eca.agent.ReturnToggle;
+import net.eca.agent.transform.ReturnToggle;
 import net.eca.api.EcaAPI;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -220,7 +220,7 @@ public class AllReturnCommand {
         ClassLoader localLoader = AllReturnCommand.class.getClassLoader();
         Class<?> fallback = null;
         for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!"net.eca.agent.ReturnToggle".equals(clazz.getName())) {
+            if (!"net.eca.agent.transform.ReturnToggle".equals(clazz.getName())) {
                 continue;
             }
             ClassLoader loader = clazz.getClassLoader();

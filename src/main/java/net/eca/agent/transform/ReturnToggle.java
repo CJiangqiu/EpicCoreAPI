@@ -1,4 +1,4 @@
-package net.eca.agent;
+package net.eca.agent.transform;
 
 import net.eca.util.EcaLogger;
 
@@ -54,7 +54,7 @@ public final class ReturnToggle {
         if (PackageWhitelist.isProtected(internalClassName)) {
             return false;
         }
-        return activeClassNames.contains(internalClassName)
+        return explicitTargets.contains(internalClassName)
             || matchesAllowedPrefix(internalClassName);
     }
 

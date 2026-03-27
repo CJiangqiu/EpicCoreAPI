@@ -8,9 +8,6 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
  * Bytecode transformer for LivingEntity and its subclasses.
  * Handles transformations like getHealth() hooking for heal negation.
@@ -38,8 +35,6 @@ public class LivingEntityTransformer implements ITransformModule {
 
     private static final String STATUS_HOOK_CLASS_NAME = "net/eca/util/health/LivingEntityHook";
     private static final String STATUS_HOOK_METHOD_DESC = "(Lnet/minecraft/world/entity/LivingEntity;Z)Z";
-    private static final String RADICAL_FLOAT_HOOK_DESC = "(Lnet/minecraft/world/entity/LivingEntity;)F";
-    private static final String RADICAL_BOOLEAN_HOOK_DESC = "(Lnet/minecraft/world/entity/LivingEntity;)Z";
 
     // 转换计数器（用于验证转换是否生效）
     private static volatile int transformCount = 0;
@@ -139,14 +134,14 @@ public class LivingEntityTransformer implements ITransformModule {
             ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
 
             boolean radicalMode = AgentConfigReader.isDefenceRadicalEnabled();
-            GetHealthClassVisitor cv = new GetHealthClassVisitor(cw, className, radicalMode);
+            GetHealthClassVisitor cv = new GetHealthClassVisitor(cw, className);
             cr.accept(cv, ClassReader.EXPAND_FRAMES);
 
             if (cv.transformed) {
                 byte[] transformedBytes = cw.toByteArray();
                 transformCount++;
 
-                AgentLogWriter.info("[LivingEntityTransformer] Transformed: " + className + " mode=" + (radicalMode ? "RADICAL_REPLACE" : "TAIL_HOOK") + " (total: " + transformCount + ")");
+                AgentLogWriter.info("[LivingEntityTransformer] Transformed: " + className + " mode=TAIL_HOOK scope=" + (radicalMode ? "ALL_SUBCLASSES" : "OVERRIDES_ONLY") + " (total: " + transformCount + ")");
                 return transformedBytes;
             }
             return null;
@@ -192,51 +187,18 @@ public class LivingEntityTransformer implements ITransformModule {
 
     // ClassVisitor：遍历类的所有方法
     private static class GetHealthClassVisitor extends ClassVisitor {
-        private final boolean radicalMode;
         public boolean transformed = false;
         public boolean hookedGetHealth = false;
         public boolean hookedGetMaxHealth = false;
         public boolean hookedIsDeadOrDying = false;
         public boolean hookedIsAlive = false;
-        private final List<MethodReplacement> replacements = new ArrayList<>();
 
-        GetHealthClassVisitor(ClassWriter cw, String className, boolean radicalMode) {
+        GetHealthClassVisitor(ClassWriter cw, String className) {
             super(Opcodes.ASM9, cw);
-            this.radicalMode = radicalMode;
         }
 
         @Override
         public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
-            if (radicalMode && (access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) == 0) {
-                if (name.equals(GET_HEALTH_METHOD_NAME) && descriptor.equals(GET_HEALTH_METHOD_DESC)) {
-                    transformed = true;
-                    hookedGetHealth = true;
-                    replacements.add(new MethodReplacement(access, name, descriptor, signature, exceptions, "radicalGetHealth", true));
-                    return null;
-                }
-
-                if (name.equals(GET_MAX_HEALTH_METHOD_NAME) && descriptor.equals(GET_MAX_HEALTH_METHOD_DESC)) {
-                    transformed = true;
-                    hookedGetMaxHealth = true;
-                    replacements.add(new MethodReplacement(access, name, descriptor, signature, exceptions, "radicalGetMaxHealth", true));
-                    return null;
-                }
-
-                if (name.equals(IS_DEAD_OR_DYING_METHOD_NAME) && descriptor.equals(IS_DEAD_OR_DYING_METHOD_DESC)) {
-                    transformed = true;
-                    hookedIsDeadOrDying = true;
-                    replacements.add(new MethodReplacement(access, name, descriptor, signature, exceptions, "radicalIsDeadOrDying", false));
-                    return null;
-                }
-
-                if (name.equals(IS_ALIVE_METHOD_NAME) && descriptor.equals(IS_ALIVE_METHOD_DESC)) {
-                    transformed = true;
-                    hookedIsAlive = true;
-                    replacements.add(new MethodReplacement(access, name, descriptor, signature, exceptions, "radicalIsAlive", false));
-                    return null;
-                }
-            }
-
             MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
 
             if (name.equals(GET_HEALTH_METHOD_NAME) && descriptor.equals(GET_HEALTH_METHOD_DESC)) {
@@ -269,57 +231,6 @@ public class LivingEntityTransformer implements ITransformModule {
             }
 
             return mv;
-        }
-
-        @Override
-        public void visitEnd() {
-            for (MethodReplacement replacement : replacements) {
-                emitReplacementMethod(replacement);
-            }
-            super.visitEnd();
-        }
-
-        private void emitReplacementMethod(MethodReplacement replacement) {
-            MethodVisitor mv = super.visitMethod(
-                replacement.access,
-                replacement.name,
-                replacement.descriptor,
-                replacement.signature,
-                replacement.exceptions
-            );
-            mv.visitCode();
-            mv.visitVarInsn(Opcodes.ALOAD, 0);
-            mv.visitTypeInsn(Opcodes.CHECKCAST, "net/minecraft/world/entity/LivingEntity");
-            mv.visitMethodInsn(
-                Opcodes.INVOKESTATIC,
-                STATUS_HOOK_CLASS_NAME,
-                replacement.hookMethod,
-                replacement.floatReturn ? RADICAL_FLOAT_HOOK_DESC : RADICAL_BOOLEAN_HOOK_DESC,
-                false
-            );
-            mv.visitInsn(replacement.floatReturn ? Opcodes.FRETURN : Opcodes.IRETURN);
-            mv.visitMaxs(0, 0);
-            mv.visitEnd();
-        }
-    }
-
-    private static class MethodReplacement {
-        final int access;
-        final String name;
-        final String descriptor;
-        final String signature;
-        final String[] exceptions;
-        final String hookMethod;
-        final boolean floatReturn;
-
-        MethodReplacement(int access, String name, String descriptor, String signature, String[] exceptions, String hookMethod, boolean floatReturn) {
-            this.access = access;
-            this.name = name;
-            this.descriptor = descriptor;
-            this.signature = signature;
-            this.exceptions = exceptions;
-            this.hookMethod = hookMethod;
-            this.floatReturn = floatReturn;
         }
     }
 

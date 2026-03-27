@@ -1,6 +1,6 @@
 package net.eca.util.health;
 
-import net.eca.agent.ReturnToggle.PackageWhitelist;
+import net.eca.agent.transform.ReturnToggle.PackageWhitelist;
 import net.eca.util.EcaLogger;
 import org.objectweb.asm.*;
 

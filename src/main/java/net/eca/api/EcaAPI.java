@@ -1,8 +1,8 @@
 package net.eca.api;
 
 import net.eca.agent.EcaAgent;
-import net.eca.agent.ReturnToggle;
-import net.eca.agent.ReturnToggle.PackageWhitelist;
+import net.eca.agent.transform.ReturnToggle;
+import net.eca.agent.transform.ReturnToggle.PackageWhitelist;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityLocationManager;
@@ -10,16 +10,13 @@ import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.LwjglUtil;
-import net.eca.util.entity_extension.CombatMusicExtension;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
-import net.eca.util.entity_extension.GlobalFogExtension;
 import net.eca.network.EntityExtensionOverridePacket.FogData;
 import net.eca.network.EntityExtensionOverridePacket.SkyboxData;
 import net.eca.network.EntityExtensionOverridePacket.MusicData;
 import net.eca.util.spawn_ban.SpawnBanManager;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.EntityType;
@@ -31,10 +28,6 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.lang.instrument.Instrumentation;
-import java.net.URL;
-import java.security.CodeSource;
-import java.security.ProtectionDomain;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -227,7 +220,7 @@ public final class EcaAPI {
      * - When enabling invulnerability: revives entity and locks health
      * - When disabling invulnerability: clears invulnerability and unlocks health
      * - Prevents death through LivingDeathEvent cancellation
-     * - Prevents removal through Entity kill/discard/remove/setRemoved Mixin interception
+     * - Prevents removal through Entity killEntity/discard/remove/setRemoved Mixin interception
      * @param entity the entity to modify
      * @param invulnerable true to make the entity invulnerable, false otherwise
      */
@@ -268,19 +261,16 @@ public final class EcaAPI {
     // 设置实体死亡
     /**
      * Set an entity to dead state and handle all death-related logic.
-     * This will set health to 0, trigger die(), drop loot, grant advancements, and completely remove the entity.
-     * Note: Death messages are NOT sent - implement custom death message logic in your mod if needed.
-     * @param entity the living entity to kill
+     * @param entity the living entity to setDead
      * @param damageSource the damage source that caused the death
      */
     public static void killEntity(LivingEntity entity, DamageSource damageSource) {
-        EntityUtil.setDead(entity, damageSource);
+        EntityUtil.killEntity(entity, damageSource);
     }
 
     // 复活实体
     /**
      * Revive an entity by clearing its death state.
-     * This resets the 'dead' flag and 'deathTime' field using VarHandle.
      * @param entity the living entity to revive
      */
     public static void reviveEntity(LivingEntity entity) {
@@ -982,8 +972,8 @@ public final class EcaAPI {
     /**
      * Enable AllReturn for the specified entity's mod.
      * DANGER! Requires "Enable Radical Logic" in Attack config.
-     * Will perform return transformation on all boolean and void methods of the target entity's mod.
-     * @param entity the entity whose mod classes will be transformed
+     * Enables early-return behavior for the target entity's mod package on classes that were transformed during agent phases.
+     * @param entity the entity used to resolve the target mod package
      * @return true if AllReturn was enabled successfully, false if radical logic is disabled or agent not available
      */
     public static boolean enableAllReturn(Entity entity) {
@@ -1008,30 +998,16 @@ public final class EcaAPI {
 
         String packagePrefix = getPackagePrefix(binaryName);
         String internalPrefix = packagePrefix != null ? packagePrefix.replace('.', '/') : null;
+        if (internalPrefix == null) {
+            return false;
+        }
 
         ReturnToggle.setAllReturnEnabled(true);
+        invokeAgentReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, true);
         ReturnToggle.addAllowedPackagePrefix(internalPrefix);
+        invokeAgentReturnToggle(inst, "addAllowedPackagePrefix", new Class<?>[] { String.class }, internalPrefix);
 
-        URL codeSource = getCodeSourceLocation(entityClass);
-        List<Class<?>> candidates = collectCandidates(inst, codeSource, packagePrefix);
-
-        if (candidates.isEmpty()) {
-            return false;
-        }
-
-        List<String> targets = new ArrayList<>();
-        for (Class<?> clazz : candidates) {
-            targets.add(clazz.getName().replace('.', '/'));
-        }
-        ReturnToggle.addExplicitTargets(targets.toArray(new String[0]));
-
-        try {
-            inst.retransformClasses(candidates.toArray(new Class<?>[0]));
-            return true;
-        } catch (Throwable t) {
-            EcaLogger.warn("AllReturn batch retransform failed: {}", t.getMessage());
-            return false;
-        }
+        return true;
     }
 
     // 关闭AllReturn
@@ -1039,8 +1015,11 @@ public final class EcaAPI {
      * Disable AllReturn and clear all targets.
      */
     public static void disableAllReturn() {
+        Instrumentation inst = EcaAgent.getInstrumentation();
         ReturnToggle.setAllReturnEnabled(false);
         ReturnToggle.clearAllTargets();
+        invokeAgentReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, false);
+        invokeAgentReturnToggle(inst, "clearAllTargets", new Class<?>[0]);
     }
 
     // 检查AllReturn是否启用
@@ -1056,8 +1035,7 @@ public final class EcaAPI {
     /**
      * Enable or disable global AllReturn mode.
      * DANGER! Requires "Enable Radical Logic" in Attack config.
-     * When enabled, will perform return transformation on all boolean and void methods
-     * of ALL loaded mods (excluding whitelisted packages).
+     * When enabled, activates early-return behavior for all non-whitelisted loaded mod packages.
      * @param enable true to enable, false to disable
      * @return true if operation succeeded, false if radical logic is disabled or agent not available
      */
@@ -1082,8 +1060,7 @@ public final class EcaAPI {
             return false;
         }
 
-        // 收集所有非白名单的类（不依赖 modPackagePrefixes）
-        List<Class<?>> candidates = new ArrayList<>();
+        // 收集所有非白名单类的包前缀
         Set<String> collectedPrefixes = new HashSet<>();
 
         for (Class<?> clazz : inst.getAllLoadedClasses()) {
@@ -1093,8 +1070,6 @@ public final class EcaAPI {
             String className = clazz.getName();
             if (ReturnToggle.isExcludedBinaryName(className)) continue;
 
-            candidates.add(clazz);
-
             // 收集包前缀
             String packagePrefix = getPackagePrefix(className);
             if (packagePrefix != null) {
@@ -1103,42 +1078,18 @@ public final class EcaAPI {
             }
         }
 
-        if (candidates.isEmpty()) {
-            EcaLogger.warn("GlobalAllReturn: No candidate classes found");
+        if (collectedPrefixes.isEmpty()) {
+            EcaLogger.warn("GlobalAllReturn: No candidate package prefixes found");
             return false;
         }
 
-        // 启用 AllReturn 并添加所有包前缀（与实体版相同方式）
+        // 启用 AllReturn 并添加所有包前缀
         ReturnToggle.setAllReturnEnabled(true);
         invokeAgentReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, true);
 
         for (String prefix : collectedPrefixes) {
             ReturnToggle.addAllowedPackagePrefix(prefix);
             invokeAgentReturnToggle(inst, "addAllowedPackagePrefix", new Class<?>[] { String.class }, prefix);
-        }
-
-        // 只 retransform 尚未被转换过的类（load time 已转换的类只需开启 flag 即可生效）
-        Set<String> alreadyTransformed = ReturnToggle.getActiveClassNames();
-        List<Class<?>> needRetransform = new ArrayList<>();
-        List<String> newTargets = new ArrayList<>();
-
-        for (Class<?> clazz : candidates) {
-            String internalName = clazz.getName().replace('.', '/');
-            if (!alreadyTransformed.contains(internalName)) {
-                needRetransform.add(clazz);
-                newTargets.add(internalName);
-            }
-        }
-
-        if (!newTargets.isEmpty()) {
-            ReturnToggle.addExplicitTargets(newTargets.toArray(new String[0]));
-            invokeAgentReturnToggle(inst, "addExplicitTargets", new Class<?>[] { String[].class }, (Object) newTargets.toArray(new String[0]));
-
-            try {
-                inst.retransformClasses(needRetransform.toArray(new Class<?>[0]));
-            } catch (Throwable t) {
-                EcaLogger.warn("GlobalAllReturn: Batch retransform failed: {}", t.getMessage());
-            }
         }
 
         return true;
@@ -1162,7 +1113,7 @@ public final class EcaAPI {
         ClassLoader localLoader = EcaAPI.class.getClassLoader();
         Class<?> fallback = null;
         for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!"net.eca.agent.ReturnToggle".equals(clazz.getName())) {
+            if (!"net.eca.agent.transform.ReturnToggle".equals(clazz.getName())) {
                 continue;
             }
             ClassLoader loader = clazz.getClassLoader();
@@ -1224,40 +1175,6 @@ public final class EcaAPI {
             return null;
         }
         return binaryName.substring(0, lastDot + 1);
-    }
-
-    private static URL getCodeSourceLocation(Class<?> clazz) {
-        try {
-            ProtectionDomain domain = clazz.getProtectionDomain();
-            if (domain == null) return null;
-            CodeSource source = domain.getCodeSource();
-            if (source == null) return null;
-            return source.getLocation();
-        } catch (SecurityException ignored) {
-            return null;
-        }
-    }
-
-    private static List<Class<?>> collectCandidates(Instrumentation inst, URL codeSource, String packagePrefix) {
-        List<Class<?>> candidates = new ArrayList<>();
-        for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!inst.isModifiableClass(clazz)) continue;
-            if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) continue;
-
-            String className = clazz.getName();
-            if (ReturnToggle.isExcludedBinaryName(className)) continue;
-
-            if (codeSource != null) {
-                URL classSource = getCodeSourceLocation(clazz);
-                if (classSource == null || !classSource.equals(codeSource)) continue;
-            } else if (packagePrefix != null) {
-                if (!className.startsWith(packagePrefix)) continue;
-            } else {
-                continue;
-            }
-            candidates.add(clazz);
-        }
-        return candidates;
     }
 
     private EcaAPI() {}

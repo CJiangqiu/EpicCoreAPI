@@ -3,11 +3,9 @@ package net.eca.event;
 import net.eca.EcaMod;
 import net.eca.agent.AgentLogWriter;
 import net.eca.agent.EcaAgent;
-import net.eca.agent.EcaTransformer;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.entity_extension.EntityExtensionManager;
-import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -26,9 +24,7 @@ import org.objectweb.asm.tree.VarInsnNode;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -54,65 +50,34 @@ public final class LoadCompleteHandler {
         // 扫描并注册 Entity Extensions
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
 
-        // 激进防御：重新注册 transformer 并 retransform LivingEntity 类
+        // 激进防御：FMLLoadComplete 后仅重应用 LivingEntity 转换
         if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            event.enqueueWork(LoadCompleteHandler::triggerLivingEntityRetransform);
+            event.enqueueWork(LoadCompleteHandler::applyLoadCompleteTransformers);
         }
     }
 
     // ── 激进模式：延迟 retransform ──
 
-    private static void triggerLivingEntityRetransform() {
+    private static void applyLoadCompleteTransformers() {
         if (hasDelayedRetransform) {
             return;
         }
 
         Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst == null) {
-            EcaLogger.warn("Cannot trigger delayed retransform: Instrumentation not available");
-            return;
-        }
-
-        EcaTransformer transformer = EcaTransformer.getInstance();
-        if (transformer == null) {
-            EcaLogger.warn("Cannot trigger delayed retransform: EcaTransformer not available");
+            EcaLogger.warn("Cannot apply load-complete transformers: Instrumentation not available");
             return;
         }
 
         try {
-            inst.removeTransformer(transformer);
-            inst.addTransformer(transformer, true);
-
-            List<Class<?>> targets = new ArrayList<>();
-            for (Class<?> clazz : inst.getAllLoadedClasses()) {
-                if (!inst.isModifiableClass(clazz)) {
-                    continue;
-                }
-                if (LivingEntity.class.isAssignableFrom(clazz)) {
-                    targets.add(clazz);
-                    continue;
-                }
-                String className = clazz.getName();
-                if (className.equals("net.minecraft.world.level.entity.EntityTickList") ||
-                    className.equals("net.minecraft.world.level.entity.EntityLookup") ||
-                    className.equals("net.minecraft.util.ClassInstanceMultiMap") ||
-                    className.equals("net.minecraft.server.level.ChunkMap") ||
-                    className.equals("net.minecraft.world.level.entity.PersistentEntitySectionManager") ||
-                    className.equals("net.minecraft.world.level.entity.EntitySectionStorage")) {
-                    targets.add(clazz);
-                }
-            }
-
             logRadicalSecondPassMethodTargets(inst);
             Map<String, byte[]> capturedBytecode = new HashMap<>();
             ClassFileTransformer captureTransformer = createMethodBytecodeCaptureTransformer(capturedBytecode);
             inst.addTransformer(captureTransformer, true);
-            if (!targets.isEmpty()) {
-                try {
-                    inst.retransformClasses(targets.toArray(new Class[0]));
-                } finally {
-                    inst.removeTransformer(captureTransformer);
-                }
+            try {
+                EcaAgent.applyLivingEntityTransformers();
+            } finally {
+                inst.removeTransformer(captureTransformer);
             }
             logCapturedMethodBytecode(capturedBytecode);
 

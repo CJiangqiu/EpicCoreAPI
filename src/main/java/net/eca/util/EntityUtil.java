@@ -24,8 +24,6 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.server.level.*;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.components.BossHealthOverlay;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.entity.*;
@@ -1204,7 +1202,7 @@ public class EntityUtil {
     // ==================== 实体死亡模块 ====================
 
     //设置实体死亡状态
-    public static void setDead(LivingEntity entity, DamageSource damageSource) {
+    public static void killEntity(LivingEntity entity, DamageSource damageSource) {
         if (entity == null || damageSource == null) return;
 
         try {
@@ -1225,21 +1223,21 @@ public class EntityUtil {
                 }
             }
 
-            //调用原版die方法
+            //调用原版die
             entity.die(damageSource);
             entity.setPose(Pose.DYING);
-
+            entity.dead = true;
+            entity.deathTime = 0;
             //触发击杀成就
             triggerKillAdvancement(entity, damageSource);
-
             //掉落物品
             entity.dropAllDeathLoot(damageSource);
 
-            //设置死亡字段
-            setDeathFieldsViaVarHandle(entity);
+            if (entity.isAlive()){
+                //保底清除实体
+                removeEntity(entity, Entity.RemovalReason.KILLED);
+            }
 
-            //清除实体
-            removeEntity(entity, Entity.RemovalReason.KILLED);
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to set entity dead: {}", e.getMessage());
         }
@@ -1265,16 +1263,6 @@ public class EntityUtil {
             reviveAllContainers(entity);
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to revive entity: {}", e.getMessage());
-        }
-    }
-
-    //设置死亡相关字段
-    private static void setDeathFieldsViaVarHandle(LivingEntity entity) {
-        try {
-            entity.dead = true;
-            entity.deathTime = 0;
-        } catch (Exception e) {
-            EcaLogger.info("[EntityUtil] Failed to set death fields: {}", e.getMessage());
         }
     }
 

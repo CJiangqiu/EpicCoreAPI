@@ -17,7 +17,7 @@ public class KillEntityCommand {
 
     //注册子命令
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
-        return Commands.literal("kill")
+        return Commands.literal("killEntity")
             .then(Commands.argument("targets", EntityArgument.entities())
                 .executes(KillEntityCommand::killEntities)
             );
@@ -45,7 +45,7 @@ public class KillEntityCommand {
                     successCount++;
                 } catch (Exception e) {
                     source.sendFailure(Component.literal(
-                        "§cFailed to kill " + entity.getName().getString() + ": " + e.getMessage()
+                        "§cFailed to killEntity " + entity.getName().getString() + ": " + e.getMessage()
                     ));
                 }
             }

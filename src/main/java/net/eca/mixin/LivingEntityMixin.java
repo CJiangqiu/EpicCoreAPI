@@ -50,9 +50,9 @@ public abstract class LivingEntityMixin {
     private void eca$writeAdditionalSaveData(CompoundTag tag, CallbackInfo ci) {
         LivingEntity entity = (LivingEntity) (Object) this;
         if (EntityUtil.INVULNERABLE == null ||
-            EntityUtil.HEALTH_LOCK_VALUE == null ||
-            EntityUtil.HEAL_BAN_VALUE == null ||
-            EntityUtil.MAX_HEALTH_LOCK_VALUE == null) {
+                EntityUtil.HEALTH_LOCK_VALUE == null ||
+                EntityUtil.HEAL_BAN_VALUE == null ||
+                EntityUtil.MAX_HEALTH_LOCK_VALUE == null) {
             return;
         }
 
@@ -66,9 +66,9 @@ public abstract class LivingEntityMixin {
     private void eca$readAdditionalSaveData(CompoundTag tag, CallbackInfo ci) {
         LivingEntity entity = (LivingEntity) (Object) this;
         if (EntityUtil.INVULNERABLE == null ||
-            EntityUtil.HEALTH_LOCK_VALUE == null ||
-            EntityUtil.HEAL_BAN_VALUE == null ||
-            EntityUtil.MAX_HEALTH_LOCK_VALUE == null) {
+                EntityUtil.HEALTH_LOCK_VALUE == null ||
+                EntityUtil.HEAL_BAN_VALUE == null ||
+                EntityUtil.MAX_HEALTH_LOCK_VALUE == null) {
             return;
         }
 
