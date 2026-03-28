@@ -9,7 +9,7 @@ import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.health.HealthLockManager;
-import net.eca.util.reflect.LwjglUtil;
+import net.eca.util.reflect.UnsafeUtil;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
@@ -307,17 +307,15 @@ public final class EcaAPI {
         EntityUtil.remove(entity, reason);
     }
 
-    // 清除实体（使用LWJGL实现，需要开启激进攻击逻辑配置）
+    // 清除实体（使用Unsafe实现，需要开启激进攻击逻辑配置）
     /**
-     * Remove an entity using LWJGL API.
+     * Remove an entity using Unsafe API, bypassing call-stack interception.
      * DANGER! Requires "Enable Radical Logic" in Attack config.
      * @param entity the entity to remove
+     * @param reason the removal reason
      * @return true if removal succeeded, false otherwise (including when config is disabled)
      */
-    public static boolean memoryRemove(Entity entity) {
-        if (entity == null) {
-            return false;
-        }
+    public static boolean memoryRemove(Entity entity, Entity.RemovalReason reason) {
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
             EcaLogger.warn("memoryRemove requires Attack Radical Logic to be enabled in config");
             return false;
@@ -325,7 +323,7 @@ public final class EcaAPI {
 
         EntityUtil.prepareForMemoryRemove(entity);
 
-        return LwjglUtil.lwjglRemove(entity);
+        return UnsafeUtil.unsafeRemove(entity, reason);
     }
 
     // 清理实体 Boss 血条

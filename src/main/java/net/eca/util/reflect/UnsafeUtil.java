@@ -1,33 +1,32 @@
 package net.eca.util.reflect;
 
-import net.eca.util.EcaLogger;
-import net.eca.util.EntityUtil;
+import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import net.eca.network.ClientRemovePacket;
 import net.eca.network.NetworkHandler;
-import net.minecraft.server.level.ServerChunkCache;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.server.level.ChunkMap;
+import net.eca.util.EcaLogger;
+import net.eca.util.EntityUtil;
 import net.minecraft.core.SectionPos;
+import net.minecraft.server.level.*;
+import net.minecraft.util.ClassInstanceMultiMap;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.entity.*;
-import net.minecraft.util.ClassInstanceMultiMap;
+import net.minecraft.world.level.gameevent.DynamicGameEventListener;
+import net.minecraftforge.entity.PartEntity;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
-import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
-import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
-import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
-import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
-import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
 
 /**
- * LWJGL底层内存操作工具类
+ * 内存操作工具类
  * 通过LWJGL内部的Unsafe通道进行内存操作，绕过字节码级别的拦截
  * 原理：
  * 1. LWJGL是Minecraft核心依赖，其内部类不会被第三方修改
@@ -35,7 +34,7 @@ import java.util.*;
  * 3. 通过Method.invoke()调用Unsafe方法，字节码中不会出现直接的Unsafe调用
  */
 @SuppressWarnings("unchecked")
-public class LwjglUtil {
+public class UnsafeUtil {
 
     // ==================== ChunkMap tick 状态（供 Mixin 调用） ====================
 
@@ -72,43 +71,40 @@ public class LwjglUtil {
     private static boolean initialized = false;
     private static boolean available = false;
 
-    // ==================== 字段偏移量缓存 ====================
+    // ==================== Field offsets ====================
 
-    private static long REMOVAL_REASON_OFFSET = -1;
-    private static long LEVEL_CALLBACK_OFFSET = -1;
-
-    // ServerLevel 相关
+    // ServerLevel
     private static long SERVER_LEVEL_PLAYERS_OFFSET = -1;
     private static long SERVER_LEVEL_CHUNK_SOURCE_OFFSET = -1;
     private static long SERVER_LEVEL_ENTITY_TICK_LIST_OFFSET = -1;
     private static long SERVER_LEVEL_ENTITY_MANAGER_OFFSET = -1;
     private static long SERVER_LEVEL_NAVIGATING_MOBS_OFFSET = -1;
 
-    // EntityTickList 相关
+    // EntityTickList
     private static long ENTITY_TICK_LIST_ACTIVE_OFFSET = -1;
     private static long ENTITY_TICK_LIST_PASSIVE_OFFSET = -1;
     private static long ENTITY_TICK_LIST_ITERATED_OFFSET = -1;
 
-    // ServerChunkCache / ChunkMap 相关
+    // ServerChunkCache / ChunkMap
     private static long SERVER_CHUNK_CACHE_CHUNK_MAP_OFFSET = -1;
     private static long CHUNK_MAP_ENTITY_MAP_OFFSET = -1;
 
-    // PersistentEntitySectionManager 相关
+    // PersistentEntitySectionManager
     private static long PERSISTENT_MANAGER_VISIBLE_STORAGE_OFFSET = -1;
     private static long PERSISTENT_MANAGER_KNOWN_UUIDS_OFFSET = -1;
     private static long PERSISTENT_MANAGER_SECTION_STORAGE_OFFSET = -1;
     private static long PERSISTENT_MANAGER_CALLBACKS_OFFSET = -1;
     private static long PERSISTENT_MANAGER_LOADING_INBOX_OFFSET = -1;
 
-    // EntityLookup 相关
+    // EntityLookup
     private static long ENTITY_LOOKUP_BY_UUID_OFFSET = -1;
     private static long ENTITY_LOOKUP_BY_ID_OFFSET = -1;
 
-    // EntitySectionStorage / EntitySection 相关
+    // EntitySectionStorage / EntitySection
     private static long ENTITY_SECTION_STORAGE_SECTIONS_OFFSET = -1;
     private static long ENTITY_SECTION_STORAGE_OFFSET = -1;
 
-    // ClassInstanceMultiMap 相关
+    // ClassInstanceMultiMap
     private static long CLASS_INSTANCE_MULTI_MAP_BY_CLASS_OFFSET = -1;
 
     // ==================== 初始化 ====================
@@ -127,7 +123,7 @@ public class LwjglUtil {
             available = true;
         } catch (Exception e) {
             available = false;
-            EcaLogger.info("[LwjglUtil] Failed to initialize LWJGL Unsafe channel: {}", e.getMessage());
+            EcaLogger.info("[UnsafeUtil] Failed to initialize LWJGL Unsafe channel: {}", e.getMessage());
         }
     }
 
@@ -142,10 +138,7 @@ public class LwjglUtil {
             throw new RuntimeException("LWJGL UNSAFE is null");
         }
 
-        // 获取 Unsafe 类
         Class<?> unsafeClass = LWJGL_UNSAFE.getClass();
-
-        // 获取方法引用
         PUT_OBJECT_METHOD = unsafeClass.getMethod("putObject", Object.class, long.class, Object.class);
         PUT_INT_METHOD = unsafeClass.getMethod("putInt", Object.class, long.class, int.class);
         PUT_LONG_METHOD = unsafeClass.getMethod("putLong", Object.class, long.class, long.class);
@@ -155,12 +148,6 @@ public class LwjglUtil {
     }
 
     private static void initFieldOffsets() throws Exception {
-        // Entity 相关字段
-        REMOVAL_REASON_OFFSET = getFieldOffset(Entity.class,
-            ObfuscationMapping.getFieldMapping("Entity.removalReason"));
-        LEVEL_CALLBACK_OFFSET = getFieldOffset(Entity.class,
-            ObfuscationMapping.getFieldMapping("Entity.levelCallback"));
-
         // ServerLevel 相关字段
         SERVER_LEVEL_PLAYERS_OFFSET = getFieldOffset(ServerLevel.class,
             ObfuscationMapping.getFieldMapping("ServerLevel.players"));
@@ -228,7 +215,7 @@ public class LwjglUtil {
         try {
             PUT_OBJECT_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
         } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] putObject failed: {}", e.getMessage());
+            EcaLogger.info("[UnsafeUtil] putObject failed: {}", e.getMessage());
         }
     }
 
@@ -237,7 +224,7 @@ public class LwjglUtil {
         try {
             PUT_INT_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
         } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] putInt failed: {}", e.getMessage());
+            EcaLogger.info("[UnsafeUtil] putInt failed: {}", e.getMessage());
         }
     }
 
@@ -246,7 +233,7 @@ public class LwjglUtil {
         try {
             PUT_BOOLEAN_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
         } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] putBoolean failed: {}", e.getMessage());
+            EcaLogger.info("[UnsafeUtil] putBoolean failed: {}", e.getMessage());
         }
     }
 
@@ -255,7 +242,7 @@ public class LwjglUtil {
         try {
             return GET_OBJECT_METHOD.invoke(LWJGL_UNSAFE, target, offset);
         } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] getObject failed: {}", e.getMessage());
+            EcaLogger.info("[UnsafeUtil] getObject failed: {}", e.getMessage());
             return null;
         }
     }
@@ -265,7 +252,7 @@ public class LwjglUtil {
         try {
             return (long) OBJECT_FIELD_OFFSET_METHOD.invoke(LWJGL_UNSAFE, field);
         } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] objectFieldOffset failed: {}", e.getMessage());
+            EcaLogger.info("[UnsafeUtil] objectFieldOffset failed: {}", e.getMessage());
             return -1;
         }
     }
@@ -276,76 +263,55 @@ public class LwjglUtil {
 
     // ==================== 公开 API ====================
 
-    // 通过LWJGL底层通道移除实体
+    // 强制清除实体（绕过无敌/锁血，使用 CHANGED_DIMENSION 原因跳过保护检查）
     /**
-     * Remove entity using LWJGL low-level memory channel.
-     * This method bypasses bytecode-level interception by using reflection to invoke Unsafe methods.
-     *
-     * Execution order:
-     * 1. Set Entity.removalReason = CHANGED_DIMENSION
-     * 2. Set Entity.levelCallback = EntityInLevelCallback.NULL
-     * 3. Remove from low-level containers (following EntityUtil order):
-     *    - ChunkMap.entityMap
-     *    - ServerLevel.players / navigatingMobs
-     *    - EntityLookup (byUuid + byId)
-     *    - KnownUuids
-     *    - EntityTickList (active + passive)
-     *    - EntitySectionStorage (ClassInstanceMultiMap)
+     * Forcefully remove an entity, bypassing invulnerability and health lock protections.
+     * Uses CHANGED_DIMENSION as removal reason to skip vanilla protection checks.
+     * All container removal operations go through the Unsafe channel to bypass call-stack interception.
      *
      * @param entity the entity to remove
      * @return true if removal succeeded, false otherwise
      */
-    public static boolean lwjglRemove(Entity entity) {
-        if (entity == null) return false;
-        if (!available) {
-            EcaLogger.info("[LwjglUtil] LWJGL channel not available, cannot remove entity");
-            return false;
-        }
+    public static boolean unsafeRemove(Entity entity, Entity.RemovalReason reason) {
+        if (entity == null || entity.level() == null) return false;
+        if (entity.level().isClientSide) return false;
+        ServerLevel serverLevel = (ServerLevel) entity.level();
 
         try {
             List<UUID> bossEventUUIDs = EntityUtil.collectAllBossEventUUIDsForRemoval(entity);
-
             EntityUtil.cleanupAI(entity);
             EntityUtil.cleanupBossBar(entity);
+            entity.removalReason = reason;
             entity.stopRiding();
-            EntityUtil.removeAllPassengers(entity);
+            entity.getPassengers().forEach(Entity::stopRiding);
             entity.invalidateCaps();
-
-            // 1. 设置清除原因为 CHANGED_DIMENSION（维度切换）
-            if (REMOVAL_REASON_OFFSET > 0) {
-                lwjglPutObject(entity, REMOVAL_REASON_OFFSET, Entity.RemovalReason.CHANGED_DIMENSION);
+            broadcastEntityRemoval(serverLevel, entity, bossEventUUIDs);
+            unsafeRemoveFromLoadingInbox(serverLevel, entity);
+            unsafeRemoveFromSectionStorage(serverLevel, entity);
+            unsafeRemoveFromEntityTickList(serverLevel, entity.getId());
+            unsafeRemoveFromChunkMap(serverLevel, entity.getId());
+            unsafeRemoveFromPlayersAndMobs(serverLevel, entity);
+            if (entity.isMultipartEntity()) {
+                for (PartEntity<?> part : entity.getParts()) {
+                    serverLevel.dragonParts.remove(part.getId());
+                }
             }
-
-            if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
-                EntityUtil.notifyServerScoreboardRemoval(entity);
-                broadcastEntityRemoval(serverLevel, entity, bossEventUUIDs);
-            }
-
-            EntityUtil.applyRemovalLifecycle(entity, Entity.RemovalReason.CHANGED_DIMENSION);
-
-            // 2. 设置回调为 NULL
-            if (LEVEL_CALLBACK_OFFSET > 0) {
-                lwjglPutObject(entity, LEVEL_CALLBACK_OFFSET, EntityInLevelCallback.NULL);
-            }
-
-            // 3. 底层容器清除（仅服务端）
-            if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
-                // 再清除服务端容器
-                removeFromServerContainersViaLwjgl(serverLevel, entity);
-            }
-
+            entity.updateDynamicGameEventListener(DynamicGameEventListener::remove);
+            entity.onRemovedFromWorld();
+            unsafeRemoveFromEntityLookup(serverLevel, entity.getId(), entity.getUUID());
+            callbacksOnDestroyed(serverLevel, entity);
+            unsafeRemoveFromKnownUuids(serverLevel, entity.getUUID());
+            entity.levelCallback = EntityInLevelCallback.NULL;
+            unsafeRemoveSectionIfEmpty(serverLevel, entity);
             return true;
         } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] Failed to remove entity: {}", e.getMessage());
+            EcaLogger.info("[UnsafeUtil] Failed to remove entity: {}", e.getMessage());
             return false;
         }
     }
 
     // ==================== 客户端同步 ====================
 
-    /**
-     * 广播移除包给所有玩家
-     */
     private static void broadcastEntityRemoval(ServerLevel serverLevel, Entity entity, List<UUID> bossEventUUIDs) {
         try {
             ClientRemovePacket packet = new ClientRemovePacket(entity.getId(), bossEventUUIDs);
@@ -353,18 +319,14 @@ public class LwjglUtil {
                 NetworkHandler.sendToPlayer(packet, player);
             }
         } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] Failed to broadcast entity removal: {}", e.getMessage());
+            EcaLogger.info("[UnsafeUtil] Failed to broadcast entity removal: {}", e.getMessage());
         }
     }
 
     // ==================== 底层容器清除（服务端） ====================
 
-    private static void removeFromServerContainersViaLwjgl(ServerLevel serverLevel, Entity entity) {
-        EntityUtil.removeFromServerContainers(serverLevel, entity);
-    }
-
     // 从 ChunkMap.entityMap 移除（tick 期间延迟执行，避免迭代器损坏）
-    private static void removeFromChunkMapViaLwjgl(ServerLevel serverLevel, int entityId) {
+    private static void unsafeRemoveFromChunkMap(ServerLevel serverLevel, int entityId) {
         if (chunkMapTicking) {
             pendingChunkMapOps.add(() -> doRemoveFromChunkMap(serverLevel, entityId));
             return;
@@ -375,7 +337,6 @@ public class LwjglUtil {
     private static void doRemoveFromChunkMap(ServerLevel serverLevel, int entityId) {
         try {
             if (SERVER_LEVEL_CHUNK_SOURCE_OFFSET < 0) return;
-
             Object chunkSource = lwjglGetObject(serverLevel, SERVER_LEVEL_CHUNK_SOURCE_OFFSET);
             if (chunkSource == null) return;
 
@@ -393,9 +354,8 @@ public class LwjglUtil {
     }
 
     // 从 ServerLevel.players / navigatingMobs 移除
-    private static void removeFromPlayersOrMobsViaLwjgl(ServerLevel serverLevel, Entity entity) {
+    private static void unsafeRemoveFromPlayersAndMobs(ServerLevel serverLevel, Entity entity) {
         try {
-            // 如果是玩家，从 players 列表移除
             if (entity instanceof Player && SERVER_LEVEL_PLAYERS_OFFSET > 0) {
                 List<?> players = (List<?>) lwjglGetObject(serverLevel, SERVER_LEVEL_PLAYERS_OFFSET);
                 if (players != null) {
@@ -403,7 +363,6 @@ public class LwjglUtil {
                 }
             }
 
-            // 如果是 Mob，从 navigatingMobs 集合移除
             if (entity instanceof Mob && SERVER_LEVEL_NAVIGATING_MOBS_OFFSET > 0) {
                 ObjectOpenHashSet<Mob> navigatingMobs = (ObjectOpenHashSet<Mob>)
                     lwjglGetObject(serverLevel, SERVER_LEVEL_NAVIGATING_MOBS_OFFSET);
@@ -415,10 +374,9 @@ public class LwjglUtil {
     }
 
     // 从 EntityLookup (byUuid + byId) 移除
-    private static void removeFromEntityLookupViaLwjgl(ServerLevel serverLevel, int entityId, UUID entityUUID) {
+    private static void unsafeRemoveFromEntityLookup(ServerLevel serverLevel, int entityId, UUID entityUUID) {
         try {
             if (SERVER_LEVEL_ENTITY_MANAGER_OFFSET < 0) return;
-
             Object entityManager = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_MANAGER_OFFSET);
             if (entityManager == null) return;
 
@@ -426,7 +384,6 @@ public class LwjglUtil {
             Object visibleStorage = lwjglGetObject(entityManager, PERSISTENT_MANAGER_VISIBLE_STORAGE_OFFSET);
             if (visibleStorage == null) return;
 
-            // 移除 byUuid
             if (ENTITY_LOOKUP_BY_UUID_OFFSET > 0) {
                 Map<UUID, Entity> byUuid = (Map<UUID, Entity>)
                     lwjglGetObject(visibleStorage, ENTITY_LOOKUP_BY_UUID_OFFSET);
@@ -435,7 +392,6 @@ public class LwjglUtil {
                 }
             }
 
-            // 移除 byId
             if (ENTITY_LOOKUP_BY_ID_OFFSET > 0) {
                 Int2ObjectLinkedOpenHashMap<Entity> byId = (Int2ObjectLinkedOpenHashMap<Entity>)
                     lwjglGetObject(visibleStorage, ENTITY_LOOKUP_BY_ID_OFFSET);
@@ -446,11 +402,10 @@ public class LwjglUtil {
         } catch (Exception ignored) {}
     }
 
-    // 从 KnownUuids 移除
-    private static void removeFromKnownUuidsViaLwjgl(ServerLevel serverLevel, UUID entityUUID) {
+    // 从 knownUuids 移除
+    private static void unsafeRemoveFromKnownUuids(ServerLevel serverLevel, UUID entityUUID) {
         try {
             if (SERVER_LEVEL_ENTITY_MANAGER_OFFSET < 0) return;
-
             Object entityManager = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_MANAGER_OFFSET);
             if (entityManager == null) return;
 
@@ -464,10 +419,9 @@ public class LwjglUtil {
     }
 
     // 从 EntityTickList (active + passive) 移除（仿照原版 ensureActiveIsNotIterated + remove 逻辑）
-    private static void removeFromEntityTickListViaLwjgl(ServerLevel serverLevel, int entityId) {
+    private static void unsafeRemoveFromEntityTickList(ServerLevel serverLevel, int entityId) {
         try {
             if (SERVER_LEVEL_ENTITY_TICK_LIST_OFFSET < 0) return;
-
             Object entityTickList = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_TICK_LIST_OFFSET);
             if (entityTickList == null) return;
 
@@ -505,10 +459,9 @@ public class LwjglUtil {
     }
 
     // 从 EntitySectionStorage (ClassInstanceMultiMap) 移除
-    private static void removeFromEntitySectionStorageViaLwjgl(ServerLevel serverLevel, Entity entity) {
+    private static void unsafeRemoveFromSectionStorage(ServerLevel serverLevel, Entity entity) {
         try {
             if (SERVER_LEVEL_ENTITY_MANAGER_OFFSET < 0) return;
-
             Object entityManager = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_MANAGER_OFFSET);
             if (entityManager == null) return;
 
@@ -521,7 +474,6 @@ public class LwjglUtil {
                 lwjglGetObject(sectionStorage, ENTITY_SECTION_STORAGE_SECTIONS_OFFSET);
             if (sections == null) return;
 
-            // 遍历所有 EntitySection
             for (Object section : sections.values()) {
                 if (section == null) continue;
 
@@ -529,31 +481,25 @@ public class LwjglUtil {
                 Object storage = lwjglGetObject(section, ENTITY_SECTION_STORAGE_OFFSET);
                 if (storage == null) continue;
 
-                // 获取 ClassInstanceMultiMap.byClass
                 if (CLASS_INSTANCE_MULTI_MAP_BY_CLASS_OFFSET < 0) continue;
                 Map<Class<?>, List<?>> byClass = (Map<Class<?>, List<?>>)
                     lwjglGetObject(storage, CLASS_INSTANCE_MULTI_MAP_BY_CLASS_OFFSET);
                 if (byClass == null) continue;
 
-                // 遍历所有类型的 List，移除匹配的实体
                 for (Map.Entry<Class<?>, List<?>> entry : byClass.entrySet()) {
-                    Class<?> clazz = entry.getKey();
-                    List<?> list = entry.getValue();
-
-                    if (clazz.isInstance(entity)) {
-                        list.remove(entity);
+                    if (entry.getKey().isInstance(entity)) {
+                        entry.getValue().remove(entity);
                     }
                 }
             }
         } catch (Exception ignored) {}
     }
 
-    // 调用 callbacks.onDestroyed() 触发 tracking 结束
+    // 调用 callbacks.onDestroyed() 触发 scoreboard/tracking 清理
     @SuppressWarnings("rawtypes")
-    private static void callbacksOnDestroyedViaLwjgl(ServerLevel serverLevel, Entity entity) {
+    private static void callbacksOnDestroyed(ServerLevel serverLevel, Entity entity) {
         try {
             if (SERVER_LEVEL_ENTITY_MANAGER_OFFSET < 0 || PERSISTENT_MANAGER_CALLBACKS_OFFSET < 0) return;
-
             Object entityManager = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_MANAGER_OFFSET);
             if (entityManager == null) return;
 
@@ -565,10 +511,9 @@ public class LwjglUtil {
     }
 
     // 从 loadingInbox 清理正在加载的实体
-    private static void removeFromLoadingInboxViaLwjgl(ServerLevel serverLevel, Entity entity) {
+    private static void unsafeRemoveFromLoadingInbox(ServerLevel serverLevel, Entity entity) {
         try {
             if (SERVER_LEVEL_ENTITY_MANAGER_OFFSET < 0 || PERSISTENT_MANAGER_LOADING_INBOX_OFFSET < 0) return;
-
             Object entityManager = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_MANAGER_OFFSET);
             if (entityManager == null) return;
 
@@ -591,10 +536,9 @@ public class LwjglUtil {
     }
 
     // 清理空的 EntitySection
-    private static void removeSectionIfEmptyViaLwjgl(ServerLevel serverLevel, Entity entity) {
+    private static void unsafeRemoveSectionIfEmpty(ServerLevel serverLevel, Entity entity) {
         try {
             if (SERVER_LEVEL_ENTITY_MANAGER_OFFSET < 0 || PERSISTENT_MANAGER_SECTION_STORAGE_OFFSET < 0) return;
-
             Object entityManager = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_MANAGER_OFFSET);
             if (entityManager == null) return;
 
@@ -602,7 +546,8 @@ public class LwjglUtil {
             if (sectionStorage == null) return;
 
             if (ENTITY_SECTION_STORAGE_SECTIONS_OFFSET < 0) return;
-            Long2ObjectMap<?> sections = (Long2ObjectMap<?>) lwjglGetObject(sectionStorage, ENTITY_SECTION_STORAGE_SECTIONS_OFFSET);
+            Long2ObjectMap<?> sections = (Long2ObjectMap<?>)
+                lwjglGetObject(sectionStorage, ENTITY_SECTION_STORAGE_SECTIONS_OFFSET);
             if (sections == null) return;
 
             long sectionKey = SectionPos.asLong(entity.blockPosition());

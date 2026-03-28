@@ -6,7 +6,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.eca.util.EcaLogger;
 import net.eca.util.health.HealthAnalyzer.HealthFieldCache;
 import net.eca.util.health.HealthAnalyzer.ContainerAccessPattern;
-import net.eca.util.reflect.LwjglUtil;
+import net.eca.util.reflect.UnsafeUtil;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 
 import java.lang.invoke.MethodHandles;
@@ -283,7 +283,7 @@ public class HealthAnalyzerManager {
                     if (offset == -1) return false;
 
                     //Unsafe 直接写入
-                    LwjglUtil.lwjglPutObject(entry, offset, boxedValue);
+                    UnsafeUtil.lwjglPutObject(entry, offset, boxedValue);
                     return true;
                 }
             }
@@ -306,7 +306,7 @@ public class HealthAnalyzerManager {
             for (Field f : cls.getDeclaredFields()) {
                 String name = f.getName();
                 if (name.equals("value") || name.equals("val")) {
-                    long offset = LwjglUtil.lwjglObjectFieldOffset(f);
+                    long offset = UnsafeUtil.lwjglObjectFieldOffset(f);
                     if (offset != -1) {
                         ENTRY_VALUE_OFFSET_CACHE.put(entryClass, offset);
                         return offset;

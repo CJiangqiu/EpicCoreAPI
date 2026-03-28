@@ -6,7 +6,7 @@ import net.eca.api.EcaAPI;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.util.entity_extension.ForceLoadingManager;
-import net.eca.util.reflect.LwjglUtil;
+import net.eca.util.reflect.UnsafeUtil;
 import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
@@ -73,12 +73,12 @@ public abstract class ChunkMapMixin {
 
     @Inject(method = "tick()V", at = @At("HEAD"))
     private void eca$onTickStart(CallbackInfo ci) {
-        LwjglUtil.onChunkMapTickStart();
+        UnsafeUtil.onChunkMapTickStart();
     }
 
     @Inject(method = "tick()V", at = @At("TAIL"))
     private void eca$onTickEnd(CallbackInfo ci) {
-        LwjglUtil.onChunkMapTickEnd();
+        UnsafeUtil.onChunkMapTickEnd();
         // 恢复受保护实体的追踪
         ForceLoadingManager.recoverTrackedEntities(this.level, this.entityMap, this::addEntity);
     }

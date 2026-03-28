@@ -42,7 +42,7 @@ public class MemoryRemoveCommand {
             int failCount = 0;
 
             for (Entity entity : targets) {
-                boolean success = EcaAPI.memoryRemove(entity);
+                boolean success = EcaAPI.memoryRemove(entity, Entity.RemovalReason.CHANGED_DIMENSION);
                 if (success) {
                     successCount++;
                 } else {

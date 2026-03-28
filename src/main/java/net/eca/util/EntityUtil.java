@@ -1292,38 +1292,27 @@ public class EntityUtil {
     //完整的实体清除方法
     public static void remove(Entity entity, Entity.RemovalReason reason) {
         if (entity == null || entity.level() == null) return;
-        boolean isServerSide = !entity.level().isClientSide;
+        if (entity.level().isClientSide) return;
+        ServerLevel serverLevel = (ServerLevel) entity.level();
 
         try {
             List<UUID> bossEventUUIDs = collectAllBossEventUUIDsForRemoval(entity);
             cleanupAI(entity);
             cleanupBossBar(entity);
+            entity.removalReason = reason;
             entity.stopRiding();
-            removeAllPassengers(entity);
+            entity.getPassengers().forEach(Entity::stopRiding);
             entity.invalidateCaps();
-            if (isServerSide) {
-                notifyServerScoreboardRemoval(entity);
-            }
-            if (isServerSide && entity.level() instanceof ServerLevel serverLevel) {
-                NetworkHandler.sendToTrackingClients(
-                        new ClientRemovePacket(entity.getId(), bossEventUUIDs),
-                        entity
-                );
-            }
-            applyRemovalLifecycle(entity, reason);
+            NetworkHandler.sendToTrackingClients(new ClientRemovePacket(entity.getId(), bossEventUUIDs), entity);
+            removeFromServerContainers(serverLevel, entity);
 
-
-            if (isServerSide && entity.level() instanceof ServerLevel serverLevel) {
-                removeFromServerContainers(serverLevel, entity);
-            } else if (entity.level().isClientSide && entity.level() instanceof ClientLevel clientLevel) {
-                removeFromClientContainers(clientLevel, entity);
-            }
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Entity removal failed: {}", e.getMessage());
         }
     }
 
     public static void prepareForMemoryRemove(Entity entity) {
+        if (entity == null) return;
         if (!(entity instanceof LivingEntity livingEntity)) {
             return;
         }
@@ -1346,33 +1335,6 @@ public class EntityUtil {
         }
         return bossEventUUIDs;
     }
-
-    public static void notifyServerScoreboardRemoval(Entity entity) {
-        if (entity == null || entity.level() == null || entity.level().isClientSide) {
-            return;
-        }
-        if (entity.level() instanceof ServerLevel serverLevel) {
-            serverLevel.getScoreboard().entityRemoved(entity);
-        }
-    }
-
-    public static void applyRemovalLifecycle(Entity entity, Entity.RemovalReason reason) {
-        if (entity == null) {
-            return;
-        }
-
-        entity.setRemoved(reason);
-        entity.onRemovedFromWorld();
-        EntityInLevelCallback callback = entity.levelCallback;
-        if (callback != EntityInLevelCallback.NULL) {
-            callback.onRemove(reason);
-        }
-        entity.levelCallback = EntityInLevelCallback.NULL;
-        if (entity instanceof LivingEntity livingEntity) {
-            livingEntity.updateDynamicGameEventListener(DynamicGameEventListener::remove);
-        }
-    }
-
 
     //AI清理
     public static void cleanupAI(Entity entity) {
@@ -1433,34 +1395,29 @@ public class EntityUtil {
         return uuids;
     }
 
-    //清除所有乘客的骑乘关系
-    public static void removeAllPassengers(Entity entity) {
-        List<Entity> passengers = entity.getPassengers();
-        for (int i = passengers.size() - 1; i >= 0; i--) {
-            Entity passenger = passengers.get(i);
-            if (passenger != null) {
-                passenger.stopRiding();
-            }
-        }
-    }
-
-    // ==================== 服务端底层容器清除 ====================
-
+    //服务端底层容器清除（顺序对齐原版 PersistentEntitySectionManager.Callback.onRemove）
     public static void removeFromServerContainers(ServerLevel serverLevel, Entity entity) {
         try {
             PersistentEntitySectionManager<Entity> entityManager = serverLevel.entityManager;
-            entityManager.callbacks.onDestroyed(entity);
 
             removeFromLoadingInbox(entityManager, entity);
+            removeFromSectionStorage(entityManager.sectionStorage, entity);
+            removeFromEntityTickList(serverLevel.entityTickList, entity);
             serverLevel.chunkSource.chunkMap.entityMap.remove(entity.getId());
             if (entity instanceof ServerPlayer) serverLevel.players.remove(entity);
             if (entity instanceof Mob) serverLevel.navigatingMobs.remove(entity);
-
-            removeFromSectionStorage(entityManager.sectionStorage, entity);              //1. ClassInstanceMultiMap 直接操作
-            removeSectionIfEmpty(entityManager.sectionStorage, entity);
-            removeFromEntityTickList(serverLevel.entityTickList, entity);                //2. EntityTickList.active 直接操作
-            removeFromEntityLookup(entityManager.visibleEntityStorage, entity);          //3. EntityLookup byId/byUuid 直接操作
-            entityManager.knownUuids.remove(entity.getUUID());                           //4. KnownUuids
+            if (entity.isMultipartEntity()) {
+                for (PartEntity<?> part : entity.getParts()) {
+                    serverLevel.dragonParts.remove(part.getId());
+                }
+            }
+            entity.updateDynamicGameEventListener(DynamicGameEventListener::remove);
+            entity.onRemovedFromWorld();
+            removeFromEntityLookup(entityManager.visibleEntityStorage, entity);
+            entityManager.callbacks.onDestroyed(entity);
+            entityManager.knownUuids.remove(entity.getUUID());          // e. knownUuids
+            entity.levelCallback = EntityInLevelCallback.NULL;           // f. levelCallback = NULL
+            removeSectionIfEmpty(entityManager.sectionStorage, entity);  // g. removeSectionIfEmpty
 
         } catch (Exception e) {
             EcaLogger.error("[EntityUtil] Failed to remove from server containers, entityId={}, type={}, uuid={}",
@@ -1523,8 +1480,7 @@ public class EntityUtil {
         }
     }
 
-    // ==================== 客户端底层容器清除 ====================
-
+    //客户端底层容器清除
     public static void removeFromClientContainers(ClientLevel clientLevel, Entity entity) {
         try {
             clientLevel.players.remove(entity);

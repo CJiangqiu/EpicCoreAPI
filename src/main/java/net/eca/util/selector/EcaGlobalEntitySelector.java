@@ -1,50 +1,82 @@
 package net.eca.util.selector;
 
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import net.eca.api.EcaAPI;
 import net.minecraft.advancements.critereon.MinMaxBounds;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.selector.EntitySelector;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 public class EcaGlobalEntitySelector extends EntitySelector {
 
-    private final String rawSelector;
+    private final EntitySelector vanilla;
     private final EcaEntitySelector.SelectorMode mode;
 
-    public EcaGlobalEntitySelector(String rawSelector, EcaEntitySelector.SelectorMode mode) {
+    public EcaGlobalEntitySelector(EntitySelector vanilla, EcaEntitySelector.SelectorMode mode) {
         super(
-            mode == EcaEntitySelector.SelectorMode.NEAREST_PLAYER
-                || mode == EcaEntitySelector.SelectorMode.RANDOM_PLAYER
-                || mode == EcaEntitySelector.SelectorMode.SELF ? 1 : Integer.MAX_VALUE,
-            mode != EcaEntitySelector.SelectorMode.NEAREST_PLAYER
-                && mode != EcaEntitySelector.SelectorMode.ALL_PLAYERS
-                && mode != EcaEntitySelector.SelectorMode.RANDOM_PLAYER,
-            false,
+            vanilla.getMaxResults(),
+            vanilla.includesEntities(),
+            vanilla.isWorldLimited(),
             entity -> true,
             MinMaxBounds.Doubles.ANY,
             Function.identity(),
             null,
             EntitySelector.ORDER_ARBITRARY,
             mode == EcaEntitySelector.SelectorMode.SELF,
-            null,
-            null,
-            null,
-            true
+            null, null, null,
+            vanilla.usesSelector()
         );
-        this.rawSelector = rawSelector;
+        this.vanilla = vanilla;
         this.mode = mode;
     }
 
     @Override
     public List<? extends Entity> findEntities(CommandSourceStack source) throws CommandSyntaxException {
-        return EcaEntitySelector.select(source, this.rawSelector, this.mode);
+        Vec3 pos = vanilla.position.apply(source.getPosition());
+
+        // Replicate EntitySelector.getPredicate logic using AT-exposed fields
+        Predicate<Entity> predicate = vanilla.predicate;
+        if (vanilla.aabb != null) {
+            AABB movedAabb = vanilla.aabb.move(pos);
+            predicate = predicate.and(e -> movedAabb.intersects(e.getBoundingBox()));
+        }
+        if (!vanilla.range.isAny()) {
+            predicate = predicate.and(e -> vanilla.range.matchesSqr(e.distanceToSqr(pos)));
+        }
+        Predicate<Entity> finalPredicate = predicate.and(e -> e.getType().isEnabled(source.enabledFeatures()));
+
+        // @eca_s: return only the executing entity if it matches
+        if (mode == EcaEntitySelector.SelectorMode.SELF) {
+            Entity self = source.getEntity();
+            if (self != null && (!self.isRemoved() || EcaAPI.isInvulnerable(self)) && finalPredicate.test(self)) {
+                return List.of(self);
+            }
+            return Collections.emptyList();
+        }
+
+        // Get ECA's extended entity list (includes invulnerable entities not in vanilla lookup)
+        Level level = source.getLevel();
+        boolean playersOnly = !vanilla.includesEntities();
+        List<Entity> entities = new ArrayList<>(EcaEntitySelector.getEntities(level,
+            playersOnly ? e -> e instanceof Player && finalPredicate.test(e) : finalPredicate));
+
+        // Sort and limit (replicating EntitySelector.sortAndLimit)
+        if (entities.size() > 1) {
+            vanilla.order.accept(pos, entities);
+        }
+        return entities.subList(0, Math.min(vanilla.maxResults, entities.size()));
     }
 
     @Override
