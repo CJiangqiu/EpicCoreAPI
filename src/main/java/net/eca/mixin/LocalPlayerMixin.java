@@ -3,7 +3,6 @@ package net.eca.mixin;
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
 import net.minecraft.client.player.LocalPlayer;
-import net.minecraft.world.damagesource.DamageSource;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -45,7 +44,7 @@ public class LocalPlayerMixin {
     private void onTick(CallbackInfo ci) {
         LocalPlayer player = (LocalPlayer) (Object) this;
         if (EcaAPI.isInvulnerable(player)) {
-            EntityUtil.reviveEntity(player);
+            EntityUtil.revive(player);
         }
     }
 }

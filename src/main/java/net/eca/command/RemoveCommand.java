@@ -15,7 +15,7 @@ import net.minecraft.world.entity.Entity;
 import java.util.Collection;
 
 //移除实体命令
-public class RemoveEntityCommand {
+public class RemoveCommand {
 
     //移除原因提示
     private static final SuggestionProvider<CommandSourceStack> REMOVAL_REASON_SUGGESTIONS =
@@ -29,17 +29,17 @@ public class RemoveEntityCommand {
         return Commands.literal("remove")
             .then(Commands.argument("targets", EntityArgument.entities())
                 //无参数版本，使用默认原因 KILLED
-                .executes(context -> removeEntities(context, null))
+                .executes(context -> remove(context, null))
                 //带原因参数版本
                 .then(Commands.argument("reason", StringArgumentType.word())
                     .suggests(REMOVAL_REASON_SUGGESTIONS)
-                    .executes(context -> removeEntities(context, StringArgumentType.getString(context, "reason")))
+                    .executes(context -> remove(context, StringArgumentType.getString(context, "reason")))
                 )
             );
     }
 
     //执行移除
-    private static int removeEntities(CommandContext<CommandSourceStack> context, String reasonString) {
+    private static int remove(CommandContext<CommandSourceStack> context, String reasonString) {
         CommandSourceStack source = context.getSource();
 
         try {
@@ -64,7 +64,7 @@ public class RemoveEntityCommand {
 
             for (Entity entity : targets) {
                 try {
-                    EcaAPI.removeEntity(entity, reason);
+                    EcaAPI.remove(entity, reason);
                     successCount++;
                 } catch (Exception e) {
                     source.sendFailure(Component.literal(

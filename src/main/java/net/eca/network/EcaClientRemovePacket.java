@@ -59,7 +59,7 @@ public class EcaClientRemovePacket {
 
     /**
      * Handle the packet on client side.
-     * Follows the same phase order as EntityUtil.removeEntity():
+     * Follows the same phase order as EntityUtil.remove():
      * 1. Lifecycle callback (onClientRemoval)
      * 2. Capabilities invalidation
      * 3. State marking (setRemoved, levelCallback)

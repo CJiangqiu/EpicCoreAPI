@@ -19,12 +19,12 @@ public class MemoryRemoveCommand {
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
         return Commands.literal("memoryRemove")
             .then(Commands.argument("targets", EntityArgument.entities())
-                .executes(MemoryRemoveCommand::memoryRemoveEntities)
+                .executes(MemoryRemoveCommand::memoryRemove)
             );
     }
 
     //执行清除
-    private static int memoryRemoveEntities(CommandContext<CommandSourceStack> context) {
+    private static int memoryRemove(CommandContext<CommandSourceStack> context) {
         CommandSourceStack source = context.getSource();
 
         //检查配置
@@ -42,7 +42,7 @@ public class MemoryRemoveCommand {
             int failCount = 0;
 
             for (Entity entity : targets) {
-                boolean success = EcaAPI.memoryRemoveEntity(entity);
+                boolean success = EcaAPI.memoryRemove(entity);
                 if (success) {
                     successCount++;
                 } else {

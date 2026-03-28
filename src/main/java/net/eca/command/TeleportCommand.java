@@ -1,6 +1,5 @@
 package net.eca.command;
 
-import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import net.eca.api.EcaAPI;
@@ -22,13 +21,13 @@ public class TeleportCommand {
         return Commands.literal("teleport")
             .then(Commands.argument("targets", EntityArgument.entities())
                 .then(Commands.argument("location", Vec3Argument.vec3())
-                    .executes(TeleportCommand::teleportToCoordinates)
+                    .executes(TeleportCommand::teleport)
                 )
             );
     }
 
     //执行传送（坐标）
-    private static int teleportToCoordinates(CommandContext<CommandSourceStack> context) {
+    private static int teleport(CommandContext<CommandSourceStack> context) {
         CommandSourceStack source = context.getSource();
 
         try {
@@ -39,7 +38,7 @@ public class TeleportCommand {
 
             for (Entity entity : targets) {
                 try {
-                    boolean success = EcaAPI.teleportEntity(entity, location.x, location.y, location.z);
+                    boolean success = EcaAPI.teleport(entity, location.x, location.y, location.z);
                     if (success) {
                         successCount++;
                     } else {

@@ -220,7 +220,7 @@ public final class EcaAPI {
      * - When enabling invulnerability: revives entity and locks health
      * - When disabling invulnerability: clears invulnerability and unlocks health
      * - Prevents death through LivingDeathEvent cancellation
-     * - Prevents removal through Entity killEntity/discard/remove/setRemoved Mixin interception
+     * - Prevents removal through Entity kill/discard/remove/setRemoved Mixin interception
      * @param entity the entity to modify
      * @param invulnerable true to make the entity invulnerable, false otherwise
      */
@@ -234,7 +234,7 @@ public final class EcaAPI {
 
         if (invulnerable) {
             // 开启无敌：复活 + 锁血 + 设置无敌状态 + 添加记录
-            reviveEntity(livingEntity);
+            revive(livingEntity);
             float currentHealth = livingEntity.getHealth();
             lockHealth(livingEntity, currentHealth);
             if (EntityUtil.INVULNERABLE != null) {
@@ -264,8 +264,8 @@ public final class EcaAPI {
      * @param entity the living entity to setDead
      * @param damageSource the damage source that caused the death
      */
-    public static void killEntity(LivingEntity entity, DamageSource damageSource) {
-        EntityUtil.killEntity(entity, damageSource);
+    public static void kill(LivingEntity entity, DamageSource damageSource) {
+        EntityUtil.kill(entity, damageSource);
     }
 
     // 复活实体
@@ -273,12 +273,12 @@ public final class EcaAPI {
      * Revive an entity by clearing its death state.
      * @param entity the living entity to revive
      */
-    public static void reviveEntity(LivingEntity entity) {
-        EntityUtil.reviveEntity(entity);
+    public static void revive(LivingEntity entity) {
+        EntityUtil.revive(entity);
     }
 
-    public static void reviveEntity(ServerLevel level, UUID uuid) {
-        EntityUtil.reviveEntity(level, uuid);
+    public static void revive(ServerLevel level, UUID uuid) {
+        EntityUtil.revive(level, uuid);
     }
 
     public static Map<String, Boolean> reviveAllContainers(LivingEntity entity) {
@@ -303,8 +303,8 @@ public final class EcaAPI {
      * @param entity the entity to remove
      * @param reason the removal reason (e.g., Entity.RemovalReason.KILLED, DISCARDED, etc.)
      */
-    public static void removeEntity(Entity entity, Entity.RemovalReason reason) {
-        EntityUtil.removeEntity(entity, reason);
+    public static void remove(Entity entity, Entity.RemovalReason reason) {
+        EntityUtil.remove(entity, reason);
     }
 
     // 清除实体（使用LWJGL实现，需要开启激进攻击逻辑配置）
@@ -314,12 +314,12 @@ public final class EcaAPI {
      * @param entity the entity to remove
      * @return true if removal succeeded, false otherwise (including when config is disabled)
      */
-    public static boolean memoryRemoveEntity(Entity entity) {
+    public static boolean memoryRemove(Entity entity) {
         if (entity == null) {
             return false;
         }
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
-            EcaLogger.warn("memoryRemoveEntity requires Attack Radical Logic to be enabled in config");
+            EcaLogger.warn("memoryRemove requires Attack Radical Logic to be enabled in config");
             return false;
         }
 
@@ -350,8 +350,8 @@ public final class EcaAPI {
      * @param z the target z coordinate
      * @return true if teleportation succeeded, false otherwise
      */
-    public static boolean teleportEntity(Entity entity, double x, double y, double z) {
-        return EntityUtil.teleportEntity(entity, x, y, z);
+    public static boolean teleport(Entity entity, double x, double y, double z) {
+        return EntityUtil.teleport(entity, x, y, z);
     }
 
     // 按ID获取实体

@@ -448,7 +448,7 @@ public class EntityUtil {
     }
 
     //按UUID复活实体（清除死亡状态 + 容器修复）
-    public static void reviveEntity(ServerLevel level, UUID entityUUID) {
+    public static void revive(ServerLevel level, UUID entityUUID) {
         if (level == null || entityUUID == null) {
             return;
         }
@@ -460,7 +460,7 @@ public class EntityUtil {
         if (entity.getRemovalReason() == Entity.RemovalReason.CHANGED_DIMENSION) {
             return;
         }
-        reviveEntity(livingEntity);
+        revive(livingEntity);
     }
 
     private static boolean isAlreadyTrackedException(Exception e) {
@@ -1202,7 +1202,7 @@ public class EntityUtil {
     // ==================== 实体死亡模块 ====================
 
     //设置实体死亡状态
-    public static void killEntity(LivingEntity entity, DamageSource damageSource) {
+    public static void kill(LivingEntity entity, DamageSource damageSource) {
         if (entity == null || damageSource == null) return;
 
         try {
@@ -1235,7 +1235,7 @@ public class EntityUtil {
 
             if (entity.isAlive()){
                 //保底清除实体
-                removeEntity(entity, Entity.RemovalReason.KILLED);
+                remove(entity, Entity.RemovalReason.KILLED);
             }
 
         } catch (Exception e) {
@@ -1244,7 +1244,7 @@ public class EntityUtil {
     }
 
     //复活实体（清除死亡状态）
-    public static void reviveEntity(LivingEntity entity) {
+    public static void revive(LivingEntity entity) {
         if (entity == null) return;
         // 跳过已完成维度切换的实体，防止旧实例被错误复活到原维度
         if (entity.getRemovalReason() == Entity.RemovalReason.CHANGED_DIMENSION) {
@@ -1286,7 +1286,7 @@ public class EntityUtil {
     // ==================== 实体清除模块 ====================
 
     //完整的实体清除方法
-    public static void removeEntity(Entity entity, Entity.RemovalReason reason) {
+    public static void remove(Entity entity, Entity.RemovalReason reason) {
         if (entity == null || entity.level() == null) return;
         boolean isServerSide = !entity.level().isClientSide;
 
@@ -1523,7 +1523,7 @@ public class EntityUtil {
      * @param z the target z coordinate
      * @return true if teleportation succeeded, false otherwise
      */
-    public static boolean teleportEntity(Entity entity, double x, double y, double z) {
+    public static boolean teleport(Entity entity, double x, double y, double z) {
         if (entity == null) return false;
 
         try {

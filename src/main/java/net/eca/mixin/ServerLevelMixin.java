@@ -69,7 +69,7 @@ public class ServerLevelMixin {
             if (entity == null || EntityUtil.isChangingDimension(entity)) {
                 continue;
             }
-            EcaAPI.reviveEntity(self, uuid);
+            EcaAPI.revive(self, uuid);
         }
 
         // 每 20 tick (1秒) 更新一次禁令
@@ -95,7 +95,7 @@ public class ServerLevelMixin {
             // 针对无敌玩家被第三方模组强制 respawn 的场景：
             // 在新实例加入前，先移除旧实例，避免 knownUuids/lookup 里出现同 UUID 冲突
             if (eca$duplicateWasInvulnerable) {
-                EntityUtil.removeEntity(sp, Entity.RemovalReason.CHANGED_DIMENSION);
+                EntityUtil.remove(sp, Entity.RemovalReason.CHANGED_DIMENSION);
             }
         } else {
             eca$oldDuplicate = null;
@@ -122,13 +122,13 @@ public class ServerLevelMixin {
         ServerLevel self = (ServerLevel)(Object)this;
         Entity current = self.getEntities().get(eca$oldDuplicate.getUUID());
         if (current == eca$oldDuplicate) {
-            EntityUtil.removeEntity(eca$oldDuplicate, Entity.RemovalReason.CHANGED_DIMENSION);
+            EntityUtil.remove(eca$oldDuplicate, Entity.RemovalReason.CHANGED_DIMENSION);
         }
 
         // 旧实例为无敌时，将无敌状态显式补回新玩家实例，避免 respawn 过程状态丢失
         if (eca$duplicateWasInvulnerable) {
             EcaAPI.setInvulnerable(newPlayer, true);
-            EntityUtil.reviveEntity(newPlayer);
+            EntityUtil.revive(newPlayer);
             EntityUtil.unmarkDimensionChanging(newPlayer);
         }
 

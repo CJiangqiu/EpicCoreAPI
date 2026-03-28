@@ -13,18 +13,18 @@ import net.minecraft.world.entity.LivingEntity;
 import java.util.Collection;
 
 //击杀实体命令
-public class KillEntityCommand {
+public class KillCommand {
 
     //注册子命令
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
-        return Commands.literal("killEntity")
+        return Commands.literal("kill")
             .then(Commands.argument("targets", EntityArgument.entities())
-                .executes(KillEntityCommand::killEntities)
+                .executes(KillCommand::kill)
             );
     }
 
     //执行击杀
-    private static int killEntities(CommandContext<CommandSourceStack> context) {
+    private static int kill(CommandContext<CommandSourceStack> context) {
         CommandSourceStack source = context.getSource();
 
         try {
@@ -41,11 +41,11 @@ public class KillEntityCommand {
 
                 try {
                     //使用通用伤害源
-                    EcaAPI.killEntity(livingEntity, source.getLevel().damageSources().generic());
+                    EcaAPI.kill(livingEntity, source.getLevel().damageSources().generic());
                     successCount++;
                 } catch (Exception e) {
                     source.sendFailure(Component.literal(
-                        "§cFailed to killEntity " + entity.getName().getString() + ": " + e.getMessage()
+                        "§cFailed to kill " + entity.getName().getString() + ": " + e.getMessage()
                     ));
                 }
             }
