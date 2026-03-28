@@ -1212,7 +1212,6 @@ public class EntityUtil {
         try {
             //设置血量为0
             setHealth(entity, 0.0f);
-
             //设置伤害来源
             Entity sourceEntity = damageSource.getEntity();
             if (sourceEntity != null) {
@@ -1234,10 +1233,10 @@ public class EntityUtil {
             entity.deathTime = 0;
             //触发击杀成就
             triggerKillAdvancement(entity, damageSource);
-            //掉落物品
-            entity.dropAllDeathLoot(damageSource);
 
             if (entity.isAlive()){
+                //掉落物品
+                entity.dropAllDeathLoot(damageSource);
                 //保底清除实体
                 remove(entity, Entity.RemovalReason.KILLED);
             }

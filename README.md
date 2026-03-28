@@ -104,7 +104,7 @@ side="BOTH"
 - `isLocationLocked(entity)` - Check if entity location is locked
 - `getLockedLocation(entity)` - Get locked position (null if not locked)
 - `remove(entity, reason)` - Complete removal (AI, boss bars, containers, passengers)
-- `memoryRemove(entity)` - DANGER! Requires Attack Radical Logic config. Remove entity via LWJGL internal channel
+- `memoryRemove(entity, reason)` - DANGER! Requires Attack Radical Logic config. Remove entity via LWJGL internal channel
 - `cleanupBossBar(entity)` - Remove boss bars without removing entity
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
 - `setInvulnerable(entity, invulnerable)` - Set invulnerability (enable: revive + lock health; disable: clear invulnerability + unlock health)
@@ -206,16 +206,16 @@ boolean locationLocked = EcaAPI.isLocationLocked(entity);
 Vec3 lockedPos = EcaAPI.getLockedLocation(entity);
 EcaAPI.unlockLocation(entity);
 EcaAPI.remove(entity, Entity.RemovalReason.KILLED);
-EcaAPI.memoryRemove(entity);  // Remove using LWJGL internal Unsafe instance
+EcaAPI.memoryRemove(entity, Entity.RemovalReason.CHANGED_DIMENSION);  // Remove using LWJGL internal Unsafe instance
 EcaAPI.cleanupBossBar(entity);
 
 // ECA Entity Selector API
-Entity byId = EcaAPI.getEntity(serverLevel, 123);
-Entity byUuid = EcaAPI.getEntity(serverLevel, uuid);
-List<Entity> allInLevel = EcaAPI.getEntities(serverLevel);
-List<Entity> inArea = EcaAPI.getEntities(serverLevel, new AABB(0, 0, 0, 16, 256, 16));
-List<Entity> filtered = EcaAPI.getEntities(serverLevel, e -> e.getType() == EntityType.ZOMBIE);
-List<LivingEntity> livingInArea = EcaAPI.getEntities(serverLevel, new AABB(0, 0, 0, 32, 256, 32), LivingEntity.class);
+Entity byId = EcaAPI.getEntity(level, 123);
+Entity byUuid = EcaAPI.getEntity(level, uuid);
+List<Entity> allInLevel = EcaAPI.getEntities(level);
+List<Entity> inArea = EcaAPI.getEntities(level, new AABB(0, 0, 0, 16, 256, 16));
+List<Entity> filtered = EcaAPI.getEntities(level, e -> e.getType() == EntityType.ZOMBIE);
+List<LivingEntity> livingInArea = EcaAPI.getEntities(level, new AABB(0, 0, 0, 32, 256, 32), LivingEntity.class);
 List<Entity> allServerEntities = EcaAPI.getEntities(server);
 
 // Invulnerability
@@ -520,7 +520,7 @@ side="BOTH"
 - `isLocationLocked(entity)` - 检查实体位置是否锁定
 - `getLockedLocation(entity)` - 获取锁定位置（未锁定返回 null）
 - `remove(entity, reason)` - 完整移除（AI、Boss 血条、容器、乘客等）
-- `memoryRemove(entity)` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
+- `memoryRemove(entity, reason)` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
 - `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活并锁血；关闭：清除无敌并解锁血量）
@@ -622,16 +622,16 @@ boolean locationLocked = EcaAPI.isLocationLocked(entity);
 Vec3 lockedPos = EcaAPI.getLockedLocation(entity);
 EcaAPI.unlockLocation(entity);
 EcaAPI.remove(entity, Entity.RemovalReason.KILLED);
-EcaAPI.memoryRemove(entity);  // 提供使用LWJGL内部Unsafe实例进行清除
+EcaAPI.memoryRemove(entity, Entity.RemovalReason.CHANGED_DIMENSION);  // 提供使用LWJGL内部Unsafe实例进行清除
 EcaAPI.cleanupBossBar(entity);
 
 // ECA 实体选择 API
-Entity byId = EcaAPI.getEntity(serverLevel, 123);
-Entity byUuid = EcaAPI.getEntity(serverLevel, uuid);
-List<Entity> allInLevel = EcaAPI.getEntities(serverLevel);
-List<Entity> inArea = EcaAPI.getEntities(serverLevel, new AABB(0, 0, 0, 16, 256, 16));
-List<Entity> filtered = EcaAPI.getEntities(serverLevel, e -> e.getType() == EntityType.ZOMBIE);
-List<LivingEntity> livingInArea = EcaAPI.getEntities(serverLevel, new AABB(0, 0, 0, 32, 256, 32), LivingEntity.class);
+Entity byId = EcaAPI.getEntity(level, 123);
+Entity byUuid = EcaAPI.getEntity(level, uuid);
+List<Entity> allInLevel = EcaAPI.getEntities(level);
+List<Entity> inArea = EcaAPI.getEntities(level, new AABB(0, 0, 0, 16, 256, 16));
+List<Entity> filtered = EcaAPI.getEntities(level, e -> e.getType() == EntityType.ZOMBIE);
+List<LivingEntity> livingInArea = EcaAPI.getEntities(level, new AABB(0, 0, 0, 32, 256, 32), LivingEntity.class);
 List<Entity> allServerEntities = EcaAPI.getEntities(server);
 
 // 无敌状态
