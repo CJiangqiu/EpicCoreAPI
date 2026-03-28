@@ -36,16 +36,10 @@ public class NetworkHandler {
      * Called during mod initialization.
      */
     public static void register() {
-        CHANNEL.messageBuilder(EcaClientRemovePacket.class, id())
-                .encoder(EcaClientRemovePacket::encode)
-                .decoder(EcaClientRemovePacket::decode)
-                .consumerMainThread(EcaClientRemovePacket::handle)
-                .add();
-
-        CHANNEL.messageBuilder(LwjglClientRemovePacket.class, id())
-                .encoder(LwjglClientRemovePacket::encode)
-                .decoder(LwjglClientRemovePacket::decode)
-                .consumerMainThread(LwjglClientRemovePacket::handle)
+        CHANNEL.messageBuilder(ClientRemovePacket.class, id())
+                .encoder(ClientRemovePacket::encode)
+                .decoder(ClientRemovePacket::decode)
+                .consumerMainThread(ClientRemovePacket::handle)
                 .add();
 
         CHANNEL.messageBuilder(EntityExtensionActiveTypePacket.class, id())

@@ -1,7 +1,7 @@
 package net.eca.util;
 
 import net.eca.config.EcaConfiguration;
-import net.eca.network.EcaClientRemovePacket;
+import net.eca.network.ClientRemovePacket;
 import net.eca.network.EntityHealthSyncPacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
@@ -34,6 +34,10 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.core.SectionPos;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
+import net.minecraft.util.ClassInstanceMultiMap;
+import net.minecraft.world.level.entity.EntityTickList;
+import net.minecraftforge.entity.PartEntity;
 import net.eca.util.selector.EcaEntitySelector;
 
 import java.lang.invoke.MethodHandles;
@@ -1302,7 +1306,7 @@ public class EntityUtil {
             }
             if (isServerSide && entity.level() instanceof ServerLevel serverLevel) {
                 NetworkHandler.sendToTrackingClients(
-                        new EcaClientRemovePacket(entity.getId(), bossEventUUIDs),
+                        new ClientRemovePacket(entity.getId(), bossEventUUIDs),
                         entity
                 );
             }
@@ -1442,7 +1446,7 @@ public class EntityUtil {
 
     // ==================== 服务端底层容器清除 ====================
 
-    private static void removeFromServerContainers(ServerLevel serverLevel, Entity entity) {
+    public static void removeFromServerContainers(ServerLevel serverLevel, Entity entity) {
         try {
             PersistentEntitySectionManager<Entity> entityManager = serverLevel.entityManager;
             entityManager.callbacks.onDestroyed(entity);
@@ -1452,10 +1456,10 @@ public class EntityUtil {
             if (entity instanceof ServerPlayer) serverLevel.players.remove(entity);
             if (entity instanceof Mob) serverLevel.navigatingMobs.remove(entity);
 
-            removeFromSectionStorage(entityManager.sectionStorage, entity);              //1. EntitySection (ClassInstanceMultiMap)
+            removeFromSectionStorage(entityManager.sectionStorage, entity);              //1. ClassInstanceMultiMap 直接操作
             removeSectionIfEmpty(entityManager.sectionStorage, entity);
-            serverLevel.entityTickList.remove(entity);                                   //2. EntityTickList
-            entityManager.visibleEntityStorage.remove(entity);                           //3. EntityLookup (byUuid + byId)
+            removeFromEntityTickList(serverLevel.entityTickList, entity);                //2. EntityTickList.active 直接操作
+            removeFromEntityLookup(entityManager.visibleEntityStorage, entity);          //3. EntityLookup byId/byUuid 直接操作
             entityManager.knownUuids.remove(entity.getUUID());                           //4. KnownUuids
 
         } catch (Exception e) {
@@ -1472,13 +1476,42 @@ public class EntityUtil {
         }
     }
 
-    //从 EntitySectionStorage 遍历所有 section 移除实体
+    //从 EntitySectionStorage 遍历所有 section 移除实体（直接操作 ClassInstanceMultiMap 底层，绕过可被 Mixin 的 MC 层 API）
     private static void removeFromSectionStorage(EntitySectionStorage<Entity> sectionStorage, Entity entity) {
         for (EntitySection<Entity> section : sectionStorage.sections.values()) {
             if (section != null) {
-                section.remove(entity);
+                removeFromClassInstanceMultiMap(section.storage, entity);
             }
         }
+    }
+
+    // 直接操作 ClassInstanceMultiMap 的 allInstances(byClass) 底层 List，绕过 ClassInstanceMultiMap.remove()
+    private static void removeFromClassInstanceMultiMap(ClassInstanceMultiMap<Entity> storage, Entity entity) {
+        for (Map.Entry<Class<?>, List<Entity>> entry : storage.byClass.entrySet()) {
+            if (entry.getKey().isInstance(entity)) {
+                entry.getValue().remove(entity);
+            }
+        }
+    }
+
+    // 直接操作 EntityTickList.active，仿照原版 ensureActiveIsNotIterated 避免迭代器损坏
+    public static void removeFromEntityTickList(EntityTickList entityTickList, Entity entity) {
+        Int2ObjectMap<Entity> active = entityTickList.active;
+        if (entityTickList.iterated == active) {
+            entityTickList.passive.clear();
+            for (Int2ObjectMap.Entry<Entity> entry : Int2ObjectMaps.fastIterable(active)) {
+                entityTickList.passive.put(entry.getIntKey(), entry.getValue());
+            }
+            entityTickList.active = entityTickList.passive;
+            entityTickList.passive = active;
+        }
+        entityTickList.active.remove(entity.getId());
+    }
+
+    // 直接操作 EntityLookup 的 byId 和 byUuid，绕过 EntityLookup.remove()
+    public static void removeFromEntityLookup(EntityLookup<Entity> entityLookup, Entity entity) {
+        entityLookup.byId.remove(entity.getId());
+        entityLookup.byUuid.remove(entity.getUUID());
     }
 
     //清理空的 EntitySection
@@ -1494,16 +1527,19 @@ public class EntityUtil {
 
     public static void removeFromClientContainers(ClientLevel clientLevel, Entity entity) {
         try {
-            // Layer 2: AT 直接访问
-            if (entity instanceof Player) clientLevel.players.remove(entity);
+            clientLevel.players.remove(entity);
+
+            if (entity.isMultipartEntity()) {
+                for (PartEntity<?> part : entity.getParts()) {
+                    clientLevel.partEntities.remove(part.getId());
+                }
+            }
 
             TransientEntitySectionManager<Entity> entityStorage = clientLevel.entityStorage;
-
-            //原版顺序
-            removeFromSectionStorage(entityStorage.sectionStorage, entity);              //1. EntitySection
+            removeFromSectionStorage(entityStorage.sectionStorage, entity);              //1. ClassInstanceMultiMap 直接操作
             removeSectionIfEmpty(entityStorage.sectionStorage, entity);
-            clientLevel.tickingEntities.remove(entity);                                  //2. EntityTickList
-            entityStorage.entityStorage.remove(entity);                                  //3. EntityLookup
+            removeFromEntityTickList(clientLevel.tickingEntities, entity);               //2. EntityTickList.active 直接操作
+            removeFromEntityLookup(entityStorage.entityStorage, entity);                 //3. EntityLookup byId/byUuid 直接操作
 
         } catch (Exception e) {
             EcaLogger.error("[EntityUtil] Failed to remove from client containers, entityId={}, type={}, uuid={}",

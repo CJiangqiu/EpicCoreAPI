@@ -2,13 +2,12 @@ package net.eca.util.reflect;
 
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
-import net.eca.network.LwjglClientRemovePacket;
+import net.eca.network.ClientRemovePacket;
 import net.eca.network.NetworkHandler;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ChunkMap;
-import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
@@ -111,19 +110,6 @@ public class LwjglUtil {
 
     // ClassInstanceMultiMap 相关
     private static long CLASS_INSTANCE_MULTI_MAP_BY_CLASS_OFFSET = -1;
-
-    // ==================== 客户端字段偏移量 ====================
-
-    // ClientLevel 相关
-    private static long CLIENT_LEVEL_TICKING_ENTITIES_OFFSET = -1;
-    private static long CLIENT_LEVEL_ENTITY_STORAGE_OFFSET = -1;
-    private static long CLIENT_LEVEL_PLAYERS_OFFSET = -1;
-
-    // TransientEntitySectionManager 相关
-    private static long TRANSIENT_MANAGER_ENTITY_STORAGE_OFFSET = -1;
-    private static long TRANSIENT_MANAGER_SECTION_STORAGE_OFFSET = -1;
-
-    private static boolean clientOffsetsInitialized = false;
 
     // ==================== 初始化 ====================
 
@@ -288,32 +274,6 @@ public class LwjglUtil {
         return available;
     }
 
-    // ==================== 客户端偏移量初始化（懒加载） ====================
-
-    private static void initClientOffsets() {
-        if (clientOffsetsInitialized) return;
-        clientOffsetsInitialized = true;
-
-        try {
-            // ClientLevel 相关字段
-            CLIENT_LEVEL_TICKING_ENTITIES_OFFSET = getFieldOffset(ClientLevel.class,
-                ObfuscationMapping.getFieldMapping("ClientLevel.tickingEntities"));
-            CLIENT_LEVEL_ENTITY_STORAGE_OFFSET = getFieldOffset(ClientLevel.class,
-                ObfuscationMapping.getFieldMapping("ClientLevel.entityStorage"));
-            CLIENT_LEVEL_PLAYERS_OFFSET = getFieldOffset(ClientLevel.class,
-                ObfuscationMapping.getFieldMapping("ClientLevel.players"));
-
-            // TransientEntitySectionManager 相关字段
-            TRANSIENT_MANAGER_ENTITY_STORAGE_OFFSET = getFieldOffset(TransientEntitySectionManager.class,
-                ObfuscationMapping.getFieldMapping("TransientEntitySectionManager.entityStorage"));
-            TRANSIENT_MANAGER_SECTION_STORAGE_OFFSET = getFieldOffset(TransientEntitySectionManager.class,
-                ObfuscationMapping.getFieldMapping("TransientEntitySectionManager.sectionStorage"));
-
-        } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] Failed to init client offsets: {}", e.getMessage());
-        }
-    }
-
     // ==================== 公开 API ====================
 
     // 通过LWJGL底层通道移除实体
@@ -384,11 +344,11 @@ public class LwjglUtil {
     // ==================== 客户端同步 ====================
 
     /**
-     * 广播 LWJGL 移除包给所有玩（绕过原版包拦截）
+     * 广播移除包给所有玩家
      */
     private static void broadcastEntityRemoval(ServerLevel serverLevel, Entity entity, List<UUID> bossEventUUIDs) {
         try {
-            LwjglClientRemovePacket packet = new LwjglClientRemovePacket(entity.getId(), bossEventUUIDs);
+            ClientRemovePacket packet = new ClientRemovePacket(entity.getId(), bossEventUUIDs);
             for (ServerPlayer player : serverLevel.players()) {
                 NetworkHandler.sendToPlayer(packet, player);
             }
@@ -397,100 +357,10 @@ public class LwjglUtil {
         }
     }
 
-    // 客户端 LWJGL 清除
-    /**
-     * Remove entity from client using LWJGL low-level memory channel.
-     * Called by EcaClientRemovePacket on client side.
-     *
-     * @param clientLevel the client level
-     * @param entity the entity to remove
-     * @return true if removal succeeded
-     */
-    public static boolean lwjglClientRemove(ClientLevel clientLevel, Entity entity) {
-        if (entity == null || clientLevel == null) return false;
-        if (!available) {
-            EcaLogger.info("[LwjglUtil] LWJGL channel not available for client removal");
-            return false;
-        }
-
-        try {
-            // 懒加载客户端偏移量
-            initClientOffsets();
-
-            int entityId = entity.getId();
-            UUID entityUUID = entity.getUUID();
-
-            // 1. 设置移除原因
-            if (REMOVAL_REASON_OFFSET > 0) {
-                lwjglPutObject(entity, REMOVAL_REASON_OFFSET, Entity.RemovalReason.CHANGED_DIMENSION);
-            }
-
-            // 2. 设置回调为 NULL
-            if (LEVEL_CALLBACK_OFFSET > 0) {
-                lwjglPutObject(entity, LEVEL_CALLBACK_OFFSET, EntityInLevelCallback.NULL);
-            }
-
-            // 3. 客户端容器清除（与 EntityUtil.removeFromClientContainers 保持一致的顺序）
-            // 3.1 从 players 列表移除
-            removeFromClientPlayersViaLwjgl(clientLevel, entity);
-
-            // 3.3 从 EntitySectionStorage 移除
-            removeFromClientEntitySectionStorageViaLwjgl(clientLevel, entity);
-
-            // 3.5 清理空的 EntitySection
-            removeClientSectionIfEmptyViaLwjgl(clientLevel, entity);
-
-            // 3.6 从 EntityTickList 移除
-            removeFromClientTickListViaLwjgl(clientLevel, entityId);
-
-            // 3.7 从 EntityLookup 移除
-            removeFromClientEntityLookupViaLwjgl(clientLevel, entityId, entityUUID);
-
-            return true;
-        } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] Failed to remove client entity: {}", e.getMessage());
-            return false;
-        }
-    }
-
     // ==================== 底层容器清除（服务端） ====================
 
     private static void removeFromServerContainersViaLwjgl(ServerLevel serverLevel, Entity entity) {
-        int entityId = entity.getId();
-        UUID entityUUID = entity.getUUID();
-
-        try {
-            // 与 EntityUtil.removeFromServerContainers 保持一致的顺序
-            // 1. 先触发回调（回调可能需要查找实体）
-            callbacksOnDestroyedViaLwjgl(serverLevel, entity);
-
-            // 2. 从 loadingInbox 清理
-            removeFromLoadingInboxViaLwjgl(serverLevel, entity);
-
-            // 3. ChunkMap.entityMap
-            removeFromChunkMapViaLwjgl(serverLevel, entityId);
-
-            // 4. ServerLevel.players / navigatingMobs
-            removeFromPlayersOrMobsViaLwjgl(serverLevel, entity);
-
-            // 5. EntitySectionStorage (ClassInstanceMultiMap)
-            removeFromEntitySectionStorageViaLwjgl(serverLevel, entity);
-
-            // 6. 清理空的 EntitySection
-            removeSectionIfEmptyViaLwjgl(serverLevel, entity);
-
-            // 7. EntityTickList (active + passive)
-            removeFromEntityTickListViaLwjgl(serverLevel, entityId);
-
-            // 8. EntityLookup (byUuid + byId)
-            removeFromEntityLookupViaLwjgl(serverLevel, entityId, entityUUID);
-
-            // 9. KnownUuids
-            removeFromKnownUuidsViaLwjgl(serverLevel, entityUUID);
-
-        } catch (Exception e) {
-            EcaLogger.info("[LwjglUtil] Container cleanup failed: {}", e.getMessage());
-        }
+        EntityUtil.removeFromServerContainers(serverLevel, entity);
     }
 
     // 从 ChunkMap.entityMap 移除（tick 期间延迟执行，避免迭代器损坏）
@@ -745,154 +615,4 @@ public class LwjglUtil {
         } catch (Exception ignored) {}
     }
 
-    // ==================== 客户端底层容器清除 ====================
-
-    // 从客户端 EntityTickList 移除（仿照原版 ensureActiveIsNotIterated + remove 逻辑）
-    private static void removeFromClientTickListViaLwjgl(ClientLevel clientLevel, int entityId) {
-        try {
-            if (CLIENT_LEVEL_TICKING_ENTITIES_OFFSET < 0) return;
-
-            Object entityTickList = lwjglGetObject(clientLevel, CLIENT_LEVEL_TICKING_ENTITIES_OFFSET);
-            if (entityTickList == null) return;
-
-            Int2ObjectLinkedOpenHashMap<Entity> active = null;
-            Int2ObjectLinkedOpenHashMap<Entity> passive = null;
-            Object iterated = null;
-
-            if (ENTITY_TICK_LIST_ACTIVE_OFFSET > 0) {
-                active = (Int2ObjectLinkedOpenHashMap<Entity>)
-                    lwjglGetObject(entityTickList, ENTITY_TICK_LIST_ACTIVE_OFFSET);
-            }
-            if (ENTITY_TICK_LIST_PASSIVE_OFFSET > 0) {
-                passive = (Int2ObjectLinkedOpenHashMap<Entity>)
-                    lwjglGetObject(entityTickList, ENTITY_TICK_LIST_PASSIVE_OFFSET);
-            }
-            if (ENTITY_TICK_LIST_ITERATED_OFFSET > 0) {
-                iterated = lwjglGetObject(entityTickList, ENTITY_TICK_LIST_ITERATED_OFFSET);
-            }
-
-            if (active == null || passive == null) return;
-
-            // 仿照原版 ensureActiveIsNotIterated：绝不修改正在被遍历的 map
-            if (iterated == active) {
-                passive.clear();
-                for (Int2ObjectMap.Entry<Entity> entry : Int2ObjectMaps.fastIterable(active)) {
-                    passive.put(entry.getIntKey(), entry.getValue());
-                }
-                lwjglPutObject(entityTickList, ENTITY_TICK_LIST_ACTIVE_OFFSET, passive);
-                lwjglPutObject(entityTickList, ENTITY_TICK_LIST_PASSIVE_OFFSET, active);
-                active = passive;
-            }
-
-            active.remove(entityId);
-        } catch (Exception ignored) {}
-    }
-
-    // 从客户端 EntityLookup 移除
-    private static void removeFromClientEntityLookupViaLwjgl(ClientLevel clientLevel, int entityId, UUID entityUUID) {
-        try {
-            if (CLIENT_LEVEL_ENTITY_STORAGE_OFFSET < 0) return;
-
-            Object entityStorage = lwjglGetObject(clientLevel, CLIENT_LEVEL_ENTITY_STORAGE_OFFSET);
-            if (entityStorage == null) return;
-
-            if (TRANSIENT_MANAGER_ENTITY_STORAGE_OFFSET < 0) return;
-            Object entityLookup = lwjglGetObject(entityStorage, TRANSIENT_MANAGER_ENTITY_STORAGE_OFFSET);
-            if (entityLookup == null) return;
-
-            // 移除 byUuid
-            if (ENTITY_LOOKUP_BY_UUID_OFFSET > 0) {
-                Map<UUID, Entity> byUuid = (Map<UUID, Entity>)
-                    lwjglGetObject(entityLookup, ENTITY_LOOKUP_BY_UUID_OFFSET);
-                if (byUuid != null) {
-                    byUuid.remove(entityUUID);
-                }
-            }
-
-            // 移除 byId
-            if (ENTITY_LOOKUP_BY_ID_OFFSET > 0) {
-                Int2ObjectLinkedOpenHashMap<Entity> byId = (Int2ObjectLinkedOpenHashMap<Entity>)
-                    lwjglGetObject(entityLookup, ENTITY_LOOKUP_BY_ID_OFFSET);
-                if (byId != null) {
-                    byId.remove(entityId);
-                }
-            }
-        } catch (Exception ignored) {}
-    }
-
-    // 从客户端 EntitySectionStorage 移除
-    private static void removeFromClientEntitySectionStorageViaLwjgl(ClientLevel clientLevel, Entity entity) {
-        try {
-            if (CLIENT_LEVEL_ENTITY_STORAGE_OFFSET < 0) return;
-
-            Object entityStorage = lwjglGetObject(clientLevel, CLIENT_LEVEL_ENTITY_STORAGE_OFFSET);
-            if (entityStorage == null) return;
-
-            if (TRANSIENT_MANAGER_SECTION_STORAGE_OFFSET < 0) return;
-            Object sectionStorage = lwjglGetObject(entityStorage, TRANSIENT_MANAGER_SECTION_STORAGE_OFFSET);
-            if (sectionStorage == null) return;
-
-            if (ENTITY_SECTION_STORAGE_SECTIONS_OFFSET < 0) return;
-            Long2ObjectMap<?> sections = (Long2ObjectMap<?>)
-                lwjglGetObject(sectionStorage, ENTITY_SECTION_STORAGE_SECTIONS_OFFSET);
-            if (sections == null) return;
-
-            for (Object section : sections.values()) {
-                if (section == null) continue;
-
-                if (ENTITY_SECTION_STORAGE_OFFSET < 0) continue;
-                Object storage = lwjglGetObject(section, ENTITY_SECTION_STORAGE_OFFSET);
-                if (storage == null) continue;
-
-                if (CLASS_INSTANCE_MULTI_MAP_BY_CLASS_OFFSET < 0) continue;
-                Map<Class<?>, List<?>> byClass = (Map<Class<?>, List<?>>)
-                    lwjglGetObject(storage, CLASS_INSTANCE_MULTI_MAP_BY_CLASS_OFFSET);
-                if (byClass == null) continue;
-
-                for (Map.Entry<Class<?>, List<?>> entry : byClass.entrySet()) {
-                    if (entry.getKey().isInstance(entity)) {
-                        entry.getValue().remove(entity);
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
-    }
-
-    // 从客户端 players 列表移除（如果是玩家）
-    private static void removeFromClientPlayersViaLwjgl(ClientLevel clientLevel, Entity entity) {
-        try {
-            if (!(entity instanceof Player)) return;
-            if (CLIENT_LEVEL_PLAYERS_OFFSET < 0) return;
-
-            List<?> players = (List<?>) lwjglGetObject(clientLevel, CLIENT_LEVEL_PLAYERS_OFFSET);
-            if (players != null) {
-                players.remove(entity);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    // 清理空的客户端 EntitySection
-    private static void removeClientSectionIfEmptyViaLwjgl(ClientLevel clientLevel, Entity entity) {
-        try {
-            if (CLIENT_LEVEL_ENTITY_STORAGE_OFFSET < 0 || TRANSIENT_MANAGER_SECTION_STORAGE_OFFSET < 0) return;
-
-            Object entityStorage = lwjglGetObject(clientLevel, CLIENT_LEVEL_ENTITY_STORAGE_OFFSET);
-            if (entityStorage == null) return;
-
-            Object sectionStorage = lwjglGetObject(entityStorage, TRANSIENT_MANAGER_SECTION_STORAGE_OFFSET);
-            if (sectionStorage == null) return;
-
-            if (ENTITY_SECTION_STORAGE_SECTIONS_OFFSET < 0) return;
-            Long2ObjectMap<?> sections = (Long2ObjectMap<?>) lwjglGetObject(sectionStorage, ENTITY_SECTION_STORAGE_SECTIONS_OFFSET);
-            if (sections == null) return;
-
-            long sectionKey = SectionPos.asLong(entity.blockPosition());
-            Object section = sections.get(sectionKey);
-            if (section instanceof EntitySection<?> entitySection) {
-                if (entitySection.isEmpty()) {
-                    sections.remove(sectionKey);
-                }
-            }
-        } catch (Exception ignored) {}
-    }
 }

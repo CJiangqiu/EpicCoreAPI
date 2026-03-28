@@ -1,12 +1,13 @@
 package net.eca.network;
 
 import net.eca.util.EcaLogger;
-import net.eca.util.reflect.LwjglUtil;
+import net.eca.util.EntityUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.BossHealthOverlay;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraftforge.network.NetworkEvent;
 
 import java.util.ArrayList;
@@ -15,20 +16,25 @@ import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
- * LWJGL-based client entity removal packet.
- * Uses LWJGL low-level memory channel to bypass bytecode interception.
+ * Client-side entity removal packet.
+ * Sent from server to client to notify entity removal.
  */
-public class LwjglClientRemovePacket {
+public class ClientRemovePacket {
 
     private final int entityId;
     private final List<UUID> bossEventUUIDs;
 
-    public LwjglClientRemovePacket(int entityId, List<UUID> bossEventUUIDs) {
+    public ClientRemovePacket(int entityId, List<UUID> bossEventUUIDs) {
         this.entityId = entityId;
         this.bossEventUUIDs = bossEventUUIDs;
     }
 
-    public static void encode(LwjglClientRemovePacket msg, FriendlyByteBuf buf) {
+    /**
+     * Encode the packet to buffer.
+     * @param msg the packet to encode
+     * @param buf the buffer to write to
+     */
+    public static void encode(ClientRemovePacket msg, FriendlyByteBuf buf) {
         buf.writeInt(msg.entityId);
         buf.writeInt(msg.bossEventUUIDs.size());
         for (UUID uuid : msg.bossEventUUIDs) {
@@ -36,17 +42,27 @@ public class LwjglClientRemovePacket {
         }
     }
 
-    public static LwjglClientRemovePacket decode(FriendlyByteBuf buf) {
+    /**
+     * Decode the packet from buffer.
+     * @param buf the buffer to read from
+     * @return the decoded packet
+     */
+    public static ClientRemovePacket decode(FriendlyByteBuf buf) {
         int entityId = buf.readInt();
         int count = buf.readInt();
         List<UUID> uuids = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             uuids.add(buf.readUUID());
         }
-        return new LwjglClientRemovePacket(entityId, uuids);
+        return new ClientRemovePacket(entityId, uuids);
     }
 
-    public static void handle(LwjglClientRemovePacket msg, Supplier<NetworkEvent.Context> ctx) {
+    /**
+     * Handle the packet on client side.
+     * @param msg the packet to handle
+     * @param ctx the network context
+     */
+    public static void handle(ClientRemovePacket msg, Supplier<NetworkEvent.Context> ctx) {
         ctx.get().enqueueWork(() -> {
             Minecraft minecraft = Minecraft.getInstance();
             ClientLevel clientLevel = minecraft.level;
@@ -54,19 +70,22 @@ public class LwjglClientRemovePacket {
                 Entity entity = clientLevel.getEntity(msg.entityId);
                 if (entity != null) {
                     entity.onClientRemoval();
-                    LwjglUtil.lwjglClientRemove(clientLevel, entity);
+                    entity.invalidateCaps();
+                    entity.setRemoved(Entity.RemovalReason.DISCARDED);
+                    entity.stopRiding();
+                    entity.onRemovedFromWorld();
+                    entity.levelCallback = EntityInLevelCallback.NULL;
+                    EntityUtil.removeFromClientContainers(clientLevel, entity);
                 } else {
-                    EcaLogger.info("[LwjglClientRemovePacket] Entity not found (ID: {})", msg.entityId);
+                    EcaLogger.debug("[ClientRemovePacket] Client entity removal: entity not found (ID: {})", msg.entityId);
                 }
 
-                //精确清理目标实体对应的 boss 血条
                 removeBossOverlayEntries(minecraft, msg.bossEventUUIDs);
             }
         });
         ctx.get().setPacketHandled(true);
     }
 
-    //从 BossHealthOverlay.events 移除指定 UUID 的 boss 血条
     private static void removeBossOverlayEntries(Minecraft minecraft, List<UUID> bossEventUUIDs) {
         if (bossEventUUIDs.isEmpty()) return;
         try {
@@ -75,7 +94,7 @@ public class LwjglClientRemovePacket {
                 bossOverlay.events.remove(uuid);
             }
         } catch (Exception e) {
-            EcaLogger.info("[LwjglClientRemovePacket] Failed to remove boss overlay entries: {}", e.getMessage());
+            EcaLogger.info("[ClientRemovePacket] Failed to remove boss overlay entries: {}", e.getMessage());
         }
     }
 }

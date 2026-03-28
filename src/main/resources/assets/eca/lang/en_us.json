@@ -1,0 +1,7 @@
+{
+  "eca.argument.entity.selector.allEntities": "ECA All entities",
+  "eca.argument.entity.selector.allPlayers": "ECA All players",
+  "eca.argument.entity.selector.nearestPlayer": "ECA Nearest player",
+  "eca.argument.entity.selector.randomPlayer": "ECA Random player",
+  "eca.argument.entity.selector.self": "ECA Current entity"
+}
