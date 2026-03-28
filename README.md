@@ -92,19 +92,19 @@ side="BOTH"
 - `addHealthBlacklistKeyword(keyword)` - Add keyword to health modification blacklist
 - `removeHealthBlacklistKeyword(keyword)` - Remove keyword from health modification blacklist
 - `getHealthBlacklistKeywords()` - Get all health blacklist keywords
-- `killEntity(entity, damageSource)` - Kill entity (loot + advancements + removal)
-- `reviveEntity(entity)` - Clear death state and restore health
-- `reviveEntity(level, uuid)` - Clear death state and restore health by UUID in specified level
+- `kill(entity, damageSource)` - Kill entity (loot + advancements + removal)
+- `revive(entity)` - Clear death state and restore health
+- `revive(level, uuid)` - Clear death state and restore health by UUID in specified level
 - `reviveAllContainers(entity)` - Revive all critical entity containers (tickList, lookup, sections, tracker)
 - `reviveAllContainers(level, uuid)` - Revive all critical entity containers by UUID in specified level
-- `teleportEntity(entity, x, y, z)` - Teleport via VarHandle with client sync
+- `teleport(entity, x, y, z)` - Teleport via VarHandle with client sync
 - `lockLocation(entity)` - Lock entity location at current position
 - `lockLocation(entity, position)` - Lock entity location at specified position
 - `unlockLocation(entity)` - Unlock entity location
 - `isLocationLocked(entity)` - Check if entity location is locked
 - `getLockedLocation(entity)` - Get locked position (null if not locked)
-- `removeEntity(entity, reason)` - Complete removal (AI, boss bars, containers, passengers)
-- `memoryRemoveEntity(entity)` - DANGER! Requires Attack Radical Logic config. Remove entity via LWJGL internal channel
+- `remove(entity, reason)` - Complete removal (AI, boss bars, containers, passengers)
+- `memoryRemove(entity)` - DANGER! Requires Attack Radical Logic config. Remove entity via LWJGL internal channel
 - `cleanupBossBar(entity)` - Remove boss bars without removing entity
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
 - `setInvulnerable(entity, invulnerable)` - Set invulnerability (enable: revive + lock health; disable: clear invulnerability + unlock health)
@@ -194,19 +194,19 @@ EcaAPI.removeHealthWhitelistKeyword("mana");
 EcaAPI.removeHealthBlacklistKeyword("timer");
 
 // Entity Control
-EcaAPI.killEntity(entity, damageSource);
-EcaAPI.reviveEntity(entity);
-EcaAPI.reviveEntity(serverLevel, uuid);  // Revive by UUID
+EcaAPI.kill(entity, damageSource);
+EcaAPI.revive(entity);
+EcaAPI.revive(serverLevel, uuid);  // Revive by UUID
 Map<String, Boolean> containerResults = EcaAPI.reviveAllContainers(entity);  // Revive all containers
 EcaAPI.reviveAllContainers(serverLevel, uuid);  // Revive all containers by UUID
-EcaAPI.teleportEntity(entity, x, y, z);
+EcaAPI.teleport(entity, x, y, z);
 EcaAPI.lockLocation(entity);  // Lock at current position
 EcaAPI.lockLocation(entity, new Vec3(100, 64, 200));  // Lock at specified position
 boolean locationLocked = EcaAPI.isLocationLocked(entity);
 Vec3 lockedPos = EcaAPI.getLockedLocation(entity);
 EcaAPI.unlockLocation(entity);
-EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
-EcaAPI.memoryRemoveEntity(entity);  // Remove using LWJGL internal Unsafe instance
+EcaAPI.remove(entity, Entity.RemovalReason.KILLED);
+EcaAPI.memoryRemove(entity);  // Remove using LWJGL internal Unsafe instance
 EcaAPI.cleanupBossBar(entity);
 
 // ECA Entity Selector API
@@ -508,19 +508,19 @@ side="BOTH"
 - `addHealthBlacklistKeyword(keyword)` - 添加血量值修改黑名单关键词
 - `removeHealthBlacklistKeyword(keyword)` - 移除血量值修改黑名单关键词
 - `getHealthBlacklistKeywords()` - 获取全部黑名单关键词
-- `killEntity(entity, damageSource)` - 击杀实体（掉落 + 成就 + 移除）
-- `reviveEntity(entity)` - 复活实体（清除死亡状态）
-- `reviveEntity(level, uuid)` - 在指定维度按 UUID 复活实体
+- `kill(entity, damageSource)` - 击杀实体（掉落 + 成就 + 移除）
+- `revive(entity)` - 复活实体（清除死亡状态）
+- `revive(level, uuid)` - 在指定维度按 UUID 复活实体
 - `reviveAllContainers(entity)` - 复活实体的所有关键容器（tickList、lookup、sections、tracker）
 - `reviveAllContainers(level, uuid)` - 在指定维度按 UUID 复活实体的所有关键容器
-- `teleportEntity(entity, x, y, z)` - VarHandle 传送并同步到客户端
+- `teleport(entity, x, y, z)` - VarHandle 传送并同步到客户端
 - `lockLocation(entity)` - 锁定实体当前位置
 - `lockLocation(entity, position)` - 锁定实体到指定位置
 - `unlockLocation(entity)` - 解除实体位置锁定
 - `isLocationLocked(entity)` - 检查实体位置是否锁定
 - `getLockedLocation(entity)` - 获取锁定位置（未锁定返回 null）
-- `removeEntity(entity, reason)` - 完整移除（AI、Boss 血条、容器、乘客等）
-- `memoryRemoveEntity(entity)` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
+- `remove(entity, reason)` - 完整移除（AI、Boss 血条、容器、乘客等）
+- `memoryRemove(entity)` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
 - `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活并锁血；关闭：清除无敌并解锁血量）
@@ -610,19 +610,19 @@ EcaAPI.removeHealthWhitelistKeyword("mana");
 EcaAPI.removeHealthBlacklistKeyword("timer");
 
 // 实体控制
-EcaAPI.killEntity(entity, damageSource);
-EcaAPI.reviveEntity(entity);
-EcaAPI.reviveEntity(serverLevel, uuid);  // 按 UUID 复活
+EcaAPI.kill(entity, damageSource);
+EcaAPI.revive(entity);
+EcaAPI.revive(serverLevel, uuid);  // 按 UUID 复活
 Map<String, Boolean> containerResults = EcaAPI.reviveAllContainers(entity);  // 复活所有容器
 EcaAPI.reviveAllContainers(serverLevel, uuid);  // 按 UUID 复活所有容器
-EcaAPI.teleportEntity(entity, x, y, z);
+EcaAPI.teleport(entity, x, y, z);
 EcaAPI.lockLocation(entity);  // 锁定到当前位置
 EcaAPI.lockLocation(entity, new Vec3(100, 64, 200));  // 锁定到指定位置
 boolean locationLocked = EcaAPI.isLocationLocked(entity);
 Vec3 lockedPos = EcaAPI.getLockedLocation(entity);
 EcaAPI.unlockLocation(entity);
-EcaAPI.removeEntity(entity, Entity.RemovalReason.KILLED);
-EcaAPI.memoryRemoveEntity(entity);  // 提供使用LWJGL内部Unsafe实例进行清除
+EcaAPI.remove(entity, Entity.RemovalReason.KILLED);
+EcaAPI.memoryRemove(entity);  // 提供使用LWJGL内部Unsafe实例进行清除
 EcaAPI.cleanupBossBar(entity);
 
 // ECA 实体选择 API
