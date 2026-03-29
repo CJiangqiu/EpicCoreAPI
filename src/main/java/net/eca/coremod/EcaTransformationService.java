@@ -31,8 +31,8 @@ public class EcaTransformationService implements ITransformationService {
 
     private static final String SERVICE_NAME = "eca_coremod";
 
-    // JAR 文件名中的标识符，用于识别 ECA 模组
-    private static final String ECA_JAR_IDENTIFIER = "eca";
+    // 当前 JAR 的绝对路径（在双加载时懒加载解析）
+    private static volatile Path ecaJarPath;
 
     public EcaTransformationService() {
         System.out.println("[ECA CoreMod] TransformationService constructor called");
@@ -98,6 +98,7 @@ public class EcaTransformationService implements ITransformationService {
      * 启用 ECA 双重加载模式
      */
     public static void enableEcaDualLoading() {
+        ecaJarPath = resolveJarPath();
         removeEcaFromTransformerDiscovery();
         removeEcaFromModuleLayer();
         System.out.println("[ECA CoreMod] Dual loading enabled successfully");
@@ -123,11 +124,11 @@ public class EcaTransformationService implements ITransformationService {
                             .getMethod("paths")
                             .invoke(namedPath);
 
-                    String pathStr = paths[0].toString();
-                    boolean isEca = pathStr.contains(ECA_JAR_IDENTIFIER);
+                    Path jarPath = paths[0];
+                    boolean isEca = ecaJarPath != null && isSameFile(jarPath, ecaJarPath);
 
                     if (isEca) {
-                        System.out.println("[ECA CoreMod] Removed from transformer discovery: " + pathStr);
+                        System.out.println("[ECA CoreMod] Removed from transformer discovery: " + jarPath);
                     }
                     return isEca;
                 } catch (Exception e) {
@@ -214,6 +215,28 @@ public class EcaTransformationService implements ITransformationService {
     }
 
     // ==================== 工具方法 ====================
+
+    private static Path resolveJarPath() {
+        try {
+            java.security.CodeSource cs = EcaTransformationService.class.getProtectionDomain().getCodeSource();
+            if (cs != null && cs.getLocation() != null) {
+                Path resolved = Path.of(cs.getLocation().toURI()).toAbsolutePath().normalize();
+                System.out.println("[ECA CoreMod] Resolved JAR path: " + resolved);
+                return resolved;
+            }
+        } catch (Throwable t) {
+            System.err.println("[ECA CoreMod] Failed to resolve JAR path: " + t.getMessage());
+        }
+        return null;
+    }
+
+    private static boolean isSameFile(Path a, Path b) {
+        try {
+            return java.nio.file.Files.isSameFile(a, b);
+        } catch (Throwable t) {
+            return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
+        }
+    }
 
     private static Unsafe getEcaUnsafe() throws Exception {
         Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");

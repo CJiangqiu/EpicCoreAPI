@@ -12,7 +12,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 // ECA Java Agent入口
 /**
@@ -285,52 +287,77 @@ public final class EcaAgent {
         Class<?>[] allClasses = inst.getAllLoadedClasses();
         AgentLogWriter.info("[EcaAgent] Scanning " + allClasses.length + " loaded classes...");
 
+        // 构建类名 -> Class 映射表，将 findClass 的 O(n) 查找降为 O(1)
+        Map<String, Class<?>> classMap = new HashMap<>(allClasses.length * 2);
+        for (Class<?> clazz : allClasses) {
+            classMap.put(clazz.getName(), clazz);
+        }
+
+        // 按模块类型分组：显式目标类 vs 基类扫描
+        List<ITransformModule> explicitModules = new ArrayList<>();
+        List<ITransformModule> scanModules = new ArrayList<>();
+        Map<ITransformModule, Class<?>> moduleBaseClasses = new HashMap<>();
+
         for (ITransformModule module : transformer.getModules()) {
             if (moduleNameFilter != null && !moduleNameFilter.equals(module.getName())) {
                 continue;
             }
-            List<Class<?>> targetClasses = new ArrayList<>();
             List<String> targetClassNames = module.getTargetClassNames();
-
             if (targetClassNames != null && !targetClassNames.isEmpty()) {
-                for (String className : targetClassNames) {
-                    Class<?> clazz = findClass(allClasses, className);
-                    if (clazz == null) {
-                        AgentLogWriter.warn("[EcaAgent] Target class not found: " + className);
-                        continue;
-                    }
-                    if (!module.shouldRetransform(className, clazz.getClassLoader())) {
-                        continue;
-                    }
-                    if (!inst.isModifiableClass(clazz)) {
-                        AgentLogWriter.warn("[EcaAgent] Target class not modifiable: " + className);
-                        continue;
-                    }
-                    targetClasses.add(clazz);
-                }
+                explicitModules.add(module);
             } else {
+                scanModules.add(module);
                 String targetBaseClass = module.getTargetBaseClass();
-                Class<?> baseClass = targetBaseClass != null ? findClass(allClasses, targetBaseClass) : null;
-                if (targetBaseClass != null && baseClass == null) {
-                    AgentLogWriter.warn("[EcaAgent] Base class not found: " + targetBaseClass);
+                if (targetBaseClass != null) {
+                    Class<?> baseClass = classMap.get(targetBaseClass);
+                    if (baseClass == null) {
+                        AgentLogWriter.warn("[EcaAgent] Base class not found: " + targetBaseClass);
+                    } else {
+                        moduleBaseClasses.put(module, baseClass);
+                    }
                 }
+            }
+        }
 
-                for (Class<?> clazz : allClasses) {
-                    if (!inst.isModifiableClass(clazz)) {
-                        continue;
-                    }
-                    if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) {
-                        continue;
-                    }
+        // 阶段1：显式目标模块，通过 HashMap O(1) 查找
+        for (ITransformModule module : explicitModules) {
+            List<Class<?>> targetClasses = new ArrayList<>();
+            for (String className : module.getTargetClassNames()) {
+                Class<?> clazz = classMap.get(className);
+                if (clazz == null) {
+                    AgentLogWriter.warn("[EcaAgent] Target class not found: " + className);
+                    continue;
+                }
+                if (!module.shouldRetransform(className, clazz.getClassLoader())) {
+                    continue;
+                }
+                if (!inst.isModifiableClass(clazz)) {
+                    AgentLogWriter.warn("[EcaAgent] Target class not modifiable: " + className);
+                    continue;
+                }
+                targetClasses.add(clazz);
+            }
+            retransformModuleClasses(inst, module, targetClasses);
+        }
 
-                    String name = clazz.getName();
-                    if (!module.shouldRetransform(name, clazz.getClassLoader())) {
-                        continue;
-                    }
+        // 阶段2：基类扫描模块，单次遍历 allClasses 同时为所有模块收集目标
+        if (!scanModules.isEmpty()) {
+            Map<ITransformModule, List<Class<?>>> scanResults = new HashMap<>();
+            for (ITransformModule module : scanModules) {
+                scanResults.put(module, new ArrayList<>());
+            }
 
-                    if (baseClass != null && !baseClass.isAssignableFrom(clazz)) {
-                        continue;
-                    }
+            for (Class<?> clazz : allClasses) {
+                if (!inst.isModifiableClass(clazz)) continue;
+                if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) continue;
+
+                String name = clazz.getName();
+
+                for (ITransformModule module : scanModules) {
+                    if (!module.shouldRetransform(name, clazz.getClassLoader())) continue;
+
+                    Class<?> baseClass = moduleBaseClasses.get(module);
+                    if (baseClass != null && !baseClass.isAssignableFrom(clazz)) continue;
 
                     if (baseClass != null && module.requiresMethodOverrideCheck()) {
                         if (!hasOverriddenMethod(clazz, module.getTargetMethodName(), module.getTargetMethodDescriptor())) {
@@ -338,26 +365,44 @@ public final class EcaAgent {
                         }
                     }
 
-                    targetClasses.add(clazz);
+                    scanResults.get(module).add(clazz);
                 }
             }
 
-            retransformModuleClasses(inst, module, targetClasses);
+            for (ITransformModule module : scanModules) {
+                retransformModuleClasses(inst, module, scanResults.get(module));
+            }
         }
     }
+
+    private static final int RETRANSFORM_BATCH_SIZE = 50;
 
     private static void retransformModuleClasses(Instrumentation inst, ITransformModule module, List<Class<?>> targetClasses) {
         AgentLogWriter.info("[EcaAgent] Found " + targetClasses.size() + " classes for module: " + module.getName());
 
+        if (targetClasses.isEmpty()) return;
+
         int successCount = 0;
         int failCount = 0;
-        for (Class<?> clazz : targetClasses) {
+
+        // 批量 retransform，减少 JVM 调用开销
+        for (int i = 0; i < targetClasses.size(); i += RETRANSFORM_BATCH_SIZE) {
+            int end = Math.min(i + RETRANSFORM_BATCH_SIZE, targetClasses.size());
+            List<Class<?>> batch = targetClasses.subList(i, end);
             try {
-                inst.retransformClasses(clazz);
-                successCount++;
+                inst.retransformClasses(batch.toArray(new Class<?>[0]));
+                successCount += batch.size();
             } catch (Throwable t) {
-                failCount++;
-                AgentLogWriter.warn("[EcaAgent] Failed to retransform: " + clazz.getName());
+                // 批量失败时回退到逐个重转，定位失败的类
+                for (Class<?> clazz : batch) {
+                    try {
+                        inst.retransformClasses(clazz);
+                        successCount++;
+                    } catch (Throwable t2) {
+                        failCount++;
+                        AgentLogWriter.warn("[EcaAgent] Failed to retransform: " + clazz.getName());
+                    }
+                }
             }
         }
 

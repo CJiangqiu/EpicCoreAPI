@@ -20,7 +20,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import java.util.ArrayList;
 
 @Mixin(LivingEntity.class)
-public abstract class LivingEntityMixin {
+public abstract class
+LivingEntityMixin {
     private static final String NBT_INVULNERABLE = "ecaInvulnerable";
     private static final String NBT_HEALTH_LOCK_VALUE = "ecaHealthLockValue";
     private static final String NBT_HEAL_BAN_VALUE = "ecaHealBanValue";
