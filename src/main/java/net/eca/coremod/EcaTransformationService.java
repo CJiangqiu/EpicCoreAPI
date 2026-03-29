@@ -15,27 +15,23 @@ import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.*;
 
-/**
- * ECA CoreMod （目前测试ing：启动agent来替代原来的主类构造函数启动agent）
- */
 @SuppressWarnings("unchecked")
 public class EcaTransformationService implements ITransformationService {
 
     static {
-        System.out.println("[ECA CoreMod] Static block : I'm first?");
-        // 先尝试启动 Agent，避免双加载调整后影响 AgentLoader 可见性
         attachAgentEarly();
-        // 再执行双加载，确保后续阶段按预期识别
         enableEcaDualLoading();
     }
 
     private static final String SERVICE_NAME = "eca_coremod";
 
-    // 当前 JAR 的绝对路径（在双加载时懒加载解析）
-    private static volatile Path ecaJarPath;
+    // 与 gradle.properties 的 archives_name 保持一致
+    private static final String ARCHIVES_NAME = "epic-core-api";
+
+    private static String ecaModuleName;
 
     public EcaTransformationService() {
-        System.out.println("[ECA CoreMod] TransformationService constructor called");
+        log("TransformationService constructor called");
     }
 
     @Override
@@ -45,68 +41,58 @@ public class EcaTransformationService implements ITransformationService {
 
     @Override
     public void onLoad(@NotNull IEnvironment env, @NotNull Set<String> otherServices) {
-        System.out.println("[ECA CoreMod] onLoad - other services count: " + otherServices.size());
+        log("onLoad - other services count: " + otherServices.size());
     }
 
-    /**
-     * 在 CoreMod 阶段提前挂载 Java Agent
-     * 此时游戏窗口尚未创建，Agent 的 ClassFileTransformer 能拦截所有后续类加载
-     */
     private static void attachAgentEarly() {
         try {
             ClassLoader coreLoader = EcaTransformationService.class.getClassLoader();
             Class<?> agentLoaderClass = Class.forName("net.eca.agent.AgentLoader", true, coreLoader);
             boolean selfAttachEnabled = (boolean) agentLoaderClass.getMethod("enableSelfAttach").invoke(null);
-            System.out.println("[ECA CoreMod] Self-attach enabled: " + selfAttachEnabled);
+            log("Self-attach enabled: " + selfAttachEnabled);
 
             boolean agentLoaded = (boolean) agentLoaderClass.getMethod("loadAgent", Class.class).invoke(null, new Object[]{null});
-            System.out.println("[ECA CoreMod] Agent early attach: " + agentLoaded);
+            log("Agent early attach: " + agentLoaded);
         } catch (ClassNotFoundException e) {
-            System.err.println("[ECA CoreMod] AgentLoader not found in early layer, fallback to mod init stage");
+            log("AgentLoader not found in early layer, fallback to mod init stage");
         } catch (Throwable t) {
-            System.err.println("[ECA CoreMod] Failed to attach agent early: " + t.getMessage());
-            t.printStackTrace();
+            log("Failed to attach agent early: " + t.getMessage());
         }
     }
 
     @Override
     public void initialize(@NotNull IEnvironment environment) {
-        System.out.println("[ECA CoreMod] initialize");
+        log("initialize");
     }
 
     @Override
     public @NotNull List<Resource> beginScanning(@NotNull IEnvironment environment) {
-        System.out.println("[ECA CoreMod] beginScanning");
+        log("beginScanning");
         return List.of();
     }
 
     @Override
     public @NotNull List<Resource> completeScan(@NotNull IModuleLayerManager layerManager) {
-        System.out.println("[ECA CoreMod] completeScan");
+        log("completeScan");
         return List.of();
     }
 
     @Override
     public @NotNull List<ITransformer> transformers() {
-        System.out.println("[ECA CoreMod] transformers() called");
+        log("transformers() called");
         return List.of();
     }
 
-    // ==================== 核心：启用双重加载 ====================
+    // ==================== 双重加载 ====================
 
-    /**
-     * 启用 ECA 双重加载模式
-     */
     public static void enableEcaDualLoading() {
-        ecaJarPath = resolveJarPath();
+        ecaModuleName = EcaTransformationService.class.getModule().getName();
+        log("[DualLoading] ecaModuleName = " + ecaModuleName + ", archivesName = " + ARCHIVES_NAME);
         removeEcaFromTransformerDiscovery();
         removeEcaFromModuleLayer();
-        System.out.println("[ECA CoreMod] Dual loading enabled successfully");
+        log("[DualLoading] Dual loading completed");
     }
 
-    /**
-     * 从 ModDirTransformerDiscoverer.found 列表中移除 ECA
-     */
     private static void removeEcaFromTransformerDiscovery() {
         try {
             Class<?> discovererClass = Class.forName(
@@ -118,17 +104,25 @@ public class EcaTransformationService implements ITransformationService {
 
             List<Object> found = (List<Object>) foundHandle.get();
 
+            log("[DualLoading] found list size = " + found.size());
+            for (Object namedPath : found) {
+                try {
+                    String name = (String) namedPath.getClass().getMethod("name").invoke(namedPath);
+                    Path[] paths = (Path[]) namedPath.getClass().getMethod("paths").invoke(namedPath);
+                    log("[DualLoading] found entry: name=" + name + ", path=" + paths[0]);
+                } catch (Exception e) {
+                    log("[DualLoading] found entry: " + namedPath);
+                }
+            }
+
             found.removeIf(namedPath -> {
                 try {
-                    Path[] paths = (Path[]) namedPath.getClass()
-                            .getMethod("paths")
-                            .invoke(namedPath);
-
-                    Path jarPath = paths[0];
-                    boolean isEca = ecaJarPath != null && isSameFile(jarPath, ecaJarPath);
+                    Path[] paths = (Path[]) namedPath.getClass().getMethod("paths").invoke(namedPath);
+                    String fileName = paths[0].getFileName().toString();
+                    boolean isEca = fileName.startsWith(ARCHIVES_NAME);
 
                     if (isEca) {
-                        System.out.println("[ECA CoreMod] Removed from transformer discovery: " + jarPath);
+                        log("[DualLoading] Removed from transformer discovery: " + paths[0]);
                     }
                     return isEca;
                 } catch (Exception e) {
@@ -137,13 +131,10 @@ public class EcaTransformationService implements ITransformationService {
             });
 
         } catch (Exception e) {
-            System.err.println("[ECA CoreMod] Failed to remove from transformer discovery: " + e.getMessage());
+            log("[DualLoading] Failed to remove from transformer discovery: " + e.getMessage());
         }
     }
 
-    /**
-     * 从 ModuleLayer 配置中移除 ECA 模块
-     */
     private static void removeEcaFromModuleLayer() {
         try {
             Unsafe unsafe = getEcaUnsafe();
@@ -177,7 +168,7 @@ public class EcaTransformationService implements ITransformationService {
 
             String moduleName = EcaTransformationService.class.getModule().getName();
             if (moduleName == null) {
-                System.out.println("[ECA CoreMod] Module name is null, skipping module layer removal");
+                log("[DualLoading] Module name is null, skipping module layer removal");
                 return;
             }
 
@@ -201,7 +192,7 @@ public class EcaTransformationService implements ITransformationService {
                     Object removed = newNameToModule.remove(moduleName);
                     if (removed != null) {
                         newModules.remove(removed);
-                        System.out.println("[ECA CoreMod] Removed module from layer: " + moduleName);
+                        log("[DualLoading] Removed module from layer: " + moduleName);
                     }
 
                     unsafe.putObject(config, nameToModuleOffset, newNameToModule);
@@ -210,31 +201,18 @@ public class EcaTransformationService implements ITransformationService {
             }
 
         } catch (Exception e) {
-            System.err.println("[ECA CoreMod] Failed to remove from module layer: " + e.getMessage());
+            log("[DualLoading] Failed to remove from module layer: " + e.getMessage());
         }
     }
 
     // ==================== 工具方法 ====================
 
-    private static Path resolveJarPath() {
+    private static void log(String message) {
         try {
-            java.security.CodeSource cs = EcaTransformationService.class.getProtectionDomain().getCodeSource();
-            if (cs != null && cs.getLocation() != null) {
-                Path resolved = Path.of(cs.getLocation().toURI()).toAbsolutePath().normalize();
-                System.out.println("[ECA CoreMod] Resolved JAR path: " + resolved);
-                return resolved;
-            }
-        } catch (Throwable t) {
-            System.err.println("[ECA CoreMod] Failed to resolve JAR path: " + t.getMessage());
-        }
-        return null;
-    }
-
-    private static boolean isSameFile(Path a, Path b) {
-        try {
-            return java.nio.file.Files.isSameFile(a, b);
-        } catch (Throwable t) {
-            return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
+            Class<?> logClass = Class.forName("net.eca.agent.AgentLogWriter",
+                    false, EcaTransformationService.class.getClassLoader());
+            logClass.getMethod("info", String.class).invoke(null, "[CoreMod] " + message);
+        } catch (Throwable ignored) {
         }
     }
 
