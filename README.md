@@ -107,7 +107,7 @@ side="BOTH"
 - `memoryRemove(entity, reason)` - DANGER! Requires Attack Radical Logic config. Remove entity via LWJGL internal channel
 - `cleanupBossBar(entity)` - Remove boss bars without removing entity
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
-- `setInvulnerable(entity, invulnerable)` - Set invulnerability (enable: revive + lock health; disable: clear invulnerability + unlock health)
+- `setInvulnerable(entity, invulnerable)` - Set invulnerability (enable: revive + lock health + block damage + remove harmful effects per tick + prevent mob targeting + protect player inventory; disable: clear all protections)
 - `enableAllReturn(entity)` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the target entity's mod
 - `setGlobalAllReturn(enable)` - DANGER! Requires Attack Radical Logic config. Enable/disable global AllReturn for all non-whitelisted mods
 - `disableAllReturn()` - Disable AllReturn and clear targets
@@ -523,7 +523,7 @@ side="BOTH"
 - `memoryRemove(entity, reason)` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
-- `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活并锁血；关闭：清除无敌并解锁血量）
+- `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活、锁血、阻断伤害、每tick清除有害效果、阻止怪物锁定、保护玩家物品栏；关闭：清除所有保护）
 - `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
 - `setGlobalAllReturn(enable)` - 危险！需要开启激进攻击逻辑配置，启用/禁用全局AllReturn，影响所有非白名单mod
 - `disableAllReturn()` - 关闭AllReturn并清除目标

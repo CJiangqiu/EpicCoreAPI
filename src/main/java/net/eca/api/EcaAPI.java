@@ -217,10 +217,16 @@ public final class EcaAPI {
      * Uses EntityData for LivingEntity types (synchronized to clients automatically).
      * Non-LivingEntity types are ignored.
      * IMPORTANT: This method automatically manages multiple protection systems:
-     * - When enabling invulnerability: revives entity and locks health
-     * - When disabling invulnerability: clears invulnerability and unlocks health
-     * - Prevents death through LivingDeathEvent cancellation
-     * - Prevents removal through Entity kill/discard/remove/setRemoved Mixin interception
+     * When enabling invulnerability:
+     * - Revives entity and locks health at current value
+     * - Blocks all incoming damage (hurt/actuallyHurt intercepted)
+     * - Prevents death (die/tickDeath intercepted, isDeadOrDying/isAlive overridden)
+     * - Removes harmful potion effects every tick
+     * - Prevents mobs from targeting this entity
+     * - Protects player inventory (clearContent/removeItem/clearOrCountMatchingItems blocked)
+     * When disabling invulnerability:
+     * - Clears invulnerability flag and unlocks health
+     * - All above protections are lifted
      * @param entity the entity to modify
      * @param invulnerable true to make the entity invulnerable, false otherwise
      */
@@ -277,15 +283,34 @@ public final class EcaAPI {
         EntityUtil.revive(entity);
     }
 
+    // 按UUID复活实体
+    /**
+     * Revive an entity by UUID in the specified level.
+     * @param level the server level containing the entity
+     * @param uuid the UUID of the entity to revive
+     */
     public static void revive(ServerLevel level, UUID uuid) {
         EntityUtil.revive(level, uuid);
     }
 
+    // 复活实体关键容器
+    /**
+     * Revive all critical entity containers for an entity.
+     * Attempts to re-insert the entity into tickList, lookup, sections, and tracker.
+     * @param entity the living entity to revive containers for
+     * @return map of container name to success result
+     */
     public static Map<String, Boolean> reviveAllContainers(LivingEntity entity) {
         return EntityUtil.reviveAllContainers(entity);
     }
 
-    //复活实体关键容器（按UUID）
+    // 按UUID复活实体关键容器
+    /**
+     * Revive all critical entity containers by UUID in the specified level.
+     * @param level the server level containing the entity
+     * @param uuid the UUID of the entity to revive containers for
+     * @return map of container name to success result
+     */
     public static Map<String, Boolean> reviveAllContainers(ServerLevel level, UUID uuid) {
         return EntityUtil.reviveAllContainers(level, uuid);
     }
@@ -637,7 +662,7 @@ public final class EcaAPI {
         return HealthLockManager.getMaxHealthLock(entity) != null;
     }
 
-    // 生命值白名单管理
+    // 添加血量白名单关键词
     /**
      * Add a keyword to the health whitelist.
      * Fields containing this keyword will be modified during health modification.
@@ -647,6 +672,7 @@ public final class EcaAPI {
         EntityUtil.addHealthWhitelistKeyword(keyword);
     }
 
+    // 移除血量白名单关键词
     /**
      * Remove a keyword from the health whitelist.
      * @param keyword the keyword to remove (case-insensitive)
@@ -655,6 +681,7 @@ public final class EcaAPI {
         EntityUtil.removeHealthWhitelistKeyword(keyword);
     }
 
+    // 获取所有血量白名单关键词
     /**
      * Get all health whitelist keywords.
      * @return a read-only copy of the health whitelist keywords
@@ -663,7 +690,7 @@ public final class EcaAPI {
         return EntityUtil.getHealthWhitelistKeywords();
     }
 
-    // 生命值黑名单管理
+    // 添加血量黑名单关键词
     /**
      * Add a keyword to the health blacklist.
      * Fields containing this keyword will NOT be modified during health modification.
@@ -673,6 +700,7 @@ public final class EcaAPI {
         EntityUtil.addHealthBlacklistKeyword(keyword);
     }
 
+    // 移除血量黑名单关键词
     /**
      * Remove a keyword from the health blacklist.
      * @param keyword the keyword to remove (case-insensitive)
@@ -681,6 +709,7 @@ public final class EcaAPI {
         EntityUtil.removeHealthBlacklistKeyword(keyword);
     }
 
+    // 获取所有血量黑名单关键词
     /**
      * Get all health blacklist keywords.
      * @return a read-only copy of the health blacklist keywords
