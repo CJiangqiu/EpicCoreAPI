@@ -9,7 +9,7 @@ configurations {
     forgevmEmbed
 }
 
-version = "${project.minecraft_version}-forge-${project.mod_version}"
+version = project.mod_version
 group = project.maven_group
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 

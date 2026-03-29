@@ -63,6 +63,18 @@ public final class NetworkDefenceMixin {
                 ci.cancel();
             }
         }
+
+        /**
+         * 拦截按引用移除物品的操作
+         * 防止外部代码强制移除无敌玩家的物品
+         */
+        @Inject(method = "removeItem(Lnet/minecraft/world/item/ItemStack;)V",
+                at = @At("HEAD"), cancellable = true)
+        private void onRemoveItemByReference(ItemStack stack, CallbackInfo ci) {
+            if (EcaAPI.isInvulnerable(this.player)) {
+                ci.cancel();
+            }
+        }
     }
 
     /* ─────────── 2. 踢人 & 断线包 保护 ─────────── */

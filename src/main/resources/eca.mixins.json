@@ -26,6 +26,7 @@
     "DistanceManagerMixin",
     "EntityLookupMixin",
     "EntityMixin",
+    "ItemStackMixin",
     "EntitySectionMixin",
     "EntityTickListMixin",
     "LivingEntityMixin",
