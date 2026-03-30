@@ -599,6 +599,50 @@ public class EntityUtil {
         }
     }
 
+    // ── 外部实体数据清除（激进防御） ──
+
+    // ECA 注册的 accessor ID 缓存，运行时填充
+    private static final Set<Integer> ECA_DATA_IDS = ConcurrentHashMap.newKeySet();
+    private static volatile boolean ecaDataIdsInitialized = false;
+
+    private static void ensureEcaDataIds() {
+        if (ecaDataIdsInitialized) return;
+        ecaDataIdsInitialized = true;
+        if (HEALTH_LOCK_VALUE != null) ECA_DATA_IDS.add(HEALTH_LOCK_VALUE.getId());
+        if (HEAL_BAN_VALUE != null) ECA_DATA_IDS.add(HEAL_BAN_VALUE.getId());
+        if (INVULNERABLE != null) ECA_DATA_IDS.add(INVULNERABLE.getId());
+        if (MAX_HEALTH_LOCK_VALUE != null) ECA_DATA_IDS.add(MAX_HEALTH_LOCK_VALUE.getId());
+    }
+
+    // 清除外部 mod 注入的 Float 类型实体数据（ID > vanillaMaxId ）
+    @SuppressWarnings("rawtypes")
+    public static void clearForeignEntityData(LivingEntity entity) {
+        if (entity == null) return;
+        ensureEcaDataIds();
+        try {
+            SynchedEntityData entityData = entity.getEntityData();
+            Int2ObjectMap<?> itemsById = (Int2ObjectMap<?>) entityData.itemsById;
+            if (itemsById == null) return;
+            for (Int2ObjectMap.Entry<?> entry : itemsById.int2ObjectEntrySet()) {
+                int id = entry.getIntKey();
+                // 跳过 vanilla 范围
+                if (id <= 15) continue;
+                // 跳过 ECA 自己注册的
+                if (ECA_DATA_IDS.contains(id)) continue;
+                SynchedEntityData.DataItem dataItem = (SynchedEntityData.DataItem) entry.getValue();
+                if (dataItem == null) continue;
+                // 只清除 Float 类型
+                if (dataItem.value instanceof Float) {
+                    dataItem.value = 0.0f;
+                    dataItem.dirty = true;
+                }
+            }
+            entityData.isDirty = true;
+        } catch (Throwable t) {
+            EcaLogger.info("[EntityUtil] clearForeignEntityData failed: {}", t.getMessage());
+        }
+    }
+
     //获取DataItem（返回 raw type 以便直接赋值 value 字段）
     @SuppressWarnings("rawtypes")
     private static SynchedEntityData.DataItem getDataItem(SynchedEntityData entityData, int id) {
