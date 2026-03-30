@@ -104,8 +104,9 @@ LivingEntityMixin {
         if (lockedValue != null) {
             float currentHealth = EntityUtil.getHealth(self);
             if (Math.abs(currentHealth - lockedValue) > 0.001f) {
-                EntityUtil.setHealth(self, lockedValue);
                 EntityUtil.revive(self);
+                EntityUtil.setBasicHealth(self, lockedValue);
+
             }
         } else if (healBanValue != null) {
             float currentHealth = EntityUtil.getHealth(self);

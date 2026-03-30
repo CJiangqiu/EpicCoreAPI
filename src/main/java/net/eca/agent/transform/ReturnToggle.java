@@ -272,6 +272,25 @@ public final class ReturnToggle {
         }
 
         /**
+         * 检查类是否受自定义保护（仅检查运行时添加的，不含内置保护）
+         * 用于 LivingEntityTransformer/EntityTransformer 排除第三方 mod 注册的包
+         * @param internalClassName 内部类名，如 "net/minecraft/world/entity/Entity"
+         * @return true 如果类在自定义保护列表中
+         */
+        public static boolean isCustomProtected(String internalClassName) {
+            if (internalClassName == null || custom.isEmpty()) {
+                return false;
+            }
+            String binaryName = internalClassName.replace('/', '.');
+            for (String prefix : custom) {
+                if (binaryName.startsWith(prefix)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
          * 添加自定义保护包名前缀
          * @param packagePrefix 包名前缀，如 "com.example."
          */

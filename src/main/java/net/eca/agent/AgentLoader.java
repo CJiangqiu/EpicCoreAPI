@@ -77,8 +77,8 @@ public final class AgentLoader {
             return true;
         }
 
-        // 先检查是否已经可以访问
-        if (isAgentFunctional()) {
+        // 功能可用但 instrumentation 未桥接到当前 classloader 时，仍需加载以完成桥接
+        if (isAgentFunctional() && EcaAgent.getInstrumentation() != null) {
             agentLoaded = true;
             return true;
         }

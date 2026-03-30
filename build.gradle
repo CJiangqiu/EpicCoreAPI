@@ -112,11 +112,6 @@ tasks.named('jar') {
     dependsOn tasks.named('agentJar')
     finalizedBy 'devJar'
 
-    from({ configurations.forgevmEmbed.collect { zipTree(it) } }) {
-        include 'forgevm/**'
-        include 'native/**'
-    }
-
     from(tasks.named('agentJar').flatMap { it.archiveFile }) {
         into 'net/eca/agent'
         rename { 'agent.jar' }

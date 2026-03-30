@@ -1,4 +1,6 @@
-package net.eca.agent;
+package net.eca.agent.transform;
+
+import net.eca.agent.AgentLogWriter;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

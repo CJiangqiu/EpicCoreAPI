@@ -1,5 +1,6 @@
-package net.eca.agent;
+package net.eca.agent.transform;
 
+import net.eca.agent.AgentLogWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.MethodVisitor;
@@ -18,15 +19,15 @@ import java.util.List;
  */
 public final class BytecodeVerifier {
 
-    // 目标方法的 SRG 名称
     private static final String GET_HEALTH_METHOD = "m_21223_";
     private static final String GET_MAX_HEALTH_METHOD = "m_21233_";
     private static final String IS_ALIVE_METHOD = "m_6084_";
     private static final String IS_DEAD_OR_DYING_METHOD = "m_21224_";
+    private static final String IS_REMOVED_METHOD = "m_213877_";
 
-    // ECA Hook 类名
     private static final String GET_HEALTH_HOOK = "net/eca/util/health/LivingEntityHook";
     private static final String STATUS_HOOK = "net/eca/util/health/LivingEntityHook";
+    private static final String ENTITY_HOOK = "net/eca/util/entity/EntityHook";
 
     /**
      * Verify and log the bytecode of a transformed class.
@@ -45,26 +46,24 @@ public final class BytecodeVerifier {
             AgentLogWriter.info("Target Class: " + targetClass.getName());
             AgentLogWriter.info("");
 
-            // 捕获类的字节码
             byte[] bytecode = captureClassBytecode(inst, targetClass);
             if (bytecode == null) {
                 AgentLogWriter.warn("Failed to capture bytecode for: " + targetClass.getName());
                 return;
             }
 
-            // 解析并验证字节码
             ClassReader cr = new ClassReader(bytecode);
             VerificationVisitor visitor = new VerificationVisitor();
             cr.accept(visitor, ClassReader.EXPAND_FRAMES);
 
-            // 输出验证结果
             AgentLogWriter.info("");
             AgentLogWriter.info("========================================");
             AgentLogWriter.info("Verification Summary:");
-            AgentLogWriter.info("  getHealth():      " + (visitor.getHealthHooked ? "✅ HOOKED" : "❌ NOT HOOKED"));
-            AgentLogWriter.info("  getMaxHealth():   " + (visitor.getMaxHealthHooked ? "✅ HOOKED" : "❌ NOT HOOKED"));
-            AgentLogWriter.info("  isAlive():        " + (visitor.isAliveHooked ? "✅ HOOKED" : "❌ NOT HOOKED"));
-            AgentLogWriter.info("  isDeadOrDying():  " + (visitor.isDeadOrDyingHooked ? "✅ HOOKED" : "❌ NOT HOOKED"));
+            AgentLogWriter.info("  getHealth():      " + (visitor.getHealthHooked ? "HOOKED" : "NOT HOOKED"));
+            AgentLogWriter.info("  getMaxHealth():   " + (visitor.getMaxHealthHooked ? "HOOKED" : "NOT HOOKED"));
+            AgentLogWriter.info("  isAlive():        " + (visitor.isAliveHooked ? "HOOKED" : "NOT HOOKED"));
+            AgentLogWriter.info("  isDeadOrDying():  " + (visitor.isDeadOrDyingHooked ? "HOOKED" : "NOT HOOKED"));
+            AgentLogWriter.info("  isRemoved():      " + (visitor.isRemovedHooked ? "HOOKED" : "NOT HOOKED"));
             AgentLogWriter.info("========================================");
             AgentLogWriter.info("");
 
@@ -73,9 +72,6 @@ public final class BytecodeVerifier {
         }
     }
 
-    /**
-     * Capture the current bytecode of a class using a temporary transformer.
-     */
     private static byte[] captureClassBytecode(Instrumentation inst, Class<?> targetClass) {
         BytecodeCaptureTransformer capturer = new BytecodeCaptureTransformer(targetClass);
         try {
@@ -90,9 +86,6 @@ public final class BytecodeVerifier {
         }
     }
 
-    /**
-     * Temporary transformer that captures bytecode without modifying it.
-     */
     private static class BytecodeCaptureTransformer implements ClassFileTransformer {
         private final Class<?> targetClass;
         private byte[] capturedBytecode;
@@ -107,7 +100,7 @@ public final class BytecodeVerifier {
             if (classBeingRedefined == targetClass) {
                 this.capturedBytecode = classfileBuffer;
             }
-            return null; // 不修改字节码
+            return null;
         }
 
         byte[] getCapturedBytecode() {
@@ -115,14 +108,12 @@ public final class BytecodeVerifier {
         }
     }
 
-    /**
-     * ASM ClassVisitor for verifying method transformations.
-     */
     private static class VerificationVisitor extends ClassVisitor {
         boolean getHealthHooked = false;
         boolean getMaxHealthHooked = false;
         boolean isAliveHooked = false;
         boolean isDeadOrDyingHooked = false;
+        boolean isRemovedHooked = false;
 
         VerificationVisitor() {
             super(Opcodes.ASM9);
@@ -150,13 +141,15 @@ public final class BytecodeVerifier {
                 return new MethodVerifier(STATUS_HOOK, "processIsDeadOrDying", result -> isDeadOrDyingHooked = result);
             }
 
+            if (IS_REMOVED_METHOD.equals(name) && "()Z".equals(descriptor)) {
+                AgentLogWriter.info("--- Method: m_213877_ (isRemoved) ---");
+                return new MethodVerifier(ENTITY_HOOK, "processIsRemoved", result -> isRemovedHooked = result);
+            }
+
             return null;
         }
     }
 
-    /**
-     * ASM MethodVisitor for verifying individual methods.
-     */
     private static class MethodVerifier extends MethodVisitor {
         private final String expectedHookClass;
         private final String expectedHookMethod;
@@ -174,17 +167,14 @@ public final class BytecodeVerifier {
 
         @Override
         public void visitLabel(Label label) {
-            // Skip labels for cleaner output
         }
 
         @Override
         public void visitLineNumber(int line, Label start) {
-            // Skip line numbers
         }
 
         @Override
         public void visitFrame(int type, int numLocal, Object[] local, int numStack, Object[] stack) {
-            // Skip frames
         }
 
         @Override
@@ -219,7 +209,7 @@ public final class BytecodeVerifier {
         public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean isInterface) {
             String hookMarker = "";
             if (opcode == Opcodes.INVOKESTATIC && owner.equals(expectedHookClass) && name.equals(expectedHookMethod)) {
-                hookMarker = " ✅ ECA HOOK";
+                hookMarker = " ECA_HOOK";
                 hookFound = true;
             }
 
@@ -234,20 +224,17 @@ public final class BytecodeVerifier {
 
         @Override
         public void visitEnd() {
-            // 输出所有指令
             for (String insn : instructions) {
                 AgentLogWriter.info(insn);
             }
 
-            // 输出结果
             if (hookFound) {
-                AgentLogWriter.info("Result: ✅ ECA hook detected");
+                AgentLogWriter.info("Result: ECA hook detected");
             } else {
-                AgentLogWriter.warn("Result: ❌ ECA hook NOT found (expected " + expectedHookClass + "." + expectedHookMethod + ")");
+                AgentLogWriter.warn("Result: ECA hook NOT found (expected " + expectedHookClass + "." + expectedHookMethod + ")");
             }
             AgentLogWriter.info("");
 
-            // 回调结果
             callback.onResult(hookFound);
         }
 
@@ -295,9 +282,6 @@ public final class BytecodeVerifier {
         }
     }
 
-    /**
-     * Callback interface for verification results.
-     */
     @FunctionalInterface
     private interface ResultCallback {
         void onResult(boolean success);

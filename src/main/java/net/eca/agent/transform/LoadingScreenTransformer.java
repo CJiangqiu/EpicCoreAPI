@@ -81,17 +81,6 @@ public class LoadingScreenTransformer implements ITransformModule {
         }
     }
 
-    private static class SafeClassWriter extends ClassWriter {
-        SafeClassWriter(ClassReader cr, int flags) {
-            super(cr, flags);
-        }
-
-        @Override
-        protected String getCommonSuperClass(String type1, String type2) {
-            return "java/lang/Object";
-        }
-    }
-
     private static class DisplayWindowVisitor extends ClassVisitor {
         boolean transformed;
 

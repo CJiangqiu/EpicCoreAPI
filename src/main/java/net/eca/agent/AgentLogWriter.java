@@ -22,6 +22,24 @@ public final class AgentLogWriter {
 
     private static final String LOG_FILE_NAME = "EcaAgent.log";
 
+    // 新游戏会话时清空旧日志（由最早的入口点 coremod 调用）
+    /**
+     * Reset the log file for a new game session.
+     * Must be called once at the earliest entry point (coremod static init).
+     * Subsequent classloader instances will append to the same file.
+     */
+    public static synchronized void resetForNewSession() {
+        try {
+            Path logsDir = Paths.get("logs");
+            if (!Files.exists(logsDir)) {
+                Files.createDirectories(logsDir);
+            }
+            Path logFile = logsDir.resolve(LOG_FILE_NAME);
+            Files.deleteIfExists(logFile);
+        } catch (IOException ignored) {
+        }
+    }
+
     // 初始化日志文件
     /**
      * Initialize the log file.
@@ -38,12 +56,17 @@ public final class AgentLogWriter {
             }
 
             Path logFile = logsDir.resolve(LOG_FILE_NAME);
-            writer = new BufferedWriter(new FileWriter(logFile.toFile(), false));
+            boolean isNewSession = !Files.exists(logFile) || Files.size(logFile) == 0;
+            writer = new BufferedWriter(new FileWriter(logFile.toFile(), true));
 
-            writer.write("========================================\n");
-            writer.write("EpicCoreAPI - Agent Log\n");
-            writer.write("Started at: " + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) + "\n");
-            writer.write("========================================\n\n");
+            if (isNewSession) {
+                writer.write("========================================\n");
+                writer.write("EpicCoreAPI - Agent Log\n");
+                writer.write("Started at: " + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) + "\n");
+                writer.write("========================================\n\n");
+            } else {
+                writer.write("\n--- ClassLoader session joined at: " + LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) + " ---\n\n");
+            }
             writer.flush();
 
         } catch (IOException e) {

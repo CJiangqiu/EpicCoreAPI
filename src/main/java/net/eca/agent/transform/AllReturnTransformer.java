@@ -1,7 +1,7 @@
 package net.eca.agent.transform;
 
 import net.eca.agent.AgentLogWriter;
-import net.eca.agent.SafeClassWriter;
+
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;

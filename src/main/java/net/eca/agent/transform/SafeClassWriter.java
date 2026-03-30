@@ -1,4 +1,4 @@
-package net.eca.agent;
+package net.eca.agent.transform;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
@@ -38,26 +38,21 @@ public class SafeClassWriter extends ClassWriter {
 
     @Override
     protected String getCommonSuperClass(String type1, String type2) {
-        // 快速路径：相同类型
         if (type1.equals(type2)) {
             return type1;
         }
 
-        // 快速路径：其中一个是 Object
         if ("java/lang/Object".equals(type1) || "java/lang/Object".equals(type2)) {
             return "java/lang/Object";
         }
 
         try {
-            // 获取 type1 的所有父类链
             Set<String> type1Ancestors = getSuperClassChain(type1);
 
-            // 检查 type2 是否在 type1 的父类链中
             if (type1Ancestors.contains(type2)) {
                 return type2;
             }
 
-            // 遍历 type2 的父类链，查找第一个在 type1 祖先中的类
             String current = type2;
             while (current != null && !"java/lang/Object".equals(current)) {
                 String superName = getSuperClassName(current);
@@ -70,19 +65,15 @@ public class SafeClassWriter extends ClassWriter {
                 current = superName;
             }
         } catch (Exception e) {
-            // 忽略异常，回退到 Object
         }
 
         return "java/lang/Object";
     }
 
-    /**
-     * 获取类的所有父类（包括自己）
-     */
     private Set<String> getSuperClassChain(String type) {
         Set<String> ancestors = new HashSet<>();
         String current = type;
-        int maxDepth = 100; // 防止无限循环
+        int maxDepth = 100;
 
         while (current != null && maxDepth-- > 0) {
             ancestors.add(current);
@@ -96,11 +87,7 @@ public class SafeClassWriter extends ClassWriter {
         return ancestors;
     }
 
-    /**
-     * 通过读取字节码获取父类名，不触发类加载
-     */
     private String getSuperClassName(String type) {
-        // 尝试从类加载器获取字节码
         String resourcePath = type + ".class";
         try (InputStream is = classLoader.getResourceAsStream(resourcePath)) {
             if (is != null) {
@@ -108,10 +95,8 @@ public class SafeClassWriter extends ClassWriter {
                 return cr.getSuperName();
             }
         } catch (IOException e) {
-            // 忽略
         }
 
-        // 回退：尝试加载类（某些系统类可能需要）
         try {
             Class<?> clazz = Class.forName(type.replace('/', '.'), false, classLoader);
             Class<?> superClass = clazz.getSuperclass();
@@ -119,7 +104,6 @@ public class SafeClassWriter extends ClassWriter {
                 return superClass.getName().replace('.', '/');
             }
         } catch (ClassNotFoundException e) {
-            // 忽略
         }
 
         return null;

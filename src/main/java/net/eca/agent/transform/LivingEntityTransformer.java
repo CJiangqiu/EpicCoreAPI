@@ -1,77 +1,52 @@
 package net.eca.agent.transform;
 
 import net.eca.agent.AgentLogWriter;
-import net.eca.agent.AgentConfigReader;
+
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
 /**
  * Bytecode transformer for LivingEntity and its subclasses.
- * Handles transformations like getHealth() hooking for heal negation.
+ * Uses HEAD hook injection: ECA logic runs first at method entry,
+ * returns early if overriding, otherwise falls through to original method body.
  */
 public class LivingEntityTransformer implements ITransformModule {
 
     private static final String TARGET_BASE_CLASS = "net.minecraft.world.entity.LivingEntity";
 
-    // getHealth()方法的SRG混淆名
     private static final String GET_HEALTH_METHOD_NAME = "m_21223_";
     private static final String GET_HEALTH_METHOD_DESC = "()F";
     private static final String GET_MAX_HEALTH_METHOD_NAME = "m_21233_";
     private static final String GET_MAX_HEALTH_METHOD_DESC = "()F";
-
-    // isDeadOrDying()/isAlive() methods (SRG names)
     private static final String IS_DEAD_OR_DYING_METHOD_NAME = "m_21224_";
     private static final String IS_DEAD_OR_DYING_METHOD_DESC = "()Z";
     private static final String IS_ALIVE_METHOD_NAME = "m_6084_";
     private static final String IS_ALIVE_METHOD_DESC = "()Z";
 
-    // Hook处理器类（由使用者设置）
+    // getHealth hook（由 EcaAgent 设置）
     private static String hookClassName = "net/eca/util/health/LivingEntityHook";
     private static String hookMethodName = "processGetHealth";
-    private static String hookMethodDesc = "(Lnet/minecraft/world/entity/LivingEntity;F)F";
+    private static String hookMethodDesc = "(Lnet/minecraft/world/entity/LivingEntity;)F";
 
+    // boolean 状态 hook（isAlive/isDeadOrDying 返回 int: -1=passthrough, 0=false, 1=true）
     private static final String STATUS_HOOK_CLASS_NAME = "net/eca/util/health/LivingEntityHook";
-    private static final String STATUS_HOOK_METHOD_DESC = "(Lnet/minecraft/world/entity/LivingEntity;Z)Z";
+    private static final String STATUS_HOOK_METHOD_DESC = "(Lnet/minecraft/world/entity/LivingEntity;)I";
 
-    // 转换计数器（用于验证转换是否生效）
     private static volatile int transformCount = 0;
 
-    /**
-     * 获取转换计数
-     * @return 成功转换的类数量
-     */
     public static int getTransformCount() {
         return transformCount;
     }
 
-    // 设置Hook处理器
-    /**
-     * Set the hook handler class and method.
-     * @param className the internal class name of the hook handler
-     * @param methodName the method name to call
-     * @param methodDesc the method descriptor
-     */
     public static void setHookHandler(String className, String methodName, String methodDesc) {
         hookClassName = className;
         hookMethodName = methodName;
         hookMethodDesc = methodDesc;
         AgentLogWriter.info("[LivingEntityTransformer] Hook handler set to: " + className + "." + methodName);
-    }
-
-    // 默认的Hook处理方法（直接返回原值）
-    /**
-     * Default hook handler that returns the original health value.
-     * Override by setting a custom hook handler via setHookHandler().
-     * @param originalHealth the original health value
-     * @param entity the living entity
-     * @param className the class name of the entity
-     * @return the processed health value
-     */
-    public static float processGetHealth(float originalHealth, Object entity, String className) {
-        return originalHealth;
     }
 
     @Override
@@ -85,42 +60,24 @@ public class LivingEntityTransformer implements ITransformModule {
     }
 
     @Override
-    public boolean requiresMethodOverrideCheck() {
-        // 非激进模式：仅重转覆写类，降低兼容影响
-        // 激进模式：全量重转 LivingEntity 子类，确保后续按“方法存在即替换”覆盖
-        return !AgentConfigReader.isDefenceRadicalEnabled();
-    }
-
-    @Override
-    public String getTargetMethodName() {
-        return GET_HEALTH_METHOD_NAME;
-    }
-
-    @Override
-    public String getTargetMethodDescriptor() {
-        return GET_HEALTH_METHOD_DESC;
-    }
-
-    @Override
     public boolean shouldTransform(String className, ClassLoader classLoader) {
-        // 跳过ECA自己的类
         if (className.startsWith("net/eca/")) {
             return false;
         }
-        // 实际的类型检查在EcaAgent中进行
+        if (ReturnToggle.PackageWhitelist.isCustomProtected(className)) {
+            return false;
+        }
         return true;
     }
 
     @Override
     public byte[] transform(String className, byte[] classfileBuffer) {
         try {
-            // Entity 自身定义了 isAlive/isDeadOrDying，但 hook 会 CHECKCAST 到 LivingEntity
-            // 非 LivingEntity 子类（如 ItemEntity）调用时会导致 ClassCastException
             if (className.equals("net/minecraft/world/entity/Entity")) {
                 return null;
             }
 
-            // 第一遍：快速扫描，检查类是否定义了目标方法
+            // 快速扫描：检查类是否声明了任一目标方法
             ClassReader scanReader = new ClassReader(classfileBuffer);
             MethodFinder finder = new MethodFinder();
             scanReader.accept(finder, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
@@ -129,20 +86,19 @@ public class LivingEntityTransformer implements ITransformModule {
                 return null;
             }
 
-            // 第二遍：实际转换
+            // 实际转换
             ClassReader cr = new ClassReader(classfileBuffer);
             ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
 
-            boolean radicalMode = AgentConfigReader.isDefenceRadicalEnabled();
-            GetHealthClassVisitor cv = new GetHealthClassVisitor(cw, className);
+            TransformClassVisitor cv = new TransformClassVisitor(cw);
             cr.accept(cv, ClassReader.EXPAND_FRAMES);
 
             if (cv.transformed) {
-                byte[] transformedBytes = cw.toByteArray();
+                byte[] result = cw.toByteArray();
                 transformCount++;
-
-                AgentLogWriter.info("[LivingEntityTransformer] Transformed: " + className + " mode=TAIL_HOOK scope=" + (radicalMode ? "ALL_SUBCLASSES" : "OVERRIDES_ONLY") + " (total: " + transformCount + ")");
-                return transformedBytes;
+                AgentLogWriter.info("[LivingEntityTransformer] Transformed: " + className
+                        + " mode=HEAD_HOOK (total: " + transformCount + ")");
+                return result;
             }
             return null;
 
@@ -152,7 +108,7 @@ public class LivingEntityTransformer implements ITransformModule {
         }
     }
 
-    // 快速扫描类是否定义了目标方法
+    // 快速扫描：任一目标方法声明即可
     private static class MethodFinder extends ClassVisitor {
         boolean hasTargetMethod = false;
 
@@ -172,28 +128,11 @@ public class LivingEntityTransformer implements ITransformModule {
         }
     }
 
-    // 安全的ClassWriter，避免类加载问题
-    private static class SafeClassWriter extends ClassWriter {
-        SafeClassWriter(ClassReader classReader, int flags) {
-            super(classReader, flags);
-        }
+    // ClassVisitor：对声明了目标方法的类进行 HEAD hook 注入
+    private static class TransformClassVisitor extends ClassVisitor {
+        boolean transformed = false;
 
-        @Override
-        protected String getCommonSuperClass(String type1, String type2) {
-            // 避免在Agent中加载类，直接返回Object
-            return "java/lang/Object";
-        }
-    }
-
-    // ClassVisitor：遍历类的所有方法
-    private static class GetHealthClassVisitor extends ClassVisitor {
-        public boolean transformed = false;
-        public boolean hookedGetHealth = false;
-        public boolean hookedGetMaxHealth = false;
-        public boolean hookedIsDeadOrDying = false;
-        public boolean hookedIsAlive = false;
-
-        GetHealthClassVisitor(ClassWriter cw, String className) {
+        TransformClassVisitor(ClassWriter cw) {
             super(Opcodes.ASM9, cw);
         }
 
@@ -203,44 +142,38 @@ public class LivingEntityTransformer implements ITransformModule {
 
             if (name.equals(GET_HEALTH_METHOD_NAME) && descriptor.equals(GET_HEALTH_METHOD_DESC)) {
                 transformed = true;
-                hookedGetHealth = true;
-                return new FloatStatusMethodVisitor(mv, hookClassName, hookMethodName, hookMethodDesc);
+                return new FloatHeadHookVisitor(mv, hookClassName, hookMethodName, hookMethodDesc);
             }
 
             if (name.equals(GET_MAX_HEALTH_METHOD_NAME) && descriptor.equals(GET_MAX_HEALTH_METHOD_DESC)) {
                 transformed = true;
-                hookedGetMaxHealth = true;
-                return new FloatStatusMethodVisitor(
-                        mv,
-                        STATUS_HOOK_CLASS_NAME,
-                        "processGetMaxHealth",
-                        "(Lnet/minecraft/world/entity/LivingEntity;F)F"
-                );
+                return new FloatHeadHookVisitor(mv, STATUS_HOOK_CLASS_NAME,
+                        "processGetMaxHealth", "(Lnet/minecraft/world/entity/LivingEntity;)F");
             }
 
             if (name.equals(IS_DEAD_OR_DYING_METHOD_NAME) && descriptor.equals(IS_DEAD_OR_DYING_METHOD_DESC)) {
                 transformed = true;
-                hookedIsDeadOrDying = true;
-                return new BooleanStatusMethodVisitor(mv, "processIsDeadOrDying");
+                return new BooleanHeadHookVisitor(mv, "processIsDeadOrDying");
             }
 
             if (name.equals(IS_ALIVE_METHOD_NAME) && descriptor.equals(IS_ALIVE_METHOD_DESC)) {
                 transformed = true;
-                hookedIsAlive = true;
-                return new BooleanStatusMethodVisitor(mv, "processIsAlive");
+                return new BooleanHeadHookVisitor(mv, "processIsAlive");
             }
 
             return mv;
         }
     }
 
-    // MethodVisitor：在返回前拦截并修改返回值
-    private static class FloatStatusMethodVisitor extends MethodVisitor {
+    // ==================== HEAD Hook Visitors ====================
+
+    // float 方法 HEAD hook：方法头调用 hook，非 NaN 则直接返回，NaN 则 fall through
+    private static class FloatHeadHookVisitor extends MethodVisitor {
         private final String hookOwner;
         private final String hookName;
         private final String hookDesc;
 
-        FloatStatusMethodVisitor(MethodVisitor mv, String hookOwner, String hookName, String hookDesc) {
+        FloatHeadHookVisitor(MethodVisitor mv, String hookOwner, String hookName, String hookDesc) {
             super(Opcodes.ASM9, mv);
             this.hookOwner = hookOwner;
             this.hookName = hookName;
@@ -248,49 +181,48 @@ public class LivingEntityTransformer implements ITransformModule {
         }
 
         @Override
-        public void visitInsn(int opcode) {
-            if (opcode == Opcodes.FRETURN) {
-                // 在返回前修改栈顶的返回值
-                // 栈：[原始血量] → [this, 原始血量] → [最终血量]
-                mv.visitVarInsn(Opcodes.ALOAD, 0);  // 加载this（放在栈底）
-                mv.visitTypeInsn(Opcodes.CHECKCAST, "net/minecraft/world/entity/LivingEntity");  // 强制转型
-                mv.visitInsn(Opcodes.SWAP);  // 交换栈顶两个元素，变成 [this, 原始血量]
-                mv.visitMethodInsn(
-                        Opcodes.INVOKESTATIC,
-                        hookOwner,
-                        hookName,
-                        hookDesc,
-                        false
-                );
-            }
-            super.visitInsn(opcode);
+        public void visitCode() {
+            super.visitCode();
+
+            Label continueLabel = new Label();
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "net/minecraft/world/entity/LivingEntity");
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, hookOwner, hookName, hookDesc, false);
+            // NaN 检测：NaN != NaN，FCMPL(NaN, NaN) = -1
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitInsn(Opcodes.FCMPL);
+            mv.visitJumpInsn(Opcodes.IFLT, continueLabel);
+            mv.visitInsn(Opcodes.FRETURN);
+            mv.visitLabel(continueLabel);
+            mv.visitInsn(Opcodes.POP);
         }
     }
 
-    private static class BooleanStatusMethodVisitor extends MethodVisitor {
+    // boolean 方法 HEAD hook：方法头调用 hook 返回 int，-1 = passthrough，0/1 = 直接返回
+    private static class BooleanHeadHookVisitor extends MethodVisitor {
         private final String hookMethod;
 
-        BooleanStatusMethodVisitor(MethodVisitor mv, String hookMethod) {
+        BooleanHeadHookVisitor(MethodVisitor mv, String hookMethod) {
             super(Opcodes.ASM9, mv);
             this.hookMethod = hookMethod;
         }
 
         @Override
-        public void visitInsn(int opcode) {
-            if (opcode == Opcodes.IRETURN) {
-                // Stack: [originalBool] -> [this, originalBool] -> [finalBool]
-                mv.visitVarInsn(Opcodes.ALOAD, 0);
-                mv.visitTypeInsn(Opcodes.CHECKCAST, "net/minecraft/world/entity/LivingEntity");
-                mv.visitInsn(Opcodes.SWAP);
-                mv.visitMethodInsn(
-                        Opcodes.INVOKESTATIC,
-                        STATUS_HOOK_CLASS_NAME,
-                        hookMethod,
-                        STATUS_HOOK_METHOD_DESC,
-                        false
-                );
-            }
-            super.visitInsn(opcode);
+        public void visitCode() {
+            super.visitCode();
+
+            Label continueLabel = new Label();
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "net/minecraft/world/entity/LivingEntity");
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, STATUS_HOOK_CLASS_NAME, hookMethod,
+                    STATUS_HOOK_METHOD_DESC, false);
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitInsn(Opcodes.ICONST_M1);
+            mv.visitJumpInsn(Opcodes.IF_ICMPEQ, continueLabel);
+            mv.visitInsn(Opcodes.IRETURN);
+            mv.visitLabel(continueLabel);
+            mv.visitInsn(Opcodes.POP);
         }
     }
 }

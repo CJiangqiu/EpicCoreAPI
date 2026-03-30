@@ -2,6 +2,7 @@ package net.eca.mixin;
 
 import it.unimi.dsi.fastutil.longs.LongSet;
 import net.eca.api.EcaAPI;
+import net.eca.util.EntityUtil;
 
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.spawn_ban.SpawnBanHook;
@@ -61,8 +62,7 @@ public class TransientEntitySectionManagerMixin {
         @Inject(method = "onRemove", at = @At("HEAD"), cancellable = true)
         private void eca$onRemove(Entity.RemovalReason reason, CallbackInfo ci) {
             if (this.entity instanceof Entity realEntity) {
-                // Allow dimension change operations even for invulnerable entities
-                if (EcaAPI.isInvulnerable(realEntity) && reason != Entity.RemovalReason.CHANGED_DIMENSION) {
+                if (EcaAPI.isInvulnerable(realEntity) && !(reason == Entity.RemovalReason.CHANGED_DIMENSION && EntityUtil.isChangingDimension(realEntity))) {
                     ci.cancel();
                 }
             }

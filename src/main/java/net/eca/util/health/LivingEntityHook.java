@@ -5,8 +5,11 @@ import net.minecraft.world.entity.LivingEntity;
 
 /**
  * Unified hook handler for LivingEntity bytecode injection.
- * Handles getHealth(), isAlive(), and isDeadOrDying() hooks.
- * All methods are called via INVOKESTATIC from LivingEntityTransformer bytecode injection.
+ * All methods are called via INVOKESTATIC from HEAD hook injection.
+ *
+ * Convention:
+ * - Float hooks return NaN for passthrough (let original method run)
+ * - Boolean hooks return int: -1 = passthrough, 0 = false, 1 = true
  */
 public final class LivingEntityHook {
 
@@ -15,110 +18,105 @@ public final class LivingEntityHook {
 
     // ==================== getHealth() hook ====================
 
-    // 处理 getHealth() 返回值（分析 + 锁定 + 禁疗）
+    // 处理 getHealth()：分析 + 锁血 + 禁疗，NaN 表示放行
     /**
-     * Process getHealth() return value.
-     * This hook performs tasks in order of priority:
-     * 1. Health Analysis: Triggers bytecode analysis to cache health storage location
-     * 2. Health Lock: Checks and applies health lock if set (highest priority)
-     * 3. Heal Ban: Prevents health from exceeding ban value (lower priority than lock)
+     * Process getHealth() at method HEAD.
+     * Returns a float value to short-circuit, or NaN to fall through to original method.
+     *
+     * Priority: analysis → health lock → heal ban → passthrough
      *
      * @param entity the living entity
-     * @param originalHealth the original health value from getHealth() calculation
-     * @return the final health value (lock > heal ban cap > original)
+     * @return locked/banned health value, or NaN for passthrough
      */
-    public static float processGetHealth(LivingEntity entity, float originalHealth) {
-        // 第一步：始终触发分析（缓存机制会避免重复分析）
-        // 即使实体被锁血或禁疗，也要完成分析，这样解锁后才能正确修改血量
+    public static float processGetHealth(LivingEntity entity) {
+        // 始终触发分析（缓存机制会避免重复分析）
         try {
             String className = entity.getClass().getName().replace('.', '/');
             HealthAnalyzerManager.onGetHealthCalled(entity, className);
         } catch (Throwable t) {
-            // 静默失败，不影响游戏运行
         }
 
-        // 第二步：检查血量锁定（最高优先级）
+        // 锁血：直接返回锁定值
         Float locked = HealthLockManager.getLock(entity);
         if (locked != null) {
             return locked;
         }
 
-        // 第三步：检查禁疗（仅限制上限，不保护下限）
+        // 禁疗：直接返回禁疗时记录的血量值
         Float healBan = HealthLockManager.getHealBan(entity);
-        if (healBan != null && originalHealth > healBan) {
+        if (healBan != null) {
             return healBan;
         }
 
-        // 第四步：返回原始值
-        return originalHealth;
+        // 放行：让原始方法体执行
+        return Float.NaN;
     }
 
-    // ==================== isDeadOrDying() hook ====================
+    // ==================== getMaxHealth() hook ====================
 
     /**
-     * Process getMaxHealth() return value.
-     * Returns locked max health when present.
+     * Process getMaxHealth() at method HEAD.
+     * Returns locked max health or NaN for passthrough.
      *
      * @param entity the living entity
-     * @param originalMaxHealth the original max health value
-     * @return locked max health or original value
+     * @return locked max health, or NaN for passthrough
      */
-    public static float processGetMaxHealth(LivingEntity entity, float originalMaxHealth) {
+    public static float processGetMaxHealth(LivingEntity entity) {
         if (entity == null) {
-            return originalMaxHealth;
+            return Float.NaN;
         }
         Float locked = HealthLockManager.getMaxHealthLock(entity);
         if (locked != null) {
             return locked;
         }
-        return originalMaxHealth;
+        return Float.NaN;
     }
 
+    // ==================== isDeadOrDying() hook ====================
+
     /**
-     * Process isDeadOrDying() return value.
-     * Returns false when entity is invulnerable or has positive health lock.
-     * Heal ban does NOT prevent death.
+     * Process isDeadOrDying() at method HEAD.
+     * Returns 0 (false, not dead) when entity is invulnerable or has positive health lock.
+     * Returns -1 for passthrough.
      *
      * @param entity the living entity
-     * @param original the original isDeadOrDying() result
-     * @return false if entity should be kept alive, otherwise original
+     * @return 0 for "not dead", -1 for passthrough
      */
-    public static boolean processIsDeadOrDying(LivingEntity entity, boolean original) {
+    public static int processIsDeadOrDying(LivingEntity entity) {
         if (entity == null) {
-            return original;
+            return -1;
         }
         if (EcaAPI.isInvulnerable(entity)) {
-            return false;
+            return 0;
         }
         Float locked = HealthLockManager.getLock(entity);
         if (locked != null && locked > 0.0f) {
-            return false;
+            return 0;
         }
-        return original;
+        return -1;
     }
 
     // ==================== isAlive() hook ====================
 
     /**
-     * Process isAlive() return value.
-     * Returns true when entity is invulnerable or has positive health lock.
-     * Heal ban does NOT prevent death.
+     * Process isAlive() at method HEAD.
+     * Returns 1 (true, alive) when entity is invulnerable or has positive health lock.
+     * Returns -1 for passthrough.
      *
      * @param entity the living entity
-     * @param original the original isAlive() result
-     * @return true if entity should be kept alive, otherwise original
+     * @return 1 for "alive", -1 for passthrough
      */
-    public static boolean processIsAlive(LivingEntity entity, boolean original) {
+    public static int processIsAlive(LivingEntity entity) {
         if (entity == null) {
-            return original;
+            return -1;
         }
         if (EcaAPI.isInvulnerable(entity)) {
-            return true;
+            return 1;
         }
         Float locked = HealthLockManager.getLock(entity);
         if (locked != null && locked > 0.0f) {
-            return true;
+            return 1;
         }
-        return original;
+        return -1;
     }
 }

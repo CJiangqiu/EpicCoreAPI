@@ -77,7 +77,7 @@ public class PersistentEntitySectionManagerMixin {
         @Inject(method = "onRemove", at = @At("HEAD"), cancellable = true)
         private void eca$onRemove(Entity.RemovalReason reason, CallbackInfo ci) {
             if (this.entity instanceof Entity realEntity) {
-                if (EcaAPI.isInvulnerable(realEntity) && reason != Entity.RemovalReason.CHANGED_DIMENSION) {
+                if (EcaAPI.isInvulnerable(realEntity) && !(reason == Entity.RemovalReason.CHANGED_DIMENSION && EntityUtil.isChangingDimension(realEntity))) {
                     ci.cancel();
                 }
             }

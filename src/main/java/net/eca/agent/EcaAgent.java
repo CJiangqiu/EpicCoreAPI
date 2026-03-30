@@ -1,20 +1,17 @@
 package net.eca.agent;
 
+import net.eca.agent.transform.AgentConfigReader;
 import net.eca.agent.transform.AllReturnTransformer;
 import net.eca.agent.transform.ContainerReplacementTransformer;
 import net.eca.agent.transform.EcaTransformer;
-import net.eca.agent.transform.ITransformModule;
+import net.eca.agent.transform.EntityTransformer;
 import net.eca.agent.transform.LivingEntityTransformer;
 import net.eca.agent.transform.LoadingScreenTransformer;
+import net.eca.agent.transform.TransformApplier;
 
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
 
 // ECA Java Agent入口
 /**
@@ -25,7 +22,6 @@ public final class EcaAgent {
 
     private static Instrumentation instrumentation;
     private static boolean initialized = false;
-    private static final String LIVING_ENTITY_TRANSFORMER_NAME = "LivingEntityTransformer";
 
     // premain入口（JVM启动时加载）
     /**
@@ -55,7 +51,7 @@ public final class EcaAgent {
             // 获取EcaTransformer并注册模块
             EcaTransformer transformer = EcaTransformer.getInstance();
 
-            // 注册加载界面渐变转换模块（最先 retransform，确保视觉反馈不被后续模块阻塞）
+            // 注册加载界面渐变转换模块
             if (AgentConfigReader.isCustomLoadingBackgroundEnabled()) {
                 transformer.registerModule(new LoadingScreenTransformer());
                 AgentLogWriter.info("[EcaAgent] Registered LoadingScreenTransformer");
@@ -63,24 +59,20 @@ public final class EcaAgent {
                 AgentLogWriter.info("[EcaAgent] Custom loading background disabled by config");
             }
 
-            // 注册容器替换模块
             transformer.registerModule(new ContainerReplacementTransformer());
-
-            // 注册LivingEntity转换模块
+            transformer.registerModule(new EntityTransformer());
             transformer.registerModule(new LivingEntityTransformer());
-
-            // 注册AllReturn转换模块
             transformer.registerModule(new AllReturnTransformer());
 
-            // 设置 getHealth() 完整钩子处理器（分析 + 覆盖）
+            // 设置 getHealth() 完整钩子处理器
             LivingEntityTransformer.setHookHandler(
                 "net/eca/util/health/LivingEntityHook",
                 "processGetHealth",
-                "(Lnet/minecraft/world/entity/LivingEntity;F)F"
+                "(Lnet/minecraft/world/entity/LivingEntity;)F"
             );
             AgentLogWriter.info("[EcaAgent] Registered LivingEntityHook handler");
 
-            applyAgentTransformers();
+            TransformApplier.apply(null);
 
             initialized = true;
             AgentLogWriter.info("[EcaAgent] Agent initialization completed successfully");
@@ -127,14 +119,8 @@ public final class EcaAgent {
     }
 
     // 打开必要的模块
-    /**
-     * Open required modules for reflection access.
-     * @param callerClassName the caller class name
-     * @param inst instrumentation instance
-     */
     private static void applyOpenPackages(String callerClassName, Instrumentation inst) {
         try {
-            // 通过已加载的类查找目标模块
             Module targetModule = null;
             if (callerClassName != null) {
                 for (Class<?> clazz : inst.getAllLoadedClasses()) {
@@ -146,11 +132,9 @@ public final class EcaAgent {
             }
 
             if (targetModule == null) {
-                // 使用EcaAgent自己的模块
                 targetModule = EcaAgent.class.getModule();
             }
 
-            // 打开java.util.*和java.lang.*
             Module base = Object.class.getModule();
             for (String pkg : base.getPackages()) {
                 if (pkg.startsWith("java.util") || pkg.startsWith("java.lang")) {
@@ -165,14 +149,6 @@ public final class EcaAgent {
         }
     }
 
-    // 打开模块
-    /**
-     * Open a module package to another module.
-     * @param inst instrumentation instance
-     * @param module the module to open
-     * @param pkg the package to open
-     * @param to the target module
-     */
     private static void applyOpenPackage(Instrumentation inst, Module module, String pkg, Module to) {
         inst.redefineModule(
                 module,
@@ -184,251 +160,6 @@ public final class EcaAgent {
         );
     }
 
-    public static void applyAgentTransformers() {
-        Instrumentation inst = instrumentation;
-        if (inst == null) {
-            AgentLogWriter.warn("[EcaAgent] Cannot apply transformers: Instrumentation not available");
-            return;
-        }
-
-        EcaTransformer transformer = EcaTransformer.getInstance();
-        if (!transformer.getModules().isEmpty()) {
-            applyAgentTransformersLocalOnly();
-            return;
-        }
-
-        Class<?> peerAgent = findPeerAgentClass(inst);
-        if (peerAgent != null) {
-            try {
-                peerAgent.getMethod("applyAgentTransformersLocalOnly").invoke(null);
-                return;
-            } catch (ReflectiveOperationException e) {
-                AgentLogWriter.warn("[EcaAgent] Failed to invoke peer applyAgentTransformers: " + e.getMessage());
-            }
-        }
-
-        AgentLogWriter.warn("[EcaAgent] No registered transform modules found");
-    }
-
-    public static void applyLivingEntityTransformers() {
-        Instrumentation inst = instrumentation;
-        if (inst == null) {
-            AgentLogWriter.warn("[EcaAgent] Cannot apply LivingEntity transformer: Instrumentation not available");
-            return;
-        }
-
-        EcaTransformer transformer = EcaTransformer.getInstance();
-        if (!transformer.getModules().isEmpty()) {
-            applyLivingEntityTransformersLocalOnly();
-            return;
-        }
-
-        Class<?> peerAgent = findPeerAgentClass(inst);
-        if (peerAgent != null) {
-            try {
-                peerAgent.getMethod("applyLivingEntityTransformersLocalOnly").invoke(null);
-                return;
-            } catch (ReflectiveOperationException e) {
-                AgentLogWriter.warn("[EcaAgent] Failed to invoke peer LivingEntity transformer apply: " + e.getMessage());
-            }
-        }
-
-        AgentLogWriter.warn("[EcaAgent] No registered transform modules found");
-    }
-
-    public static void applyAgentTransformersLocalOnly() {
-        Instrumentation inst = instrumentation;
-        if (inst == null) {
-            AgentLogWriter.warn("[EcaAgent] Cannot apply transformers: Instrumentation not available");
-            return;
-        }
-
-        EcaTransformer transformer = EcaTransformer.getInstance();
-        if (transformer.getModules().isEmpty()) {
-            AgentLogWriter.warn("[EcaAgent] No registered transform modules found");
-            return;
-        }
-
-        applyAgentTransformersLocal(inst, transformer, true, null);
-    }
-
-    public static void applyLivingEntityTransformersLocalOnly() {
-        Instrumentation inst = instrumentation;
-        if (inst == null) {
-            AgentLogWriter.warn("[EcaAgent] Cannot apply LivingEntity transformer: Instrumentation not available");
-            return;
-        }
-
-        EcaTransformer transformer = EcaTransformer.getInstance();
-        if (transformer.getModules().isEmpty()) {
-            AgentLogWriter.warn("[EcaAgent] No registered transform modules found");
-            return;
-        }
-
-        applyAgentTransformersLocal(inst, transformer, true, LIVING_ENTITY_TRANSFORMER_NAME);
-    }
-
-    /**
-     * Apply all registered transform modules to currently loaded classes.
-     * @param inst instrumentation instance
-     * @param transformer transformer singleton
-     * @param rebindTransformer true to remove/add transformer before retransforming
-     */
-    private static void applyAgentTransformersLocal(Instrumentation inst, EcaTransformer transformer, boolean rebindTransformer, String moduleNameFilter) {
-        if (rebindTransformer) {
-            try {
-                inst.removeTransformer(transformer);
-            } catch (Throwable ignored) {
-            }
-            inst.addTransformer(transformer, true);
-            AgentLogWriter.info("[EcaAgent] Rebound EcaTransformer");
-        }
-
-        Class<?>[] allClasses = inst.getAllLoadedClasses();
-        AgentLogWriter.info("[EcaAgent] Scanning " + allClasses.length + " loaded classes...");
-
-        // 构建类名 -> Class 映射表，将 findClass 的 O(n) 查找降为 O(1)
-        Map<String, Class<?>> classMap = new HashMap<>(allClasses.length * 2);
-        for (Class<?> clazz : allClasses) {
-            classMap.put(clazz.getName(), clazz);
-        }
-
-        // 按模块类型分组：显式目标类 vs 基类扫描
-        List<ITransformModule> explicitModules = new ArrayList<>();
-        List<ITransformModule> scanModules = new ArrayList<>();
-        Map<ITransformModule, Class<?>> moduleBaseClasses = new HashMap<>();
-
-        for (ITransformModule module : transformer.getModules()) {
-            if (moduleNameFilter != null && !moduleNameFilter.equals(module.getName())) {
-                continue;
-            }
-            List<String> targetClassNames = module.getTargetClassNames();
-            if (targetClassNames != null && !targetClassNames.isEmpty()) {
-                explicitModules.add(module);
-            } else {
-                scanModules.add(module);
-                String targetBaseClass = module.getTargetBaseClass();
-                if (targetBaseClass != null) {
-                    Class<?> baseClass = classMap.get(targetBaseClass);
-                    if (baseClass == null) {
-                        AgentLogWriter.warn("[EcaAgent] Base class not found: " + targetBaseClass);
-                    } else {
-                        moduleBaseClasses.put(module, baseClass);
-                    }
-                }
-            }
-        }
-
-        // 阶段1：显式目标模块，通过 HashMap O(1) 查找
-        for (ITransformModule module : explicitModules) {
-            List<Class<?>> targetClasses = new ArrayList<>();
-            for (String className : module.getTargetClassNames()) {
-                Class<?> clazz = classMap.get(className);
-                if (clazz == null) {
-                    AgentLogWriter.warn("[EcaAgent] Target class not found: " + className);
-                    continue;
-                }
-                if (!module.shouldRetransform(className, clazz.getClassLoader())) {
-                    continue;
-                }
-                if (!inst.isModifiableClass(clazz)) {
-                    AgentLogWriter.warn("[EcaAgent] Target class not modifiable: " + className);
-                    continue;
-                }
-                targetClasses.add(clazz);
-            }
-            retransformModuleClasses(inst, module, targetClasses);
-        }
-
-        // 阶段2：基类扫描模块，单次遍历 allClasses 同时为所有模块收集目标
-        if (!scanModules.isEmpty()) {
-            Map<ITransformModule, List<Class<?>>> scanResults = new HashMap<>();
-            for (ITransformModule module : scanModules) {
-                scanResults.put(module, new ArrayList<>());
-            }
-
-            for (Class<?> clazz : allClasses) {
-                if (!inst.isModifiableClass(clazz)) continue;
-                if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) continue;
-
-                String name = clazz.getName();
-
-                for (ITransformModule module : scanModules) {
-                    if (!module.shouldRetransform(name, clazz.getClassLoader())) continue;
-
-                    Class<?> baseClass = moduleBaseClasses.get(module);
-                    if (baseClass != null && !baseClass.isAssignableFrom(clazz)) continue;
-
-                    if (baseClass != null && module.requiresMethodOverrideCheck()) {
-                        if (!hasOverriddenMethod(clazz, module.getTargetMethodName(), module.getTargetMethodDescriptor())) {
-                            continue;
-                        }
-                    }
-
-                    scanResults.get(module).add(clazz);
-                }
-            }
-
-            for (ITransformModule module : scanModules) {
-                retransformModuleClasses(inst, module, scanResults.get(module));
-            }
-        }
-    }
-
-    private static final int RETRANSFORM_BATCH_SIZE = 50;
-
-    private static void retransformModuleClasses(Instrumentation inst, ITransformModule module, List<Class<?>> targetClasses) {
-        AgentLogWriter.info("[EcaAgent] Found " + targetClasses.size() + " classes for module: " + module.getName());
-
-        if (targetClasses.isEmpty()) return;
-
-        int successCount = 0;
-        int failCount = 0;
-
-        // 批量 retransform，减少 JVM 调用开销
-        for (int i = 0; i < targetClasses.size(); i += RETRANSFORM_BATCH_SIZE) {
-            int end = Math.min(i + RETRANSFORM_BATCH_SIZE, targetClasses.size());
-            List<Class<?>> batch = targetClasses.subList(i, end);
-            try {
-                inst.retransformClasses(batch.toArray(new Class<?>[0]));
-                successCount += batch.size();
-            } catch (Throwable t) {
-                // 批量失败时回退到逐个重转，定位失败的类
-                for (Class<?> clazz : batch) {
-                    try {
-                        inst.retransformClasses(clazz);
-                        successCount++;
-                    } catch (Throwable t2) {
-                        failCount++;
-                        AgentLogWriter.warn("[EcaAgent] Failed to retransform: " + clazz.getName());
-                    }
-                }
-            }
-        }
-
-        AgentLogWriter.info("[EcaAgent] Retransformation for " + module.getName() + ": " + successCount + " success, " + failCount + " failed");
-    }
-
-    private static Class<?> findPeerAgentClass(Instrumentation inst) {
-        ClassLoader localLoader = EcaAgent.class.getClassLoader();
-        for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!"net.eca.agent.EcaAgent".equals(clazz.getName())) {
-                continue;
-            }
-            if (clazz.getClassLoader() != localLoader) {
-                return clazz;
-            }
-        }
-        return null;
-    }
-
-    // 查找类
-    /**
-     * Find a class by name from loaded classes.
-     * @param allClasses all loaded classes
-     * @param className the class name to find
-     * @return the class, or null if not found
-     */
     private static Class<?> findClass(Class<?>[] allClasses, String className) {
         for (Class<?> clazz : allClasses) {
             if (clazz.getName().equals(className)) {
@@ -436,74 +167,6 @@ public final class EcaAgent {
             }
         }
         return null;
-    }
-
-    // 检查类是否重写了指定方法
-    /**
-     * Check if a class has overridden a specific method.
-     * @param clazz the class to check
-     * @param methodName the method name (SRG name)
-     * @param methodDesc the method descriptor
-     * @return true if the method is overridden
-     */
-    private static boolean hasOverriddenMethod(Class<?> clazz, String methodName, String methodDesc) {
-        try {
-            for (Method method : clazz.getDeclaredMethods()) {
-                if (method.getName().equals(methodName)) {
-                    // 简单检查：方法名匹配即可
-                    // 更精确的检查需要比较方法描述符
-                    if (methodDesc != null) {
-                        String desc = getMethodDescriptor(method);
-                        if (desc.equals(methodDesc)) {
-                            return true;
-                        }
-                    } else {
-                        return true;
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            // 某些类可能无法反射，忽略
-        }
-        return false;
-    }
-
-    // 获取方法描述符
-    /**
-     * Get the method descriptor for a method.
-     * @param method the method
-     * @return the method descriptor
-     */
-    private static String getMethodDescriptor(Method method) {
-        StringBuilder sb = new StringBuilder("(");
-        for (Class<?> paramType : method.getParameterTypes()) {
-            sb.append(getTypeDescriptor(paramType));
-        }
-        sb.append(")");
-        sb.append(getTypeDescriptor(method.getReturnType()));
-        return sb.toString();
-    }
-
-    // 获取类型描述符
-    /**
-     * Get the type descriptor for a class.
-     * @param type the class
-     * @return the type descriptor
-     */
-    private static String getTypeDescriptor(Class<?> type) {
-        if (type == void.class) return "V";
-        if (type == boolean.class) return "Z";
-        if (type == byte.class) return "B";
-        if (type == char.class) return "C";
-        if (type == short.class) return "S";
-        if (type == int.class) return "I";
-        if (type == long.class) return "J";
-        if (type == float.class) return "F";
-        if (type == double.class) return "D";
-        if (type.isArray()) {
-            return "[" + getTypeDescriptor(type.getComponentType());
-        }
-        return "L" + type.getName().replace('.', '/') + ";";
     }
 
     // 获取Instrumentation实例

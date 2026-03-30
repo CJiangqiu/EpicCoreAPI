@@ -16,7 +16,11 @@ public class ClientLevelMixin {
     private void eca$preventClientRemoval(int entityId, Entity.RemovalReason reason, CallbackInfo ci) {
         try {
             if (reason == Entity.RemovalReason.CHANGED_DIMENSION) {
-                return;
+                ClientLevel clientLevel0 = (ClientLevel) (Object) this;
+                Entity entity0 = clientLevel0.getEntity(entityId);
+                if (entity0 != null && EntityUtil.isChangingDimension(entity0)) {
+                    return;
+                }
             }
             ClientLevel clientLevel = (ClientLevel) (Object) this;
             Entity entity = clientLevel.getEntity(entityId);

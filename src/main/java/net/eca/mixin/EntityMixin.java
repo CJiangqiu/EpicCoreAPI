@@ -37,13 +37,12 @@ public class EntityMixin {
     private void onRemove(Entity.RemovalReason reason, CallbackInfo ci) {
         Entity entity = (Entity) (Object) this;
 
-        // 如果是维度切换，标记实体并允许操作
-        if (reason == Entity.RemovalReason.CHANGED_DIMENSION) {
-            EntityUtil.markDimensionChanging(entity);
+        // 维度切换：必须已被 changeDimension 标记才放行
+        if (reason == Entity.RemovalReason.CHANGED_DIMENSION && EntityUtil.isChangingDimension(entity)) {
             return;
         }
 
-        // 检查无敌保护（允许正在切换维度的实体）
+        // 检查无敌保护
         if (EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
             ci.cancel();
         }
@@ -53,13 +52,12 @@ public class EntityMixin {
     private void onSetRemoved(Entity.RemovalReason reason, CallbackInfo ci) {
         Entity entity = (Entity) (Object) this;
 
-        // 如果是维度切换，标记实体并允许操作
-        if (reason == Entity.RemovalReason.CHANGED_DIMENSION) {
-            EntityUtil.markDimensionChanging(entity);
+        // 维度切换：必须已被 changeDimension 标记才放行
+        if (reason == Entity.RemovalReason.CHANGED_DIMENSION && EntityUtil.isChangingDimension(entity)) {
             return;
         }
 
-        // 检查无敌保护（允许正在切换维度的实体）
+        // 检查无敌保护
         if (EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
             ci.cancel();
         }
@@ -70,7 +68,6 @@ public class EntityMixin {
     private void eca$preventRemovedState(CallbackInfoReturnable<Boolean> cir) {
         Entity entity = (Entity) (Object) this;
         if (entity.removalReason != null
-                && entity.removalReason != Entity.RemovalReason.CHANGED_DIMENSION
                 && !EntityUtil.isChangingDimension(entity)
                 && EcaAPI.isInvulnerable(entity)) {
             entity.removalReason = null;
@@ -131,6 +128,11 @@ public class EntityMixin {
                 }
             }
         }
+    }
+
+    @Inject(method = "changeDimension*", at = @At("HEAD"))
+    private void beforeChangeDimension(ServerLevel destination, CallbackInfoReturnable<Entity> cir) {
+        EntityUtil.markDimensionChanging((Entity) (Object) this);
     }
 
     @Inject(method = "changeDimension*", at = @At("RETURN"))

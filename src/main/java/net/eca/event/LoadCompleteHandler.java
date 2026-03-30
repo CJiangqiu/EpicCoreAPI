@@ -3,6 +3,9 @@ package net.eca.event;
 import net.eca.EcaMod;
 import net.eca.agent.AgentLogWriter;
 import net.eca.agent.EcaAgent;
+import net.eca.agent.transform.BytecodeVerifier;
+import net.eca.agent.transform.TransformApplier;
+
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.entity_extension.EntityExtensionManager;
@@ -39,10 +42,12 @@ public final class LoadCompleteHandler {
         {"m_21223_", "()F", "getHealth"},
         {"m_21233_", "()F", "getMaxHealth"},
         {"m_21224_", "()Z", "isDeadOrDying"},
-        {"m_6084_", "()Z", "isAlive"}
+        {"m_6084_", "()Z", "isAlive"},
+        {"m_213877_", "()Z", "isRemoved"}
     };
     private static final String LIVING_ENTITY_INTERNAL_NAME = "net/minecraft/world/entity/LivingEntity";
     private static final String PLAYER_INTERNAL_NAME = "net/minecraft/world/entity/player/Player";
+    private static final String ENTITY_INTERNAL_NAME = "net/minecraft/world/entity/Entity";
 
     public void onLoadComplete(FMLLoadCompleteEvent event) {
         EcaMod.setLoadComplete(true);
@@ -50,7 +55,7 @@ public final class LoadCompleteHandler {
         // 扫描并注册 Entity Extensions
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
 
-        // 激进防御：FMLLoadComplete 后仅重应用 LivingEntity 转换
+        // 激进防御：FMLLoadComplete 后重应用 Entity + LivingEntity 转换
         if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
             event.enqueueWork(LoadCompleteHandler::applyLoadCompleteTransformers);
         }
@@ -71,15 +76,20 @@ public final class LoadCompleteHandler {
 
         try {
             logRadicalSecondPassMethodTargets(inst);
-            Map<String, byte[]> capturedBytecode = new HashMap<>();
-            ClassFileTransformer captureTransformer = createMethodBytecodeCaptureTransformer(capturedBytecode);
-            inst.addTransformer(captureTransformer, true);
+
+            TransformApplier.apply("EntityTransformer");
+            TransformApplier.apply("LivingEntityTransformer");
+
+            // retransform 完成后验证：用 BytecodeVerifier 检查 ECA hook 是否存在
             try {
-                EcaAgent.applyLivingEntityTransformers();
-            } finally {
-                inst.removeTransformer(captureTransformer);
+                AgentLogWriter.info("[EcaMod] === POST-RETRANSFORM VERIFICATION ===");
+                Class<?> livingClass = Class.forName("net.minecraft.world.entity.LivingEntity");
+                BytecodeVerifier.verifyAndLog(inst, livingClass);
+                Class<?> playerClass = Class.forName("net.minecraft.world.entity.player.Player");
+                BytecodeVerifier.verifyAndLog(inst, playerClass);
+            } catch (Throwable t) {
+                AgentLogWriter.warn("[EcaMod] Post-retransform verification failed: " + t.getMessage());
             }
-            logCapturedMethodBytecode(capturedBytecode);
 
             hasDelayedRetransform = true;
 
@@ -92,21 +102,25 @@ public final class LoadCompleteHandler {
 
     private static void logRadicalSecondPassMethodTargets(Instrumentation inst) {
         try {
+            Class<?> entityClass = null;
             Class<?> livingClass = null;
             Class<?> playerClass = null;
             for (Class<?> clazz : inst.getAllLoadedClasses()) {
                 String name = clazz.getName();
-                if (livingClass == null && "net.minecraft.world.entity.LivingEntity".equals(name)) {
+                if (entityClass == null && "net.minecraft.world.entity.Entity".equals(name)) {
+                    entityClass = clazz;
+                } else if (livingClass == null && "net.minecraft.world.entity.LivingEntity".equals(name)) {
                     livingClass = clazz;
                 } else if (playerClass == null && "net.minecraft.world.entity.player.Player".equals(name)) {
                     playerClass = clazz;
                 }
-                if (livingClass != null && playerClass != null) {
+                if (entityClass != null && livingClass != null && playerClass != null) {
                     break;
                 }
             }
 
-            AgentLogWriter.info("[EcaMod] Radical second-pass method report: LivingEntity and Player");
+            AgentLogWriter.info("[EcaMod] Radical second-pass method report: Entity, LivingEntity and Player");
+            logMethodReportForClass(entityClass, "Entity");
             logMethodReportForClass(livingClass, "LivingEntity");
             logMethodReportForClass(playerClass, "Player");
         } catch (Throwable t) {
@@ -150,13 +164,16 @@ public final class LoadCompleteHandler {
         if (className == null || classfileBuffer == null) {
             return;
         }
-        if (!LIVING_ENTITY_INTERNAL_NAME.equals(className) && !PLAYER_INTERNAL_NAME.equals(className)) {
+        if (!ENTITY_INTERNAL_NAME.equals(className)
+                && !LIVING_ENTITY_INTERNAL_NAME.equals(className)
+                && !PLAYER_INTERNAL_NAME.equals(className)) {
             return;
         }
         out.put(className, classfileBuffer.clone());
     }
 
     private static void logCapturedMethodBytecode(Map<String, byte[]> capturedBytecode) {
+        logClassMethodsBytecode(ENTITY_INTERNAL_NAME, capturedBytecode.get(ENTITY_INTERNAL_NAME));
         logClassMethodsBytecode(LIVING_ENTITY_INTERNAL_NAME, capturedBytecode.get(LIVING_ENTITY_INTERNAL_NAME));
         logClassMethodsBytecode(PLAYER_INTERNAL_NAME, capturedBytecode.get(PLAYER_INTERNAL_NAME));
     }

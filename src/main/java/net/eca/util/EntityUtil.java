@@ -460,8 +460,8 @@ public class EntityUtil {
         if (!(entity instanceof LivingEntity livingEntity)) {
             return;
         }
-        // 跳过已完成维度切换的实体，防止旧实例被错误复活到原维度
-        if (entity.getRemovalReason() == Entity.RemovalReason.CHANGED_DIMENSION) {
+        // 跳过正在切换维度的实体，防止旧实例被错误复活到原维度
+        if (isChangingDimension(entity)) {
             return;
         }
         revive(livingEntity);
@@ -576,9 +576,6 @@ public class EntityUtil {
         if (reason == null) {
             return;
         }
-        if (reason == Entity.RemovalReason.CHANGED_DIMENSION) {
-            return;
-        }
         if (isChangingDimension(entity)) {
             return;
         }
@@ -689,7 +686,7 @@ public class EntityUtil {
     }
 
     //阶段1：设置原版血量
-    private static void setBasicHealth(LivingEntity entity, float expectedHealth) {
+    public static void setBasicHealth(LivingEntity entity, float expectedHealth) {
         try {
             SynchedEntityData entityData = entity.getEntityData();
             SynchedEntityData.DataItem dataItem = getDataItem(entityData, LivingEntity.DATA_HEALTH_ID.getId());
@@ -1249,13 +1246,13 @@ public class EntityUtil {
     //复活实体（清除死亡状态）
     public static void revive(LivingEntity entity) {
         if (entity == null) return;
-        // 跳过已完成维度切换的实体，防止旧实例被错误复活到原维度
-        if (entity.getRemovalReason() == Entity.RemovalReason.CHANGED_DIMENSION) {
+        // 跳过正在切换维度的实体，防止旧实例被错误复活到原维度
+        if (isChangingDimension(entity)) {
             return;
         }
         try {
             entity.revive();
-            setHealth(entity, entity.getMaxHealth());
+            setBasicHealth(entity, entity.getMaxHealth());
             entity.dead = false;
             entity.deathTime = 0;
             // 恢复站立姿势（清除DYING姿势）

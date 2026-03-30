@@ -19,6 +19,7 @@ import java.util.*;
 public class EcaTransformationService implements ITransformationService {
 
     static {
+        resetAgentLog();
         attachAgentEarly();
         enableEcaDualLoading();
     }
@@ -42,6 +43,15 @@ public class EcaTransformationService implements ITransformationService {
     @Override
     public void onLoad(@NotNull IEnvironment env, @NotNull Set<String> otherServices) {
         log("onLoad - other services count: " + otherServices.size());
+    }
+
+    private static void resetAgentLog() {
+        try {
+            Class<?> logClass = Class.forName("net.eca.agent.AgentLogWriter",
+                    true, EcaTransformationService.class.getClassLoader());
+            logClass.getMethod("resetForNewSession").invoke(null);
+        } catch (Throwable ignored) {
+        }
     }
 
     private static void attachAgentEarly() {

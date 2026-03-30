@@ -183,8 +183,7 @@ public final class EcaMod {
                 ReturnToggle.setModPackagePrefixes(modPackages);
                 ReturnToggle.setLoadTimeTransformEnabled(true);
 
-                setModPackagePrefixesInAgent(modPackages);
-                setLoadTimeTransformEnabledInAgent(true);
+                syncReturnToggleToAgent(modPackages);
             }
         } catch (Throwable t) {
             EcaLogger.warn("Failed to collect mod packages: {}", t.getMessage());
@@ -208,81 +207,26 @@ public final class EcaMod {
     }
 
     /**
-     * 通过反射设置到 agent ClassLoader 中的 ReturnToggle
+     * 通过反射同步 ReturnToggle 状态到 agent ClassLoader
      */
-    private void setModPackagePrefixesInAgent(Set<String> packages) {
+    private void syncReturnToggleToAgent(Set<String> modPackages) {
         try {
             Instrumentation inst = EcaAgent.getInstrumentation();
-            if (inst == null) {
-                return;
-            }
+            if (inst == null) return;
 
             ClassLoader localLoader = EcaMod.class.getClassLoader();
-            Class<?> agentReturnToggle = null;
-
             for (Class<?> clazz : inst.getAllLoadedClasses()) {
-                if ("net.eca.agent.transform.ReturnToggle".equals(clazz.getName())) {
-                    ClassLoader loader = clazz.getClassLoader();
-                    if (loader != localLoader) {
-                        agentReturnToggle = clazz;
-                        break;
-                    }
+                if ("net.eca.agent.transform.ReturnToggle".equals(clazz.getName())
+                        && clazz.getClassLoader() != localLoader) {
+                    clazz.getMethod("setModPackagePrefixes", Set.class)
+                            .invoke(null, modPackages);
+                    clazz.getMethod("setLoadTimeTransformEnabled", boolean.class)
+                            .invoke(null, true);
+                    return;
                 }
             }
-
-            if (agentReturnToggle != null) {
-                agentReturnToggle.getMethod("setModPackagePrefixes", Set.class)
-                    .invoke(null, packages);
-            }
         } catch (Throwable t) {
-            EcaLogger.warn("Failed to set mod packages to agent: {}", t.getMessage());
-        }
-    }
-
-    /**
-     * 通过反射设置 loadTimeTransformEnabled 到 agent ClassLoader 中的 ReturnToggle
-     */
-    private void setLoadTimeTransformEnabledInAgent(boolean enabled) {
-        try {
-            Instrumentation inst = EcaAgent.getInstrumentation();
-            if (inst == null) {
-                return;
-            }
-
-            ClassLoader localLoader = EcaMod.class.getClassLoader();
-            Class<?> agentReturnToggle = null;
-
-            for (Class<?> clazz : inst.getAllLoadedClasses()) {
-                if ("net.eca.agent.transform.ReturnToggle".equals(clazz.getName())) {
-                    ClassLoader loader = clazz.getClassLoader();
-                    if (loader != localLoader) {
-                        agentReturnToggle = clazz;
-                        break;
-                    }
-                }
-            }
-
-            if (agentReturnToggle != null) {
-                agentReturnToggle.getMethod("setLoadTimeTransformEnabled", boolean.class)
-                    .invoke(null, enabled);
-            }
-        } catch (Throwable t) {
-            EcaLogger.warn("Failed to set loadTimeTransformEnabled to agent: {}", t.getMessage());
-        }
-    }
-
-    private void logForgeVmLaunchResult(Object launchResult) {
-        if (launchResult == null) {
-            EcaLogger.warn("ForgeVM launched with null result");
-            return;
-        }
-        try {
-            Object capability = launchResult.getClass().getMethod("capabilityLevel").invoke(launchResult);
-            Object active = launchResult.getClass().getMethod("nativeDllActive").invoke(launchResult);
-            Object reason = launchResult.getClass().getMethod("reason").invoke(launchResult);
-            EcaLogger.info("ForgeVM launched: capability={}, active={}, reason={}", capability, active, reason);
-        } catch (Throwable ignored) {
-            EcaLogger.info("ForgeVM launched: {}", launchResult.toString());
+            EcaLogger.warn("Failed to sync ReturnToggle to agent: {}", t.getMessage());
         }
     }
 }

@@ -37,6 +37,7 @@
     "PersistentEntitySectionManagerMixin",
     "PersistentEntitySectionManagerMixin$CallbackMixin",
     "PlayerMixin",
+    "ServerPlayerMixin",
     "RangedAttributeMixin",
     "ServerLevelMixin",
     "TransientEntitySectionManagerMixin",

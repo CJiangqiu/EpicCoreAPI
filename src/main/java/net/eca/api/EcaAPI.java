@@ -241,8 +241,9 @@ public final class EcaAPI {
         if (invulnerable) {
             // 开启无敌：复活 + 锁血 + 设置无敌状态 + 添加记录
             revive(livingEntity);
-            float currentHealth = livingEntity.getHealth();
-            lockHealth(livingEntity, currentHealth);
+            float lockValue = Math.max(EntityUtil.getHealth(livingEntity), livingEntity.getMaxHealth());
+            lockValue = Math.max(lockValue, 1.0f);
+            lockHealth(livingEntity, lockValue);
             if (EntityUtil.INVULNERABLE != null) {
                 livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, true);
             } else {
