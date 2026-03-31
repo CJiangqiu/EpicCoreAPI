@@ -1,6 +1,8 @@
-package net.eca.util.health;
+package net.eca.coremod;
 
 import net.eca.api.EcaAPI;
+import net.eca.util.health.HealthAnalyzerManager;
+import net.eca.util.health.HealthLockManager;
 import net.minecraft.world.entity.LivingEntity;
 
 /**

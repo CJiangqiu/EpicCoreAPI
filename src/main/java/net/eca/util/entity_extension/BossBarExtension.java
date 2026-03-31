@@ -2,6 +2,7 @@ package net.eca.util.entity_extension;
 
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
@@ -10,6 +11,10 @@ public class BossBarExtension {
 
     public boolean enabled() {
         return false;
+    }
+
+    public boolean shouldRender(LivingEntity entity) {
+        return true;
     }
 
     public ResourceLocation getFrameTexture() {

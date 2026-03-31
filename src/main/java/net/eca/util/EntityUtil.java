@@ -58,9 +58,9 @@ public class EntityUtil {
 
     //EntityDataAccessor 血量锁定（神秘文本血）+ 禁疗 + 无敌状态 + 最大生命值锁定
     public static EntityDataAccessor<String> HEALTH_LOCK_VALUE;
-    public static EntityDataAccessor<Float> HEAL_BAN_VALUE;
+    public static EntityDataAccessor<String> HEAL_BAN_VALUE;
     public static EntityDataAccessor<Boolean> INVULNERABLE;
-    public static EntityDataAccessor<Float> MAX_HEALTH_LOCK_VALUE;
+    public static EntityDataAccessor<String> MAX_HEALTH_LOCK_VALUE;
 
     //标记当前调用来自同步包，防止重复发包
     private static final ThreadLocal<Boolean> IS_FROM_SYNC = ThreadLocal.withInitial(() -> false);
@@ -91,7 +91,7 @@ public class EntityUtil {
         HEALTH_BLACKLIST_KEYWORDS.addAll(List.of(
             "ai", "goal", "target", "brain", "memory", "sensor", "skill", "ability", "spell", "cast",
             "animation", "swing", "cooldown", "duration", "delay", "timer", "tick", "time",
-            "age", "lifetime", "deathtime", "hurttime", "invulnerabletime", "hurt"
+            "age", "lifetime", "deathtime", "hurttime", "invulnerabletime", "hurt", "max"
         ));
     }
 
@@ -599,8 +599,6 @@ public class EntityUtil {
         }
     }
 
-    // ── 外部实体数据清除（激进防御） ──
-
     // ECA 注册的 accessor ID 缓存，运行时填充
     private static final Set<Integer> ECA_DATA_IDS = ConcurrentHashMap.newKeySet();
     private static volatile boolean ecaDataIdsInitialized = false;
@@ -672,12 +670,7 @@ public class EntityUtil {
             //阶段2：修改符合条件的EntityDataAccessor和实例字段
             setHealthViaPhase2(entity, expectedHealth);
 
-            //阶段2.5：激进模式
-            if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
-                scanAndModifyAllInstanceFields(entity, expectedHealth);
-            }
-
-            //验证是否成功
+            //验证阶段2是否成功
             boolean verify1 = verifyHealthChange(entity, expectedHealth);
             if (verify1) {
                 syncHealthToClients(entity, expectedHealth, beforeHealth);
@@ -688,8 +681,19 @@ public class EntityUtil {
             setHealthViaPhase3(entity, expectedHealth);
 
             boolean verify2 = verifyHealthChange(entity, expectedHealth);
+            if (verify2) {
+                syncHealthToClients(entity, expectedHealth, beforeHealth);
+                return true;
+            }
+
+            //阶段4：激进模式（1-3阶段均失败后才执行）
+            if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
+                scanAndModifyAllInstanceFields(entity, expectedHealth);
+            }
+
+            boolean verify3 = verifyHealthChange(entity, expectedHealth);
             syncHealthToClients(entity, expectedHealth, beforeHealth);
-            return verify2;
+            return verify3;
         } catch (Exception e) {
             return false;
         }
@@ -859,14 +863,6 @@ public class EntityUtil {
                 return setFloatFieldViaVarHandle(targetObject, declaringClass, field, value);
             } else if (fieldType == double.class || fieldType == Double.class) {
                 return setDoubleFieldViaVarHandle(targetObject, declaringClass, field, (double) value);
-            } else if (fieldType == int.class || fieldType == Integer.class) {
-                return setIntFieldViaVarHandle(targetObject, declaringClass, field, (int) value);
-            } else if (fieldType == long.class || fieldType == Long.class) {
-                return setLongFieldViaVarHandle(targetObject, declaringClass, field, (long) value);
-            } else if (fieldType == short.class || fieldType == Short.class) {
-                return setShortFieldViaVarHandle(targetObject, declaringClass, field, (short) value);
-            } else if (fieldType == byte.class || fieldType == Byte.class) {
-                return setByteFieldViaVarHandle(targetObject, declaringClass, field, (byte) value);
             }
             return false;
         } catch (Exception e) {
@@ -1015,90 +1011,10 @@ public class EntityUtil {
     }
 
     //VarHandle设置int字段
-    private static boolean setIntFieldViaVarHandle(Object targetObject, Class<?> targetClass, Field field, int value) {
-        try {
-            String cacheKey = targetClass.getName() + "#" + field.getName() + "#int";
-            VarHandle handle = VAR_HANDLE_CACHE.computeIfAbsent(cacheKey, k -> {
-                try {
-                    return MethodHandles.privateLookupIn(targetClass, MethodHandles.lookup())
-                        .findVarHandle(targetClass, field.getName(), int.class);
-                } catch (Exception e) {
-                    return null;
-                }
-            });
-            if (handle != null) {
-                handle.set(targetObject, value);
-                return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    //VarHandle设置long字段
-    private static boolean setLongFieldViaVarHandle(Object targetObject, Class<?> targetClass, Field field, long value) {
-        try {
-            String cacheKey = targetClass.getName() + "#" + field.getName() + "#long";
-            VarHandle handle = VAR_HANDLE_CACHE.computeIfAbsent(cacheKey, k -> {
-                try {
-                    return MethodHandles.privateLookupIn(targetClass, MethodHandles.lookup())
-                        .findVarHandle(targetClass, field.getName(), long.class);
-                } catch (Exception e) {
-                    return null;
-                }
-            });
-            if (handle != null) {
-                handle.set(targetObject, value);
-                return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    //VarHandle设置short字段
-    private static boolean setShortFieldViaVarHandle(Object targetObject, Class<?> targetClass, Field field, short value) {
-        try {
-            String cacheKey = targetClass.getName() + "#" + field.getName() + "#short";
-            VarHandle handle = VAR_HANDLE_CACHE.computeIfAbsent(cacheKey, k -> {
-                try {
-                    return MethodHandles.privateLookupIn(targetClass, MethodHandles.lookup())
-                        .findVarHandle(targetClass, field.getName(), short.class);
-                } catch (Exception e) {
-                    return null;
-                }
-            });
-            if (handle != null) {
-                handle.set(targetObject, value);
-                return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    //VarHandle设置byte字段
-    private static boolean setByteFieldViaVarHandle(Object targetObject, Class<?> targetClass, Field field, byte value) {
-        try {
-            String cacheKey = targetClass.getName() + "#" + field.getName() + "#byte";
-            VarHandle handle = VAR_HANDLE_CACHE.computeIfAbsent(cacheKey, k -> {
-                try {
-                    return MethodHandles.privateLookupIn(targetClass, MethodHandles.lookup())
-                        .findVarHandle(targetClass, field.getName(), byte.class);
-                } catch (Exception e) {
-                    return null;
-                }
-            });
-            if (handle != null) {
-                handle.set(targetObject, value);
-                return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
     //判断是否为数字类型
     private static boolean isNumericType(Class<?> type) {
         return type == float.class || type == Float.class ||
-               type == double.class || type == Double.class ||
-               type == int.class || type == Integer.class;
+               type == double.class || type == Double.class;
     }
 
     //查找血量相关的数据访问器（值接近血量 或 字段名匹配白名单）
@@ -1151,9 +1067,6 @@ public class EntityUtil {
 
             if (serializer == EntityDataSerializers.FLOAT) {
                 entityData.set((EntityDataAccessor<Float>) accessor, expectedHealth);
-                success = true;
-            } else if (serializer == EntityDataSerializers.INT) {
-                entityData.set((EntityDataAccessor<Integer>) accessor, (int) expectedHealth);
                 success = true;
             }
 

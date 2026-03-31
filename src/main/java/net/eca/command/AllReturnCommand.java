@@ -3,9 +3,10 @@ package net.eca.command;
 import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
-import net.eca.agent.EcaAgent;
-import net.eca.agent.transform.ReturnToggle;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.eca.api.EcaAPI;
+import net.eca.coremod.AllReturnToggle;
+import net.eca.coremod.TransformerWhitelist;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
@@ -14,13 +15,10 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
-import net.eca.util.EcaLogger;
 
-import java.lang.instrument.Instrumentation;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
-import com.mojang.brigadier.exceptions.CommandSyntaxException;
 
 /**
  * AllReturn Command - Apply AllReturn transformation to target entity's mod classes.
@@ -28,10 +26,6 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
  * DANGER! This feature may cause unexpected crashes!
  * Requires "Enable Radical Logic" in Attack config to be enabled.
  * Will return all void and boolean methods of the attacked entity's mod.
- *
- * 危险！这个功能可能带来意想不到的崩溃风险！
- * 必须在开启激进攻击配置之后才能使用！
- * 会return所有被攻击实体所属Mod的void和boolean方法。
  */
 public class AllReturnCommand {
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
@@ -53,15 +47,10 @@ public class AllReturnCommand {
         boolean success = EcaAPI.setGlobalAllReturn(enable);
 
         if (success) {
-            if (enable) {
-                context.getSource().sendSuccess(() -> Component.literal(
-                    "§aGlobal AllReturn enabled (all non-whitelisted mods)"
-                ), true);
-            } else {
-                context.getSource().sendSuccess(() -> Component.literal(
-                    "§aGlobal AllReturn disabled"
-                ), true);
-            }
+            context.getSource().sendSuccess(() -> Component.literal(
+                enable ? "§aGlobal AllReturn enabled (all non-whitelisted mods)"
+                       : "§aGlobal AllReturn disabled"
+            ), true);
             return 1;
         } else {
             context.getSource().sendFailure(Component.literal(
@@ -74,13 +63,6 @@ public class AllReturnCommand {
 
     private static int applyAllReturnToTargets(CommandContext<CommandSourceStack> context) {
         boolean enable = BoolArgumentType.getBool(context, "enable");
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
-            context.getSource().sendFailure(Component.literal(
-                "§cAgent is not initialized. AllReturn cannot work."
-            ));
-            return 0;
-        }
 
         Collection<? extends Entity> targets;
         try {
@@ -99,18 +81,16 @@ public class AllReturnCommand {
         // 收集目标实体的包名前缀
         Set<String> targetPrefixes = new HashSet<>();
         for (Entity entity : targets) {
-            Class<?> entityClass = entity.getClass();
-            String binaryName = entityClass.getName();
+            String binaryName = entity.getClass().getName();
 
-            if (ReturnToggle.isExcludedBinaryName(binaryName)) {
+            if (TransformerWhitelist.isProtected(binaryName)) {
                 if (entity instanceof LivingEntity livingEntity) {
-                    collectEquipmentModPrefixes(livingEntity, targetPrefixes, inst);
+                    collectEquipmentModPrefixes(livingEntity, targetPrefixes);
                 }
                 continue;
             }
 
-            String packagePrefix = getPackagePrefix(binaryName);
-            String internalPrefix = packagePrefix != null ? packagePrefix.replace('.', '/') : null;
+            String internalPrefix = toInternalPrefix(binaryName);
             if (internalPrefix != null) {
                 targetPrefixes.add(internalPrefix);
             }
@@ -122,16 +102,16 @@ public class AllReturnCommand {
         }
 
         if (enable) {
-            setAllReturnEnabled(inst, true);
+            AllReturnToggle.setEnabled(true);
             for (String prefix : targetPrefixes) {
-                addAllowedPackagePrefix(inst, prefix);
+                AllReturnToggle.addAllowedPrefix(prefix);
             }
             context.getSource().sendSuccess(() -> Component.literal(
                 "§aAllReturn enabled for " + targetPrefixes.size() + " package(s)"
             ), true);
         } else {
             for (String prefix : targetPrefixes) {
-                removeAllowedPackagePrefix(inst, prefix);
+                AllReturnToggle.removeAllowedPrefix(prefix);
             }
             context.getSource().sendSuccess(() -> Component.literal(
                 "§aAllReturn disabled for " + targetPrefixes.size() + " package(s)"
@@ -140,95 +120,24 @@ public class AllReturnCommand {
         return 1;
     }
 
-    private static String getPackagePrefix(String binaryName) {
-        int lastDot = binaryName.lastIndexOf('.');
-        if (lastDot <= 0) {
-            return null;
-        }
-        return binaryName.substring(0, lastDot + 1);
-    }
-
-    //扫描原版实体的装备槽（主手+副手+4护甲），收集 mod 物品的包前缀
-    private static void collectEquipmentModPrefixes(LivingEntity entity, Set<String> targetPrefixes, Instrumentation inst) {
+    private static void collectEquipmentModPrefixes(LivingEntity entity, Set<String> targetPrefixes) {
         for (EquipmentSlot slot : EquipmentSlot.values()) {
             ItemStack stack = entity.getItemBySlot(slot);
             if (stack.isEmpty()) continue;
 
             String itemClassName = stack.getItem().getClass().getName();
-            if (ReturnToggle.isExcludedBinaryName(itemClassName)) continue;
+            if (TransformerWhitelist.isProtected(itemClassName)) continue;
 
-            String packagePrefix = getPackagePrefix(itemClassName);
-            String internalPrefix = packagePrefix != null ? packagePrefix.replace('.', '/') : null;
-            if (internalPrefix != null && targetPrefixes.add(internalPrefix)) {
-                addAllowedPackagePrefix(inst, internalPrefix);
+            String internalPrefix = toInternalPrefix(itemClassName);
+            if (internalPrefix != null) {
+                targetPrefixes.add(internalPrefix);
             }
         }
     }
 
-    private static void setAllReturnEnabled(Instrumentation inst, boolean enabled) {
-        // 总是设置本地的（mod ClassLoader 中的）
-        ReturnToggle.setAllReturnEnabled(enabled);
-        // 也尝试设置 agent ClassLoader 中的
-        if (!invokeReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, enabled)) {
-            EcaLogger.warn("AllReturn: agent ReturnToggle not found, using local only.");
-        }
-    }
-
-    private static void clearAllTargets(Instrumentation inst) {
-        // 总是清除本地的
-        ReturnToggle.clearAllTargets();
-        // 也尝试清除 agent 的
-        if (!invokeReturnToggle(inst, "clearAllTargets", new Class<?>[0])) {
-            EcaLogger.warn("AllReturn: agent ReturnToggle not found, cleared local only.");
-        }
-    }
-
-    private static void addAllowedPackagePrefix(Instrumentation inst, String internalPrefix) {
-        if (internalPrefix == null) {
-            return;
-        }
-        ReturnToggle.addAllowedPackagePrefix(internalPrefix);
-        invokeReturnToggle(inst, "addAllowedPackagePrefix", new Class<?>[] { String.class }, internalPrefix);
-    }
-
-    private static void removeAllowedPackagePrefix(Instrumentation inst, String internalPrefix) {
-        if (internalPrefix == null) {
-            return;
-        }
-        ReturnToggle.removeAllowedPackagePrefix(internalPrefix);
-        invokeReturnToggle(inst, "removeAllowedPackagePrefix", new Class<?>[] { String.class }, internalPrefix);
-    }
-
-    private static boolean invokeReturnToggle(Instrumentation inst, String method, Class<?>[] paramTypes, Object... args) {
-        Class<?> toggleClass = findAgentReturnToggle(inst);
-        if (toggleClass == null) {
-            return false;
-        }
-        try {
-            toggleClass.getMethod(method, paramTypes).invoke(null, args);
-            return true;
-        } catch (ReflectiveOperationException e) {
-            EcaLogger.warn("AllReturn failed to invoke agent ReturnToggle.{}: {}", method, e.getMessage());
-            return false;
-        }
-    }
-
-    private static Class<?> findAgentReturnToggle(Instrumentation inst) {
-        if (inst == null) {
-            return null;
-        }
-        ClassLoader localLoader = AllReturnCommand.class.getClassLoader();
-        Class<?> fallback = null;
-        for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!"net.eca.agent.transform.ReturnToggle".equals(clazz.getName())) {
-                continue;
-            }
-            ClassLoader loader = clazz.getClassLoader();
-            if (loader != localLoader) {
-                return clazz;
-            }
-            fallback = clazz;
-        }
-        return fallback;
+    private static String toInternalPrefix(String binaryName) {
+        int lastDot = binaryName.lastIndexOf('.');
+        if (lastDot <= 0) return null;
+        return binaryName.substring(0, lastDot + 1).replace('.', '/');
     }
 }

@@ -3,8 +3,7 @@ package net.eca.event;
 import net.eca.EcaMod;
 import net.eca.agent.AgentLogWriter;
 import net.eca.agent.EcaAgent;
-import net.eca.agent.transform.BytecodeVerifier;
-import net.eca.agent.transform.TransformApplier;
+import net.eca.coremod.EcaClassTransformer;
 
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
@@ -77,19 +76,8 @@ public final class LoadCompleteHandler {
         try {
             logRadicalSecondPassMethodTargets(inst);
 
-            TransformApplier.apply("EntityTransformer");
-            TransformApplier.apply("LivingEntityTransformer");
-
-            // retransform 完成后验证：用 BytecodeVerifier 检查 ECA hook 是否存在
-            try {
-                AgentLogWriter.info("[EcaMod] === POST-RETRANSFORM VERIFICATION ===");
-                Class<?> livingClass = Class.forName("net.minecraft.world.entity.LivingEntity");
-                BytecodeVerifier.verifyAndLog(inst, livingClass);
-                Class<?> playerClass = Class.forName("net.minecraft.world.entity.player.Player");
-                BytecodeVerifier.verifyAndLog(inst, playerClass);
-            } catch (Throwable t) {
-                AgentLogWriter.warn("[EcaMod] Post-retransform verification failed: " + t.getMessage());
-            }
+            // 重新触发 retransform（EcaClassTransformer 已在 CoreMod 阶段注册）
+            EcaClassTransformer.init();
 
             hasDelayedRetransform = true;
 

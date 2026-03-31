@@ -58,68 +58,79 @@ public class HealthLockManager {
     //设置禁疗
     public static void setHealBan(LivingEntity entity, float value) {
         if (entity == null) return;
+        String encrypted = encryptHealth(value);
         if (EntityUtil.HEAL_BAN_VALUE != null) {
-            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, value);
+            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, encrypted);
         } else {
             CompoundTag data = entity.getPersistentData();
-            data.putFloat(NBT_HEAL_BAN_VALUE, value);
+            data.putString(NBT_HEAL_BAN_VALUE, encrypted);
         }
     }
 
     //移除禁疗
     public static void removeHealBan(LivingEntity entity) {
         if (entity == null) return;
+        String unlockedValue = encryptHealth(0.0f);
         if (EntityUtil.HEAL_BAN_VALUE != null) {
-            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, 0.0f);
+            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, unlockedValue);
         } else {
-            CompoundTag data = entity.getPersistentData();
-            data.putFloat(NBT_HEAL_BAN_VALUE, 0.0f);
+            entity.getPersistentData().putString(NBT_HEAL_BAN_VALUE, unlockedValue);
         }
     }
 
     //获取禁疗值（如果没有禁疗返回 null）
     public static Float getHealBan(LivingEntity entity) {
         if (entity == null) return null;
-        Float value;
+        String encrypted;
         if (EntityUtil.HEAL_BAN_VALUE != null) {
-            value = entity.getEntityData().get(EntityUtil.HEAL_BAN_VALUE);
+            encrypted = entity.getEntityData().get(EntityUtil.HEAL_BAN_VALUE);
         } else {
             CompoundTag data = entity.getPersistentData();
-            value = data.getFloat(NBT_HEAL_BAN_VALUE);
+            encrypted = data.getString(NBT_HEAL_BAN_VALUE);
         }
-        return value != null && value > 0.0f ? value : null;
+        if (encrypted == null || encrypted.isEmpty()) {
+            return null;
+        }
+        float decrypted = decryptHealth(encrypted);
+        return decrypted > 0.0f ? decrypted : null;
     }
 
     //设置最大生命值锁定
     public static void setMaxHealthLock(LivingEntity entity, float value) {
         if (entity == null) return;
+        String encrypted = encryptHealth(value);
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
-            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, value);
+            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, encrypted);
         } else {
-            entity.getPersistentData().putFloat(NBT_MAX_HEALTH_LOCK_VALUE, value);
+            entity.getPersistentData().putString(NBT_MAX_HEALTH_LOCK_VALUE, encrypted);
         }
     }
 
     //移除最大生命值锁定
     public static void removeMaxHealthLock(LivingEntity entity) {
         if (entity == null) return;
+        String unlockedValue = encryptHealth(0.0f);
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
-            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, 0.0f);
+            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, unlockedValue);
         } else {
-            entity.getPersistentData().putFloat(NBT_MAX_HEALTH_LOCK_VALUE, 0.0f);
+            entity.getPersistentData().putString(NBT_MAX_HEALTH_LOCK_VALUE, unlockedValue);
         }
     }
 
     //获取最大生命值锁定值（如果没有锁定返回 null）
     public static Float getMaxHealthLock(LivingEntity entity) {
         if (entity == null) return null;
-        Float value;
+        String encrypted;
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
-            value = entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_VALUE);
+            encrypted = entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_VALUE);
         } else {
-            value = entity.getPersistentData().getFloat(NBT_MAX_HEALTH_LOCK_VALUE);
+            encrypted = entity.getPersistentData().getString(NBT_MAX_HEALTH_LOCK_VALUE);
         }
-        return value != null && value > 0.0f ? value : null;
+        if (encrypted == null || encrypted.isEmpty()) {
+            return null;
+        }
+        float decrypted = decryptHealth(encrypted);
+        return decrypted > 0.0f ? decrypted : null;
     }
 
     //加密血量值

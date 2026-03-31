@@ -22,7 +22,9 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.BossEvent;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import org.joml.Matrix4f;
@@ -65,6 +67,17 @@ public class BossHealthOverlayMixin {
         BossBarExtension bossBar = extension.bossBarExtension();
         if (bossBar == null || !bossBar.enabled()) {
             return false;
+        }
+
+        LivingEntity bossEntity = null;
+        for (Entity e : minecraft.level.entitiesForRendering()) {
+            if (e.getUUID().equals(event.getId()) && e instanceof LivingEntity living) {
+                bossEntity = living;
+                break;
+            }
+        }
+        if (!bossBar.shouldRender(bossEntity)) {
+            return true;
         }
 
         ResourceLocation frameTexture = bossBar.getFrameTexture();

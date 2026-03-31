@@ -12,6 +12,7 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import software.bernie.geckolib.cache.object.BakedGeoModel;
@@ -35,7 +36,8 @@ public class GeoEntityExtensionLayer<T extends Entity & GeoAnimatable> extends G
         if (extension == null) return;
 
         EntityLayerExtension layerExtension = extension.entityLayerExtension();
-        if (layerExtension == null || !layerExtension.enabled()) return;
+        LivingEntity livingAnimatable = animatable instanceof LivingEntity living ? living : null;
+        if (layerExtension == null || !layerExtension.enabled() || !layerExtension.shouldRender(livingAnimatable)) return;
 
         RenderType shaderRenderType = layerExtension.getRenderType();
         if (shaderRenderType == null) return;

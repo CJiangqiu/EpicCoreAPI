@@ -5,6 +5,8 @@ import cpw.mods.modlauncher.api.IEnvironment;
 import cpw.mods.modlauncher.api.IModuleLayerManager;
 import cpw.mods.modlauncher.api.ITransformationService;
 import cpw.mods.modlauncher.api.ITransformer;
+import net.eca.agent.AgentLoader;
+import net.eca.agent.AgentLogWriter;
 import org.jetbrains.annotations.NotNull;
 import sun.misc.Unsafe;
 
@@ -15,25 +17,82 @@ import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.*;
 
+/**
+ * Earliest entry point via ITransformationService SPI.
+ * Responsibilities: attach Agent, prevent dual loading, register ClassFileTransformer.
+ */
 @SuppressWarnings("unchecked")
 public class EcaTransformationService implements ITransformationService {
 
+    // 预加载 CoreMod 阶段需要的所有类（必须在双加载移除之前，包括内部类）
+    // 双加载移除后 module layer 不可用，未预加载的类会 NoClassDefFoundError
+    private static final Class<?>[] PRELOADED = preloadAll(
+        // ITransformer
+        "net.eca.coremod.EcaCoreTransformer",
+        // LoadingScreenTransformer + 全部内部类
+        "net.eca.coremod.LoadingScreenTransformer",
+        "net.eca.coremod.LoadingScreenTransformer$DisplayWindowVisitor",
+        "net.eca.coremod.LoadingScreenTransformer$PaintMethodVisitor",
+        "net.eca.coremod.LoadingScreenTransformer$SafeWriter"
+    );
+
     static {
-        resetAgentLog();
-        attachAgentEarly();
+        AgentLogWriter.resetForNewSession();
+        AgentLoader.enableSelfAttach();
+        AgentLoader.loadAgent();
         enableEcaDualLoading();
+        initLoadingScreenTransformer();
+    }
+
+    private static Class<?>[] preloadAll(String... names) {
+        ClassLoader cl = EcaTransformationService.class.getClassLoader();
+        Class<?>[] result = new Class<?>[names.length];
+        for (int i = 0; i < names.length; i++) {
+            try {
+                result[i] = Class.forName(names[i], true, cl);
+            } catch (Throwable t) {
+                result[i] = null;
+            }
+        }
+        return result;
+    }
+
+    //在 CoreMod 阶段注册加载屏幕 Transformer（直接用预加载的类实例，无匿名类）
+    private static void initLoadingScreenTransformer() {
+        try {
+            if (PRELOADED[1] == null || !LoadingScreenTransformer.ENABLED) {
+                log("[CoreMod] Loading screen transformer disabled or unavailable");
+                return;
+            }
+
+            java.lang.instrument.Instrumentation inst = net.eca.agent.EcaAgent.getInstrumentation();
+            if (inst == null) {
+                log("[CoreMod] No Instrumentation, skipping loading screen transformer");
+                return;
+            }
+
+            // 直接用预加载的类实例注册（无匿名类，避免双加载后 NoClassDefFoundError）
+            LoadingScreenTransformer transformer = new LoadingScreenTransformer();
+            inst.addTransformer(transformer, true);
+
+            // 重转换已加载的 DisplayWindow
+            for (Class<?> clazz : inst.getAllLoadedClasses()) {
+                if (clazz.getName().equals("net.minecraftforge.fml.earlydisplay.DisplayWindow")) {
+                    inst.retransformClasses(clazz);
+                    log("[CoreMod] Retransformed DisplayWindow");
+                    break;
+                }
+            }
+
+            log("[CoreMod] Loading screen transformer registered");
+        } catch (Throwable t) {
+            log("[CoreMod] Failed to init loading screen transformer: " + t.getMessage());
+        }
     }
 
     private static final String SERVICE_NAME = "eca_coremod";
-
-    // 与 gradle.properties 的 archives_name 保持一致
     private static final String ARCHIVES_NAME = "epic-core-api";
-
     private static String ecaModuleName;
-
-    public EcaTransformationService() {
-        log("TransformationService constructor called");
-    }
 
     @Override
     public @NotNull String name() {
@@ -42,60 +101,40 @@ public class EcaTransformationService implements ITransformationService {
 
     @Override
     public void onLoad(@NotNull IEnvironment env, @NotNull Set<String> otherServices) {
-        log("onLoad - other services count: " + otherServices.size());
-    }
-
-    private static void resetAgentLog() {
-        try {
-            Class<?> logClass = Class.forName("net.eca.agent.AgentLogWriter",
-                    true, EcaTransformationService.class.getClassLoader());
-            logClass.getMethod("resetForNewSession").invoke(null);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private static void attachAgentEarly() {
-        try {
-            ClassLoader coreLoader = EcaTransformationService.class.getClassLoader();
-            Class<?> agentLoaderClass = Class.forName("net.eca.agent.AgentLoader", true, coreLoader);
-            boolean selfAttachEnabled = (boolean) agentLoaderClass.getMethod("enableSelfAttach").invoke(null);
-            log("Self-attach enabled: " + selfAttachEnabled);
-
-            boolean agentLoaded = (boolean) agentLoaderClass.getMethod("loadAgent", Class.class).invoke(null, new Object[]{null});
-            log("Agent early attach: " + agentLoaded);
-        } catch (ClassNotFoundException e) {
-            log("AgentLoader not found in early layer, fallback to mod init stage");
-        } catch (Throwable t) {
-            log("Failed to attach agent early: " + t.getMessage());
-        }
     }
 
     @Override
     public void initialize(@NotNull IEnvironment environment) {
-        log("initialize");
     }
 
     @Override
     public @NotNull List<Resource> beginScanning(@NotNull IEnvironment environment) {
-        log("beginScanning");
         return List.of();
     }
 
     @Override
     public @NotNull List<Resource> completeScan(@NotNull IModuleLayerManager layerManager) {
-        log("completeScan");
         return List.of();
     }
 
     @Override
+    @SuppressWarnings("rawtypes")
     public @NotNull List<ITransformer> transformers() {
-        log("transformers() called");
-        return List.of();
+        if (PRELOADED[0] == null) {
+            log("[CoreMod] EcaCoreTransformer not available, skipping");
+            return List.of();
+        }
+        try {
+            ITransformer<?> transformer = (ITransformer<?>) PRELOADED[0].getDeclaredConstructor().newInstance();
+            return List.of(transformer);
+        } catch (Throwable t) {
+            log("[CoreMod] Failed to create EcaCoreTransformer: " + t.getMessage());
+            return List.of();
+        }
     }
 
-    // ==================== 双重加载 ====================
-
-    public static void enableEcaDualLoading() {
+    // 双重加载防护
+    private static void enableEcaDualLoading() {
         ecaModuleName = EcaTransformationService.class.getModule().getName();
         log("[DualLoading] ecaModuleName = " + ecaModuleName + ", archivesName = " + ARCHIVES_NAME);
         removeEcaFromTransformerDiscovery();
@@ -114,23 +153,11 @@ public class EcaTransformationService implements ITransformationService {
 
             List<Object> found = (List<Object>) foundHandle.get();
 
-            log("[DualLoading] found list size = " + found.size());
-            for (Object namedPath : found) {
-                try {
-                    String name = (String) namedPath.getClass().getMethod("name").invoke(namedPath);
-                    Path[] paths = (Path[]) namedPath.getClass().getMethod("paths").invoke(namedPath);
-                    log("[DualLoading] found entry: name=" + name + ", path=" + paths[0]);
-                } catch (Exception e) {
-                    log("[DualLoading] found entry: " + namedPath);
-                }
-            }
-
             found.removeIf(namedPath -> {
                 try {
                     Path[] paths = (Path[]) namedPath.getClass().getMethod("paths").invoke(namedPath);
                     String fileName = paths[0].getFileName().toString();
                     boolean isEca = fileName.startsWith(ARCHIVES_NAME);
-
                     if (isEca) {
                         log("[DualLoading] Removed from transformer discovery: " + paths[0]);
                     }
@@ -147,7 +174,7 @@ public class EcaTransformationService implements ITransformationService {
 
     private static void removeEcaFromModuleLayer() {
         try {
-            Unsafe unsafe = getEcaUnsafe();
+            Unsafe unsafe = getUnsafe();
 
             Class<?> launcherClass = Launcher.class;
             Class<?> moduleLayerHandlerClass = Class.forName(
@@ -219,17 +246,14 @@ public class EcaTransformationService implements ITransformationService {
 
     private static void log(String message) {
         try {
-            Class<?> logClass = Class.forName("net.eca.agent.AgentLogWriter",
-                    false, EcaTransformationService.class.getClassLoader());
-            logClass.getMethod("info", String.class).invoke(null, "[CoreMod] " + message);
+            AgentLogWriter.info("[CoreMod] " + message);
         } catch (Throwable ignored) {
         }
     }
 
-    private static Unsafe getEcaUnsafe() throws Exception {
+    private static Unsafe getUnsafe() throws Exception {
         Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
         unsafeField.setAccessible(true);
         return (Unsafe) unsafeField.get(null);
     }
-
 }

@@ -33,9 +33,9 @@ LivingEntityMixin {
     @Inject(method = "<clinit>", at = @At("TAIL"))
     private static void eca$onClinit(CallbackInfo ci) {
         EntityUtil.HEALTH_LOCK_VALUE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.STRING);
-        EntityUtil.HEAL_BAN_VALUE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.FLOAT);
+        EntityUtil.HEAL_BAN_VALUE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.STRING);
         EntityUtil.INVULNERABLE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.BOOLEAN);
-        EntityUtil.MAX_HEALTH_LOCK_VALUE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.FLOAT);
+        EntityUtil.MAX_HEALTH_LOCK_VALUE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.STRING);
     }
 
     //注册实体数据（在每个实例的defineSynchedData 中调用）
@@ -43,9 +43,9 @@ LivingEntityMixin {
     private void eca$onDefineSynchedData(CallbackInfo ci) {
         LivingEntity entity = (LivingEntity) (Object) this;
         entity.getEntityData().define(EntityUtil.HEALTH_LOCK_VALUE, "-1024.0");
-        entity.getEntityData().define(EntityUtil.HEAL_BAN_VALUE, 0.0f);
+        entity.getEntityData().define(EntityUtil.HEAL_BAN_VALUE, "-1024.0");
         entity.getEntityData().define(EntityUtil.INVULNERABLE, false);
-        entity.getEntityData().define(EntityUtil.MAX_HEALTH_LOCK_VALUE, 0.0f);
+        entity.getEntityData().define(EntityUtil.MAX_HEALTH_LOCK_VALUE, "-1024.0");
     }
 
     @Inject(method = "addAdditionalSaveData", at = @At("TAIL"))
@@ -60,8 +60,8 @@ LivingEntityMixin {
 
         tag.putBoolean(NBT_INVULNERABLE, entity.getEntityData().get(EntityUtil.INVULNERABLE));
         tag.putString(NBT_HEALTH_LOCK_VALUE, entity.getEntityData().get(EntityUtil.HEALTH_LOCK_VALUE));
-        tag.putFloat(NBT_HEAL_BAN_VALUE, entity.getEntityData().get(EntityUtil.HEAL_BAN_VALUE));
-        tag.putFloat(NBT_MAX_HEALTH_LOCK_VALUE, entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_VALUE));
+        tag.putString(NBT_HEAL_BAN_VALUE, entity.getEntityData().get(EntityUtil.HEAL_BAN_VALUE));
+        tag.putString(NBT_MAX_HEALTH_LOCK_VALUE, entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_VALUE));
     }
 
     @Inject(method = "readAdditionalSaveData", at = @At("TAIL"))
@@ -86,11 +86,11 @@ LivingEntityMixin {
         if (tag.contains(NBT_HEALTH_LOCK_VALUE, 8)) {
             entity.getEntityData().set(EntityUtil.HEALTH_LOCK_VALUE, tag.getString(NBT_HEALTH_LOCK_VALUE));
         }
-        if (tag.contains(NBT_HEAL_BAN_VALUE)) {
-            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, tag.getFloat(NBT_HEAL_BAN_VALUE));
+        if (tag.contains(NBT_HEAL_BAN_VALUE, 8)) {
+            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, tag.getString(NBT_HEAL_BAN_VALUE));
         }
-        if (tag.contains(NBT_MAX_HEALTH_LOCK_VALUE)) {
-            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, tag.getFloat(NBT_MAX_HEALTH_LOCK_VALUE));
+        if (tag.contains(NBT_MAX_HEALTH_LOCK_VALUE, 8)) {
+            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, tag.getString(NBT_MAX_HEALTH_LOCK_VALUE));
         }
     }
 
@@ -236,7 +236,6 @@ LivingEntityMixin {
             cir.setReturnValue(true);
         }
     }
-
 
 }
 

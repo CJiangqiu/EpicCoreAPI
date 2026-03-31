@@ -1,4 +1,4 @@
-package net.eca.util.entity;
+package net.eca.coremod;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;

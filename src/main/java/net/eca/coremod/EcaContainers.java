@@ -1,4 +1,4 @@
-package net.eca.agent.transform;
+package net.eca.coremod;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;

@@ -1,8 +1,8 @@
 package net.eca.api;
 
 import net.eca.agent.EcaAgent;
-import net.eca.agent.transform.ReturnToggle;
-import net.eca.agent.transform.ReturnToggle.PackageWhitelist;
+import net.eca.coremod.AllReturnToggle;
+import net.eca.coremod.TransformerWhitelist;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityLocationManager;
@@ -177,8 +177,8 @@ public final class EcaAPI {
      * Set entity health using multi-phase modification.
      * Phase 1: Modify vanilla DATA_HEALTH_ID
      * Phase 2: Smart scan for EntityDataAccessors and fields matching health keywords
-     * Phase 2.5: Radical mode (all numeric fields, if enabled in config)
      * Phase 3: Bytecode reverse tracking via HealthAnalyzerManager
+     * Phase 4: Radical mode - all numeric fields (only if phases 1-3 fail, requires config)
      * @param entity the living entity
      * @param health the target health value
      * @return true if modification succeeded
@@ -1000,41 +1000,28 @@ public final class EcaAPI {
     /**
      * Enable AllReturn for the specified entity's mod.
      * DANGER! Requires "Enable Radical Logic" in Attack config.
-     * Enables early-return behavior for the target entity's mod package on classes that were transformed during agent phases.
      * @param entity the entity used to resolve the target mod package
-     * @return true if AllReturn was enabled successfully, false if radical logic is disabled or agent not available
+     * @return true if AllReturn was enabled successfully
      */
     public static boolean enableAllReturn(Entity entity) {
-        if (entity == null) {
-            return false;
-        }
+        if (entity == null) return false;
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
             EcaLogger.warn("AllReturn requires Attack Radical Logic to be enabled in config");
             return false;
         }
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
+        if (EcaAgent.getInstrumentation() == null) {
             EcaLogger.warn("AllReturn: Agent is not initialized");
             return false;
         }
 
-        Class<?> entityClass = entity.getClass();
-        String binaryName = entityClass.getName();
-        if (ReturnToggle.isExcludedBinaryName(binaryName)) {
-            return false;
-        }
+        String binaryName = entity.getClass().getName();
+        if (TransformerWhitelist.isProtected(binaryName)) return false;
 
-        String packagePrefix = getPackagePrefix(binaryName);
-        String internalPrefix = packagePrefix != null ? packagePrefix.replace('.', '/') : null;
-        if (internalPrefix == null) {
-            return false;
-        }
+        String internalPrefix = toInternalPrefix(binaryName);
+        if (internalPrefix == null) return false;
 
-        ReturnToggle.setAllReturnEnabled(true);
-        invokeAgentReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, true);
-        ReturnToggle.addAllowedPackagePrefix(internalPrefix);
-        invokeAgentReturnToggle(inst, "addAllowedPackagePrefix", new Class<?>[] { String.class }, internalPrefix);
-
+        AllReturnToggle.setEnabled(true);
+        AllReturnToggle.addAllowedPrefix(internalPrefix);
         return true;
     }
 
@@ -1043,11 +1030,7 @@ public final class EcaAPI {
      * Disable AllReturn and clear all targets.
      */
     public static void disableAllReturn() {
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        ReturnToggle.setAllReturnEnabled(false);
-        ReturnToggle.clearAllTargets();
-        invokeAgentReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, false);
-        invokeAgentReturnToggle(inst, "clearAllTargets", new Class<?>[0]);
+        AllReturnToggle.clearAll();
     }
 
     // 检查AllReturn是否启用
@@ -1056,25 +1039,19 @@ public final class EcaAPI {
      * @return true if AllReturn is enabled
      */
     public static boolean isAllReturnEnabled() {
-        return ReturnToggle.isAllReturnEnabled();
+        return AllReturnToggle.isEnabled();
     }
 
     // 全局AllReturn开关（影响所有已加载的mod）
     /**
      * Enable or disable global AllReturn mode.
      * DANGER! Requires "Enable Radical Logic" in Attack config.
-     * When enabled, activates early-return behavior for all non-whitelisted loaded mod packages.
      * @param enable true to enable, false to disable
-     * @return true if operation succeeded, false if radical logic is disabled or agent not available
+     * @return true if operation succeeded
      */
     public static boolean setGlobalAllReturn(boolean enable) {
-        Instrumentation inst = EcaAgent.getInstrumentation();
-
         if (!enable) {
-            ReturnToggle.setAllReturnEnabled(false);
-            ReturnToggle.clearAllTargets();
-            invokeAgentReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, false);
-            invokeAgentReturnToggle(inst, "clearAllTargets", new Class<?>[0]);
+            AllReturnToggle.clearAll();
             return true;
         }
 
@@ -1083,27 +1060,22 @@ public final class EcaAPI {
             return false;
         }
 
+        Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst == null) {
             EcaLogger.warn("GlobalAllReturn: Agent is not initialized");
             return false;
         }
 
-        // 收集所有非白名单类的包前缀
         Set<String> collectedPrefixes = new HashSet<>();
-
         for (Class<?> clazz : inst.getAllLoadedClasses()) {
             if (!inst.isModifiableClass(clazz)) continue;
             if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) continue;
 
             String className = clazz.getName();
-            if (ReturnToggle.isExcludedBinaryName(className)) continue;
+            if (TransformerWhitelist.isProtected(className)) continue;
 
-            // 收集包前缀
-            String packagePrefix = getPackagePrefix(className);
-            if (packagePrefix != null) {
-                String internalPrefix = packagePrefix.replace('.', '/');
-                collectedPrefixes.add(internalPrefix);
-            }
+            String prefix = toInternalPrefix(className);
+            if (prefix != null) collectedPrefixes.add(prefix);
         }
 
         if (collectedPrefixes.isEmpty()) {
@@ -1111,46 +1083,17 @@ public final class EcaAPI {
             return false;
         }
 
-        // 启用 AllReturn 并添加所有包前缀
-        ReturnToggle.setAllReturnEnabled(true);
-        invokeAgentReturnToggle(inst, "setAllReturnEnabled", new Class<?>[] { boolean.class }, true);
-
+        AllReturnToggle.setEnabled(true);
         for (String prefix : collectedPrefixes) {
-            ReturnToggle.addAllowedPackagePrefix(prefix);
-            invokeAgentReturnToggle(inst, "addAllowedPackagePrefix", new Class<?>[] { String.class }, prefix);
+            AllReturnToggle.addAllowedPrefix(prefix);
         }
-
         return true;
     }
 
-    private static void invokeAgentReturnToggle(Instrumentation inst, String method, Class<?>[] paramTypes, Object... args) {
-        Class<?> agentToggle = findAgentReturnToggle(inst);
-        if (agentToggle == null) {
-            return;
-        }
-        try {
-            agentToggle.getMethod(method, paramTypes).invoke(null, args);
-        } catch (ReflectiveOperationException ignored) {
-        }
-    }
-
-    private static Class<?> findAgentReturnToggle(Instrumentation inst) {
-        if (inst == null) {
-            return null;
-        }
-        ClassLoader localLoader = EcaAPI.class.getClassLoader();
-        Class<?> fallback = null;
-        for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!"net.eca.agent.transform.ReturnToggle".equals(clazz.getName())) {
-                continue;
-            }
-            ClassLoader loader = clazz.getClassLoader();
-            if (loader != localLoader) {
-                return clazz;
-            }
-            fallback = clazz;
-        }
-        return fallback;
+    private static String toInternalPrefix(String binaryName) {
+        int lastDot = binaryName.lastIndexOf('.');
+        if (lastDot <= 0) return null;
+        return binaryName.substring(0, lastDot + 1).replace('.', '/');
     }
 
     // ==================== 包名白名单 API ====================
@@ -1162,7 +1105,7 @@ public final class EcaAPI {
      * @param packagePrefix the package prefix to protect (e.g., "com.yourmod.")
      */
     public static void addProtectedPackage(String packagePrefix) {
-        PackageWhitelist.addProtection(packagePrefix);
+        TransformerWhitelist.addCustom(packagePrefix);
     }
 
     // 移除受保护的包名前缀（不能移除内置保护）
@@ -1173,7 +1116,7 @@ public final class EcaAPI {
      * @return true if successfully removed, false if it was a built-in protection or not found
      */
     public static boolean removeProtectedPackage(String packagePrefix) {
-        return PackageWhitelist.removeProtection(packagePrefix);
+        return TransformerWhitelist.removeCustom(packagePrefix);
     }
 
     // 检查包名是否受保护
@@ -1183,7 +1126,7 @@ public final class EcaAPI {
      * @return true if the class is protected
      */
     public static boolean isPackageProtected(String className) {
-        return PackageWhitelist.isProtectedBinary(className);
+        return TransformerWhitelist.isProtected(className);
     }
 
     // 获取所有受保护的包名前缀
@@ -1192,17 +1135,7 @@ public final class EcaAPI {
      * @return unmodifiable set of all protected prefixes
      */
     public static Set<String> getAllProtectedPackages() {
-        return PackageWhitelist.getAll();
-    }
-
-    //AllReturn 内部方法
-
-    private static String getPackagePrefix(String binaryName) {
-        int lastDot = binaryName.lastIndexOf('.');
-        if (lastDot <= 0) {
-            return null;
-        }
-        return binaryName.substring(0, lastDot + 1);
+        return TransformerWhitelist.getAll();
     }
 
     private EcaAPI() {}

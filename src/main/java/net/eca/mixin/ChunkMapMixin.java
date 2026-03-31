@@ -14,6 +14,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.ChunkStatus;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -55,7 +56,7 @@ public abstract class ChunkMapMixin {
     @Inject(method = "scheduleChunkGeneration", at = @At("HEAD"), cancellable = true)
     private void eca$guardChunkGeneration(
         ChunkHolder holder,
-        net.minecraft.world.level.chunk.ChunkStatus status,
+        ChunkStatus status,
         CallbackInfoReturnable<CompletableFuture<Either<ChunkAccess, ChunkHolder.ChunkLoadingFailure>>> cir
     ) {
         ChunkPos pos = holder.getPos();

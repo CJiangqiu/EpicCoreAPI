@@ -1,6 +1,7 @@
 package net.eca.util.entity_extension;
 
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
@@ -25,5 +26,9 @@ public class EntityLayerExtension {
 
     public float getAlpha() {
         return 0.5f;
+    }
+
+    public boolean shouldRender(LivingEntity entity) {
+        return true;
     }
 }

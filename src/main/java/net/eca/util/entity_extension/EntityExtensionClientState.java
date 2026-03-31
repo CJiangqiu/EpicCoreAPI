@@ -1,8 +1,11 @@
 package net.eca.util.entity_extension;
 
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
@@ -25,6 +28,11 @@ public final class EntityExtensionClientState {
     private static final Set<ResourceLocation> OVERRIDE_FOGS = ConcurrentHashMap.newKeySet();
     private static final Set<ResourceLocation> OVERRIDE_SKYBOXES = ConcurrentHashMap.newKeySet();
     private static final Set<ResourceLocation> OVERRIDE_MUSICS = ConcurrentHashMap.newKeySet();
+
+    // 当前维度已配置的效果对象（不受 shouldXxx 条件影响，仅在 activeType 变更时更新）
+    private static final Map<ResourceLocation, GlobalFogExtension> CONFIGURED_FOGS = new ConcurrentHashMap<>();
+    private static final Map<ResourceLocation, GlobalSkyboxExtension> CONFIGURED_SKYBOXES = new ConcurrentHashMap<>();
+    private static final Map<ResourceLocation, CombatMusicExtension> CONFIGURED_MUSICS = new ConcurrentHashMap<>();
 
     public static void setActiveType(ResourceLocation dimensionId, ResourceLocation typeId) {
         if (dimensionId == null) {
@@ -157,25 +165,34 @@ public final class EntityExtensionClientState {
         ACTIVE_PRIORITIES.put(dimensionId, extensionPriority);
         GlobalFogExtension fog = extension.globalFogExtension();
         if (fog != null && fog.enabled()) {
+            CONFIGURED_FOGS.put(dimensionId, fog);
             ACTIVE_FOGS.put(dimensionId, fog);
         } else {
+            CONFIGURED_FOGS.remove(dimensionId);
             ACTIVE_FOGS.remove(dimensionId);
         }
         GlobalSkyboxExtension skybox = extension.globalSkyboxExtension();
         if (skybox != null && skybox.enabled()) {
+            CONFIGURED_SKYBOXES.put(dimensionId, skybox);
             ACTIVE_SKYBOXES.put(dimensionId, skybox);
         } else {
+            CONFIGURED_SKYBOXES.remove(dimensionId);
             ACTIVE_SKYBOXES.remove(dimensionId);
         }
         CombatMusicExtension music = extension.combatMusicExtension();
         if (music != null && music.enabled()) {
+            CONFIGURED_MUSICS.put(dimensionId, music);
             ACTIVE_MUSICS.put(dimensionId, music);
         } else {
+            CONFIGURED_MUSICS.remove(dimensionId);
             ACTIVE_MUSICS.remove(dimensionId);
         }
     }
 
     private static void clearEffectCaches(ResourceLocation dimensionId) {
+        CONFIGURED_FOGS.remove(dimensionId);
+        CONFIGURED_SKYBOXES.remove(dimensionId);
+        CONFIGURED_MUSICS.remove(dimensionId);
         if (!OVERRIDE_FOGS.contains(dimensionId)) {
             ACTIVE_FOGS.remove(dimensionId);
         }
@@ -186,6 +203,60 @@ public final class EntityExtensionClientState {
             ACTIVE_MUSICS.remove(dimensionId);
         }
         ACTIVE_PRIORITIES.remove(dimensionId);
+    }
+
+    public static void tickConditions(ResourceLocation dimensionId, ClientLevel level) {
+        if (dimensionId == null || level == null) {
+            return;
+        }
+
+        EntityType<?> type = ACTIVE_TYPES.get(dimensionId);
+        if (type == null) {
+            return;
+        }
+
+        EntityExtension extension = EntityExtensionManager.getExtension(type);
+        if (extension == null) {
+            return;
+        }
+
+        LivingEntity entity = findPrimaryEntity(level, type);
+
+        GlobalFogExtension fog = CONFIGURED_FOGS.get(dimensionId);
+        if (fog != null) {
+            if (extension.shouldEnableFog(entity)) {
+                ACTIVE_FOGS.put(dimensionId, fog);
+            } else {
+                ACTIVE_FOGS.remove(dimensionId);
+            }
+        }
+
+        GlobalSkyboxExtension skybox = CONFIGURED_SKYBOXES.get(dimensionId);
+        if (skybox != null) {
+            if (extension.shouldEnableSkybox(entity)) {
+                ACTIVE_SKYBOXES.put(dimensionId, skybox);
+            } else {
+                ACTIVE_SKYBOXES.remove(dimensionId);
+            }
+        }
+
+        CombatMusicExtension music = CONFIGURED_MUSICS.get(dimensionId);
+        if (music != null) {
+            if (extension.shouldEnableMusic(entity)) {
+                ACTIVE_MUSICS.put(dimensionId, music);
+            } else {
+                ACTIVE_MUSICS.remove(dimensionId);
+            }
+        }
+    }
+
+    private static LivingEntity findPrimaryEntity(ClientLevel level, EntityType<?> type) {
+        for (Entity entity : level.entitiesForRendering()) {
+            if (entity.getType() == type && entity instanceof LivingEntity living && living.isAlive()) {
+                return living;
+            }
+        }
+        return null;
     }
 
     // ==================== Boss Event 映射 ====================

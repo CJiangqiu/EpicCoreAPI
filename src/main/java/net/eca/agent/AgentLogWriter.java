@@ -19,7 +19,6 @@ public final class AgentLogWriter {
     private static BufferedWriter writer = null;
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
     private static boolean initialized = false;
-
     private static final String LOG_FILE_NAME = "EcaAgent.log";
 
     // 新游戏会话时清空旧日志（由最早的入口点 coremod 调用）

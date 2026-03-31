@@ -48,6 +48,8 @@ public final class CombatMusicManager {
         tickCounter = 0;
 
         ResourceLocation dimensionId = minecraft.level.dimension().location();
+        EntityExtensionClientState.tickConditions(dimensionId, minecraft.level);
+
         CombatMusicExtension musicExtension = EntityExtensionClientState.getActiveMusic(dimensionId);
         if (musicExtension == null || !musicExtension.enabled()) {
             clearStrictLock();

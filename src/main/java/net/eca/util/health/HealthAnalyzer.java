@@ -1,6 +1,6 @@
 package net.eca.util.health;
 
-import net.eca.agent.transform.ReturnToggle.PackageWhitelist;
+import net.eca.coremod.TransformerWhitelist;
 import net.eca.util.EcaLogger;
 import org.objectweb.asm.*;
 
@@ -11,6 +11,7 @@ import net.minecraft.world.entity.LivingEntity;
 import java.lang.invoke.VarHandle;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.Stack;
 import java.util.function.BiFunction;
 import java.util.function.Function;
@@ -20,6 +21,23 @@ public class HealthAnalyzer {
 
     private static final String TARGET_METHOD_NAME = "m_21223_";
     private static final String TARGET_METHOD_DESC = "()F";
+
+    private static final Set<String> PROTECTED_PREFIXES = Set.of(
+        "java.", "javax.", "sun.", "jdk.", "com.sun.",
+        "net.minecraft.", "com.mojang.", "net.minecraftforge.", "cpw.mods.",
+        "org.spongepowered.", "org.objectweb.asm.", "com.llamalad7.mixinextras.",
+        "org.lwjgl.",
+        "com.google.", "org.apache.", "io.netty.", "it.unimi.", "org.slf4j.",
+        "net.eca."
+    );
+
+    private static boolean isProtectedClass(String binaryClassName) {
+        if (binaryClassName == null) return true;
+        for (String prefix : PROTECTED_PREFIXES) {
+            if (binaryClassName.startsWith(prefix)) return true;
+        }
+        return false;
+    }
 
     //Analyze the getHealth() method of a class (entry point with recursion)
     public static AnalysisResult analyze(Class<?> clazz) {
@@ -153,7 +171,7 @@ public class HealthAnalyzer {
 
         //检查是否是受保护的类（避免递归分析）
         String className = clazz.getName();
-        if (PackageWhitelist.isProtectedBinary(className)) {
+        if (TransformerWhitelist.isProtected(className)) {
             return null;
         }
 
@@ -176,7 +194,7 @@ public class HealthAnalyzer {
                 String targetClassName = result.methodCallTarget.owner.replace('/', '.');
 
                 //检查是否是受保护的类（避免递归分析）
-                if (PackageWhitelist.isProtectedBinary(targetClassName)) {
+                if (TransformerWhitelist.isProtected(targetClassName)) {
                     EcaLogger.warn("[HealthAnalyzer] Skipping recursion into protected class: {}", targetClassName);
                     return result;
                 }

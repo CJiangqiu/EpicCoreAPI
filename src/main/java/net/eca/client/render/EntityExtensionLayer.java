@@ -37,7 +37,7 @@ public class EntityExtensionLayer<T extends LivingEntity, M extends net.minecraf
         }
 
         EntityLayerExtension layerExtension = extension.entityLayerExtension();
-        if (layerExtension == null || !layerExtension.enabled()) {
+        if (layerExtension == null || !layerExtension.enabled() || !layerExtension.shouldRender(entity)) {
             return;
         }
 

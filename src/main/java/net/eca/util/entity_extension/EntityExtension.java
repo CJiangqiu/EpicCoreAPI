@@ -73,6 +73,21 @@ public abstract class EntityExtension {
     }
 
     @OnlyIn(Dist.CLIENT)
+    public boolean shouldEnableFog(LivingEntity entity) {
+        return true;
+    }
+
+    @OnlyIn(Dist.CLIENT)
+    public boolean shouldEnableSkybox(LivingEntity entity) {
+        return true;
+    }
+
+    @OnlyIn(Dist.CLIENT)
+    public boolean shouldEnableMusic(LivingEntity entity) {
+        return true;
+    }
+
+    @OnlyIn(Dist.CLIENT)
     protected abstract String getModId();
 
     @OnlyIn(Dist.CLIENT)
