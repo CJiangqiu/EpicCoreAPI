@@ -1141,29 +1141,23 @@ public final class EcaAPI {
 
     // ==================== 强加载系统 ====================
 
-    // 启用实体强加载
+    // 设置实体强加载状态
     /**
-     * Enable force loading for an entity instance.
-     * The entity's chunk will be kept loaded (EntityTicking level) regardless of player proximity.
+     * Set the force loading state of an entity.
+     * When enabled, the entity's chunk is kept loaded (EntityTicking level) regardless of player proximity.
      * The force load ticket follows the entity as it moves between chunks.
-     * @param entity the living entity to force load
+     * When disabled, the chunk ticket is released. Has no effect on entities force-loaded via EntityExtension.
+     * @param entity the living entity
      * @param level the server level the entity is in
+     * @param forceLoad true to enable force loading, false to disable
      */
-    public static void enableForceLoading(LivingEntity entity, ServerLevel level) {
+    public static void setForceLoading(LivingEntity entity, ServerLevel level, boolean forceLoad) {
         if (entity == null || level == null) return;
-        ForceLoadingManager.enableForceLoading(entity, level);
-    }
-
-    // 禁用实体强加载
-    /**
-     * Disable force loading for an entity instance.
-     * Releases the chunk ticket. Has no effect if the entity is force-loaded via EntityExtension.
-     * @param entity the living entity to stop force loading
-     * @param level the server level the entity is in
-     */
-    public static void disableForceLoading(LivingEntity entity, ServerLevel level) {
-        if (entity == null || level == null) return;
-        ForceLoadingManager.disableForceLoading(entity, level);
+        if (forceLoad) {
+            ForceLoadingManager.enableForceLoading(entity, level);
+        } else {
+            ForceLoadingManager.disableForceLoading(entity, level);
+        }
     }
 
     // 检查实体是否被强加载（包含扩展系统和手动API两种来源）
