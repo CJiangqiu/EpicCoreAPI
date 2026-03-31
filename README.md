@@ -26,7 +26,7 @@ Use `/eca` command (requires OP permission level 2):
 - `/eca allReturn global <true|false>` - DANGER! Enable/disable global AllReturn for all non-whitelisted mods
 - `/eca banSpawn <targets> <seconds>` - Ban spawning of selected entities' types for specified duration
 - `/eca banSpawn clear` - Unban all spawns in current dimension
-- `/eca setForceLoading <targets> <true|false>` - Enable/disable force chunk loading for entities (keeps entity's chunk at EntityTicking level regardless of player proximity)
+- `/eca setForceLoading <targets> <true|false>` - Enable/disable force chunk loading for entities
 - `/eca setInvulnerable show_all` - Show all invulnerable entities
 - `/eca entityExtension get_registry` - Show entity extension registry
 - `/eca entityExtension get_active` - Show active entity extension types in current dimension
@@ -134,7 +134,7 @@ side="BOTH"
 - `unbanSpawn(level, entityType)` - Unban entity type, allowing it to spawn again
 - `getAllSpawnBans(level)` - Get all spawn bans in level (Map<EntityType, Integer>)
 - `unbanAllSpawns(level)` - Unban all entity types in level
-- `setForceLoading(entity, level, forceLoad)` - Enable/disable force chunk loading for entity (keeps entity's chunk at EntityTicking level regardless of player proximity)
+- `setForceLoading(entity, level, forceLoad)` - Enable/disable force chunk loading for entity
 - `isForceLoaded(entity)` - Check if entity is force loaded (via EntityExtension or API)
 - `getEntity(level, entityId)` - Resolve entity by runtime id in specified level (ECA selector path)
 - `getEntity(level, uuid)` - Resolve entity by UUID in specified level (ECA selector path)
@@ -450,7 +450,7 @@ Available presets:
 - `/eca allReturn global <true|false>` - 危险！启用/禁用全局AllReturn，影响所有非白名单mod
 - `/eca banSpawn <目标> <秒数>` - 禁止选中实体的类型生成指定时长
 - `/eca banSpawn clear` - 解除当前维度所有禁生成
-- `/eca setForceLoading <目标> <true|false>` - 启用/禁用实体强加载（无论玩家距离如何，始终保持实体所在区块处于 EntityTicking 级别）
+- `/eca setForceLoading <目标> <true|false>` - 启用/禁用实体强加载
 - `/eca setInvulnerable show_all` - 显示所有无敌实体
 - `/eca entityExtension get_registry` - 查看实体扩展注册表
 - `/eca entityExtension get_active` - 查看当前维度活跃的扩展类型
@@ -558,7 +558,7 @@ side="BOTH"
 - `unbanSpawn(level, entityType)` - 解除指定实体类型的禁生成
 - `getAllSpawnBans(level)` - 获取所有禁生成（Map<EntityType, Integer>）
 - `unbanAllSpawns(level)` - 解除所有禁生成
-- `setForceLoading(entity, level, forceLoad)` - 启用/禁用实体强加载（无论玩家距离如何，始终保持实体所在区块处于 EntityTicking 级别）
+- `setForceLoading(entity, level, forceLoad)` - 启用/禁用实体强加载
 - `isForceLoaded(entity)` - 检查实体是否被强加载（包含 EntityExtension 和 API 两种来源）
 - `getEntity(level, entityId)` - 在指定维度按运行时 id 获取实体（ECA 选择器路径）
 - `getEntity(level, uuid)` - 在指定维度按 UUID 获取实体（ECA 选择器路径）
