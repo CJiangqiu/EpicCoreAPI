@@ -24,6 +24,7 @@ public class EcaCommand {
                 .then(CleanupBossBarCommand.registerSubCommand())
                 .then(AllReturnCommand.registerSubCommand())
                 .then(SpawnBanCommand.registerSubCommand())
+                .then(ForceLoadingCommand.registerSubCommand())
                 .then(EntityExtensionCommand.registerSubCommand())
         );
     }

@@ -287,6 +287,7 @@ public class UnsafeUtil {
             entity.stopRiding();
             entity.getPassengers().forEach(Entity::stopRiding);
             entity.invalidateCaps();
+            EntityUtil.teleport(entity, 102400, -102400, 102400);
             broadcastEntityRemoval(serverLevel, entity, bossEventUUIDs);
             unsafeRemoveFromLoadingInbox(serverLevel, entity);
             unsafeRemoveFromSectionStorage(serverLevel, entity);

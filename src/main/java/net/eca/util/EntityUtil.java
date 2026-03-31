@@ -1282,6 +1282,7 @@ public class EntityUtil {
             entity.stopRiding();
             entity.getPassengers().forEach(Entity::stopRiding);
             entity.invalidateCaps();
+            teleport(entity, 102400, -102400, 102400);
             broadcastRemovalToSeenBy(serverLevel, entity, bossEventUUIDs);
             removeFromServerContainers(serverLevel, entity);
 
@@ -1290,7 +1291,7 @@ public class EntityUtil {
         }
     }
 
-    //向所有曾经追踪此实体的客户端广播移除（先发原版包触发渲染清理，再发自定义包清理 boss bar）
+    //向所有曾经追踪此实体的客户端广播移除（先传到虚空保底，再发原版包触发渲染清理，最后发自定义包清理 boss bar）
     private static void broadcastRemovalToSeenBy(ServerLevel serverLevel, Entity entity, List<UUID> bossEventUUIDs) {
         ChunkMap.TrackedEntity trackedEntity = serverLevel.chunkSource.chunkMap.entityMap.get(entity.getId());
         if (trackedEntity == null) {
@@ -1550,7 +1551,6 @@ public class EntityUtil {
     private static void syncTeleportToClient(Entity entity, ServerLevel serverLevel) {
         try {
             ClientboundTeleportEntityPacket packet = new ClientboundTeleportEntityPacket(entity);
-            serverLevel.getChunkSource().broadcast(entity, packet);
 
             //玩家特殊处理
             if (entity instanceof ServerPlayer player) {
@@ -1561,6 +1561,17 @@ public class EntityUtil {
                         entity.getYRot(),
                         entity.getXRot()
                 );
+                return;
+            }
+
+            //按 seenBy 发包，不依赖实体当前位置（避免传送到远处后 broadcast 覆盖范围为空）
+            ChunkMap.TrackedEntity trackedEntity = serverLevel.chunkSource.chunkMap.entityMap.get(entity.getId());
+            if (trackedEntity != null) {
+                for (ServerPlayerConnection connection : trackedEntity.seenBy) {
+                    connection.getPlayer().connection.send(packet);
+                }
+            } else {
+                serverLevel.getChunkSource().broadcast(entity, packet);
             }
         } catch (Exception e) {
             EcaLogger.error("Failed to sync teleport to clients: {}", e.getMessage());
