@@ -157,7 +157,7 @@ public class EcaTransformationService implements ITransformationService {
                 try {
                     Path[] paths = (Path[]) namedPath.getClass().getMethod("paths").invoke(namedPath);
                     String fileName = paths[0].getFileName().toString();
-                    boolean isEca = fileName.startsWith(ARCHIVES_NAME);
+                    boolean isEca = fileName.contains(ARCHIVES_NAME);
                     if (isEca) {
                         log("[DualLoading] Removed from transformer discovery: " + paths[0]);
                     }

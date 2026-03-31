@@ -399,6 +399,23 @@ public class MyBossExtension extends EntityExtension {
             @Override public boolean strictMusicLock() { return true; }  // block all other MUSIC sounds while active
         };
     }
+
+    // Per-entity conditional triggers — evaluated each tick per entity instance
+    // Fog/skybox/music only activate when the corresponding condition returns true
+    @Override
+    public boolean shouldEnableFog(LivingEntity entity) {
+        return entity.getHealth() < entity.getMaxHealth() * 0.5f;  // example: fog activates when entity is below 50% health
+    }
+
+    @Override
+    public boolean shouldEnableSkybox(LivingEntity entity) {
+        return true;  // skybox activation condition per entity instance
+    }
+
+    @Override
+    public boolean shouldEnableMusic(LivingEntity entity) {
+        return true;  // combat music activation condition per entity instance
+    }
 }
 ```
 
@@ -822,6 +839,23 @@ public class MyBossExtension extends EntityExtension {
             @Override public boolean loop() { return true; }  // 循环播放
             @Override public boolean strictMusicLock() { return true; }  // 激活时阻止其他所有 MUSIC 类音效播放
         };
+    }
+
+    // 逐实体条件触发 — 每 tick 对每个实体实例单独判断
+    // 迷雾/天空盒/音乐仅在对应条件返回 true 时激活
+    @Override
+    public boolean shouldEnableFog(LivingEntity entity) {
+        return entity.getHealth() < entity.getMaxHealth() * 0.5f;  // 示例：实体血量低于 50% 时触发迷雾
+    }
+
+    @Override
+    public boolean shouldEnableSkybox(LivingEntity entity) {
+        return true;  // 天空盒触发条件
+    }
+
+    @Override
+    public boolean shouldEnableMusic(LivingEntity entity) {
+        return true;  // 战斗音乐触发条件
     }
 }
 ```
