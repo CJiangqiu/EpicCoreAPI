@@ -16,6 +16,7 @@ import net.minecraftforge.common.world.ForgeChunkManager;
 import net.minecraft.world.entity.Entity;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -27,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class ForceLoadingManager {
 
     private static final Map<UUID, TrackedChunk> TRACKED = new ConcurrentHashMap<>();
+    private static final Set<UUID> FORCE_LOADED_MANUAL = ConcurrentHashMap.newKeySet();
 
     private static final ThreadLocal<Entity> CURRENT_RENDERING_ENTITY = new ThreadLocal<>();
 
@@ -86,6 +88,7 @@ public final class ForceLoadingManager {
 
     public static void onEntityLeave(LivingEntity entity, ServerLevel level) {
         UUID uuid = entity.getUUID();
+        FORCE_LOADED_MANUAL.remove(uuid);
         TrackedChunk tracked = TRACKED.remove(uuid);
         if (tracked == null) {
             return;
@@ -141,12 +144,38 @@ public final class ForceLoadingManager {
 
     // 防移除保护：无敌实体 或 强加载实体
     public static boolean shouldProtect(Entity entity) {
-        return EcaAPI.isInvulnerable(entity) || isForceLoadedType(entity.getType());
+        return EcaAPI.isInvulnerable(entity) || isForceLoadedType(entity.getType()) || FORCE_LOADED_MANUAL.contains(entity.getUUID());
     }
 
     // 强加载专属：超视距渲染、追踪距离扩大、区块票据、防despawn
     public static boolean shouldForceLoad(Entity entity) {
-        return isForceLoadedType(entity.getType());
+        return isForceLoadedType(entity.getType()) || FORCE_LOADED_MANUAL.contains(entity.getUUID());
+    }
+
+    public static void enableForceLoading(LivingEntity entity, ServerLevel level) {
+        if (entity == null || level == null) return;
+        UUID uuid = entity.getUUID();
+        if (TRACKED.containsKey(uuid)) return;
+        FORCE_LOADED_MANUAL.add(uuid);
+        ChunkPos chunkPos = new ChunkPos(entity.blockPosition());
+        if (!isValidChunkPos(chunkPos)) return;
+        ForgeChunkManager.forceChunk(level, EcaMod.MOD_ID, uuid, chunkPos.x, chunkPos.z, true, true);
+        TRACKED.put(uuid, new TrackedChunk(level, chunkPos));
+    }
+
+    public static void disableForceLoading(LivingEntity entity, ServerLevel level) {
+        if (entity == null) return;
+        UUID uuid = entity.getUUID();
+        FORCE_LOADED_MANUAL.remove(uuid);
+        if (isForceLoadedType(entity.getType())) return;
+        TrackedChunk tracked = TRACKED.remove(uuid);
+        if (tracked == null) return;
+        ForgeChunkManager.forceChunk(tracked.level, EcaMod.MOD_ID, uuid,
+                tracked.chunkPos.x, tracked.chunkPos.z, false, true);
+    }
+
+    public static boolean isManualForceLoaded(UUID uuid) {
+        return FORCE_LOADED_MANUAL.contains(uuid);
     }
 
     // 恢复被清除的强加载实体的 ChunkMap 追踪

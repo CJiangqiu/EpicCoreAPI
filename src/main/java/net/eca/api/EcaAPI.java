@@ -12,6 +12,7 @@ import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.UnsafeUtil;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.eca.network.EntityExtensionOverridePacket.FogData;
 import net.eca.network.EntityExtensionOverridePacket.SkyboxData;
@@ -1136,6 +1137,45 @@ public final class EcaAPI {
      */
     public static Set<String> getAllProtectedPackages() {
         return TransformerWhitelist.getAll();
+    }
+
+    // ==================== 强加载系统 ====================
+
+    // 启用实体强加载
+    /**
+     * Enable force loading for an entity instance.
+     * The entity's chunk will be kept loaded (EntityTicking level) regardless of player proximity.
+     * The force load ticket follows the entity as it moves between chunks.
+     * @param entity the living entity to force load
+     * @param level the server level the entity is in
+     */
+    public static void enableForceLoading(LivingEntity entity, ServerLevel level) {
+        if (entity == null || level == null) return;
+        ForceLoadingManager.enableForceLoading(entity, level);
+    }
+
+    // 禁用实体强加载
+    /**
+     * Disable force loading for an entity instance.
+     * Releases the chunk ticket. Has no effect if the entity is force-loaded via EntityExtension.
+     * @param entity the living entity to stop force loading
+     * @param level the server level the entity is in
+     */
+    public static void disableForceLoading(LivingEntity entity, ServerLevel level) {
+        if (entity == null || level == null) return;
+        ForceLoadingManager.disableForceLoading(entity, level);
+    }
+
+    // 检查实体是否被强加载（包含扩展系统和手动API两种来源）
+    /**
+     * Check if an entity is currently force loaded.
+     * Returns true if force loaded via EntityExtension or via the API.
+     * @param entity the entity to check
+     * @return true if the entity is force loaded
+     */
+    public static boolean isForceLoaded(LivingEntity entity) {
+        if (entity == null) return false;
+        return ForceLoadingManager.shouldForceLoad(entity);
     }
 
     private EcaAPI() {}

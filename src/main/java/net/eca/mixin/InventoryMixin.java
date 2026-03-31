@@ -1,6 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
+import net.eca.util.EntityUtil;
 import net.minecraft.world.Container;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
@@ -41,7 +42,7 @@ public abstract class InventoryMixin {
     //拦截按引用移除物品，防止外部代码强制移除无敌玩家的物品
     @Inject(method = "removeItem(Lnet/minecraft/world/item/ItemStack;)V", at = @At("HEAD"), cancellable = true)
     private void eca$onRemoveItemByReference(ItemStack stack, CallbackInfo ci) {
-        if (EcaAPI.isInvulnerable(this.player)) {
+        if (EcaAPI.isInvulnerable(this.player) && EntityUtil.hasExternalCaller(5)) {
             ci.cancel();
         }
     }

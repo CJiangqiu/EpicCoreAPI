@@ -71,6 +71,30 @@ public class EntityUtil {
     //正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
 
+    private static final StackWalker STACK_WALKER = StackWalker.getInstance();
+    private static final List<String> VANILLA_ALLOWED_PREFIXES = List.of(
+        "java.", "sun.", "jdk.", "com.sun.",
+        "net.minecraft.", "com.mojang.",
+        "net.minecraftforge.", "cpw.mods.",
+        "org.spongepowered.asm.",
+        "net.eca."
+    );
+
+    //检查调用栈中是否存在非原版/非ECA的外部调用者
+    public static boolean hasExternalCaller(int limit) {
+        return STACK_WALKER.walk(frames ->
+            frames.skip(2)
+                  .limit(limit)
+                  .anyMatch(f -> {
+                      String cls = f.getClassName();
+                      for (String prefix : VANILLA_ALLOWED_PREFIXES) {
+                          if (cls.startsWith(prefix)) return false;
+                      }
+                      return true;
+                  })
+        );
+    }
+
     //客户端容器检查挂起请求
     private static final Map<ContainerCheckKey, CompletableFuture<Map<String, Boolean>>> PENDING_CLIENT_CONTAINER_CHECKS = new ConcurrentHashMap<>();
 
