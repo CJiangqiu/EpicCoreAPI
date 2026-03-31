@@ -160,15 +160,15 @@ public class BossHealthOverlayMixin {
         int frameDrawX = frameOffsetX;
         int frameDrawY = frameOffsetY;
 
-        // 填充：按 progress 裁剪渲染
+        // 外框：满宽渲染（先渲染作为底层）
+        eca$renderLayer(graphics, frameTexture, frameType,
+                frameDrawX, frameDrawY, barWidth, barHeight, barWidth, barHeight);
+
+        // 填充：按 progress 裁剪渲染（后渲染覆盖在外框上方）
         if (fillWidth > 0) {
             eca$renderLayer(graphics, fillTexture, fillType,
                     fillDrawX, fillDrawY, fillWidth, fillTextureHeight, fillTextureWidth, fillTextureHeight);
         }
-
-        // 外框：满宽渲染
-        eca$renderLayer(graphics, frameTexture, frameType,
-                frameDrawX, frameDrawY, barWidth, barHeight, barWidth, barHeight);
 
         graphics.pose().popPose();
 
