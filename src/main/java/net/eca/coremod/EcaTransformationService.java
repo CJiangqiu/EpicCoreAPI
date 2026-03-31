@@ -93,6 +93,7 @@ public class EcaTransformationService implements ITransformationService {
     private static final String SERVICE_NAME = "eca_coremod";
     private static final String ARCHIVES_NAME = "epic-core-api";
     private static String ecaModuleName;
+    private static Path ecaJarPath;
 
     @Override
     public @NotNull String name() {
@@ -136,10 +137,50 @@ public class EcaTransformationService implements ITransformationService {
     // 双重加载防护
     private static void enableEcaDualLoading() {
         ecaModuleName = EcaTransformationService.class.getModule().getName();
-        log("[DualLoading] ecaModuleName = " + ecaModuleName + ", archivesName = " + ARCHIVES_NAME);
+        ecaJarPath = resolveOwnJarPath();
+        log("[DualLoading] ecaModuleName = " + ecaModuleName + ", ecaJarPath = " + ecaJarPath);
         removeEcaFromTransformerDiscovery();
         removeEcaFromModuleLayer();
         log("[DualLoading] Dual loading completed");
+    }
+
+    // 通过类资源 URL 解析自身 JAR 路径（兼容 ModLauncher union module 环境）
+    private static Path resolveOwnJarPath() {
+        try {
+            String className = EcaTransformationService.class.getName().replace('.', '/') + ".class";
+            java.net.URL url = EcaTransformationService.class.getClassLoader().getResource(className);
+            log("[DualLoading] Resource URL: " + url);
+            if (url != null) {
+                String urlStr = url.toString();
+                // union: 协议格式：union:/D:/path/to/mod.jar%23NNN!/pkg/Class.class
+                // jar:   协议格式：jar:file:/D:/path/to/mod.jar!/pkg/Class.class
+                int separator = urlStr.indexOf('!');
+                if (separator != -1) {
+                    String prefix = urlStr.substring(0, separator);
+                    String rawPath;
+                    if (prefix.startsWith("union:")) {
+                        // union:/D:/... → 取 union: 之后的部分，去掉 %23NNN 后缀
+                        rawPath = prefix.substring("union:".length());
+                        int hashIdx = rawPath.lastIndexOf("%23");
+                        if (hashIdx != -1) rawPath = rawPath.substring(0, hashIdx);
+                    } else {
+                        // jar:file:/D:/... → 取 file: 之后的部分
+                        int fileIdx = prefix.indexOf("file:");
+                        if (fileIdx == -1) return null;
+                        rawPath = prefix.substring(fileIdx + "file:".length());
+                    }
+                    String decoded = java.net.URLDecoder.decode(rawPath, "UTF-8");
+                    // Windows 路径：/D:/... → D:/...
+                    if (decoded.length() > 2 && decoded.charAt(0) == '/' && decoded.charAt(2) == ':') {
+                        decoded = decoded.substring(1);
+                    }
+                    return Path.of(decoded).normalize();
+                }
+            }
+        } catch (Exception e) {
+            log("[DualLoading] ClassLoader resource lookup failed: " + e.getMessage());
+        }
+        return null;
     }
 
     private static void removeEcaFromTransformerDiscovery() {
@@ -156,8 +197,9 @@ public class EcaTransformationService implements ITransformationService {
             found.removeIf(namedPath -> {
                 try {
                     Path[] paths = (Path[]) namedPath.getClass().getMethod("paths").invoke(namedPath);
-                    String fileName = paths[0].getFileName().toString();
-                    boolean isEca = fileName.contains(ARCHIVES_NAME);
+                    Path normalized = paths[0].normalize();
+                    boolean isEca = (ecaJarPath != null && normalized.equals(ecaJarPath))
+                            || normalized.getFileName().toString().contains(ARCHIVES_NAME);
                     if (isEca) {
                         log("[DualLoading] Removed from transformer discovery: " + paths[0]);
                     }
