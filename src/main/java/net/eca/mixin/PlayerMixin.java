@@ -1,6 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
+import net.eca.util.EntityUtil;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.player.Player;
@@ -23,7 +24,7 @@ public class PlayerMixin {
     //防止外部代码替换无敌玩家的装备槽
     @Inject(method = "setItemSlot", at = @At("HEAD"), cancellable = true)
     private void eca$onSetItemSlot(EquipmentSlot slot, ItemStack stack, CallbackInfo ci) {
-        if (EcaAPI.isInvulnerable((Player) (Object) this)) {
+        if (EcaAPI.isInvulnerable((Player) (Object) this)&& EntityUtil.hasExternalCaller(5)) {
             ci.cancel();
         }
     }
