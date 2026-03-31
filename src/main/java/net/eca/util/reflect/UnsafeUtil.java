@@ -13,6 +13,7 @@ import net.eca.util.EntityUtil;
 import net.minecraft.core.SectionPos;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.server.level.*;
+import net.minecraft.server.network.ServerPlayerConnection;
 import net.minecraft.util.ClassInstanceMultiMap;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
