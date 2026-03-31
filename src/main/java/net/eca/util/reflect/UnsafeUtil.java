@@ -11,6 +11,7 @@ import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.minecraft.core.SectionPos;
+import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.server.level.*;
 import net.minecraft.util.ClassInstanceMultiMap;
 import net.minecraft.world.entity.Entity;
@@ -314,9 +315,24 @@ public class UnsafeUtil {
 
     private static void broadcastEntityRemoval(ServerLevel serverLevel, Entity entity, List<UUID> bossEventUUIDs) {
         try {
-            ClientRemovePacket packet = new ClientRemovePacket(entity.getId(), bossEventUUIDs);
-            for (ServerPlayer player : serverLevel.players()) {
-                NetworkHandler.sendToPlayer(packet, player);
+            ChunkMap.TrackedEntity trackedEntity = serverLevel.chunkSource.chunkMap.entityMap.get(entity.getId());
+            if (trackedEntity == null) {
+                ClientRemovePacket packet = new ClientRemovePacket(entity.getId(), bossEventUUIDs);
+                for (ServerPlayer player : serverLevel.players()) {
+                    NetworkHandler.sendToPlayer(packet, player);
+                }
+                return;
+            }
+
+            Set<ServerPlayerConnection> seenBy = new HashSet<>(trackedEntity.seenBy);
+            if (seenBy.isEmpty()) return;
+
+            ClientboundRemoveEntitiesPacket vanillaPacket = new ClientboundRemoveEntitiesPacket(entity.getId());
+            ClientRemovePacket customPacket = new ClientRemovePacket(entity.getId(), bossEventUUIDs);
+            for (ServerPlayerConnection connection : seenBy) {
+                ServerPlayer player = connection.getPlayer();
+                player.connection.send(vanillaPacket);
+                NetworkHandler.sendToPlayer(customPacket, player);
             }
         } catch (Exception e) {
             EcaLogger.info("[UnsafeUtil] Failed to broadcast entity removal: {}", e.getMessage());

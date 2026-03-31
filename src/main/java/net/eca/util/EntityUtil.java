@@ -32,6 +32,8 @@ import net.minecraft.advancements.CriteriaTriggers;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
+import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
+import net.minecraft.server.network.ServerPlayerConnection;
 import net.minecraft.core.SectionPos;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
@@ -1280,11 +1282,31 @@ public class EntityUtil {
             entity.stopRiding();
             entity.getPassengers().forEach(Entity::stopRiding);
             entity.invalidateCaps();
-            NetworkHandler.sendToTrackingClients(new ClientRemovePacket(entity.getId(), bossEventUUIDs), entity);
+            broadcastRemovalToSeenBy(serverLevel, entity, bossEventUUIDs);
             removeFromServerContainers(serverLevel, entity);
 
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Entity removal failed: {}", e.getMessage());
+        }
+    }
+
+    //向所有曾经追踪此实体的客户端广播移除（先发原版包触发渲染清理，再发自定义包清理 boss bar）
+    private static void broadcastRemovalToSeenBy(ServerLevel serverLevel, Entity entity, List<UUID> bossEventUUIDs) {
+        ChunkMap.TrackedEntity trackedEntity = serverLevel.chunkSource.chunkMap.entityMap.get(entity.getId());
+        if (trackedEntity == null) {
+            NetworkHandler.sendToTrackingClients(new ClientRemovePacket(entity.getId(), bossEventUUIDs), entity);
+            return;
+        }
+
+        Set<ServerPlayerConnection> seenBy = new HashSet<>(trackedEntity.seenBy);
+        if (seenBy.isEmpty()) return;
+
+        ClientboundRemoveEntitiesPacket vanillaPacket = new ClientboundRemoveEntitiesPacket(entity.getId());
+        ClientRemovePacket customPacket = new ClientRemovePacket(entity.getId(), bossEventUUIDs);
+        for (ServerPlayerConnection connection : seenBy) {
+            ServerPlayer player = connection.getPlayer();
+            player.connection.send(vanillaPacket);
+            NetworkHandler.sendToPlayer(customPacket, player);
         }
     }
 
