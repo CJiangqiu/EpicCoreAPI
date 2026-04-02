@@ -22,7 +22,7 @@ public final class TransformerWhitelist {
         "org.joml.", "com.fasterxml.", "org.openjdk.", "org.checkerframework.", "com.electronwill.",
         "org.antlr.", "com.github.benmanes.caffeine.", "org.codehaus.", "org.yaml.", "com.typesafe.",
         "joptsimple.", "org.jline.", "org.w3c.", "org.xml.", "oshi.", "com.ibm.",
-        "netscape.javascript.", "kotlin.", "org.ow2.", "ca.weblite.", "paulscode.",
+        "netscape.javascript.", "kotlin.", "kotlinx.", "org.ow2.", "ca.weblite.", "paulscode.",
         "org.spongepowered.", "org.objectweb.asm.", "com.llamalad7.mixinextras.",
         "mezz.jei.", "snownee.jade.", "software.bernie.", "com.github.alexthe666.citadel.",
         "me.jellysquid.mods.sodium.", "com.supermartijn642.fusion.", "com.supermartijn642.core.",
