@@ -64,6 +64,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         }
 
         if (!registered) {
+            TransformerWhitelist.loadJsonWhitelist();
             inst.addTransformer(new EcaClassTransformer(), true);
             AgentLogWriter.info("[EcaClassTransformer] Registered as ClassFileTransformer");
             registered = true;

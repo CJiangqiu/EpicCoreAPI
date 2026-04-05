@@ -70,11 +70,7 @@ public final class TransformerWhitelist {
     // 运行时自定义：跳过全部转换（API + JSON）
     private static final Set<String> customTransform = Collections.synchronizedSet(new HashSet<>());
 
-    // ==================== JSON 配置加载 ====================
-
-    static {
-        loadFromConfigDirectory();
-    }
+    private static volatile boolean jsonLoaded = false;
 
     // ==================== 首段快速索引 ====================
 
@@ -294,6 +290,14 @@ public final class TransformerWhitelist {
     private static final String CONFIG_DIR = "config/eca";
     private static final String TYPE_ALLRETURN = "allreturn";
     private static final String TYPE_TRANSFORM = "transform";
+
+    //从 config/eca/ 加载 JSON 白名单（必须在 ClassFileTransformer 注册前��用）
+    public static void loadJsonWhitelist() {
+        if (jsonLoaded) return;
+        jsonLoaded = true;
+        loadFromConfigDirectory();
+        rebuildFirstSegments();
+    }
 
     private static void loadFromConfigDirectory() {
         try {
