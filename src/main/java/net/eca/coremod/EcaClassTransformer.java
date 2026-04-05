@@ -92,7 +92,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
                 continue;
             }
 
-            if (TransformerWhitelist.isProtected(name)) continue;
+            if (TransformerWhitelist.isSystemProtected(name)) continue;
 
             // 一次遍历继承链，同时判断 LivingEntity 和 Entity
             try {
@@ -157,7 +157,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             return ContainerReplacementTransformer.transform(className, classfileBuffer);
         }
 
-        if (TransformerWhitelist.isProtectedInternal(className)) return null;
+        if (TransformerWhitelist.isSystemProtectedInternal(className)) return null;
 
         try {
             return doTransform(className, classfileBuffer);

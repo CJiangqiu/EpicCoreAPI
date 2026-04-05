@@ -113,10 +113,13 @@ side="BOTH"
 - `setGlobalAllReturn(enable)` - DANGER! Requires Attack Radical Logic config. Enable/disable global AllReturn for all non-whitelisted mods
 - `disableAllReturn()` - Disable AllReturn and clear targets
 - `isAllReturnEnabled()` - Check if AllReturn is enabled
-- `addProtectedPackage(prefix)` - Add custom package prefix to whitelist, protecting it from AllReturn (e.g., "com.yourmod.")
-- `removeProtectedPackage(prefix)` - Remove custom package prefix from whitelist (built-in protections cannot be removed)
-- `isPackageProtected(className)` - Check if a class is protected by the whitelist
-- `getAllProtectedPackages()` - Get all protected package prefixes (built-in + custom)
+- `addAllReturnWhitelist(prefix)` - Add package prefix to AllReturn whitelist (skip AllReturn, defensive hooks still apply)
+- `removeAllReturnWhitelist(prefix)` - Remove package prefix from AllReturn whitelist (built-in entries cannot be removed)
+- `addTransformWhitelist(prefix)` - Add package prefix to transform whitelist (skip ALL ECA transformations including defensive hooks)
+- `removeTransformWhitelist(prefix)` - Remove package prefix from transform whitelist (built-in entries cannot be removed)
+- `isAllReturnWhitelisted(className)` - Check if a class is protected from AllReturn
+- `isTransformWhitelisted(className)` - Check if a class is protected from all ECA transformations
+- `getAllWhitelistedPackages()` - Get all whitelist prefixes (both levels, built-in + custom)
 - `getEntityExtensionRegistry()` - Get all registered entity extensions (Map<EntityType, EntityExtension>)
 - `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
 - `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
@@ -232,11 +235,17 @@ EcaAPI.setGlobalAllReturn(true);  // Enable for ALL non-whitelisted mods
 boolean enabled = EcaAPI.isAllReturnEnabled();
 EcaAPI.disableAllReturn();  // Disable and clear all AllReturn
 
-// Package Whitelist
-EcaAPI.addProtectedPackage("com.yourmod.");
-boolean removed = EcaAPI.removeProtectedPackage("com.yourmod.");  // Note: built-in hardcoded entries cannot be removed
-boolean isProtected = EcaAPI.isPackageProtected("com.yourmod.YourClass");
-Set<String> allProtected = EcaAPI.getAllProtectedPackages();  // Get all protected packages
+// Whitelist — AllReturn level (skip AllReturn only, defensive hooks still apply)
+EcaAPI.addAllReturnWhitelist("com.yourmod.");
+boolean removed = EcaAPI.removeAllReturnWhitelist("com.yourmod.");
+boolean isProtected = EcaAPI.isAllReturnWhitelisted("com.yourmod.YourClass");
+
+// Whitelist — Transform level (skip ALL ECA transformations including defensive hooks)
+EcaAPI.addTransformWhitelist("com.yourmod.");
+boolean removedTransform = EcaAPI.removeTransformWhitelist("com.yourmod.");
+boolean isFullyProtected = EcaAPI.isTransformWhitelisted("com.yourmod.YourClass");
+
+Set<String> allWhitelisted = EcaAPI.getAllWhitelistedPackages();
 
 // Spawn Ban
 EcaAPI.banSpawn(serverLevel, EntityType.ZOMBIE, 300);  // Ban zombies for 5 minutes
@@ -437,6 +446,36 @@ Available presets:
 - `CosmosRenderTypes` — Cosmos
 - `BlackHoleRenderTypes` — Black Hole
 
+### ECA Transformer Whitelist
+
+Although I've added as many common libraries and mods to the ECA Transformer whitelist as possible, there may still be mods that crash due to ECA transformation. So I've prepared a JSON configuration for modpack developers to add package prefixes to the whitelist. You can add JSON files under the `config/eca/` folder. If the folder is empty on first launch, example files will be generated automatically.
+
+Only the `type` and `packages` fields are required, other fields are ignored:
+
+Single mod example (`allreturn` — skip AllReturn only, defensive hooks still apply):
+```json
+{
+  "type": "allreturn",
+  "packages": [
+    "com.example.yourmod."
+  ]
+}
+```
+
+Multiple mods example (`transform` — skip ALL ECA transformations):
+```json
+{
+  "type": "transform",
+  "packages": [
+    "com.example.modA.",
+    "com.example.modB.",
+    "net.example.modC."
+  ]
+}
+```
+
+Any `.json` filename works, and you can have multiple files.
+
 ---
 
 # 中文
@@ -554,10 +593,13 @@ side="BOTH"
 - `setGlobalAllReturn(enable)` - 危险！需要开启激进攻击逻辑配置，启用/禁用全局AllReturn，影响所有非白名单mod
 - `disableAllReturn()` - 关闭AllReturn并清除目标
 - `isAllReturnEnabled()` - 检查AllReturn是否启用
-- `addProtectedPackage(prefix)` - 添加受保护的包名前缀，使其免受 AllReturn 影响（如 "com.yourmod."）
-- `removeProtectedPackage(prefix)` - 移除自定义包名保护（内置保护名单不能移除）
-- `isPackageProtected(className)` - 检查类是否受白名单保护
-- `getAllProtectedPackages()` - 获取所有受保护的包名前缀（内置保护名单 + 自定义）
+- `addAllReturnWhitelist(prefix)` - 添加 AllReturn 白名单前缀（跳过 AllReturn 转换，防御性 Hook 仍然生效）
+- `removeAllReturnWhitelist(prefix)` - 移除 AllReturn 白名单前缀（内置条目不能移除）
+- `addTransformWhitelist(prefix)` - 添加转换白名单前缀（跳过全部 ECA 转换，包括防御性 Hook）
+- `removeTransformWhitelist(prefix)` - 移除转换白名单前缀（内置条目不能移除）
+- `isAllReturnWhitelisted(className)` - 检查类是否在 AllReturn 白名单中
+- `isTransformWhitelisted(className)` - 检查类是否在转换白名单中（跳过全部转换）
+- `getAllWhitelistedPackages()` - 获取所有白名单前缀（两级合并，内置 + 自定义）
 - `getEntityExtensionRegistry()` - 获取所有已注册的实体扩展（Map<EntityType, EntityExtension>）
 - `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
 - `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）
@@ -673,11 +715,17 @@ EcaAPI.setGlobalAllReturn(true);  // 对所有非白名单mod启用
 boolean enabled = EcaAPI.isAllReturnEnabled();
 EcaAPI.disableAllReturn();  // 关闭并清除全部AllReturn
 
-// 包名白名单
-EcaAPI.addProtectedPackage("com.yourmod.");
-boolean removed = EcaAPI.removeProtectedPackage("com.yourmod.");  // 注意内置硬编码名单无法移除
-boolean isProtected = EcaAPI.isPackageProtected("com.yourmod.YourClass");
-Set<String> allProtected = EcaAPI.getAllProtectedPackages();  // 获取所有受保护的包名
+// 白名单 — AllReturn 级别（跳过 AllReturn，防御性 Hook 仍生效）
+EcaAPI.addAllReturnWhitelist("com.yourmod.");
+boolean removed = EcaAPI.removeAllReturnWhitelist("com.yourmod.");
+boolean isProtected = EcaAPI.isAllReturnWhitelisted("com.yourmod.YourClass");
+
+// 白名单 — 转换级别（跳过全部 ECA 转换，包括防御性 Hook）
+EcaAPI.addTransformWhitelist("com.yourmod.");
+boolean removedTransform = EcaAPI.removeTransformWhitelist("com.yourmod.");
+boolean isFullyProtected = EcaAPI.isTransformWhitelisted("com.yourmod.YourClass");
+
+Set<String> allWhitelisted = EcaAPI.getAllWhitelistedPackages();
 
 // 禁生成
 EcaAPI.banSpawn(serverLevel, EntityType.ZOMBIE, 300);  // 禁止僵尸生成5分钟
@@ -877,6 +925,36 @@ public class MyBossExtension extends EntityExtension {
 - `StarlightRenderTypes` — 星辉
 - `CosmosRenderTypes` — 宇宙
 - `BlackHoleRenderTypes` — 黑洞
+
+### ECA Transformer 白名单
+
+尽管我尽可能的添加了常见的库和 Mod 作为 ECA Transformer 的白名单，但是仍然不排除有 mod 因为被 ECA 转换导致崩溃的问题，所以我准备了一个可供整合包开发者使用的 JSON 配置文件来添加包名白名单给 ECA Transformer。您可以在 `config/eca/` 文件夹下添加 JSON 文件来添加白名单，首次启动时如果文件夹为空会自动生成示例文件。
+
+只有 `type` 和 `packages` 字段是必须的，其他字段会被忽略：
+
+单个 mod 示例（`allreturn` — 仅跳过 AllReturn 转换，防御性 Hook 仍然生效）：
+```json
+{
+  "type": "allreturn",
+  "packages": [
+    "com.example.yourmod."
+  ]
+}
+```
+
+多个 mod 示例（`transform` — 跳过全部 ECA 转换）：
+```json
+{
+  "type": "transform",
+  "packages": [
+    "com.example.modA.",
+    "com.example.modB.",
+    "net.example.modC."
+  ]
+}
+```
+
+文件名随意，可以有多个文件。
 
 ---
 

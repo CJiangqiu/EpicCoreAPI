@@ -428,15 +428,16 @@ public final class EntityExtensionManager {
         if (entity == null || extension == null || state == null) {
             return;
         }
-        if (!extension.shouldShowBossBar(entity)) {
-            return;
-        }
 
+        boolean shouldShow = extension.shouldShowBossBar(entity);
         UUID entityUuid = entity.getUUID();
         state.customBossEvents.computeIfAbsent(entityUuid, key -> {
             EcaBossEvent bossEvent = new EcaBossEvent(entityUuid, entity.getDisplayName());
+            bossEvent.setVisible(shouldShow);
             CustomBossEventState customState = new CustomBossEventState(entity, extension, bossEvent);
-            updateCustomBossEvent(customState);
+            if (shouldShow) {
+                updateCustomBossEvent(customState);
+            }
             return customState;
         });
     }

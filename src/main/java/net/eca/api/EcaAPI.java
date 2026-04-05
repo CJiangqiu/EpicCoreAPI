@@ -1097,46 +1097,115 @@ public final class EcaAPI {
         return binaryName.substring(0, lastDot + 1).replace('.', '/');
     }
 
-    // ==================== 包名白名单 API ====================
+    // ==================== 白名单 API ====================
 
-    // 添加受保护的包名前缀（保护 mod 免受 AllReturn 等危险操作影响）
+    // --- AllReturn 白名单：跳过 AllReturn 转换，防御性 Hook 仍然生效 ---
+
+    // 添加 AllReturn 白名单前缀
     /**
-     * Add a protected package prefix to the whitelist.
-     * Classes in protected packages will not be affected by AllReturn and other dangerous operations.
-     * @param packagePrefix the package prefix to protect (e.g., "com.yourmod.")
+     * Add a package prefix to the AllReturn whitelist.
+     * Classes in whitelisted packages will NOT be affected by AllReturn transformation.
+     * Defensive hooks (getHealth, isAlive, etc.) will still apply.
+     * @param packagePrefix the package prefix (e.g., "com.yourmod.")
      */
-    public static void addProtectedPackage(String packagePrefix) {
-        TransformerWhitelist.addCustom(packagePrefix);
+    public static void addAllReturnWhitelist(String packagePrefix) {
+        TransformerWhitelist.addAllReturn(packagePrefix);
     }
 
-    // 移除受保护的包名前缀（不能移除内置保护）
+    // 移除 AllReturn 白名单前缀
     /**
-     * Remove a protected package prefix from the whitelist.
-     * Built-in protections (JDK, Minecraft, Forge, etc.) cannot be removed.
-     * @param packagePrefix the package prefix to unprotect
-     * @return true if successfully removed, false if it was a built-in protection or not found
+     * Remove a package prefix from the AllReturn whitelist.
+     * Built-in entries cannot be removed.
+     * @param packagePrefix the package prefix to remove
+     * @return true if successfully removed
      */
-    public static boolean removeProtectedPackage(String packagePrefix) {
-        return TransformerWhitelist.removeCustom(packagePrefix);
+    public static boolean removeAllReturnWhitelist(String packagePrefix) {
+        return TransformerWhitelist.removeAllReturn(packagePrefix);
     }
 
-    // 检查包名是否受保护
+    // --- 转换白名单：跳过全部 ECA 转换（AllReturn + 防御性 Hook） ---
+
+    // 添加转换白名单前缀
     /**
-     * Check if a class is protected by the whitelist.
+     * Add a package prefix to the transform whitelist.
+     * Classes in whitelisted packages will be completely skipped by ALL ECA transformations,
+     * including AllReturn AND defensive hooks (getHealth, isAlive, etc.).
+     * @param packagePrefix the package prefix (e.g., "com.yourmod.")
+     */
+    public static void addTransformWhitelist(String packagePrefix) {
+        TransformerWhitelist.addTransform(packagePrefix);
+    }
+
+    // 移除转换白名单前缀
+    /**
+     * Remove a package prefix from the transform whitelist.
+     * Built-in entries (JDK, Minecraft, Forge, etc.) cannot be removed.
+     * @param packagePrefix the package prefix to remove
+     * @return true if successfully removed
+     */
+    public static boolean removeTransformWhitelist(String packagePrefix) {
+        return TransformerWhitelist.removeTransform(packagePrefix);
+    }
+
+    // --- 查询 ---
+
+    // 检查类是否在 AllReturn 白名单中
+    /**
+     * Check if a class is protected from AllReturn transformation.
      * @param className the binary class name (e.g., "com.yourmod.MyClass")
-     * @return true if the class is protected
+     * @return true if the class is protected from AllReturn
      */
-    public static boolean isPackageProtected(String className) {
+    public static boolean isAllReturnWhitelisted(String className) {
         return TransformerWhitelist.isProtected(className);
     }
 
-    // 获取所有受保护的包名前缀
+    // 检查类是否在转换白名单中
     /**
-     * Get all protected package prefixes (built-in + custom).
-     * @return unmodifiable set of all protected prefixes
+     * Check if a class is protected from all ECA transformations.
+     * @param className the binary class name (e.g., "com.yourmod.MyClass")
+     * @return true if the class is fully protected
      */
-    public static Set<String> getAllProtectedPackages() {
+    public static boolean isTransformWhitelisted(String className) {
+        return TransformerWhitelist.isSystemProtected(className);
+    }
+
+    // 获取所有白名单前缀
+    /**
+     * Get all whitelist prefixes (both levels, built-in + custom).
+     * @return unmodifiable set of all prefixes
+     */
+    public static Set<String> getAllWhitelistedPackages() {
         return TransformerWhitelist.getAll();
+    }
+
+    // --- 兼容旧 API ---
+
+    // 添加受保护的包名前缀（已弃用，请使用 addAllReturnWhitelist）
+    /** @deprecated Use {@link #addAllReturnWhitelist(String)} instead. */
+    @Deprecated
+    public static void addProtectedPackage(String packagePrefix) {
+        addAllReturnWhitelist(packagePrefix);
+    }
+
+    // 移除受保护的包名前缀（已弃用，请使用 removeAllReturnWhitelist）
+    /** @deprecated Use {@link #removeAllReturnWhitelist(String)} instead. */
+    @Deprecated
+    public static boolean removeProtectedPackage(String packagePrefix) {
+        return removeAllReturnWhitelist(packagePrefix);
+    }
+
+    // 检查包名是否受保护（已弃用，请使用 isAllReturnWhitelisted）
+    /** @deprecated Use {@link #isAllReturnWhitelisted(String)} instead. */
+    @Deprecated
+    public static boolean isPackageProtected(String className) {
+        return isAllReturnWhitelisted(className);
+    }
+
+    // 获取所有受保护的包名前缀（已弃用，请使用 getAllWhitelistedPackages）
+    /** @deprecated Use {@link #getAllWhitelistedPackages()} instead. */
+    @Deprecated
+    public static Set<String> getAllProtectedPackages() {
+        return getAllWhitelistedPackages();
     }
 
     // ==================== 强加载系统 ====================

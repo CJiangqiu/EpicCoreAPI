@@ -138,6 +138,10 @@ public class FogRendererMixin {
                 continue;
             }
 
+            if (!extension.shouldEnableFog(living)) {
+                continue;
+            }
+
             float radius = fog.radius();
             if (!(radius > 0.0f)) {
                 continue;
