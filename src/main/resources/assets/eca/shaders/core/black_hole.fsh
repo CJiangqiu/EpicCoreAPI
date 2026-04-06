@@ -5,6 +5,11 @@ uniform sampler2D Sampler2;
 uniform float GameTime;
 uniform float CameraYaw;
 uniform float CameraPitch;
+uniform sampler2D Sampler0;
+uniform vec4 ColorKeyColor;
+uniform float ColorKeyTolerance;
+uniform vec2 LocalUvMin;
+uniform vec2 LocalUvScale;
 
 in vec4 vertexColor;
 in vec2 texCoord0;
@@ -51,6 +56,13 @@ vec3 getStarColor(float temp) {
 }
 
 void main() {
+    if (ColorKeyColor.a > 0.5) {
+        vec4 eca_baseColor = texture(Sampler0, texCoord0);
+        if (eca_baseColor.a < 0.1 || distance(eca_baseColor.rgb, ColorKeyColor.rgb) > ColorKeyTolerance) {
+            discard;
+        }
+    }
+
     float time = GameTime * 400.0;
 
     vec3 dir = normalize(skyDir);
@@ -64,16 +76,18 @@ void main() {
     dir = vec3(dir.z * sa + dir.x * ca, dir.y, dir.z * ca - dir.x * sa);
 
     vec2 skyPos = dir.xz / max(0.15, 1.0 + dir.y);
-    vec2 uvDeriv = fwidth(texCoord0);
+    // 归一化到本地 [0,1] UV，让物品图集子区域也能正确中心化
+    vec2 localUv = (texCoord0 - LocalUvMin) * LocalUvScale;
+    vec2 uvDeriv = fwidth(localUv);
     float useUvSpace = step(0.00001, uvDeriv.x + uvDeriv.y);
 
     vec2 relativeUv;
     if (useUvSpace > 0.5) {
         // GUI mode - centered with aspect ratio correction
-        float dx = abs(dFdx(texCoord0.x));
-        float dy = abs(dFdy(texCoord0.y));
+        float dx = abs(dFdx(localUv.x));
+        float dy = abs(dFdy(localUv.y));
         float aspectRatio = (dy > 0.00001) ? (dy / dx) : 1.0;
-        vec2 centered = texCoord0 * 2.0 - 1.0;
+        vec2 centered = localUv * 2.0 - 1.0;
         centered.x *= aspectRatio;
         relativeUv = centered * 2.3;
     } else {

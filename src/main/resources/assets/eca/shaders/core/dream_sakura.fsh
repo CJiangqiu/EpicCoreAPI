@@ -6,6 +6,8 @@ uniform sampler2D Sampler2;
 uniform float GameTime;
 uniform float CameraYaw;
 uniform float CameraPitch;
+uniform vec4 ColorKeyColor;
+uniform float ColorKeyTolerance;
 
 in vec4 vertexColor;
 in vec2 texCoord0;
@@ -44,6 +46,13 @@ vec4 sampleRotatedPetal(sampler2D tex, vec2 uv, vec2 center, float angle, float 
 }
 
 void main() {
+    if (ColorKeyColor.a > 0.5) {
+        vec4 eca_baseColor = texture(Sampler0, texCoord0);
+        if (eca_baseColor.a < 0.1 || distance(eca_baseColor.rgb, ColorKeyColor.rgb) > ColorKeyTolerance) {
+            discard;
+        }
+    }
+
     vec4 baseTexture = texture(Sampler0, texCoord0);
 
     vec3 effects = vec3(0.0);

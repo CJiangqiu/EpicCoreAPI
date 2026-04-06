@@ -45,6 +45,8 @@ public final class TransformerWhitelist {
         "netscape.javascript.", "kotlin.", "kotlinx.", "org.ow2.", "ca.weblite.", "paulscode.",
         "org.spongepowered.", "org.objectweb.asm.", "com.llamalad7.mixinextras.", "com.tterrag.", "oolloo.", "native0.",
         "me.lucko.spark.", "de.odysseus.", "org.jcp.", "com.eliotlash.mclib.",
+        // FTB / CreeperHost 系列
+        "dev.ftb.", "net.creeperhost.", "dev.latvian.mods.",
         // ECA 自身
         "net.eca."
     );
@@ -60,9 +62,10 @@ public final class TransformerWhitelist {
         "org.anarres.", "net.jodah.", "thedarkcolour.", "com.mrcrayfish.",
         "com.chaosthedude.", "net.mehvahdjukaar.", "io.github.flemmli97.", "io.redspace.ironsspellbooks.",
         "com.obscuria.", "jeresources.", "vazkii.patchouli.", "com.bawnorton.mixinsquared.", "terrablender.",
+        "me.fengming.vaultpatcher_asm.",
         "vectorwing.farmersdelight.", "jackiecrazy.attributizer.", "com.fe.", "com.mega.",
         "net.the_last_sword.", "net.mcreator.ultimateskeletons.", "com.core.dream_sakura.", "com.github.L_Ender.",
-        "com.github.tartaricacid."
+        "com.github.tartaricacid.", "com.replaymod."
     );
 
     // 运行时自定义：跳过 AllReturn（API + JSON）

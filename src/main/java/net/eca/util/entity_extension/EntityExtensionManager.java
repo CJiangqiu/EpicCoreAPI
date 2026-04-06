@@ -452,8 +452,9 @@ public final class EntityExtensionManager {
             return;
         }
 
+        UUID entityUuid = entity.getUUID();
         for (UUID bossEventId : collectBossEventIds(entity, state)) {
-            NetworkHandler.sendToTrackingClients(new EntityExtensionBossEventTypePacket(bossEventId, typeId), entity);
+            NetworkHandler.sendToTrackingClients(new EntityExtensionBossEventTypePacket(bossEventId, typeId, entityUuid), entity);
         }
     }
 
@@ -467,8 +468,9 @@ public final class EntityExtensionManager {
             return;
         }
 
+        UUID entityUuid = entity.getUUID();
         for (UUID bossEventId : collectBossEventIds(entity, state)) {
-            NetworkHandler.sendToPlayer(new EntityExtensionBossEventTypePacket(bossEventId, typeId), player);
+            NetworkHandler.sendToPlayer(new EntityExtensionBossEventTypePacket(bossEventId, typeId, entityUuid), player);
         }
     }
 
@@ -478,7 +480,7 @@ public final class EntityExtensionManager {
         }
 
         for (UUID bossEventId : collectBossEventIds(entity, state)) {
-            NetworkHandler.sendToTrackingClients(new EntityExtensionBossEventTypePacket(bossEventId, null), entity);
+            NetworkHandler.sendToTrackingClients(new EntityExtensionBossEventTypePacket(bossEventId, null, null), entity);
         }
     }
 
@@ -488,7 +490,7 @@ public final class EntityExtensionManager {
         }
 
         for (UUID bossEventId : collectBossEventIds(entity, state)) {
-            NetworkHandler.sendToPlayer(new EntityExtensionBossEventTypePacket(bossEventId, null), player);
+            NetworkHandler.sendToPlayer(new EntityExtensionBossEventTypePacket(bossEventId, null, null), player);
         }
     }
 

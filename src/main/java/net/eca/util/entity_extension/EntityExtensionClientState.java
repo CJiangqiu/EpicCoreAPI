@@ -19,6 +19,7 @@ public final class EntityExtensionClientState {
 
     private static final Map<ResourceLocation, EntityType<?>> ACTIVE_TYPES = new ConcurrentHashMap<>();
     private static final Map<UUID, EntityType<?>> BOSS_EVENT_TYPES = new ConcurrentHashMap<>();
+    private static final Map<UUID, UUID> BOSS_EVENT_ENTITY_UUIDS = new ConcurrentHashMap<>();
 
     private static final Map<ResourceLocation, GlobalFogExtension> ACTIVE_FOGS = new ConcurrentHashMap<>();
     private static final Map<ResourceLocation, GlobalSkyboxExtension> ACTIVE_SKYBOXES = new ConcurrentHashMap<>();
@@ -261,23 +262,30 @@ public final class EntityExtensionClientState {
 
     // ==================== Boss Event 映射 ====================
 
-    public static void setBossEventType(UUID bossEventId, ResourceLocation typeId) {
+    public static void setBossEventType(UUID bossEventId, ResourceLocation typeId, UUID entityUuid) {
         if (bossEventId == null) {
             return;
         }
 
         if (typeId == null) {
             BOSS_EVENT_TYPES.remove(bossEventId);
+            BOSS_EVENT_ENTITY_UUIDS.remove(bossEventId);
             return;
         }
 
         EntityType<?> type = BuiltInRegistries.ENTITY_TYPE.getOptional(typeId).orElse(null);
         if (type == null) {
             BOSS_EVENT_TYPES.remove(bossEventId);
+            BOSS_EVENT_ENTITY_UUIDS.remove(bossEventId);
             return;
         }
 
         BOSS_EVENT_TYPES.put(bossEventId, type);
+        if (entityUuid != null) {
+            BOSS_EVENT_ENTITY_UUIDS.put(bossEventId, entityUuid);
+        } else {
+            BOSS_EVENT_ENTITY_UUIDS.remove(bossEventId);
+        }
     }
 
     public static EntityType<?> getBossEventType(UUID bossEventId) {
@@ -285,6 +293,13 @@ public final class EntityExtensionClientState {
             return null;
         }
         return BOSS_EVENT_TYPES.get(bossEventId);
+    }
+
+    public static UUID getBossEventEntityUuid(UUID bossEventId) {
+        if (bossEventId == null) {
+            return null;
+        }
+        return BOSS_EVENT_ENTITY_UUIDS.get(bossEventId);
     }
 
     private EntityExtensionClientState() {}

@@ -5,6 +5,7 @@ import net.eca.agent.AgentLogWriter;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 
 /**
  * Runtime toggle for AllReturn functionality.
@@ -14,6 +15,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * This class only controls the runtime on/off behavior.
  */
 public final class AllReturnToggle {
+
+    // 注入字节码通过 System.getProperties().get(CHECKER_KEY) 间接调用，避免 classloader 隔离问题
+    static final String CHECKER_KEY = "eca.allreturn.checker";
 
     private static volatile boolean enabled = false;
     private static final Set<String> allowedPrefixes = ConcurrentHashMap.newKeySet();
@@ -30,7 +34,20 @@ public final class AllReturnToggle {
     //加载时检查：该类是否应该被注入 guard（不在白名单中的类都注入，运行时由 shouldReturn 控制开关）
     public static boolean shouldInjectGuard(String internalClassName) {
         if (internalClassName == null) return false;
+        ensureCheckerRegistered();
         return !TransformerWhitelist.isProtectedInternal(internalClassName);
+    }
+
+    private static volatile boolean checkerRegistered = false;
+
+    //确保 Predicate checker 已注册到 System.getProperties()（注入字节码通过此间接调用）
+    @SuppressWarnings("unchecked")
+    private static void ensureCheckerRegistered() {
+        if (checkerRegistered) return;
+        Predicate<String> checker = AllReturnToggle::shouldReturn;
+        System.getProperties().put(CHECKER_KEY, checker);
+        checkerRegistered = true;
+        AgentLogWriter.info("[AllReturnToggle] Registered checker to System.getProperties()");
     }
 
     private static boolean matchesPrefix(String internalClassName) {
@@ -104,6 +121,8 @@ public final class AllReturnToggle {
         allowedPrefixes.clear();
         transformedClasses.clear();
         loggedModRoots.clear();
+        System.getProperties().remove(CHECKER_KEY);
+        checkerRegistered = false;
     }
 
     private static String normalize(String prefix) {

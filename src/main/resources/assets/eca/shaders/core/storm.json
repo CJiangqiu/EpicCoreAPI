@@ -16,6 +16,7 @@
   ],
 
   "samplers": [
+    { "name": "Sampler0" },
     { "name": "Sampler2" }
   ],
 
@@ -55,6 +56,30 @@
       "type": "float",
       "count": 1,
       "values": [0.0]
+    },
+    {
+      "name": "ColorKeyColor",
+      "type": "float",
+      "count": 4,
+      "values": [0.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "name": "ColorKeyTolerance",
+      "type": "float",
+      "count": 1,
+      "values": [0.1]
+    },
+    {
+      "name": "LocalUvMin",
+      "type": "float",
+      "count": 2,
+      "values": [0.0, 0.0]
+    },
+    {
+      "name": "LocalUvScale",
+      "type": "float",
+      "count": 2,
+      "values": [1.0, 1.0]
     }
   ]
 }

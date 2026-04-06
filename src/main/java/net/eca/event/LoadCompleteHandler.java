@@ -8,6 +8,7 @@ import net.eca.coremod.EcaClassTransformer;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.item_extension.ItemExtensionManager;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -51,8 +52,9 @@ public final class LoadCompleteHandler {
     public void onLoadComplete(FMLLoadCompleteEvent event) {
         EcaMod.setLoadComplete(true);
 
-        // 扫描并注册 Entity Extensions
+        // 扫描并注册 Entity Extensions 和 Item Extensions
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
+        event.enqueueWork(ItemExtensionManager::scanAndRegisterAll);
 
         // 激进防御：FMLLoadComplete 后重应用 Entity + LivingEntity 转换
         if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {

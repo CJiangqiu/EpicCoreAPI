@@ -17,7 +17,8 @@
     "LivingEntityRendererMixin",
     "LocalPlayerMixin",
     "MinecraftMixin",
-    "SoundManagerMixin"
+    "SoundManagerMixin",
+    "ItemRendererMixin"
   ],
   "mixins": [
     "CapabilityDispatcherMixin",

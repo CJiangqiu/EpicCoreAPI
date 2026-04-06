@@ -27,6 +27,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import java.util.UUID;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -69,11 +70,14 @@ public class BossHealthOverlayMixin {
             return false;
         }
 
+        UUID entityUuid = EntityExtensionClientState.getBossEventEntityUuid(event.getId());
         LivingEntity bossEntity = null;
-        for (Entity e : minecraft.level.entitiesForRendering()) {
-            if (e.getUUID().equals(event.getId()) && e instanceof LivingEntity living) {
-                bossEntity = living;
-                break;
+        if (entityUuid != null) {
+            for (Entity e : minecraft.level.entitiesForRendering()) {
+                if (e.getUUID().equals(entityUuid) && e instanceof LivingEntity living) {
+                    bossEntity = living;
+                    break;
+                }
             }
         }
         if (!bossBar.shouldRender(bossEntity)) {

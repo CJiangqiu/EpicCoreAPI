@@ -16,6 +16,10 @@ public class StormShader {
     private static Uniform timeUniform;
     private static Uniform cameraYawUniform;
     private static Uniform cameraPitchUniform;
+    private static Uniform colorKeyColorUniform;
+    private static Uniform colorKeyToleranceUniform;
+    private static Uniform localUvMinUniform;
+    private static Uniform localUvScaleUniform;
 
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance stormShader = EcaShaderInstance.create(
@@ -28,6 +32,10 @@ public class StormShader {
             timeUniform = shader.getUniform("GameTime");
             cameraYawUniform = shader.getUniform("CameraYaw");
             cameraPitchUniform = shader.getUniform("CameraPitch");
+            colorKeyColorUniform = shader.getUniform("ColorKeyColor");
+            colorKeyToleranceUniform = shader.getUniform("ColorKeyTolerance");
+            localUvMinUniform = shader.getUniform("LocalUvMin");
+            localUvScaleUniform = shader.getUniform("LocalUvScale");
         });
     }
 
@@ -54,6 +62,8 @@ public class StormShader {
                     }
                 }
             }
+            EcaShaderInstance.applyColorKeyUniforms(colorKeyColorUniform, colorKeyToleranceUniform);
+            EcaShaderInstance.applyLocalUvBoundsUniforms(localUvMinUniform, localUvScaleUniform);
         } catch (Exception ignored) {
         }
     }
@@ -67,5 +77,9 @@ public class StormShader {
         timeUniform = null;
         cameraYawUniform = null;
         cameraPitchUniform = null;
+        colorKeyColorUniform = null;
+        colorKeyToleranceUniform = null;
+        localUvMinUniform = null;
+        localUvScaleUniform = null;
     }
 }

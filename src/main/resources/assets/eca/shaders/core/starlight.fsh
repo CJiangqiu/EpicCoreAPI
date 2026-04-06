@@ -5,6 +5,11 @@ uniform float GameTime;
 uniform sampler2D Sampler2;
 uniform float CameraYaw;
 uniform float CameraPitch;
+uniform sampler2D Sampler0;
+uniform vec4 ColorKeyColor;
+uniform float ColorKeyTolerance;
+uniform vec2 LocalUvMin;
+uniform vec2 LocalUvScale;
 
 in vec4 vertexColor;
 in vec2 texCoord0;
@@ -80,6 +85,13 @@ float circleStar(vec2 p, float size) {
 }
 
 void main() {
+    if (ColorKeyColor.a > 0.5) {
+        vec4 eca_baseColor = texture(Sampler0, texCoord0);
+        if (eca_baseColor.a < 0.1 || distance(eca_baseColor.rgb, ColorKeyColor.rgb) > ColorKeyTolerance) {
+            discard;
+        }
+    }
+
     vec3 dir = normalize(skyDir);
 
     float sb = sin(-CameraPitch);
@@ -91,17 +103,21 @@ void main() {
     dir = vec3(dir.z * sa + dir.x * ca, dir.y, dir.z * ca - dir.x * sa);
 
     vec2 skyPos = dir.xz / max(0.15, 1.0 + dir.y);
-    vec2 uvDeriv = fwidth(texCoord0);
+    // 归一化到本地 [0,1] UV：物品渲染时 texCoord0 是图集子区域，
+    // 通过 LocalUvMin/Scale 映射回 quad 本地坐标，让中心化数学对物品也生效。
+    // 非物品渲染传入 (0,0)+(1,1) 恒等映射，行为保持不变。
+    vec2 localUv = (texCoord0 - LocalUvMin) * LocalUvScale;
+    vec2 uvDeriv = fwidth(localUv);
     float useUvSpace = step(0.00001, uvDeriv.x + uvDeriv.y);
 
     vec2 uv;
     if (useUvSpace > 0.5) {
         // GUI/Entity mode: scale proportionally
-        float dx = abs(dFdx(texCoord0.x));
-        float dy = abs(dFdy(texCoord0.y));
+        float dx = abs(dFdx(localUv.x));
+        float dy = abs(dFdy(localUv.y));
         float aspectRatio = (dy > 0.00001) ? (dy / dx) : 1.0;
 
-        vec2 centered = texCoord0 * 2.0 - 1.0;
+        vec2 centered = localUv * 2.0 - 1.0;
         centered.x *= aspectRatio;
         uv = centered * 5.0;
     } else {

@@ -428,9 +428,76 @@ public class MyBossExtension extends EntityExtension {
 }
 ```
 
+### Item Extension System
+
+This mod also provides a customizable item extension system for adding shader rendering effects to specific items. You need to create a subclass extending `ItemExtension` and annotate it with `@RegisterItemExtension` to register the extension. Item extensions are client-only — no network synchronization is needed.
+
+```java
+import net.eca.api.RegisterItemExtension;
+import net.eca.client.render.StarlightRenderTypes;
+import net.eca.util.item_extension.ItemExtension;
+import net.eca.util.item_extension.ItemExtensionManager;
+import net.minecraft.client.renderer.RenderType;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+
+@RegisterItemExtension
+public class DiamondSwordExtension extends ItemExtension {
+
+    static {
+        ItemExtensionManager.register(new DiamondSwordExtension());
+    }
+
+    public DiamondSwordExtension() {
+        super(Items.DIAMOND_SWORD);  // target item
+    }
+
+    @Override
+    protected String getModId() {
+        return "your_mod_id";
+    }
+
+    @Override
+    public boolean enabled() {
+        return true;  // global master switch — return false to disable this extension entirely
+    }
+
+    @Override
+    public boolean shouldRender(ItemStack stack) {
+        return true;  // per-stack activation condition (e.g. check NBT, enchantment, custom name)
+    }
+
+    @Override
+    public RenderType getRenderType() {
+        return StarlightRenderTypes.ITEM;  // shader overlay RenderType
+    }
+
+    @Override
+    public float[] getColorKey() {
+        // Only pixels matching this RGB (0.0~1.0) will be overlaid with the shader.
+        // Return null to apply the shader to the entire item texture.
+        return new float[]{0.25f, 0.83f, 0.73f};
+    }
+
+    @Override
+    public float getColorKeyTolerance() {
+        return 0.3f;  // RGB distance tolerance, 0.0~1.0
+    }
+}
+```
+
+Activation condition switches:
+- `enabled()` — global master switch. Return `false` to completely disable this extension without removing the registration.
+- `shouldRender(ItemStack stack)` — per-stack runtime check. Called every frame for every rendered stack, so you can gate the effect on NBT, enchantments, custom names, durability, etc.
+
+Notes:
+- Each `Item` can only have ONE extension. Duplicate registrations are rejected with an error log.
+- The shader is rendered as an additional overlay pass on top of normal item rendering (works in GUI, first-person, third-person, ground item, and item frames).
+- Color-Key masking uses local UV bounds automatically, so centered shader math (spiral, stars, rings) stays centered on the item geometry regardless of where the texture lives on the block atlas.
+
 ### Shader Presets
 
-This mod also provides some built-in shader presets for the entity extension system. You can directly use these RenderTypes in your extension — simply replace `CustomRenderTypes` in the example above with the preset name. Each preset provides 3 RenderTypes: BOSS_BAR, BOSS_LAYER, SKYBOX.
+This mod also provides some built-in shader presets for both the entity extension system and the item extension system. You can directly use these RenderTypes in your extension — simply replace `CustomRenderTypes` in the example above with the preset name. Each preset provides 4 RenderTypes: `BOSS_BAR`, `BOSS_LAYER`, `SKYBOX` for entity extensions, and `ITEM` for item extensions.
 
 Available presets:
 - `TheLastEndRenderTypes` — The Last End
@@ -908,9 +975,76 @@ public class MyBossExtension extends EntityExtension {
 }
 ```
 
+### 物品扩展
+
+本 Mod 还提供了一个可自定义的物品扩展功能，用于为特定物品增加着色器渲染效果。你需要创建继承 `ItemExtension` 的子类，并在类开头使用 `@RegisterItemExtension` 进行注册扩展。物品扩展完全是客户端行为，无需任何网络同步。
+
+```java
+import net.eca.api.RegisterItemExtension;
+import net.eca.client.render.StarlightRenderTypes;
+import net.eca.util.item_extension.ItemExtension;
+import net.eca.util.item_extension.ItemExtensionManager;
+import net.minecraft.client.renderer.RenderType;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+
+@RegisterItemExtension
+public class DiamondSwordExtension extends ItemExtension {
+
+    static {
+        ItemExtensionManager.register(new DiamondSwordExtension());
+    }
+
+    public DiamondSwordExtension() {
+        super(Items.DIAMOND_SWORD);  // 目标物品
+    }
+
+    @Override
+    protected String getModId() {
+        return "your_mod_id";
+    }
+
+    @Override
+    public boolean enabled() {
+        return true;  // 全局总开关，返回 false 则完全禁用该扩展
+    }
+
+    @Override
+    public boolean shouldRender(ItemStack stack) {
+        return true;  // 单个物品堆的生效条件（例如检查 NBT、附魔、自定义名称）
+    }
+
+    @Override
+    public RenderType getRenderType() {
+        return StarlightRenderTypes.ITEM;  // 着色器叠加 RenderType
+    }
+
+    @Override
+    public float[] getColorKey() {
+        // 仅对匹配该 RGB（0.0~1.0）的像素叠加着色器。
+        // 返回 null 则对整个物品贴图应用着色器。
+        return new float[]{0.25f, 0.83f, 0.73f};
+    }
+
+    @Override
+    public float getColorKeyTolerance() {
+        return 0.3f;  // RGB 距离容差，0.0~1.0
+    }
+}
+```
+
+生效条件开关：
+- `enabled()` — 全局总开关。返回 `false` 可在不移除注册的情况下完全禁用该扩展。
+- `shouldRender(ItemStack stack)` — 单堆运行时检查。每帧对每个渲染中的物品堆调用一次，你可以根据 NBT、附魔、自定义名、耐久度等条件动态决定是否生效。
+
+说明：
+- 每个 `Item` 只能有一个扩展，重复注册会被拒绝并输出错误日志。
+- 着色器会作为额外的叠加 Pass 渲染在原始物品之上（GUI、第一人称、第三人称、地面掉落物、物品展示框均生效）。
+- Color-Key 蒙版自动使用本地 UV 边界，因此中心化的着色器数学（螺旋、星星、圆环）会正确对齐到物品几何中心，与物品贴图在方块图集上的位置无关。
+
 ### 着色器预设
 
-本 Mod 还提供了一些用于实体扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个预设均提供 3 个 RenderType：BOSS_BAR、BOSS_LAYER、SKYBOX。
+本 Mod 还提供了一些用于实体扩展系统和物品扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个预设均提供 4 个 RenderType：实体扩展用的 `BOSS_BAR`、`BOSS_LAYER`、`SKYBOX`，以及物品扩展用的 `ITEM`。
 
 可用预设：
 - `TheLastEndRenderTypes` — 终焉

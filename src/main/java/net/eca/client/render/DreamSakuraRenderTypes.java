@@ -68,6 +68,23 @@ public class DreamSakuraRenderTypes {
             .createCompositeState(false)
     );
 
+    public static final RenderType ITEM = RenderType.create("dream_sakura_item",
+        DefaultVertexFormat.NEW_ENTITY,
+        VertexFormat.Mode.QUADS,
+        256,
+        true,
+        false,
+        RenderType.CompositeState.builder()
+            .setShaderState(SHADER_STATE)
+            .setTextureState(RenderType.BLOCK_SHEET_MIPPED)
+            .setTransparencyState(RenderType.TRANSLUCENT_TRANSPARENCY)
+            .setDepthTestState(RenderType.LEQUAL_DEPTH_TEST)
+            .setCullState(RenderType.NO_CULL)
+            .setOverlayState(RenderType.OVERLAY)
+            .setWriteMaskState(RenderType.COLOR_WRITE)
+            .createCompositeState(true)
+    );
+
     public static RenderType createEntityEffect(ResourceLocation texture) {
         return RenderType.create("dream_sakura_entity_effect",
             DefaultVertexFormat.NEW_ENTITY,

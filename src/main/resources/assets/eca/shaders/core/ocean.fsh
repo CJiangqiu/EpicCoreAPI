@@ -6,6 +6,8 @@ uniform sampler2D Sampler2;
 uniform float GameTime;
 uniform float CameraYaw;
 uniform float CameraPitch;
+uniform vec4 ColorKeyColor;
+uniform float ColorKeyTolerance;
 
 in vec4 vertexColor;
 in vec2 texCoord0;
@@ -27,6 +29,13 @@ float wave(vec2 pos, float time) {
 }
 
 void main() {
+    if (ColorKeyColor.a > 0.5) {
+        vec4 eca_baseColor = texture(Sampler0, texCoord0);
+        if (eca_baseColor.a < 0.1 || distance(eca_baseColor.rgb, ColorKeyColor.rgb) > ColorKeyTolerance) {
+            discard;
+        }
+    }
+
     float time = GameTime * 600.0;
 
     vec3 deepBlue = vec3(0.2, 0.5, 0.7);

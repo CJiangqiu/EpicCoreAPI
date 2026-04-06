@@ -12,10 +12,12 @@ public class EntityExtensionBossEventTypePacket {
 
     private final UUID bossEventId;
     private final ResourceLocation typeId;
+    private final UUID entityUuid;
 
-    public EntityExtensionBossEventTypePacket(UUID bossEventId, ResourceLocation typeId) {
+    public EntityExtensionBossEventTypePacket(UUID bossEventId, ResourceLocation typeId, UUID entityUuid) {
         this.bossEventId = bossEventId;
         this.typeId = typeId;
+        this.entityUuid = entityUuid;
     }
 
     public static void encode(EntityExtensionBossEventTypePacket message, FriendlyByteBuf buffer) {
@@ -24,19 +26,25 @@ public class EntityExtensionBossEventTypePacket {
         if (message.typeId != null) {
             buffer.writeResourceLocation(message.typeId);
         }
+        buffer.writeBoolean(message.entityUuid != null);
+        if (message.entityUuid != null) {
+            buffer.writeUUID(message.entityUuid);
+        }
     }
 
     public static EntityExtensionBossEventTypePacket decode(FriendlyByteBuf buffer) {
         UUID bossEventId = buffer.readUUID();
         boolean hasType = buffer.readBoolean();
         ResourceLocation typeId = hasType ? buffer.readResourceLocation() : null;
-        return new EntityExtensionBossEventTypePacket(bossEventId, typeId);
+        boolean hasEntityUuid = buffer.readBoolean();
+        UUID entityUuid = hasEntityUuid ? buffer.readUUID() : null;
+        return new EntityExtensionBossEventTypePacket(bossEventId, typeId, entityUuid);
     }
 
     public static void handle(EntityExtensionBossEventTypePacket message, Supplier<NetworkEvent.Context> context) {
         NetworkEvent.Context ctx = context.get();
         ctx.enqueueWork(() -> {
-            EntityExtensionClientState.setBossEventType(message.bossEventId, message.typeId);
+            EntityExtensionClientState.setBossEventType(message.bossEventId, message.typeId, message.entityUuid);
         });
         ctx.setPacketHandled(true);
     }

@@ -5,6 +5,9 @@ uniform sampler2D Sampler2;
 uniform float GameTime;
 uniform float CameraYaw;
 uniform float CameraPitch;
+uniform sampler2D Sampler0;
+uniform vec4 ColorKeyColor;
+uniform float ColorKeyTolerance;
 
 in vec4 vertexColor;
 in vec2 texCoord0;
@@ -63,6 +66,13 @@ float sdBox(vec2 p, vec2 b) {
 }
 
 void main() {
+    if (ColorKeyColor.a > 0.5) {
+        vec4 eca_baseColor = texture(Sampler0, texCoord0);
+        if (eca_baseColor.a < 0.1 || distance(eca_baseColor.rgb, ColorKeyColor.rgb) > ColorKeyTolerance) {
+            discard;
+        }
+    }
+
     float time = GameTime * 400.0;
 
     vec3 dir = normalize(skyDir);

@@ -6,6 +6,8 @@ uniform sampler2D Sampler2;
 uniform float GameTime;
 uniform float CameraYaw;
 uniform float CameraPitch;
+uniform vec4 ColorKeyColor;
+uniform float ColorKeyTolerance;
 
 in vec4 vertexColor;
 in vec2 texCoord0;
@@ -22,6 +24,13 @@ float hash2(vec2 p) {
 }
 
 void main() {
+    if (ColorKeyColor.a > 0.5) {
+        vec4 eca_baseColor = texture(Sampler0, texCoord0);
+        if (eca_baseColor.a < 0.1 || distance(eca_baseColor.rgb, ColorKeyColor.rgb) > ColorKeyTolerance) {
+            discard;
+        }
+    }
+
     vec3 effects = vec3(0.0);
     float time = GameTime * 600.0;
 

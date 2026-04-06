@@ -12,12 +12,13 @@ import org.objectweb.asm.Type;
 /**
  * Inserts early-return guards into void and boolean methods.
  * When AllReturnToggle is enabled, matching classes' methods will return immediately.
+ * <p>
+ * Injected bytecode uses System.getProperties().get() to avoid referencing
+ * any net.eca class, preventing NoClassDefFoundError across classloader boundaries.
  */
 final class AllReturnTransformer {
 
-    private static final String TOGGLE_CLASS = "net/eca/coremod/AllReturnToggle";
-    private static final String TOGGLE_METHOD = "shouldReturn";
-    private static final String TOGGLE_DESC = "(Ljava/lang/String;)Z";
+    private static final String CHECKER_KEY = AllReturnToggle.CHECKER_KEY;
 
     static byte[] transform(String className, byte[] classfileBuffer) {
         try {
@@ -74,15 +75,43 @@ final class AllReturnTransformer {
             this.returnType = returnType;
         }
 
+        /**
+         * Injected bytecode equivalent:
+         * <pre>
+         * Object checker = System.getProperties().get("eca.allreturn.checker");
+         * if (checker != null && ((Predicate) checker).test(className)) {
+         *     return; // or return false;
+         * }
+         * </pre>
+         * Only references JDK classes — no net.eca dependency in target bytecode.
+         */
         @Override
         public void visitCode() {
             super.visitCode();
 
             Label continueLabel = new Label();
+            Label nullLabel = new Label();
+
+            // Object checker = System.getProperties().get(CHECKER_KEY)
+            mv.visitLdcInsn(CHECKER_KEY);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                    "()Ljava/util/Properties;", false);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+
+            // if (checker == null) goto continue
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitJumpInsn(Opcodes.IFNULL, nullLabel);
+
+            // ((Predicate) checker).test(className)
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate");
             mv.visitLdcInsn(className);
-            mv.visitMethodInsn(Opcodes.INVOKESTATIC, TOGGLE_CLASS, TOGGLE_METHOD, TOGGLE_DESC, false);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", "test",
+                    "(Ljava/lang/Object;)Z", true);
             mv.visitJumpInsn(Opcodes.IFEQ, continueLabel);
 
+            // return (or return false)
             if (returnType.getSort() == Type.BOOLEAN) {
                 mv.visitInsn(Opcodes.ICONST_0);
                 mv.visitInsn(Opcodes.IRETURN);
@@ -90,8 +119,12 @@ final class AllReturnTransformer {
                 mv.visitInsn(Opcodes.RETURN);
             }
 
+            // null path: pop the null and fall through
+            mv.visitLabel(nullLabel);
+            mv.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[]{"java/lang/Object"});
+            mv.visitInsn(Opcodes.POP);
+
             mv.visitLabel(continueLabel);
-            // guard 跳转目标处插入 F_SAME：栈为空，locals 和方法入口一致
             mv.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
         }
     }

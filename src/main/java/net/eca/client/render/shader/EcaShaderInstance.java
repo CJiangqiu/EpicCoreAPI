@@ -1,5 +1,6 @@
 package net.eca.client.render.shader;
 
+import com.mojang.blaze3d.shaders.Uniform;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.resources.ResourceLocation;
@@ -56,6 +57,77 @@ public class EcaShaderInstance extends ShaderInstance {
         IS_DEPTH_COLOR_LOCKED = isLockedHandle;
         GET_IRIS_API = getApiHandle;
         IS_SHADER_PACK_IN_USE = isInUseHandle;
+    }
+
+    // ==================== ColorKey 共享状态 ====================
+
+    private static float colorKeyR;
+    private static float colorKeyG;
+    private static float colorKeyB;
+    private static float colorKeyEnabled;
+    private static float colorKeyTolerance = 0.1f;
+
+    public static void setColorKey(float r, float g, float b, float tolerance) {
+        colorKeyR = r;
+        colorKeyG = g;
+        colorKeyB = b;
+        colorKeyEnabled = 1.0f;
+        colorKeyTolerance = tolerance;
+    }
+
+    public static void clearColorKey() {
+        colorKeyR = 0.0f;
+        colorKeyG = 0.0f;
+        colorKeyB = 0.0f;
+        colorKeyEnabled = 0.0f;
+        colorKeyTolerance = 0.1f;
+    }
+
+    public static void applyColorKeyUniforms(Uniform colorKeyColorUniform, Uniform colorKeyToleranceUniform) {
+        try {
+            if (colorKeyColorUniform != null) {
+                colorKeyColorUniform.set(colorKeyR, colorKeyG, colorKeyB, colorKeyEnabled);
+            }
+            if (colorKeyToleranceUniform != null) {
+                colorKeyToleranceUniform.set(colorKeyTolerance);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    // ==================== LocalUvBounds 共享状态 ====================
+    // 用于把图集 UV (texCoord0) 归一化回本地 [0,1] 空间，使 shader 的中心化数学
+    // 对物品/子贴图也能正确工作。默认 (0,0)+(1,1) 即恒等映射，完全向后兼容。
+
+    private static float localUvMinU = 0.0f;
+    private static float localUvMinV = 0.0f;
+    private static float localUvScaleU = 1.0f;
+    private static float localUvScaleV = 1.0f;
+
+    public static void setLocalUvBounds(float uMin, float vMin, float uScale, float vScale) {
+        localUvMinU = uMin;
+        localUvMinV = vMin;
+        localUvScaleU = uScale;
+        localUvScaleV = vScale;
+    }
+
+    public static void clearLocalUvBounds() {
+        localUvMinU = 0.0f;
+        localUvMinV = 0.0f;
+        localUvScaleU = 1.0f;
+        localUvScaleV = 1.0f;
+    }
+
+    public static void applyLocalUvBoundsUniforms(Uniform localUvMinUniform, Uniform localUvScaleUniform) {
+        try {
+            if (localUvMinUniform != null) {
+                localUvMinUniform.set(localUvMinU, localUvMinV);
+            }
+            if (localUvScaleUniform != null) {
+                localUvScaleUniform.set(localUvScaleU, localUvScaleV);
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     // 检测Oculus光影是否激活（光影包已启用且正在使用）
