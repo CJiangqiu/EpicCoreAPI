@@ -1,13 +1,11 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
-import net.eca.util.EcaLogger;
 import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
@@ -86,25 +84,6 @@ public class EntityMixin {
             ci.cancel();
         }
 
-    }
-
-    @Inject(method = "move", at = @At("RETURN"))
-    private void afterMove(MoverType type, Vec3 movement, CallbackInfo ci) {
-        Entity entity = (Entity) (Object) this;
-
-        // 如果位置被锁定且不在维度切换中，直接拉回锁定位置
-        if (EntityLocationManager.isLocationLocked(entity) && !EntityUtil.isChangingDimension(entity)) {
-            Vec3 lockedPos = EntityLocationManager.getLockedPosition(entity);
-            if (lockedPos != null) {
-                Vec3 currentPos = entity.position();
-                double distance = currentPos.distanceTo(lockedPos);
-
-                // 如果位置偏离，拉回去
-                if (distance > 0.001) {
-                    entity.setPos(lockedPos.x, lockedPos.y, lockedPos.z);
-                }
-            }
-        }
     }
 
     @Inject(method = "setPosRaw(DDD)V", at = @At("HEAD"), cancellable = true)

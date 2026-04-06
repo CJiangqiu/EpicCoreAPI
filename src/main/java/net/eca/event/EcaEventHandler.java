@@ -80,10 +80,19 @@ public class EcaEventHandler {
 
     @SubscribeEvent
     public void onLevelTick(TickEvent.LevelTickEvent event) {
-        if (event.phase == TickEvent.Phase.END &&
-            event.level instanceof ServerLevel serverLevel) {
-            EntityExtensionManager.tickDimension(serverLevel);
+        if (!(event.level instanceof ServerLevel serverLevel)) {
+            return;
+        }
+
+        //START 相位：抢在 ServerLevel.tick() 的 entityManager.tick() 之前校正位置
+        //防止字段脏写攻击导致实体被迁移到远方 section、进而触发 pending unload 失锁
+        if (event.phase == TickEvent.Phase.START) {
             EntityLocationManager.checkLockedEntities(serverLevel);
+            return;
+        }
+
+        if (event.phase == TickEvent.Phase.END) {
+            EntityExtensionManager.tickDimension(serverLevel);
             ForceLoadingManager.tickDimension(serverLevel);
         }
     }

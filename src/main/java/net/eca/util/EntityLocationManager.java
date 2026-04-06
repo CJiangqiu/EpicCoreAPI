@@ -1,5 +1,6 @@
 package net.eca.util;
 
+import net.eca.api.EcaAPI;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
@@ -12,12 +13,17 @@ import java.util.concurrent.ConcurrentHashMap;
 //实体位置锁定管理器
 public class EntityLocationManager {
 
+    //实体临时查不到多少 tick 后才真正删锁（防止 section 迁移/卸载瞬态误删）
+    private static final int MAX_MISS_TICKS = 1200;
+
     //位置锁定数据
     private static class LocationLockData {
         Vec3 lockedPosition;
+        int missCount;
 
         LocationLockData(Vec3 position) {
             this.lockedPosition = position;
+            this.missCount = 0;
         }
     }
 
@@ -66,8 +72,14 @@ public class EntityLocationManager {
             //从所有维度查找实体（防止维度切换时丢失锁定）
             Entity entity = findEntityInAllLevels(server, uuid);
             if (entity == null) {
-                return true;  //实体真正不存在才删除锁定
+                //实体暂时查不到（可能因为字段脏写导致 section 迁移瞬态卸载）
+                //累计 miss，超过阈值才真正删锁，防止被攻击者诱导失锁
+                data.missCount++;
+                return data.missCount > MAX_MISS_TICKS;
             }
+
+            //查到就重置 miss 计数
+            data.missCount = 0;
 
             //维度切换时更新锁定位置（维度切换放行后门）
             if (EntityUtil.isChangingDimension(entity)) {
@@ -84,9 +96,10 @@ public class EntityLocationManager {
             Vec3 lockedPos = data.lockedPosition;
             double distance = currentPos.distanceTo(lockedPos);
 
-            //检测位置偏离，强制拉回
+            //检测位置偏离，用 ECA 传送 API 强制拉回
+            //相比 setPos：同步 xOld/yOld/zOld、正确更新 bb、按 seenBy 发包（远距离也能同步客户端）
             if (distance > 0.001) {
-                entity.setPos(lockedPos.x, lockedPos.y, lockedPos.z);
+                EcaAPI.teleport(entity, lockedPos.x, lockedPos.y, lockedPos.z);
             }
 
             return false;
