@@ -11,6 +11,9 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
     public static ForgeConfigSpec.ConfigValue<Boolean> ENABLE_CUSTOM_LOADING_BACKGROUND;
     public static ForgeConfigSpec.IntValue FORCE_LOADING_MAX_RENDER_DISTANCE;
+    public static ForgeConfigSpec.IntValue BOSSSHOW_MAX_SUBTITLE_DURATION_TICKS;
+    public static ForgeConfigSpec.IntValue BOSSSHOW_RANGE_SCAN_INTERVAL_TICKS;
+    public static ForgeConfigSpec.IntValue BOSSSHOW_ENTITY_SELECTION_RANGE;
 
     static {
         // Attack Configuration | 攻击系统配置
@@ -43,6 +46,26 @@ public class EcaConfiguration {
             .comment("Maximum render/tracking distance (in blocks) for force-loaded entities. Prevents unlimited packet sending.")
             .defineInRange("Force Loading Max Render Distance", 128, 32, 1024);
 
+        // BossShow Configuration | 演出系统配置
+        BUILDER.push("BossShow");
+
+        BOSSSHOW_MAX_SUBTITLE_DURATION_TICKS = BUILDER
+            .comment("Maximum duration (in ticks, 20 per second) a subtitle line stays on screen before auto-clearing.",
+                     "Default 100 = 5 seconds.")
+            .defineInRange("Max Subtitle Duration Ticks", 100, 1, 72000);
+
+        BOSSSHOW_RANGE_SCAN_INTERVAL_TICKS = BUILDER
+            .comment("Interval (in ticks) between server-side scans for Range-trigger entities.",
+                     "Lower = snappier triggering, higher CPU cost. Default 10 = twice per second.")
+            .defineInRange("Range Scan Interval Ticks", 10, 1, 200);
+
+        BOSSSHOW_ENTITY_SELECTION_RANGE = BUILDER
+            .comment("Reach distance (in blocks) for the entity-bind raytrace during recording selection mode.",
+                     "Default 64.")
+            .defineInRange("Entity Selection Range", 64, 4, 256);
+
+        BUILDER.pop();
+
         SPEC = BUILDER.build();
     }
 
@@ -73,6 +96,18 @@ public class EcaConfiguration {
 
     public static int getForceLoadingMaxRenderDistanceSafely() {
         return safeGet(FORCE_LOADING_MAX_RENDER_DISTANCE, 128);
+    }
+
+    public static int getBossShowMaxSubtitleDurationTicksSafely() {
+        return safeGet(BOSSSHOW_MAX_SUBTITLE_DURATION_TICKS, 100);
+    }
+
+    public static int getBossShowRangeScanIntervalTicksSafely() {
+        return safeGet(BOSSSHOW_RANGE_SCAN_INTERVAL_TICKS, 10);
+    }
+
+    public static int getBossShowEntitySelectionRangeSafely() {
+        return safeGet(BOSSSHOW_ENTITY_SELECTION_RANGE, 64);
     }
 
 }

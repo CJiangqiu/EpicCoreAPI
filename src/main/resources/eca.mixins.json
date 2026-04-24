@@ -7,6 +7,8 @@
   "refmap": "mixins.eca.refmap.json",
   "client": [
     "BossHealthOverlayMixin",
+    "BossShowCameraMixin",
+    "CameraAccessor",
     "ClientEntityCallbacksMixin",
     "ClientLevelMixin",
     "DeathScreenMixin",

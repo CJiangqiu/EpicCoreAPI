@@ -1213,10 +1213,8 @@ public class EntityUtil {
             entity.deathTime = 0;
             //触发击杀成就
             triggerKillAdvancement(entity, damageSource);
-
-            if (entity.isAlive()){
-                //掉落物品
-                entity.dropAllDeathLoot(damageSource);
+            entity.dropAllDeathLoot(damageSource);
+            if (entity.isAlive() &&! entity.isRemoved()){
                 //保底清除实体
                 remove(entity, Entity.RemovalReason.KILLED);
             }

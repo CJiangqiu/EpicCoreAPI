@@ -78,6 +78,59 @@ public class NetworkHandler {
                 .consumerNetworkThread(EntityContainerCheckResponsePacket::handle)
                 .add();
 
+        CHANNEL.messageBuilder(BossShowStartPacket.class, id())
+                .encoder(BossShowStartPacket::encode)
+                .decoder(BossShowStartPacket::decode)
+                .consumerMainThread(BossShowStartPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(BossShowStopPacket.class, id())
+                .encoder(BossShowStopPacket::encode)
+                .decoder(BossShowStopPacket::decode)
+                .consumerMainThread(BossShowStopPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(BossShowSkipPacket.class, id())
+                .encoder(BossShowSkipPacket::encode)
+                .decoder(BossShowSkipPacket::decode)
+                .consumerMainThread(BossShowSkipPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(BossShowOpenEditorHomePacket.class, id())
+                .encoder(BossShowOpenEditorHomePacket::encode)
+                .decoder(BossShowOpenEditorHomePacket::decode)
+                .consumerMainThread(BossShowOpenEditorHomePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(BossShowExitEditorPacket.class, id())
+                .encoder(BossShowExitEditorPacket::encode)
+                .decoder(BossShowExitEditorPacket::decode)
+                .consumerMainThread(BossShowExitEditorPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(BossShowSaveEditorPacket.class, id())
+                .encoder(BossShowSaveEditorPacket::encode)
+                .decoder(BossShowSaveEditorPacket::decode)
+                .consumerMainThread(BossShowSaveEditorPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(BossShowDeleteEditorPacket.class, id())
+                .encoder(BossShowDeleteEditorPacket::encode)
+                .decoder(BossShowDeleteEditorPacket::decode)
+                .consumerMainThread(BossShowDeleteEditorPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(BossShowPlaySelectionPacket.class, id())
+                .encoder(BossShowPlaySelectionPacket::encode)
+                .decoder(BossShowPlaySelectionPacket::decode)
+                .consumerMainThread(BossShowPlaySelectionPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(BossShowSubtitlePacket.class, id())
+                .encoder(BossShowSubtitlePacket::encode)
+                .decoder(BossShowSubtitlePacket::decode)
+                .consumerMainThread(BossShowSubtitlePacket::handle)
+                .add();
     }
 
     /**

@@ -32,6 +32,7 @@ public final class EcaMod {
     }
 
     public EcaMod() {
+
         // 从 CoreMod ClassLoader 桥接 Instrumentation 到 GAME layer
         bridgeInstrumentationFromCoremod();
         // 注册 ClassFileTransformer

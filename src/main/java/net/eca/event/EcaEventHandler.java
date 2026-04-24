@@ -2,6 +2,7 @@ package net.eca.event;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityLocationManager;
+import net.eca.util.bossshow.BossShowPlaybackTracker;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
@@ -55,6 +56,13 @@ public class EcaEventHandler {
     }
 
     @SubscribeEvent
+    public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            BossShowPlaybackTracker.onPlayerLogout(player);
+        }
+    }
+
+    @SubscribeEvent
     public void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             EntityExtensionManager.onPlayerChangedDimension(player, event.getFrom());
@@ -95,5 +103,12 @@ public class EcaEventHandler {
             EntityExtensionManager.tickDimension(serverLevel);
             ForceLoadingManager.tickDimension(serverLevel);
         }
+    }
+
+    //服务端全局 tick：推进 BossShow 会话 + 扫描 range 触发器（每 tick 一次，与维度数量无关）
+    @SubscribeEvent
+    public void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END) return;
+        BossShowPlaybackTracker.onServerTick(event.getServer());
     }
 }

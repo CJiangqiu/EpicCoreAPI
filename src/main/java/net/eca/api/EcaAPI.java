@@ -17,9 +17,15 @@ import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.eca.network.EntityExtensionOverridePacket.FogData;
 import net.eca.network.EntityExtensionOverridePacket.SkyboxData;
 import net.eca.network.EntityExtensionOverridePacket.MusicData;
+import net.eca.util.bossshow.BossShowDefinition;
+import net.eca.util.bossshow.BossShowManager;
+import net.eca.util.bossshow.BossShowPlaybackTracker;
+import net.eca.util.bossshow.Trigger;
 import net.eca.util.spawn_ban.SpawnBanManager;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
@@ -59,6 +65,10 @@ public final class EcaAPI {
         if (entity == null) {
             throw new IllegalArgumentException("Entity cannot be null");
         }
+        if (value <= 0) {
+            throw new IllegalArgumentException("Lock health value must be greater than 0");
+        }
+        setHealth(entity, value);
         HealthLockManager.setLock(entity, value);
     }
 
@@ -94,6 +104,7 @@ public final class EcaAPI {
         if (entity == null) {
             throw new IllegalArgumentException("Entity cannot be null");
         }
+        setHealth(entity, value);
         HealthLockManager.setHealBan(entity, value);
     }
 
@@ -362,6 +373,92 @@ public final class EcaAPI {
      */
     public static void cleanupBossBar(Entity entity) {
         EntityUtil.cleanupBossBar(entity);
+    }
+
+
+    // 播放 BossShow 演出
+    /**
+     * Start playing a BossShow cutscene for a specific player, targeting a specific entity.
+     * The cutscene must already be loaded (either via {@code @RegisterBossShow} + JSON, or
+     * via a JSON file under {@code config/eca/bossshow/<ns>/<name>.json}).
+     * <p>
+     * This bypasses history checks — the cutscene plays even if the viewer has seen it before.
+     * For "natural" trigger semantics (honoring history), use {@link #playBossShowIfNew}.
+     *
+     * @param viewer     the player who will watch the cutscene
+     * @param target     the target entity the cutscene is anchored to
+     * @param cutsceneId the ResourceLocation id of the cutscene
+     * @return true if playback started, false if no such definition or viewer already has a session
+     */
+    public static boolean playBossShow(ServerPlayer viewer,
+                                       LivingEntity target,
+                                       ResourceLocation cutsceneId) {
+        BossShowDefinition def = BossShowManager.get(cutsceneId);
+        if (def == null) return false;
+        return BossShowPlaybackTracker.start(viewer, target, def, true);
+    }
+
+    // 仅当未看过时播放 BossShow 演出
+    /**
+     * Start playing a BossShow cutscene only if the viewer has not seen it before (honors history).
+     * @param viewer     the player
+     * @param target     the target entity
+     * @param cutsceneId the cutscene id
+     * @return true if playback started, false if already seen or not found
+     */
+    public static boolean playBossShowIfNew(ServerPlayer viewer,
+                                            LivingEntity target,
+                                            ResourceLocation cutsceneId) {
+        BossShowDefinition def = BossShowManager.get(cutsceneId);
+        if (def == null) return false;
+        return BossShowPlaybackTracker.start(viewer, target, def, false);
+    }
+
+    // 停止 BossShow 演出
+    /**
+     * Stop the currently playing BossShow cutscene for the given viewer, if any.
+     * @param viewer the player
+     */
+    public static void stopBossShow(ServerPlayer viewer) {
+        BossShowPlaybackTracker.stop(viewer, false);
+    }
+
+    // 检查玩家是否正在观看 BossShow 演出
+    /**
+     * @param viewer the player
+     * @return true if the player currently has an active BossShow session
+     */
+    public static boolean isBossShowPlaying(ServerPlayer viewer) {
+        return BossShowPlaybackTracker.isPlaying(viewer);
+    }
+
+    // 推送自定义事件触发 BossShow 演出
+    /**
+     * Push a custom event name to the BossShow system. Every cutscene whose trigger is
+     * {@link Trigger.Custom} with a matching {@code eventName} (case-sensitive, non-empty)
+     * is started for the given viewer/target pair, honoring per-definition history.
+     * <p>
+     * Cutscenes are skipped silently if the viewer already has an active session, the
+     * cutscene is empty, or history says the viewer has already seen it (per
+     * {@code allowRepeat} on the definition).
+     *
+     * @param eventName the event name to match against {@code Trigger.Custom.eventName}
+     * @param viewer    the player who will watch any matched cutscenes
+     * @param target    the entity the cutscene is anchored to
+     * @return the number of cutscenes actually started
+     */
+    public static int launchBossShowEvent(String eventName, ServerPlayer viewer, LivingEntity target) {
+        if (eventName == null || eventName.isEmpty()) return 0;
+        if (viewer == null || target == null) return 0;
+        int started = 0;
+        for (BossShowDefinition def : BossShowManager.getAllDefinitions().values()) {
+            if (!(def.trigger() instanceof Trigger.Custom custom)) continue;
+            if (!eventName.equals(custom.eventName())) continue;
+            if (BossShowPlaybackTracker.start(viewer, target, def, false)) {
+                started++;
+            }
+        }
+        return started;
     }
 
 

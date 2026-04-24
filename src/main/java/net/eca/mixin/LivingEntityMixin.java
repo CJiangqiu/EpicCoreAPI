@@ -28,6 +28,9 @@ LivingEntityMixin {
     private static final String NBT_HEAL_BAN_VALUE = "ecaHealBanValue";
     private static final String NBT_MAX_HEALTH_LOCK_VALUE = "ecaMaxHealthLockValue";
 
+    // 防止本钩子与其他 mod 的 setHealth 注入互相递归导致 StackOverflowError
+    private static final ThreadLocal<Boolean> ECA_IN_SET_HEALTH = ThreadLocal.withInitial(() -> false);
+
 
     //静态初始化注入EntityDataAccessor
     @Inject(method = "<clinit>", at = @At("TAIL"))
@@ -43,7 +46,7 @@ LivingEntityMixin {
     private void eca$onDefineSynchedData(CallbackInfo ci) {
         LivingEntity entity = (LivingEntity) (Object) this;
         entity.getEntityData().define(EntityUtil.HEALTH_LOCK_VALUE, "-1024.0");
-        entity.getEntityData().define(EntityUtil.HEAL_BAN_VALUE, "-1024.0");
+        entity.getEntityData().define(EntityUtil.HEAL_BAN_VALUE, "");
         entity.getEntityData().define(EntityUtil.INVULNERABLE, false);
         entity.getEntityData().define(EntityUtil.MAX_HEALTH_LOCK_VALUE, "-1024.0");
     }
@@ -87,7 +90,10 @@ LivingEntityMixin {
             entity.getEntityData().set(EntityUtil.HEALTH_LOCK_VALUE, tag.getString(NBT_HEALTH_LOCK_VALUE));
         }
         if (tag.contains(NBT_HEAL_BAN_VALUE, 8)) {
-            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, tag.getString(NBT_HEAL_BAN_VALUE));
+            // TODO(1.1.6): 删除此迁移；将 1.1.5 前老哨兵 "-1024.0" 归一化为空串，避免被误判为 healBan=0
+            String healBan = tag.getString(NBT_HEAL_BAN_VALUE);
+            if ("-1024.0".equals(healBan)) healBan = "";
+            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, healBan);
         }
         if (tag.contains(NBT_MAX_HEALTH_LOCK_VALUE, 8)) {
             entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, tag.getString(NBT_MAX_HEALTH_LOCK_VALUE));
@@ -178,26 +184,32 @@ LivingEntityMixin {
 
     @Inject(method = "setHealth", at = @At("HEAD"), cancellable = true)
     private void onSetHealth(float health, CallbackInfo ci) {
-        LivingEntity self = (LivingEntity) (Object) this;
+        if (ECA_IN_SET_HEALTH.get()) return;
+        ECA_IN_SET_HEALTH.set(true);
+        try {
+            LivingEntity self = (LivingEntity) (Object) this;
 
-        Float lockedValue = HealthLockManager.getLock(self);
-        Float healBanValue = HealthLockManager.getHealBan(self);
+            Float lockedValue = HealthLockManager.getLock(self);
+            Float healBanValue = HealthLockManager.getHealBan(self);
 
-        if (lockedValue == null && healBanValue == null) {
-            return;
-        }
-
-        float currentHealth = EntityUtil.getHealth(self);
-
-        if (lockedValue != null) {
-            if (Math.abs(health - lockedValue) < 0.001f) {
+            if (lockedValue == null && healBanValue == null) {
                 return;
             }
-            ci.cancel();
-        } else if (healBanValue != null) {
-            if (health > currentHealth) {
+
+            float currentHealth = EntityUtil.getHealth(self);
+
+            if (lockedValue != null) {
+                if (Math.abs(health - lockedValue) < 0.001f) {
+                    return;
+                }
                 ci.cancel();
+            } else if (healBanValue != null) {
+                if (health > currentHealth) {
+                    ci.cancel();
+                }
             }
+        } finally {
+            ECA_IN_SET_HEALTH.set(false);
         }
     }
 

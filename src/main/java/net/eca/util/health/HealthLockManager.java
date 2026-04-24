@@ -70,11 +70,10 @@ public class HealthLockManager {
     //移除禁疗
     public static void removeHealBan(LivingEntity entity) {
         if (entity == null) return;
-        String unlockedValue = encryptHealth(0.0f);
         if (EntityUtil.HEAL_BAN_VALUE != null) {
-            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, unlockedValue);
+            entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, "");
         } else {
-            entity.getPersistentData().putString(NBT_HEAL_BAN_VALUE, unlockedValue);
+            entity.getPersistentData().putString(NBT_HEAL_BAN_VALUE, "");
         }
     }
 
@@ -91,8 +90,7 @@ public class HealthLockManager {
         if (encrypted == null || encrypted.isEmpty()) {
             return null;
         }
-        float decrypted = decryptHealth(encrypted);
-        return decrypted > 0.0f ? decrypted : null;
+        return decryptHealth(encrypted);
     }
 
     //设置最大生命值锁定
