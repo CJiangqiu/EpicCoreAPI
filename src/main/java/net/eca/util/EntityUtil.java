@@ -7,7 +7,6 @@ import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.HealthLockManager;
-import net.eca.util.health.HealthAnalyzer.HealthFieldCache;
 import net.eca.util.health.HealthAnalyzerManager;
 import net.minecraft.network.syncher.EntityDataSerializer;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -120,12 +119,6 @@ public class EntityUtil {
             "age", "lifetime", "deathtime", "hurttime", "invulnerabletime", "hurt", "max"
         ));
     }
-
-    //VarHandle缓存
-    private static final Map<String, VarHandle> VAR_HANDLE_CACHE = new ConcurrentHashMap<>();
-
-    //EntityDataAccessor缓存
-    private static final Map<Class<?>, List<EntityDataAccessor<?>>> HEALTH_ACCESSOR_CACHE = new ConcurrentHashMap<>();
 
     //检查实体是否正在切换维度
     /**
@@ -678,48 +671,31 @@ public class EntityUtil {
         }
     }
 
-    //设置实体生命值（完整阶段流程）
+    //设置实体生命值（Phase 1 + 2 + 3 顺序全部跑一遍，最后 verify）
     public static boolean setHealth(LivingEntity entity, float expectedHealth) {
         if (entity == null) return false;
         try {
             float beforeHealth = getHealth(entity);
 
-            //阶段1：修改原版血量
+            //Phase 1：写 vanilla DATA_HEALTH_ID
             setBasicHealth(entity, expectedHealth);
 
-            //玩家只执行阶段1
+            //玩家只执行 Phase 1
             if (entity instanceof Player) {
                 syncHealthToClients(entity, expectedHealth, beforeHealth);
                 return true;
             }
 
-            //阶段2：修改符合条件的EntityDataAccessor和实例字段
+            //Phase 2：尝试调用实体自带的 setHealth/setHp/modifyHealth 等方法
             setHealthViaPhase2(entity, expectedHealth);
 
-            //验证阶段2是否成功
-            boolean verify1 = verifyHealthChange(entity, expectedHealth);
-            if (verify1) {
-                syncHealthToClients(entity, expectedHealth, beforeHealth);
-                return true;
-            }
-
-            //阶段3：字节码反向追踪
+            //Phase 3：ASM dataflow 分析 + 写入真实血量存储
             setHealthViaPhase3(entity, expectedHealth);
 
-            boolean verify2 = verifyHealthChange(entity, expectedHealth);
-            if (verify2) {
-                syncHealthToClients(entity, expectedHealth, beforeHealth);
-                return true;
-            }
-
-            //阶段4：激进模式（1-3阶段均失败后才执行）
-            if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
-                scanAndModifyAllInstanceFields(entity, expectedHealth);
-            }
-
-            boolean verify3 = verifyHealthChange(entity, expectedHealth);
+            //只在最后 verify 一次
+            boolean ok = verifyHealthChange(entity, expectedHealth);
             syncHealthToClients(entity, expectedHealth, beforeHealth);
-            return verify3;
+            return ok;
         } catch (Exception e) {
             return false;
         }
@@ -773,414 +749,53 @@ public class EntityUtil {
         } catch (Exception ignored) {}
     }
 
-    //阶段2：修改符合条件的EntityDataAccessor和字段
+    //Phase 2：按关键词搜索实体自带的 setHealth/setHp/modifyHealth 等方法并调用
+    //匹配条件：方法名以 set/modify/update 开头 + 包含 health/hp + 不含 max + 单个数字参数
     private static void setHealthViaPhase2(LivingEntity entity, float expectedHealth) {
+        if (IS_IN_ENTITY_HEALTH_SETTER.get()) return;
         try {
-            float currentHealth = getHealth(entity);
-
-            //尝试调用实体自己的 setHealth 类方法（优先级最高）
-            tryCallEntityHealthSetter(entity, expectedHealth);
-
-            //修改值接近血量或字段名匹配白名单的 EntityDataAccessor
-            List<EntityDataAccessor<?>> healthAccessors = findHealthRelatedAccessors(entity);
-            for (EntityDataAccessor<?> acc : healthAccessors) {
-                setAccessorValue(entity, acc, expectedHealth);
-            }
-
-            //扫描并修改符合条件的实例字段
-            scanAndModifyIntelligentFields(entity, currentHealth, expectedHealth);
-        } catch (Exception e) {
-            // Silently fail
-        }
-    }
-
-    //尝试调用实体自身的血量设置方法
-    private static boolean tryCallEntityHealthSetter(LivingEntity entity, float expectedHealth) {
-        if (IS_IN_ENTITY_HEALTH_SETTER.get()) {
-            return false;
-        }
-
-        Class<?> entityClass = entity.getClass();
-        // 常见的血量设置方法名
-        String[] methodNames = {"setHEALTS", "setHealth", "set_health", "setHP", "setHp"};
-
-        for (Class<?> clazz = entityClass; clazz != null && clazz != LivingEntity.class; clazz = clazz.getSuperclass()) {
-            for (String methodName : methodNames) {
-                try {
-                    Method method = clazz.getDeclaredMethod(methodName, float.class);
-                    method.setAccessible(true);
+            for (Class<?> clazz = entity.getClass(); clazz != null && clazz != LivingEntity.class; clazz = clazz.getSuperclass()) {
+                for (Method m : clazz.getDeclaredMethods()) {
+                    if (!isHealthSetterMethod(m)) continue;
+                    m.setAccessible(true);
                     IS_IN_ENTITY_HEALTH_SETTER.set(true);
                     try {
-                        method.invoke(entity, expectedHealth);
+                        Class<?> pt = m.getParameterTypes()[0];
+                        if (pt == float.class) m.invoke(entity, expectedHealth);
+                        else if (pt == double.class) m.invoke(entity, (double) expectedHealth);
+                        else if (pt == int.class) m.invoke(entity, (int) expectedHealth);
+                        else if (pt == long.class) m.invoke(entity, (long) expectedHealth);
+                        return;  //第一个匹配就停
                     } finally {
                         IS_IN_ENTITY_HEALTH_SETTER.set(false);
                     }
-                    return true;
-                } catch (NoSuchMethodException ignored) {
-                    // 方法不存在，尝试下一个
-                } catch (Exception ignored) {
-                    // Silently fail
                 }
-            }
-        }
-        return false;
-    }
-
-    //扫描并修改符合智能条件的字段
-    private static void scanAndModifyIntelligentFields(LivingEntity entity, float currentHealth, float expectedHealth) {
-        Set<Object> scannedObjects = new HashSet<>();
-        scanAndModifyIntelligentFieldsRecursive(entity, entity.getClass(), currentHealth, expectedHealth, scannedObjects, 0);
-    }
-
-    //递归扫描并修改符合条件的字段
-    private static void scanAndModifyIntelligentFieldsRecursive(Object targetObject, Class<?> targetClass,
-                                                                float currentHealth, float expectedHealth,
-                                                                Set<Object> scannedObjects, int nestingLevel) {
-        if (nestingLevel > 3) return;
-        if (nestingLevel > 0 && scannedObjects.contains(targetObject)) return;
-        if (nestingLevel > 0) scannedObjects.add(targetObject);
-
-        try {
-            Class<?> currentClass = targetClass;
-            int inheritanceLevel = 0;
-
-            while (currentClass != null && inheritanceLevel < 5) {
-                for (Field field : currentClass.getDeclaredFields()) {
-                    try {
-                        if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers())) continue;
-                        if (matchesHealthBlacklist(field.getName())) continue;
-
-                        field.setAccessible(true);
-                        Class<?> fieldType = field.getType();
-
-                        if (isNumericType(fieldType)) {
-                            Object value = field.get(targetObject);
-                            if (value instanceof Number) {
-                                float fieldValue = ((Number) value).floatValue();
-                                if (Math.abs(fieldValue - currentHealth) <= 10.0f || matchesHealthWhitelist(field.getName())) {
-                                    setFieldViaVarHandle(targetObject, field, expectedHealth);
-                                }
-                            }
-                        } else if (!fieldType.isPrimitive() && !fieldType.getName().startsWith("java.") &&
-                                   !fieldType.getName().startsWith("net.minecraft.")) {
-                            Object nestedObject = field.get(targetObject);
-                            if (nestedObject != null && !scannedObjects.contains(nestedObject)) {
-                                scanAndModifyIntelligentFieldsRecursive(nestedObject, nestedObject.getClass(),
-                                    currentHealth, expectedHealth, scannedObjects, nestingLevel + 1);
-                            }
-                        }
-                    } catch (Exception ignored) {}
-                }
-
-                currentClass = currentClass.getSuperclass();
-                inheritanceLevel++;
-                if (currentClass == LivingEntity.class) break;
             }
         } catch (Exception ignored) {}
     }
 
-    //使用VarHandle设置字段值
-    private static boolean setFieldViaVarHandle(Object targetObject, Field field, float value) {
-        try {
-            Class<?> fieldType = field.getType();
-            Class<?> declaringClass = field.getDeclaringClass();
+    private static final Set<String> HEALTH_SETTER_VERBS = Set.of("set", "modify", "update");
+    private static final Set<String> HEALTH_SETTER_NOUNS = Set.of("health", "hp");
 
-            if (fieldType == float.class || fieldType == Float.class) {
-                return setFloatFieldViaVarHandle(targetObject, declaringClass, field, value);
-            } else if (fieldType == double.class || fieldType == Double.class) {
-                return setDoubleFieldViaVarHandle(targetObject, declaringClass, field, (double) value);
-            }
-            return false;
-        } catch (Exception e) {
-            return false;
-        }
+    //判断方法是否符合"动词 + 名词 + 非 max + 单数字参"
+    private static boolean isHealthSetterMethod(Method m) {
+        if (m.getParameterCount() != 1) return false;
+        Class<?> pt = m.getParameterTypes()[0];
+        if (pt != float.class && pt != double.class && pt != int.class && pt != long.class) return false;
+        String name = m.getName().toLowerCase();
+        boolean hasVerb = false;
+        for (String v : HEALTH_SETTER_VERBS) if (name.startsWith(v)) { hasVerb = true; break; }
+        if (!hasVerb) return false;
+        boolean hasNoun = false;
+        for (String n : HEALTH_SETTER_NOUNS) if (name.contains(n)) { hasNoun = true; break; }
+        return hasNoun && !name.contains("max");
     }
 
-    //阶段2.5：扫描并修改所有实例字段 + 全部数字类型 EntityDataAccessor
-    private static int scanAndModifyAllInstanceFields(LivingEntity entity, float expectedHealth) {
-        Set<Object> scannedObjects = new HashSet<>();
-        int totalModified = 0;
-        float currentHealth = getHealth(entity);
-
-        //激进扫描全部数字类型的 EntityDataAccessor（排除黑名单和原版血量ID）
-        totalModified += scanAndModifyAllNumericAccessors(entity, expectedHealth);
-
-        Class<?> currentClass = entity.getClass();
-        int inheritanceLevel = 0;
-
-        while (currentClass != null && inheritanceLevel < 5) {
-            totalModified += scanAndModifyFieldsInClass(entity, currentClass, currentHealth, expectedHealth, scannedObjects, 0);
-            currentClass = currentClass.getSuperclass();
-            inheritanceLevel++;
-            if (currentClass == LivingEntity.class) break;
-        }
-
-        return totalModified;
-    }
-
-    //激进模式：扫描全部数字类型的 EntityDataAccessor，排除黑名单后全改
-    private static int scanAndModifyAllNumericAccessors(LivingEntity entity, float expectedHealth) {
-        int modifiedCount = 0;
-        int vanillaHealthId = LivingEntity.DATA_HEALTH_ID.getId();
-
-        for (Class<?> clazz = entity.getClass(); clazz != null && clazz != Entity.class; clazz = clazz.getSuperclass()) {
-            for (Field field : clazz.getDeclaredFields()) {
-                try {
-                    if (!Modifier.isStatic(field.getModifiers())) continue;
-                    if (!EntityDataAccessor.class.isAssignableFrom(field.getType())) continue;
-                    if (matchesHealthBlacklist(field.getName())) continue;
-
-                    field.setAccessible(true);
-                    EntityDataAccessor<?> accessor = (EntityDataAccessor<?>) field.get(null);
-                    if (accessor == null || accessor.getId() == vanillaHealthId) continue;
-
-                    Object value = entity.getEntityData().get(accessor);
-                    if (value instanceof Number) {
-                        setAccessorValue(entity, accessor, expectedHealth);
-                        modifiedCount++;
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-
-        return modifiedCount;
-    }
-
-    //扫描并修改指定类的所有数值字段
-    private static int scanAndModifyFieldsInClass(Object targetObject, Class<?> targetClass,
-                                                  float currentHealth, float expectedHealth,
-                                                  Set<Object> scannedObjects, int nestingLevel) {
-        if (nestingLevel > 3) return 0;
-        if (nestingLevel > 0 && scannedObjects.contains(targetObject)) return 0;
-        if (nestingLevel > 0) scannedObjects.add(targetObject);
-
-        int modifiedCount = 0;
-
-        try {
-            for (Field field : targetClass.getDeclaredFields()) {
-                try {
-                    if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers())) continue;
-
-                    Class<?> fieldType = field.getType();
-                    field.setAccessible(true);
-
-                    if (isNumericType(fieldType)) {
-                        if (shouldModifyNumericField(targetObject, field, currentHealth)) {
-                            if (setFieldViaVarHandle(targetObject, field, expectedHealth)) {
-                                modifiedCount++;
-                            }
-                        }
-                    } else if (!fieldType.isPrimitive() && !fieldType.getName().startsWith("java.") &&
-                               !fieldType.getName().startsWith("net.minecraft.")) {
-                        Object nestedObject = field.get(targetObject);
-                        if (nestedObject != null && !scannedObjects.contains(nestedObject)) {
-                            modifiedCount += scanAndModifyFieldsInClass(nestedObject, nestedObject.getClass(),
-                                currentHealth, expectedHealth, scannedObjects, nestingLevel + 1);
-                        }
-                    }
-                } catch (Exception ignored) {}
-            }
-        } catch (Exception ignored) {}
-
-        return modifiedCount;
-    }
-
-    //判断是否应该修改数值字段
-    private static boolean shouldModifyNumericField(Object targetObject, Field field, float currentHealth) {
-        try {
-            if (matchesHealthBlacklist(field.getName())) return false;
-            Object currentValue = field.get(targetObject);
-            return currentValue instanceof Number;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    //VarHandle设置float字段
-    private static boolean setFloatFieldViaVarHandle(Object targetObject, Class<?> targetClass, Field field, float value) {
-        try {
-            String cacheKey = targetClass.getName() + "#" + field.getName() + "#float";
-            VarHandle handle = VAR_HANDLE_CACHE.computeIfAbsent(cacheKey, k -> {
-                try {
-                    return MethodHandles.privateLookupIn(targetClass, MethodHandles.lookup())
-                        .findVarHandle(targetClass, field.getName(), float.class);
-                } catch (Exception e) {
-                    return null;
-                }
-            });
-            if (handle != null) {
-                handle.set(targetObject, value);
-                return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    //VarHandle设置double字段
-    private static boolean setDoubleFieldViaVarHandle(Object targetObject, Class<?> targetClass, Field field, double value) {
-        try {
-            String cacheKey = targetClass.getName() + "#" + field.getName() + "#double";
-            VarHandle handle = VAR_HANDLE_CACHE.computeIfAbsent(cacheKey, k -> {
-                try {
-                    return MethodHandles.privateLookupIn(targetClass, MethodHandles.lookup())
-                        .findVarHandle(targetClass, field.getName(), double.class);
-                } catch (Exception e) {
-                    return null;
-                }
-            });
-            if (handle != null) {
-                handle.set(targetObject, value);
-                return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    //VarHandle设置int字段
-    //判断是否为数字类型
-    private static boolean isNumericType(Class<?> type) {
-        return type == float.class || type == Float.class ||
-               type == double.class || type == Double.class;
-    }
-
-    //查找血量相关的数据访问器（值接近血量 或 字段名匹配白名单）
-    private static List<EntityDataAccessor<?>> findHealthRelatedAccessors(LivingEntity entity) {
-        Class<?> entityClass = entity.getClass();
-        List<EntityDataAccessor<?>> cached = HEALTH_ACCESSOR_CACHE.get(entityClass);
-        if (cached != null) {
-            return cached;
-        }
-
-        List<EntityDataAccessor<?>> result = new ArrayList<>();
-        float entityHealth = getHealth(entity);
-        int vanillaHealthId = LivingEntity.DATA_HEALTH_ID.getId();
-
-        for (Class<?> clazz = entityClass; clazz != null && clazz != Entity.class; clazz = clazz.getSuperclass()) {
-            for (Field field : clazz.getDeclaredFields()) {
-                try {
-                    if (!Modifier.isStatic(field.getModifiers())) continue;
-                    if (!EntityDataAccessor.class.isAssignableFrom(field.getType())) continue;
-                    if (matchesHealthBlacklist(field.getName())) continue;
-
-                    field.setAccessible(true);
-                    EntityDataAccessor<?> accessor = (EntityDataAccessor<?>) field.get(null);
-                    if (accessor == null || accessor.getId() == vanillaHealthId) continue;
-
-                    Object value = entity.getEntityData().get(accessor);
-                    if (!(value instanceof Number)) continue;
-
-                    float numericValue = ((Number) value).floatValue();
-                    boolean nearbyValue = Math.abs(numericValue - entityHealth) <= 10.0f;
-                    boolean keywordMatch = matchesHealthWhitelist(field.getName());
-
-                    if (nearbyValue || keywordMatch) {
-                        result.add(accessor);
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-
-        HEALTH_ACCESSOR_CACHE.put(entityClass, result);
-        return result;
-    }
-
-    //设置EntityDataAccessor的值
-    private static void setAccessorValue(LivingEntity entity, EntityDataAccessor<?> accessor, float expectedHealth) {
-        try {
-            EntityDataSerializer<?> serializer = accessor.getSerializer();
-            SynchedEntityData entityData = entity.getEntityData();
-            boolean success = false;
-
-            if (serializer == EntityDataSerializers.FLOAT) {
-                entityData.set((EntityDataAccessor<Float>) accessor, expectedHealth);
-                success = true;
-            }
-
-            if (success) {
-                SynchedEntityData.DataItem dataItem = getDataItem(entityData, accessor.getId());
-                if (dataItem != null) {
-                    dataItem.dirty = true;
-                }
-                entityData.isDirty = true;
-                entity.onSyncedDataUpdated(accessor);
-            }
-        } catch (Exception ignored) {
-            // Silently fail
-        }
-    }
-
-    //阶段3：字节码反向追踪修改血量
+    //Phase 3：ASM dataflow 分析器追踪真实血量存储并写入
     private static void setHealthViaPhase3(LivingEntity entity, float expectedHealth) {
         try {
-            Class<?> entityClass = entity.getClass();
-            HealthFieldCache cache = HealthAnalyzerManager.getCache(entityClass);
-
-            if (cache == null) {
-                HealthAnalyzerManager.triggerAnalysis(entity);
-                cache = HealthAnalyzerManager.getCache(entityClass);
-                if (cache == null) return;
-            }
-
-            //应用逆向公式
-            float valueToWrite = expectedHealth;
-            if (cache.reverseTransform != null) {
-                valueToWrite = cache.reverseTransform.apply(Math.max(0.0f, expectedHealth));
-            }
-
-            //容器检测
-            if (cache.containerDetected) {
-                scanAndModifyHealthContainer(entity, valueToWrite, cache);
-                return;
-            }
-
-            //字段访问路径
-            if (cache.writePath != null) {
-                cache.writePath.apply(entity, valueToWrite);
-            }
+            HealthAnalyzerManager.writeAll(entity, expectedHealth);
         } catch (Exception ignored) {}
-    }
-
-    //主动扫描容器修改血量（通用，支持任何 Map 实现）
-    private static void scanAndModifyHealthContainer(LivingEntity entity, float expectedHealth, HealthFieldCache cache) {
-        try {
-            Class<?> containerClass = Class.forName(cache.containerClass);
-            Method getterMethod = containerClass.getDeclaredMethod(cache.containerGetterMethod);
-            getterMethod.setAccessible(true);
-
-            Object mapInstance = getterMethod.invoke(null);
-            if (!(mapInstance instanceof Map)) return;
-
-            Map<?, ?> healthMap = (Map<?, ?>) mapInstance;
-
-            //尝试多种 key 匹配
-            Object[] possibleKeys = {entity, entity.getUUID(), entity.getId()};
-            for (Object key : possibleKeys) {
-                if (key != null && healthMap.containsKey(key)) {
-                    HealthAnalyzerManager.modifyMapValue(healthMap, key, expectedHealth);
-                    return;
-                }
-            }
-        } catch (Exception ignored) {}
-    }
-
-    //检查字段名是否匹配健康白名单
-    private static boolean matchesHealthWhitelist(String fieldName) {
-        if (fieldName == null || fieldName.isEmpty()) return false;
-        String lowerName = fieldName.toLowerCase();
-        for (String keyword : HEALTH_WHITELIST_KEYWORDS) {
-            if (lowerName.contains(keyword)) return true;
-        }
-        return false;
-    }
-
-    //检查字段名是否匹配黑名单
-    private static boolean matchesHealthBlacklist(String fieldName) {
-        if (fieldName == null || fieldName.isEmpty()) return false;
-        String lowerName = fieldName.toLowerCase();
-        for (String keyword : HEALTH_BLACKLIST_KEYWORDS) {
-            if (lowerName.contains(keyword)) return true;
-        }
-        return false;
     }
 
     // ==================== 实体死亡模块 ====================
@@ -1214,7 +829,7 @@ public class EntityUtil {
             //触发击杀成就
             triggerKillAdvancement(entity, damageSource);
             entity.dropAllDeathLoot(damageSource);
-            if (entity.isAlive() &&! entity.isRemoved()){
+            if (entity.isAlive() || ! entity.isRemoved()){
                 //保底清除实体
                 remove(entity, Entity.RemovalReason.KILLED);
             }

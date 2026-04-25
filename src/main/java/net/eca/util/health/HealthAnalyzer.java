@@ -2,1043 +2,867 @@ package net.eca.util.health;
 
 import net.eca.coremod.TransformerWhitelist;
 import net.eca.util.EcaLogger;
-import org.objectweb.asm.*;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.*;
+import org.objectweb.asm.tree.analysis.*;
 
-import java.io.IOException;
 import java.io.InputStream;
-import net.minecraft.world.entity.LivingEntity;
-
-import java.lang.invoke.VarHandle;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Set;
-import java.util.Stack;
+import java.util.*;
 import java.util.function.BiFunction;
-import java.util.function.Function;
 
-//Health value analyzer: analyzes getHealth() method implementation and builds reverse formula
-public class HealthAnalyzer {
+/*
+ * Phase 3 数据流分析：反向追踪 getHealth() 的真实存储位置，之前的那个太复杂了，换成了现在通用性更强的版本
+ * 沿继承链找到 m_21223_()F 最深的 override，用 ASM Analyzer + TaintInterpreter
+ * 把字节码翻译成代数表达式树（Expr）。遇到 mod 方法会递归内联（深度上限 maxDepth），
+ * java.lang / net.minecraft 的未识别调用保留为 UnresolvedCall，留给 Manager 走 sister-setter。
+ * solve() 对表达式树做反向求解：给定期望返回值和目标叶子，沿运算链逐层求逆，
+ * 算出叶子应该写什么值。不可逆节点返回 null，由上层兜底。
+ */
+public final class HealthAnalyzer {
 
     private static final String TARGET_METHOD_NAME = "m_21223_";
     private static final String TARGET_METHOD_DESC = "()F";
+    private static final int DEFAULT_MAX_DEPTH = 10;
 
-    private static final Set<String> PROTECTED_PREFIXES = Set.of(
-        "java.", "javax.", "sun.", "jdk.", "com.sun.",
-        "net.minecraft.", "com.mojang.", "net.minecraftforge.", "cpw.mods.",
-        "org.spongepowered.", "org.objectweb.asm.", "com.llamalad7.mixinextras.",
-        "org.lwjgl.",
-        "com.google.", "org.apache.", "io.netty.", "it.unimi.", "org.slf4j.",
-        "net.eca."
-    );
+    private HealthAnalyzer() {}
 
-    private static boolean isProtectedClass(String binaryClassName) {
-        if (binaryClassName == null) return true;
-        for (String prefix : PROTECTED_PREFIXES) {
-            if (binaryClassName.startsWith(prefix)) return true;
+    // ==================== 入口 ====================
+
+    public static AnalysisResult analyze(Class<?> entityClass) {
+        return analyze(entityClass, DEFAULT_MAX_DEPTH);
+    }
+
+    public static AnalysisResult analyze(Class<?> entityClass, int maxDepth) {
+        try {
+            Class<?> owner = findMethodOwner(entityClass, TARGET_METHOD_NAME, TARGET_METHOD_DESC);
+            if (owner == null) return AnalysisResult.EMPTY;
+            AnalysisContext ctx = new AnalysisContext(maxDepth);
+            Expr ret = analyzeMethod(owner, TARGET_METHOD_NAME, TARGET_METHOD_DESC, null, ctx, 0);
+            if (ret == null) return AnalysisResult.EMPTY;
+            return AnalysisResult.from(ret);
+        } catch (Throwable t) {
+            EcaLogger.info("[HealthAnalyzer] analyze {} failed: {}", entityClass.getName(), t.toString());
+            return AnalysisResult.EMPTY;
+        }
+    }
+
+    // ==================== 表达式树 ====================
+
+    public interface Expr {}
+
+    public record FieldLeaf(List<FieldStep> path) implements Expr {
+        public record FieldStep(String ownerInternal, String name, String desc) {}
+    }
+
+    public record EntityDataLeaf(String accessorOwnerInternal, String accessorName) implements Expr {}
+
+    public record MapEntryLeaf(String containerOwnerInternal, String containerGetterName, KeyKind keyKind) implements Expr {
+        public enum KeyKind { ENTITY, ENTITY_ID, ENTITY_UUID, UNKNOWN }
+    }
+
+    //Map.get 受体来自 GETSTATIC 而不是 INVOKESTATIC 时使用
+    public record MapByStaticFieldLeaf(String fieldOwnerInternal, String fieldName, MapEntryLeaf.KeyKind keyKind) implements Expr {}
+
+    //数组元素访问：arr[idx]，indexExpr 可以是 Const 或其他 leaf 表达式（如 GETFIELD 链）
+    public record ArrayIndexLeaf(Expr arrayExpr, Expr indexExpr) implements Expr {}
+
+    //在非 this 受体上做 GETFIELD 链：root 是某个 leaf（MapEntry / MapByStaticField / ArrayIndex / UnresolvedCall 等），path 是后续字段链
+    public record ChainedFieldLeaf(Expr root, List<FieldLeaf.FieldStep> path) implements Expr {}
+
+    public record Const(float value) implements Expr {}
+
+    public record BinaryOp(int opcode, Expr left, Expr right) implements Expr {}
+
+    public record UnaryOp(int opcode, Expr operand) implements Expr {}
+
+    //已知可逆/可特殊处理的方法调用（Long.reverse / Float.intBitsToFloat / Float.floatToRawIntBits / Math.max(F,F)）
+    public record InvertibleCall(InvertibleKind kind, List<Expr> args) implements Expr {
+        public enum InvertibleKind {
+            LONG_REVERSE,           // Long.reverse(long): long, 自逆
+            INT_BITS_TO_FLOAT,      // Float.intBitsToFloat(int): float, 反向是 floatToRawIntBits
+            FLOAT_TO_RAW_INT_BITS,  // Float.floatToRawIntBits(float): int, 反向是 intBitsToFloat
+            MATH_MAX_F              // Math.max(float, float): float, target>0 时若一边是 0 即直通另一边
+        }
+    }
+
+    public record UnresolvedCall(String owner, String name, String desc, List<Expr> args) implements Expr {}
+
+    public record Choice(List<Expr> alternatives) implements Expr {}
+
+    public record UnknownExpr() implements Expr {
+        public static final UnknownExpr I = new UnknownExpr();
+    }
+
+    // 分析期内部占位符（最终结果不应该再出现这些）
+    record EntityParamMarker() implements Expr { static final EntityParamMarker I = new EntityParamMarker(); }
+    record StaticFieldMarker(String ownerInternal, String name, String desc) implements Expr {}
+    record StaticMethodResult(String ownerInternal, String name, String desc) implements Expr {}
+
+    // ==================== 分析结果 ====================
+
+    public static final class AnalysisResult {
+        public static final AnalysisResult EMPTY = new AnalysisResult(UnknownExpr.I, List.of());
+        public final Expr returnExpr;
+        public final List<WriteTarget> writeTargets;
+
+        private AnalysisResult(Expr returnExpr, List<WriteTarget> writeTargets) {
+            this.returnExpr = returnExpr;
+            this.writeTargets = writeTargets;
+        }
+
+        public boolean isEmpty() { return writeTargets.isEmpty(); }
+
+        static AnalysisResult from(Expr ret) {
+            List<WriteTarget> targets = new ArrayList<>();
+            Set<Expr> seenSinks = new HashSet<>();
+            collectWriteTargets(ret, ret, targets, seenSinks);
+            return new AnalysisResult(ret, List.copyOf(targets));
+        }
+
+        private static void collectWriteTargets(Expr root, Expr current, List<WriteTarget> out, Set<Expr> seen) {
+            if (current instanceof Choice c) {
+                for (Expr alt : c.alternatives) collectWriteTargets(root, alt, out, seen);
+                return;
+            }
+            collectLeaves(current, leaf -> {
+                if (seen.add(leaf)) out.add(new WriteTarget(leaf, root));
+            });
+        }
+
+        private static void collectLeaves(Expr e, java.util.function.Consumer<Expr> sink) {
+            if (e instanceof FieldLeaf || e instanceof EntityDataLeaf || e instanceof MapEntryLeaf
+                || e instanceof MapByStaticFieldLeaf || e instanceof ArrayIndexLeaf || e instanceof ChainedFieldLeaf) {
+                sink.accept(e);
+            } else if (e instanceof BinaryOp b) {
+                collectLeaves(b.left, sink);
+                collectLeaves(b.right, sink);
+            } else if (e instanceof UnaryOp u) {
+                collectLeaves(u.operand, sink);
+            } else if (e instanceof Choice c) {
+                for (Expr a : c.alternatives) collectLeaves(a, sink);
+            } else if (e instanceof UnresolvedCall uc) {
+                for (Expr a : uc.args) collectLeaves(a, sink);
+            } else if (e instanceof InvertibleCall ic) {
+                for (Expr a : ic.args) collectLeaves(a, sink);
+            }
+        }
+    }
+
+    public record WriteTarget(Expr sink, Expr fullExpr) {}
+
+    // ==================== 分析实现 ====================
+
+    private static final class AnalysisContext {
+        final int maxDepth;
+        final Map<String, Expr> methodCache = new HashMap<>();
+        AnalysisContext(int maxDepth) { this.maxDepth = maxDepth; }
+    }
+
+    private static Class<?> findMethodOwner(Class<?> startClass, String name, String desc) {
+        for (Class<?> c = startClass; c != null && c != Object.class; c = c.getSuperclass()) {
+            if (classDefinesMethod(c, name, desc)) return c;
+        }
+        return null;
+    }
+
+    private static boolean classDefinesMethod(Class<?> clazz, String name, String desc) {
+        if (clazz.getClassLoader() == null) return false;
+        try (InputStream is = clazz.getClassLoader().getResourceAsStream(clazz.getName().replace('.', '/') + ".class")) {
+            if (is == null) return false;
+            ClassNode cn = new ClassNode();
+            new ClassReader(is).accept(cn, 0);
+            for (MethodNode mn : cn.methods) if (mn.name.equals(name) && mn.desc.equals(desc)) return true;
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static Expr analyzeMethod(Class<?> owner, String name, String desc,
+                                       TaintValue[] seedLocals, AnalysisContext ctx, int depth) {
+        if (owner.getClassLoader() == null) return null;
+        if (TransformerWhitelist.isProtected(owner.getName())) return null;
+
+        String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc;
+        if (seedLocals == null) {
+            Expr cached = ctx.methodCache.get(cacheKey);
+            if (cached != null) return cached;
+        }
+
+        try (InputStream is = owner.getClassLoader().getResourceAsStream(
+                owner.getName().replace('.', '/') + ".class")) {
+            if (is == null) return null;
+            ClassNode cn = new ClassNode();
+            new ClassReader(is).accept(cn, ClassReader.EXPAND_FRAMES);
+            MethodNode mn = null;
+            for (MethodNode m : cn.methods) {
+                if (m.name.equals(name) && m.desc.equals(desc)) { mn = m; break; }
+            }
+            if (mn == null || mn.instructions.size() == 0) return null;
+
+            String ownerInternal = owner.getName().replace('.', '/');
+            TaintInterpreter interp = new TaintInterpreter(ctx, depth, ownerInternal, seedLocals);
+            Analyzer<TaintValue> analyzer = new Analyzer<>(interp);
+            Frame<TaintValue>[] frames = analyzer.analyze(ownerInternal, mn);
+
+            // 收集所有 return 指令处栈顶的 Expr，union 成 Choice
+            List<Expr> returns = new ArrayList<>();
+            int idx = 0;
+            for (AbstractInsnNode insn : mn.instructions) {
+                int op = insn.getOpcode();
+                if (op == Opcodes.IRETURN || op == Opcodes.LRETURN || op == Opcodes.FRETURN
+                    || op == Opcodes.DRETURN || op == Opcodes.ARETURN) {
+                    Frame<TaintValue> f = frames[idx];
+                    if (f != null && f.getStackSize() > 0) {
+                        Expr e = cleanMarkers(f.getStack(f.getStackSize() - 1).expr);
+                        if (e != null) returns.add(e);
+                    }
+                }
+                idx++;
+            }
+            Expr result = returns.isEmpty() ? UnknownExpr.I
+                : (returns.size() == 1 ? returns.get(0) : new Choice(dedupe(returns)));
+            if (seedLocals == null) ctx.methodCache.put(cacheKey, result);
+            return result;
+        } catch (Throwable t) {
+            EcaLogger.info("[HealthAnalyzer] analyzeMethod {}.{} failed: {}", owner.getName(), name, t.toString());
+            return null;
+        }
+    }
+
+    private static List<Expr> dedupe(List<Expr> in) {
+        List<Expr> out = new ArrayList<>();
+        for (Expr e : in) if (!out.contains(e)) out.add(e);
+        return out;
+    }
+
+    // 保留 markers（EntityParamMarker / StaticFieldMarker / StaticMethodResult）在 args 里，给运行时 resolveExprObject 用
+    // 它们不会被 collectLeaves 收集为 sink，所以不会污染 WriteTarget 列表
+    private static Expr cleanMarkers(Expr e) {
+        if (e instanceof BinaryOp b) {
+            return new BinaryOp(b.opcode, cleanMarkers(b.left), cleanMarkers(b.right));
+        }
+        if (e instanceof UnaryOp u) {
+            return new UnaryOp(u.opcode, cleanMarkers(u.operand));
+        }
+        if (e instanceof Choice c) {
+            List<Expr> alts = new ArrayList<>();
+            for (Expr a : c.alternatives) alts.add(cleanMarkers(a));
+            return alts.size() == 1 ? alts.get(0) : new Choice(dedupe(alts));
+        }
+        if (e instanceof UnresolvedCall uc) {
+            List<Expr> args = new ArrayList<>();
+            for (Expr a : uc.args) args.add(cleanMarkers(a));
+            return new UnresolvedCall(uc.owner, uc.name, uc.desc, args);
+        }
+        if (e instanceof InvertibleCall ic) {
+            List<Expr> args = new ArrayList<>();
+            for (Expr a : ic.args) args.add(cleanMarkers(a));
+            return new InvertibleCall(ic.kind, args);
+        }
+        if (e instanceof ArrayIndexLeaf ai) {
+            return new ArrayIndexLeaf(cleanMarkers(ai.arrayExpr), cleanMarkers(ai.indexExpr));
+        }
+        if (e instanceof ChainedFieldLeaf cf) {
+            return new ChainedFieldLeaf(cleanMarkers(cf.root), cf.path);
+        }
+        return e;
+    }
+
+    // ==================== Interpreter ====================
+
+    private static final class TaintValue implements Value {
+        final int size;
+        final Expr expr;
+        TaintValue(int size, Expr expr) { this.size = size; this.expr = expr; }
+        @Override public int getSize() { return size; }
+        @Override public boolean equals(Object o) {
+            return o instanceof TaintValue v && size == v.size && Objects.equals(expr, v.expr);
+        }
+        @Override public int hashCode() { return Objects.hash(size, expr); }
+    }
+
+    private static final class TaintInterpreter extends Interpreter<TaintValue> {
+        final AnalysisContext ctx;
+        final int depth;
+        final String currentOwner;
+        final TaintValue[] seedLocals;
+
+        TaintInterpreter(AnalysisContext ctx, int depth, String currentOwner, TaintValue[] seedLocals) {
+            super(Opcodes.ASM9);
+            this.ctx = ctx;
+            this.depth = depth;
+            this.currentOwner = currentOwner;
+            this.seedLocals = seedLocals;
+        }
+
+        @Override public TaintValue newValue(Type type) {
+            if (type == null) return new TaintValue(1, UnknownExpr.I);
+            if (type == Type.VOID_TYPE) return null;
+            return new TaintValue(type.getSize(), UnknownExpr.I);
+        }
+
+        @Override public TaintValue newParameterValue(boolean isInstanceMethod, int local, Type type) {
+            if (seedLocals != null && local < seedLocals.length && seedLocals[local] != null) {
+                return seedLocals[local];
+            }
+            if (isInstanceMethod && local == 0) return new TaintValue(1, EntityParamMarker.I);
+            return new TaintValue(type.getSize(), UnknownExpr.I);
+        }
+
+        @Override public TaintValue newOperation(AbstractInsnNode insn) {
+            return switch (insn.getOpcode()) {
+                case Opcodes.ACONST_NULL -> new TaintValue(1, UnknownExpr.I);
+                case Opcodes.ICONST_M1 -> new TaintValue(1, new Const(-1f));
+                case Opcodes.ICONST_0 -> new TaintValue(1, new Const(0f));
+                case Opcodes.ICONST_1 -> new TaintValue(1, new Const(1f));
+                case Opcodes.ICONST_2 -> new TaintValue(1, new Const(2f));
+                case Opcodes.ICONST_3 -> new TaintValue(1, new Const(3f));
+                case Opcodes.ICONST_4 -> new TaintValue(1, new Const(4f));
+                case Opcodes.ICONST_5 -> new TaintValue(1, new Const(5f));
+                case Opcodes.LCONST_0 -> new TaintValue(2, new Const(0f));
+                case Opcodes.LCONST_1 -> new TaintValue(2, new Const(1f));
+                case Opcodes.FCONST_0 -> new TaintValue(1, new Const(0f));
+                case Opcodes.FCONST_1 -> new TaintValue(1, new Const(1f));
+                case Opcodes.FCONST_2 -> new TaintValue(1, new Const(2f));
+                case Opcodes.DCONST_0 -> new TaintValue(2, new Const(0f));
+                case Opcodes.DCONST_1 -> new TaintValue(2, new Const(1f));
+                case Opcodes.BIPUSH, Opcodes.SIPUSH -> new TaintValue(1, new Const(((IntInsnNode) insn).operand));
+                case Opcodes.LDC -> {
+                    Object cst = ((LdcInsnNode) insn).cst;
+                    int sz = (cst instanceof Long || cst instanceof Double) ? 2 : 1;
+                    if (cst instanceof Number n) yield new TaintValue(sz, new Const(n.floatValue()));
+                    yield new TaintValue(sz, UnknownExpr.I);
+                }
+                case Opcodes.GETSTATIC -> {
+                    FieldInsnNode f = (FieldInsnNode) insn;
+                    Type t = Type.getType(f.desc);
+                    yield new TaintValue(t.getSize(), new StaticFieldMarker(f.owner, f.name, f.desc));
+                }
+                case Opcodes.NEW -> new TaintValue(1, UnknownExpr.I);
+                case Opcodes.JSR -> new TaintValue(1, UnknownExpr.I);
+                default -> new TaintValue(1, UnknownExpr.I);
+            };
+        }
+
+        @Override public TaintValue copyOperation(AbstractInsnNode insn, TaintValue value) {
+            return value;
+        }
+
+        @Override public TaintValue unaryOperation(AbstractInsnNode insn, TaintValue value) {
+            int op = insn.getOpcode();
+            return switch (op) {
+                case Opcodes.INEG, Opcodes.FNEG -> new TaintValue(1, new UnaryOp(op, value.expr));
+                case Opcodes.LNEG, Opcodes.DNEG -> new TaintValue(2, new UnaryOp(op, value.expr));
+                case Opcodes.I2F, Opcodes.L2F, Opcodes.D2F -> new TaintValue(1, new UnaryOp(op, value.expr));
+                case Opcodes.F2I, Opcodes.L2I, Opcodes.D2I, Opcodes.I2B, Opcodes.I2C, Opcodes.I2S -> new TaintValue(1, new UnaryOp(op, value.expr));
+                case Opcodes.I2L, Opcodes.F2L, Opcodes.D2L -> new TaintValue(2, new UnaryOp(op, value.expr));
+                case Opcodes.I2D, Opcodes.L2D, Opcodes.F2D -> new TaintValue(2, new UnaryOp(op, value.expr));
+                case Opcodes.GETFIELD -> {
+                    FieldInsnNode f = (FieldInsnNode) insn;
+                    Type t = Type.getType(f.desc);
+                    FieldLeaf.FieldStep step = new FieldLeaf.FieldStep(f.owner, f.name, f.desc);
+                    Expr newExpr;
+                    if (value.expr instanceof FieldLeaf existing) {
+                        // 现有 entity-rooted 字段链，追加一节
+                        List<FieldLeaf.FieldStep> path = new ArrayList<>(existing.path);
+                        path.add(step);
+                        newExpr = new FieldLeaf(path);
+                    } else if (value.expr instanceof EntityParamMarker) {
+                        // this.field 起步
+                        newExpr = new FieldLeaf(List.of(step));
+                    } else if (value.expr instanceof ChainedFieldLeaf existing) {
+                        // 已经在非 this 受体上的字段链，追加
+                        List<FieldLeaf.FieldStep> path = new ArrayList<>(existing.path);
+                        path.add(step);
+                        newExpr = new ChainedFieldLeaf(existing.root, path);
+                    } else if (value.expr instanceof MapEntryLeaf
+                            || value.expr instanceof MapByStaticFieldLeaf
+                            || value.expr instanceof ArrayIndexLeaf
+                            || value.expr instanceof UnresolvedCall
+                            || value.expr instanceof InvertibleCall) {
+                        // 受体是其他 leaf 形式（map.get 结果、数组元素、未知方法返回值等）→ 启动新 ChainedFieldLeaf
+                        newExpr = new ChainedFieldLeaf(value.expr, List.of(step));
+                    } else if (value.expr instanceof StaticFieldMarker sfm) {
+                        // 静态字段对象上取字段，把 sfm 当成 root（极少见，但允许）
+                        newExpr = new ChainedFieldLeaf(sfm, List.of(step));
+                    } else {
+                        newExpr = UnknownExpr.I;
+                    }
+                    yield new TaintValue(t.getSize(), newExpr);
+                }
+                case Opcodes.CHECKCAST -> value;
+                case Opcodes.INSTANCEOF -> new TaintValue(1, UnknownExpr.I);
+                case Opcodes.ARRAYLENGTH -> new TaintValue(1, UnknownExpr.I);
+                case Opcodes.NEWARRAY, Opcodes.ANEWARRAY -> new TaintValue(1, UnknownExpr.I);
+                case Opcodes.IFEQ, Opcodes.IFNE, Opcodes.IFLT, Opcodes.IFGE,
+                     Opcodes.IFGT, Opcodes.IFLE, Opcodes.IFNULL, Opcodes.IFNONNULL,
+                     Opcodes.TABLESWITCH, Opcodes.LOOKUPSWITCH,
+                     Opcodes.PUTSTATIC, Opcodes.ATHROW,
+                     Opcodes.MONITORENTER, Opcodes.MONITOREXIT -> null;
+                default -> new TaintValue(1, UnknownExpr.I);
+            };
+        }
+
+        @Override public TaintValue binaryOperation(AbstractInsnNode insn, TaintValue v1, TaintValue v2) {
+            int op = insn.getOpcode();
+            return switch (op) {
+                case Opcodes.IADD, Opcodes.ISUB, Opcodes.IMUL, Opcodes.IDIV, Opcodes.IREM,
+                     Opcodes.FADD, Opcodes.FSUB, Opcodes.FMUL, Opcodes.FDIV, Opcodes.FREM,
+                     Opcodes.IAND, Opcodes.IOR, Opcodes.IXOR, Opcodes.ISHL, Opcodes.ISHR, Opcodes.IUSHR ->
+                    new TaintValue(1, new BinaryOp(op, v1.expr, v2.expr));
+                case Opcodes.LADD, Opcodes.LSUB, Opcodes.LMUL, Opcodes.LDIV, Opcodes.LREM,
+                     Opcodes.DADD, Opcodes.DSUB, Opcodes.DMUL, Opcodes.DDIV, Opcodes.DREM,
+                     Opcodes.LAND, Opcodes.LOR, Opcodes.LXOR ->
+                    new TaintValue(2, new BinaryOp(op, v1.expr, v2.expr));
+                case Opcodes.LSHL, Opcodes.LSHR, Opcodes.LUSHR ->
+                    new TaintValue(2, new BinaryOp(op, v1.expr, v2.expr));
+                // 数组元素加载：返回元素，size 由元素类型决定
+                case Opcodes.AALOAD, Opcodes.IALOAD, Opcodes.FALOAD,
+                     Opcodes.BALOAD, Opcodes.CALOAD, Opcodes.SALOAD ->
+                    new TaintValue(1, new ArrayIndexLeaf(v1.expr, v2.expr));
+                case Opcodes.LALOAD, Opcodes.DALOAD ->
+                    new TaintValue(2, new ArrayIndexLeaf(v1.expr, v2.expr));
+                default -> new TaintValue(1, UnknownExpr.I);
+            };
+        }
+
+        @Override public TaintValue ternaryOperation(AbstractInsnNode insn, TaintValue v1, TaintValue v2, TaintValue v3) {
+            return null;
+        }
+
+        @Override public TaintValue naryOperation(AbstractInsnNode insn, List<? extends TaintValue> values) {
+            if (insn.getOpcode() == Opcodes.MULTIANEWARRAY) return new TaintValue(1, UnknownExpr.I);
+            if (insn.getOpcode() == Opcodes.INVOKEDYNAMIC) {
+                Type ret = Type.getReturnType(((InvokeDynamicInsnNode) insn).desc);
+                return ret == Type.VOID_TYPE ? null : new TaintValue(ret.getSize(), UnknownExpr.I);
+            }
+            MethodInsnNode m = (MethodInsnNode) insn;
+            Type retType = Type.getReturnType(m.desc);
+            int sz = retType == Type.VOID_TYPE ? 0 : retType.getSize();
+            if (retType == Type.VOID_TYPE) return null;
+
+            // Number 拆箱（floatValue/doubleValue/intValue/...）当 identity，剥掉 SynchedEntityData.get 后编译器插入的 CHECKCAST + 拆箱包装
+            if (m.getOpcode() == Opcodes.INVOKEVIRTUAL && values.size() == 1
+                && isNumberUnboxingMethod(m.owner, m.name, m.desc)) {
+                return new TaintValue(sz, values.get(0).expr);
+            }
+
+            // 包装类装箱（Float.valueOf / Integer.valueOf / ...）当 identity
+            if (m.getOpcode() == Opcodes.INVOKESTATIC && values.size() == 1
+                && isWrapperValueOfMethod(m.owner, m.name, m.desc)) {
+                return new TaintValue(sz, values.get(0).expr);
+            }
+
+            // 已知可逆/特殊静态方法（位运算反向）
+            InvertibleCall.InvertibleKind invKind = detectInvertible(m);
+            if (invKind != null) {
+                List<Expr> argExprs = new ArrayList<>(values.size());
+                for (TaintValue v : values) argExprs.add(v.expr);
+                return new TaintValue(sz, new InvertibleCall(invKind, argExprs));
+            }
+
+            // SynchedEntityData.get(accessor)
+            if (m.owner.equals("net/minecraft/network/syncher/SynchedEntityData")
+                && (m.name.equals("m_135370_") || m.name.equals("get"))
+                && values.size() >= 2) {
+                TaintValue accessorArg = values.get(1);
+                if (accessorArg.expr instanceof StaticFieldMarker sfm) {
+                    return new TaintValue(sz, new EntityDataLeaf(sfm.ownerInternal, sfm.name));
+                }
+                return new TaintValue(sz, UnknownExpr.I);
+            }
+
+            // Map.get / getOrDefault —— 容器来自静态方法 或 静态字段
+            if ((m.name.equals("get") || m.name.equals("getOrDefault"))
+                && values.size() >= 2
+                && (m.owner.endsWith("Map") || m.owner.endsWith("HashMap")
+                    || m.owner.equals("java/util/Map")
+                    || m.owner.equals("java/util/HashMap")
+                    || m.owner.equals("java/util/WeakHashMap")
+                    || m.owner.equals("java/util/concurrent/ConcurrentHashMap"))) {
+                TaintValue recv = values.get(0);
+                TaintValue keyArg = values.get(1);
+                MapEntryLeaf.KeyKind kind = detectKeyKind(keyArg.expr);
+                if (recv.expr instanceof StaticMethodResult smr) {
+                    return new TaintValue(sz, new MapEntryLeaf(smr.ownerInternal, smr.name, kind));
+                }
+                if (recv.expr instanceof StaticFieldMarker sfm) {
+                    return new TaintValue(sz, new MapByStaticFieldLeaf(sfm.ownerInternal, sfm.name, kind));
+                }
+            }
+
+            // 尝试递归分析
+            if (depth + 1 < ctx.maxDepth && !m.name.startsWith("<")) {
+                Expr inlined = tryInlineInvoke(m, values);
+                if (inlined != null && !(inlined instanceof UnknownExpr)) {
+                    return new TaintValue(sz, inlined);
+                }
+            }
+
+            // 静态方法返回对象 —— 记为容器 getter 候选
+            if (m.getOpcode() == Opcodes.INVOKESTATIC && retType.getSort() == Type.OBJECT) {
+                return new TaintValue(sz, new StaticMethodResult(m.owner, m.name, m.desc));
+            }
+
+            // 兜底
+            List<Expr> argExprs = new ArrayList<>(values.size());
+            for (TaintValue v : values) argExprs.add(v.expr);
+            return new TaintValue(sz, new UnresolvedCall(m.owner, m.name, m.desc, argExprs));
+        }
+
+        private Expr tryInlineInvoke(MethodInsnNode m, List<? extends TaintValue> values) {
+            if (m.owner.startsWith("java/") || m.owner.startsWith("net/minecraft/")) return null;
+            Class<?> owner;
+            try {
+                owner = Class.forName(m.owner.replace('/', '.'), false, Thread.currentThread().getContextClassLoader());
+            } catch (Throwable t) { return null; }
+            boolean isStatic = m.getOpcode() == Opcodes.INVOKESTATIC;
+            Type[] argTypes = Type.getArgumentTypes(m.desc);
+            int localCount = (isStatic ? 0 : 1);
+            for (Type at : argTypes) localCount += at.getSize();
+            TaintValue[] seed = new TaintValue[localCount + 8];
+            int idx = 0;
+            int vidx = 0;
+            if (!isStatic) { seed[idx++] = values.get(vidx++); }
+            for (Type at : argTypes) {
+                TaintValue arg = values.get(vidx++);
+                seed[idx] = arg;
+                idx += at.getSize();
+            }
+            return analyzeMethod(owner, m.name, m.desc, seed, ctx, depth + 1);
+        }
+
+        private static boolean isWrapperValueOfMethod(String owner, String name, String desc) {
+            if (!name.equals("valueOf")) return false;
+            if (!owner.startsWith("java/lang/")) return false;
+            String simple = owner.substring(10);
+            return (simple.equals("Float") && desc.equals("(F)Ljava/lang/Float;"))
+                || (simple.equals("Double") && desc.equals("(D)Ljava/lang/Double;"))
+                || (simple.equals("Integer") && desc.equals("(I)Ljava/lang/Integer;"))
+                || (simple.equals("Long") && desc.equals("(J)Ljava/lang/Long;"))
+                || (simple.equals("Short") && desc.equals("(S)Ljava/lang/Short;"))
+                || (simple.equals("Byte") && desc.equals("(B)Ljava/lang/Byte;"))
+                || (simple.equals("Boolean") && desc.equals("(Z)Ljava/lang/Boolean;"))
+                || (simple.equals("Character") && desc.equals("(C)Ljava/lang/Character;"));
+        }
+
+        private static InvertibleCall.InvertibleKind detectInvertible(MethodInsnNode m) {
+            if (m.getOpcode() != Opcodes.INVOKESTATIC) return null;
+            if (m.owner.equals("java/lang/Long")
+                && m.name.equals("reverse") && m.desc.equals("(J)J")) {
+                return InvertibleCall.InvertibleKind.LONG_REVERSE;
+            }
+            if (m.owner.equals("java/lang/Float")
+                && m.name.equals("intBitsToFloat") && m.desc.equals("(I)F")) {
+                return InvertibleCall.InvertibleKind.INT_BITS_TO_FLOAT;
+            }
+            if (m.owner.equals("java/lang/Float")
+                && (m.name.equals("floatToRawIntBits") || m.name.equals("floatToIntBits"))
+                && m.desc.equals("(F)I")) {
+                return InvertibleCall.InvertibleKind.FLOAT_TO_RAW_INT_BITS;
+            }
+            if (m.owner.equals("java/lang/Math")
+                && m.name.equals("max") && m.desc.equals("(FF)F")) {
+                return InvertibleCall.InvertibleKind.MATH_MAX_F;
+            }
+            return null;
+        }
+
+        private static boolean isNumberUnboxingMethod(String owner, String name, String desc) {
+            if (!owner.startsWith("java/lang/")) return false;
+            String simple = owner.substring(10);
+            boolean wrapper = simple.equals("Float") || simple.equals("Double")
+                || simple.equals("Integer") || simple.equals("Long")
+                || simple.equals("Short") || simple.equals("Byte")
+                || simple.equals("Boolean") || simple.equals("Character")
+                || simple.equals("Number");
+            if (!wrapper) return false;
+            return (name.equals("floatValue") && desc.equals("()F"))
+                || (name.equals("doubleValue") && desc.equals("()D"))
+                || (name.equals("intValue") && desc.equals("()I"))
+                || (name.equals("longValue") && desc.equals("()J"))
+                || (name.equals("shortValue") && desc.equals("()S"))
+                || (name.equals("byteValue") && desc.equals("()B"))
+                || (name.equals("booleanValue") && desc.equals("()Z"))
+                || (name.equals("charValue") && desc.equals("()C"));
+        }
+
+        private MapEntryLeaf.KeyKind detectKeyKind(Expr keyExpr) {
+            if (keyExpr instanceof EntityParamMarker) return MapEntryLeaf.KeyKind.ENTITY;
+            if (keyExpr instanceof UnresolvedCall uc && uc.args.size() >= 1 && uc.args.get(0) instanceof EntityParamMarker) {
+                if (uc.name.equals("m_19879_") || uc.name.equals("getId")) return MapEntryLeaf.KeyKind.ENTITY_ID;
+                if (uc.name.equals("m_20148_") || uc.name.equals("getUUID")) return MapEntryLeaf.KeyKind.ENTITY_UUID;
+            }
+            return MapEntryLeaf.KeyKind.UNKNOWN;
+        }
+
+        @Override public void returnOperation(AbstractInsnNode insn, TaintValue value, TaintValue expected) {}
+
+        @Override public TaintValue merge(TaintValue v1, TaintValue v2) {
+            if (v1.equals(v2)) return v1;
+            List<Expr> alts = new ArrayList<>();
+            addAlt(alts, v1.expr);
+            addAlt(alts, v2.expr);
+            if (alts.size() == 1) return new TaintValue(Math.max(v1.size, v2.size), alts.get(0));
+            return new TaintValue(Math.max(v1.size, v2.size), new Choice(alts));
+        }
+
+        private static void addAlt(List<Expr> into, Expr e) {
+            if (e instanceof Choice c) {
+                for (Expr a : c.alternatives) if (!into.contains(a)) into.add(a);
+            } else if (!into.contains(e)) into.add(e);
+        }
+    }
+
+    // ==================== 反向求解 ====================
+
+    //给定表达式 e、目标返回值 target、写入的 sink（表达式里的某个叶子）、以及读运行时值的函数，
+    //解出 sink 应该写什么值。不可解时返回 null。target 和 readCurrent 用 Number 承载，让 long-domain（XOR/Long.reverse 等）也能解。
+    public static Number solve(Expr e, Expr sink, Number target, BiFunction<Expr, Void, Number> readCurrent) {
+        if (e == sink) return target;
+        if (e instanceof Choice c) {
+            for (Expr alt : c.alternatives) {
+                if (!containsSink(alt, sink)) continue;
+                Number v = solve(alt, sink, target, readCurrent);
+                if (v != null) return v;
+            }
+            return null;
+        }
+        if (e instanceof BinaryOp b) {
+            boolean leftContains = containsSink(b.left, sink);
+            boolean rightContains = containsSink(b.right, sink);
+            if (leftContains == rightContains) return null;
+            if (leftContains) {
+                Number rv = evaluate(b.right, readCurrent);
+                if (rv == null) return null;
+                Number lt = invertBinary(b.opcode, target, rv, true);
+                if (lt == null) return null;
+                return solve(b.left, sink, lt, readCurrent);
+            } else {
+                Number lv = evaluate(b.left, readCurrent);
+                if (lv == null) return null;
+                Number rt = invertBinary(b.opcode, target, lv, false);
+                if (rt == null) return null;
+                return solve(b.right, sink, rt, readCurrent);
+            }
+        }
+        if (e instanceof UnaryOp u) {
+            Number inner = invertUnary(u.opcode, target);
+            if (inner == null) return null;
+            return solve(u.operand, sink, inner, readCurrent);
+        }
+        if (e instanceof InvertibleCall ic) {
+            Number newTarget = invertInvertibleCall(ic, target, sink, readCurrent);
+            if (newTarget == null) return null;
+            Expr argWithSink = null;
+            for (Expr arg : ic.args) {
+                if (containsSink(arg, sink)) { argWithSink = arg; break; }
+            }
+            if (argWithSink == null) return null;
+            return solve(argWithSink, sink, newTarget, readCurrent);
+        }
+        return null;
+    }
+
+    private static Number invertBinary(int op, Number target, Number other, boolean solveLeft) {
+        return switch (op) {
+            case Opcodes.IADD -> Integer.valueOf(target.intValue() - other.intValue());
+            case Opcodes.LADD -> Long.valueOf(target.longValue() - other.longValue());
+            case Opcodes.FADD -> Float.valueOf(target.floatValue() - other.floatValue());
+            case Opcodes.DADD -> Double.valueOf(target.doubleValue() - other.doubleValue());
+            case Opcodes.ISUB -> Integer.valueOf(solveLeft ? target.intValue() + other.intValue() : other.intValue() - target.intValue());
+            case Opcodes.LSUB -> Long.valueOf(solveLeft ? target.longValue() + other.longValue() : other.longValue() - target.longValue());
+            case Opcodes.FSUB -> Float.valueOf(solveLeft ? target.floatValue() + other.floatValue() : other.floatValue() - target.floatValue());
+            case Opcodes.DSUB -> Double.valueOf(solveLeft ? target.doubleValue() + other.doubleValue() : other.doubleValue() - target.doubleValue());
+            case Opcodes.IMUL -> other.intValue() == 0 ? null : Integer.valueOf(target.intValue() / other.intValue());
+            case Opcodes.LMUL -> other.longValue() == 0 ? null : Long.valueOf(target.longValue() / other.longValue());
+            case Opcodes.FMUL -> other.floatValue() == 0 ? null : Float.valueOf(target.floatValue() / other.floatValue());
+            case Opcodes.DMUL -> other.doubleValue() == 0 ? null : Double.valueOf(target.doubleValue() / other.doubleValue());
+            case Opcodes.IDIV -> {
+                if (solveLeft) yield Integer.valueOf(target.intValue() * other.intValue());
+                if (target.intValue() == 0) yield null;
+                yield Integer.valueOf(other.intValue() / target.intValue());
+            }
+            case Opcodes.LDIV -> {
+                if (solveLeft) yield Long.valueOf(target.longValue() * other.longValue());
+                if (target.longValue() == 0) yield null;
+                yield Long.valueOf(other.longValue() / target.longValue());
+            }
+            case Opcodes.FDIV -> {
+                if (solveLeft) yield Float.valueOf(target.floatValue() * other.floatValue());
+                if (target.floatValue() == 0f) yield null;
+                yield Float.valueOf(other.floatValue() / target.floatValue());
+            }
+            case Opcodes.DDIV -> {
+                if (solveLeft) yield Double.valueOf(target.doubleValue() * other.doubleValue());
+                if (target.doubleValue() == 0d) yield null;
+                yield Double.valueOf(other.doubleValue() / target.doubleValue());
+            }
+            // XOR 自逆：x ^ o = t → x = t ^ o
+            case Opcodes.IXOR -> Integer.valueOf((int)(target.longValue() ^ other.longValue()));
+            case Opcodes.LXOR -> Long.valueOf(target.longValue() ^ other.longValue());
+            default -> null;
+        };
+    }
+
+    private static Number invertUnary(int op, Number target) {
+        return switch (op) {
+            case Opcodes.INEG -> Integer.valueOf(-target.intValue());
+            case Opcodes.LNEG -> Long.valueOf(-target.longValue());
+            case Opcodes.FNEG -> Float.valueOf(-target.floatValue());
+            case Opcodes.DNEG -> Double.valueOf(-target.doubleValue());
+            // L2I 截低 32：写时高 32 填 0（任意值都行，read 时同样会被截）
+            case Opcodes.L2I -> Long.valueOf(target.longValue() & 0xFFFFFFFFL);
+            case Opcodes.I2L -> Integer.valueOf(target.intValue());
+            case Opcodes.I2F, Opcodes.L2F, Opcodes.D2F -> Float.valueOf(target.floatValue());
+            case Opcodes.F2I, Opcodes.D2I -> Integer.valueOf(target.intValue());
+            case Opcodes.F2L, Opcodes.D2L -> Long.valueOf(target.longValue());
+            case Opcodes.F2D, Opcodes.I2D, Opcodes.L2D -> Double.valueOf(target.doubleValue());
+            case Opcodes.I2B, Opcodes.I2C, Opcodes.I2S -> target;
+            default -> null;
+        };
+    }
+
+    private static Number invertInvertibleCall(InvertibleCall ic, Number target, Expr sink,
+                                               BiFunction<Expr, Void, Number> readCurrent) {
+        return switch (ic.kind) {
+            case LONG_REVERSE -> Long.valueOf(Long.reverse(target.longValue()));
+            case INT_BITS_TO_FLOAT -> Integer.valueOf(Float.floatToRawIntBits(target.floatValue()));
+            case FLOAT_TO_RAW_INT_BITS -> Float.valueOf(Float.intBitsToFloat(target.intValue()));
+            case MATH_MAX_F -> {
+                // max(a, b) = target；只解含 sink 的那个 arg，另一个 evaluate
+                Expr argWithSink = null, other = null;
+                for (Expr arg : ic.args) {
+                    if (containsSink(arg, sink)) argWithSink = arg;
+                    else other = arg;
+                }
+                if (argWithSink == null) yield null;
+                Number otherVal = other != null ? evaluate(other, readCurrent) : Float.valueOf(0f);
+                if (otherVal == null) yield null;
+                float t = target.floatValue(), o = otherVal.floatValue();
+                // target >= other 时 sink_arg = target；否则不可解
+                if (t >= o) yield Float.valueOf(t);
+                yield null;
+            }
+        };
+    }
+
+    private static boolean containsSink(Expr e, Expr sink) {
+        if (e == sink) return true;
+        if (e instanceof BinaryOp b) return containsSink(b.left, sink) || containsSink(b.right, sink);
+        if (e instanceof UnaryOp u) return containsSink(u.operand, sink);
+        if (e instanceof Choice c) {
+            for (Expr a : c.alternatives) if (containsSink(a, sink)) return true;
+            return false;
+        }
+        if (e instanceof InvertibleCall ic) {
+            for (Expr a : ic.args) if (containsSink(a, sink)) return true;
+            return false;
+        }
+        if (e instanceof UnresolvedCall uc) {
+            for (Expr a : uc.args) if (containsSink(a, sink)) return true;
+            return false;
         }
         return false;
     }
 
-    //Analyze the getHealth() method of a class (entry point with recursion)
-    public static AnalysisResult analyze(Class<?> clazz) {
-
-        //查找定义 getHealth() 方法的类（可能在父类）
-        Class<?> methodOwnerClass = findMethodOwnerClass(clazz);
-
-        if (methodOwnerClass == null) {
-            EcaLogger.warn("[HealthAnalyzer] getHealth() method not found in class hierarchy for: {}", clazz.getName());
+    public static Number evaluate(Expr e, BiFunction<Expr, Void, Number> readCurrent) {
+        if (e instanceof Const c) return Float.valueOf(c.value);
+        if (e instanceof FieldLeaf || e instanceof EntityDataLeaf || e instanceof MapEntryLeaf
+            || e instanceof MapByStaticFieldLeaf || e instanceof ArrayIndexLeaf || e instanceof ChainedFieldLeaf) {
+            return readCurrent.apply(e, null);
+        }
+        if (e instanceof Choice c) {
+            for (Expr alt : c.alternatives) {
+                Number v = evaluate(alt, readCurrent);
+                if (v != null) return v;
+            }
             return null;
         }
-
-        if (methodOwnerClass != clazz) {
+        if (e instanceof BinaryOp b) {
+            Number l = evaluate(b.left, readCurrent);
+            Number r = evaluate(b.right, readCurrent);
+            if (l == null || r == null) return null;
+            return computeBinary(b.opcode, l, r);
         }
-
-        return analyzeMethodRecursive(methodOwnerClass, TARGET_METHOD_NAME, TARGET_METHOD_DESC, 0);
-    }
-
-    //查找定义了 getHealth() 方法的类（向上遍历继承链）
-    private static Class<?> findMethodOwnerClass(Class<?> startClass) {
-        Class<?> current = startClass;
-        int depth = 0;
-
-        while (current != null && current != Object.class) {
-
-            if (classDefinesMethod(current, TARGET_METHOD_NAME, TARGET_METHOD_DESC)) {
-                return current;
+        if (e instanceof UnaryOp u) {
+            Number v = evaluate(u.operand, readCurrent);
+            if (v == null) return null;
+            return computeUnary(u.opcode, v);
+        }
+        if (e instanceof InvertibleCall ic) {
+            List<Number> argVals = new ArrayList<>();
+            for (Expr arg : ic.args) {
+                Number v = evaluate(arg, readCurrent);
+                if (v == null) return null;
+                argVals.add(v);
             }
-
-            current = current.getSuperclass();
-            depth++;
+            return applyInvertibleCall(ic.kind, argVals);
         }
-
         return null;
     }
 
-    //检查类是否定义了指定方法
-    private static boolean classDefinesMethod(Class<?> clazz, String methodName, String descriptor) {
-        try {
-            String className = clazz.getName().replace('.', '/') + ".class";
-            InputStream classStream = clazz.getClassLoader().getResourceAsStream(className);
-
-            if (classStream == null) {
-                EcaLogger.warn("[HealthAnalyzer] Cannot load bytecode for class: {}", clazz.getName());
-                return false;
-            }
-
-            ClassReader cr = new ClassReader(classStream);
-            MethodDefinitionFinder finder = new MethodDefinitionFinder(methodName, descriptor);
-            cr.accept(finder, 0);
-
-            return finder.found;
-
-        } catch (Exception e) {
-            EcaLogger.error("[HealthAnalyzer] Error checking method in class: {}", clazz.getName(), e);
-            return false;
-        }
+    private static Number computeBinary(int op, Number l, Number r) {
+        return switch (op) {
+            case Opcodes.IADD -> Integer.valueOf(l.intValue() + r.intValue());
+            case Opcodes.LADD -> Long.valueOf(l.longValue() + r.longValue());
+            case Opcodes.FADD -> Float.valueOf(l.floatValue() + r.floatValue());
+            case Opcodes.DADD -> Double.valueOf(l.doubleValue() + r.doubleValue());
+            case Opcodes.ISUB -> Integer.valueOf(l.intValue() - r.intValue());
+            case Opcodes.LSUB -> Long.valueOf(l.longValue() - r.longValue());
+            case Opcodes.FSUB -> Float.valueOf(l.floatValue() - r.floatValue());
+            case Opcodes.DSUB -> Double.valueOf(l.doubleValue() - r.doubleValue());
+            case Opcodes.IMUL -> Integer.valueOf(l.intValue() * r.intValue());
+            case Opcodes.LMUL -> Long.valueOf(l.longValue() * r.longValue());
+            case Opcodes.FMUL -> Float.valueOf(l.floatValue() * r.floatValue());
+            case Opcodes.DMUL -> Double.valueOf(l.doubleValue() * r.doubleValue());
+            case Opcodes.IDIV -> r.intValue() == 0 ? null : Integer.valueOf(l.intValue() / r.intValue());
+            case Opcodes.LDIV -> r.longValue() == 0L ? null : Long.valueOf(l.longValue() / r.longValue());
+            case Opcodes.FDIV -> r.floatValue() == 0f ? null : Float.valueOf(l.floatValue() / r.floatValue());
+            case Opcodes.DDIV -> r.doubleValue() == 0d ? null : Double.valueOf(l.doubleValue() / r.doubleValue());
+            case Opcodes.IXOR -> Integer.valueOf(l.intValue() ^ r.intValue());
+            case Opcodes.LXOR -> Long.valueOf(l.longValue() ^ r.longValue());
+            case Opcodes.IAND -> Integer.valueOf(l.intValue() & r.intValue());
+            case Opcodes.LAND -> Long.valueOf(l.longValue() & r.longValue());
+            case Opcodes.IOR -> Integer.valueOf(l.intValue() | r.intValue());
+            case Opcodes.LOR -> Long.valueOf(l.longValue() | r.longValue());
+            default -> null;
+        };
     }
 
-    //简单的 ClassVisitor，只查找方法是否存在
-    private static class MethodDefinitionFinder extends ClassVisitor {
-        private final String targetMethodName;
-        private final String targetMethodDesc;
-        public boolean found = false;
-
-        public MethodDefinitionFinder(String methodName, String methodDesc) {
-            super(Opcodes.ASM9);
-            this.targetMethodName = methodName;
-            this.targetMethodDesc = methodDesc;
-        }
-
-        @Override
-        public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
-            if (name.equals(targetMethodName) && descriptor.equals(targetMethodDesc)) {
-                found = true;
-            }
-            return null;
-        }
+    private static Number computeUnary(int op, Number v) {
+        return switch (op) {
+            case Opcodes.INEG -> Integer.valueOf(-v.intValue());
+            case Opcodes.LNEG -> Long.valueOf(-v.longValue());
+            case Opcodes.FNEG -> Float.valueOf(-v.floatValue());
+            case Opcodes.DNEG -> Double.valueOf(-v.doubleValue());
+            case Opcodes.L2I -> Integer.valueOf((int) v.longValue());
+            case Opcodes.I2L -> Long.valueOf(v.intValue());
+            case Opcodes.F2I -> Integer.valueOf((int) v.floatValue());
+            case Opcodes.I2F -> Float.valueOf(v.intValue());
+            case Opcodes.D2F -> Float.valueOf((float) v.doubleValue());
+            case Opcodes.F2D -> Double.valueOf(v.floatValue());
+            case Opcodes.L2F -> Float.valueOf(v.longValue());
+            case Opcodes.F2L -> Long.valueOf((long) v.floatValue());
+            case Opcodes.D2L -> Long.valueOf((long) v.doubleValue());
+            case Opcodes.L2D -> Double.valueOf(v.longValue());
+            case Opcodes.D2I -> Integer.valueOf((int) v.doubleValue());
+            case Opcodes.I2D -> Double.valueOf(v.intValue());
+            case Opcodes.I2B -> Integer.valueOf((byte) v.intValue());
+            case Opcodes.I2C -> Integer.valueOf((char) v.intValue());
+            case Opcodes.I2S -> Integer.valueOf((short) v.intValue());
+            default -> v;
+        };
     }
 
-    //解析方法描述符，获取参数数量（通用方法）
-    private static int getParameterCount(String descriptor) {
-        // descriptor 格式: (参数类型...)返回类型
-        // 例如: (Ljava/lang/Object;I)V
-        //       参数1: Ljava/lang/Object; (对象)
-        //       参数2: I (int)
-
-        if (descriptor == null || !descriptor.startsWith("(")) {
-            return 0;
-        }
-
-        String params = descriptor.substring(1, descriptor.indexOf(')'));
-        int count = 0;
-        int i = 0;
-
-        while (i < params.length()) {
-            char c = params.charAt(i);
-            if (c == 'L') {
-                //对象类型: Lpackage/Class;
-                i = params.indexOf(';', i) + 1;
-                count++;
-            } else if (c == '[') {
-                //数组类型: [I, [Ljava/lang/Object; 等
-                i++;
-                while (i < params.length() && params.charAt(i) == '[') {
-                    i++;
-                }
-                if (i < params.length() && params.charAt(i) == 'L') {
-                    i = params.indexOf(';', i) + 1;
-                } else {
-                    i++;
-                }
-                count++;
-            } else {
-                //基本类型: I, F, D, J, S, B, C, Z
-                i++;
-                count++;
-            }
-        }
-
-        return count;
+    private static Number applyInvertibleCall(InvertibleCall.InvertibleKind kind, List<Number> args) {
+        return switch (kind) {
+            case LONG_REVERSE -> args.size() < 1 ? null : Long.valueOf(Long.reverse(args.get(0).longValue()));
+            case INT_BITS_TO_FLOAT -> args.size() < 1 ? null : Float.valueOf(Float.intBitsToFloat(args.get(0).intValue()));
+            case FLOAT_TO_RAW_INT_BITS -> args.size() < 1 ? null : Integer.valueOf(Float.floatToRawIntBits(args.get(0).floatValue()));
+            case MATH_MAX_F -> args.size() < 2 ? null : Float.valueOf(Math.max(args.get(0).floatValue(), args.get(1).floatValue()));
+        };
     }
 
-    //Recursively analyze a method until finding minimal writable unit
-    private static AnalysisResult analyzeMethodRecursive(Class<?> clazz, String methodName, String descriptor, int depth) {
-
-        //检查是否是 Java 核心类（bootstrap 类加载器加载的类）
-        if (clazz.getClassLoader() == null) {
-            return null;
-        }
-
-        //检查是否是受保护的类（避免递归分析）
-        String className = clazz.getName();
-        if (TransformerWhitelist.isProtected(className)) {
-            return null;
-        }
-
-        AnalysisResult result = analyzeMethodBytecode(clazz, methodName, descriptor);
-
-        if (result == null || !result.foundMethod) {
-            return result;
-        }
-
-        //如果找到最小可写单元，停止递归
-        if (result.foundMinimalUnit) {
-            return result;
-        }
-
-        //如果是方法调用，递归分析
-        if (result.hasMethodCall()) {
-
-            try {
-                //加载被调用方法的类
-                String targetClassName = result.methodCallTarget.owner.replace('/', '.');
-
-                //检查是否是受保护的类（避免递归分析）
-                if (TransformerWhitelist.isProtected(targetClassName)) {
-                    EcaLogger.warn("[HealthAnalyzer] Skipping recursion into protected class: {}", targetClassName);
-                    return result;
-                }
-
-                Class<?> targetClass = Class.forName(targetClassName);
-
-                //递归分析被调用的方法
-                AnalysisResult subResult = analyzeMethodRecursive(
-                    targetClass,
-                    result.methodCallTarget.name,
-                    result.methodCallTarget.descriptor,
-                    depth + 1
-                );
-
-                //合并结果
-                if (subResult != null) {
-                    result.merge(subResult);
-                }
-
-            } catch (ClassNotFoundException e) {
-                EcaLogger.warn("[HealthAnalyzer] Cannot load class for recursive analysis: {}", result.methodCallTarget.owner);
-            }
-        }
-
-        return result;
-    }
-
-    //Analyze a single method's bytecode
-    private static AnalysisResult analyzeMethodBytecode(Class<?> clazz, String methodName, String descriptor) {
-        try {
-            String className = clazz.getName().replace('.', '/') + ".class";
-            InputStream classStream = clazz.getClassLoader().getResourceAsStream(className);
-
-            if (classStream == null) {
-                EcaLogger.warn("[HealthAnalyzer] Cannot get class bytecode: {}", clazz.getName());
-                return null;
-            }
-
-            ClassReader classReader = new ClassReader(classStream);
-            AnalysisVisitor visitor = new AnalysisVisitor(clazz, methodName, descriptor);
-            classReader.accept(visitor, ClassReader.EXPAND_FRAMES);
-
-            if (!visitor.result.foundMethod) {
-                EcaLogger.warn("[HealthAnalyzer] Method {} not found in {}", methodName, clazz.getName());
-            }
-
-            return visitor.result;
-
-        } catch (IOException e) {
-            EcaLogger.error("[HealthAnalyzer] Failed to analyze bytecode: {}", clazz.getName(), e);
-            return null;
-        }
-    }
-
-    //Analysis result
-    public static class AnalysisResult {
-        public boolean foundMethod = false;
-        public boolean foundMinimalUnit = false;
-        public StackElement returnValueSource;
-        public List<ArithmeticOp> arithmeticOps = new ArrayList<>();
-        public Function<Float, Float> reverseFormula;
-        public DataSourceInfo dataSource;
-        public ContainerInfo containerInfo;
-        public MethodCallTarget methodCallTarget;
-
-        //嵌套字段访问路径（从 Entity 到最终字段的路径）
-        public List<FieldAccessStep> fieldAccessPath = new ArrayList<>();
-
-        //EntityData specific info
-        public String entityDataAccessorName;
-        public String entityDataAccessorOwner;
-
-        //HashMap specific info
-        public String hashMapContainerGetterMethod;
-        public String hashMapContainerGetterOwner;
-        public StackElement hashMapKeySource;
-        public MethodCallTarget hashMapMethodTarget;  //HashMap.get/getOrDefault 方法目标
-
-        public void buildReverseFormula() {
-            if (arithmeticOps.isEmpty()) {
-                reverseFormula = null;
-                return;
-            }
-
-
-            //Reverse operations (from end to start)
-            List<Function<Float, Float>> reverseOps = new ArrayList<>();
-            for (int i = arithmeticOps.size() - 1; i >= 0; i--) {
-                ArithmeticOp op = arithmeticOps.get(i);
-
-                Function<Float, Float> reverseOp = reverseOperation(op);
-                if (reverseOp != null) {
-                    reverseOps.add(reverseOp);
-                } else {
-                    EcaLogger.warn("[HealthAnalyzer] Could not reverse operation: {}", op);
-                }
-            }
-
-
-            //Compose functions
-            reverseFormula = (targetValue) -> {
-                float result = targetValue;
-                for (Function<Float, Float> op : reverseOps) {
-                    result = op.apply(result);
-                }
-                return result;
-            };
-        }
-
-        private Function<Float, Float> reverseOperation(ArithmeticOp op) {
-            switch (op.opcode) {
-                //一元运算（取负）- 所有类型
-                case Opcodes.FNEG:
-                case Opcodes.INEG:
-                case Opcodes.DNEG:
-                    return y -> -y;
-
-                //Float 四则运算
-                case Opcodes.FADD: return y -> y - op.getOperandFloat();
-                case Opcodes.FSUB: return y -> y + op.getOperandFloat();
-                case Opcodes.FMUL: return y -> y / op.getOperandFloat();
-                case Opcodes.FDIV: return y -> y * op.getOperandFloat();
-
-                //Int 四则运算
-                case Opcodes.IADD: return y -> y - op.getOperandFloat();
-                case Opcodes.ISUB: return y -> y + op.getOperandFloat();
-                case Opcodes.IMUL: return y -> y / op.getOperandFloat();
-                case Opcodes.IDIV: return y -> y * op.getOperandFloat();
-
-                //Double 四则运算
-                case Opcodes.DADD: return y -> y - op.getOperandFloat();
-                case Opcodes.DSUB: return y -> y + op.getOperandFloat();
-                case Opcodes.DMUL: return y -> y / op.getOperandFloat();
-                case Opcodes.DDIV: return y -> y * op.getOperandFloat();
-
-                //类型转换（恒等函数，因为逆向时已经是 float）
-                case Opcodes.I2F:   // int → float，逆向: float → int
-                case Opcodes.F2I:   // float → int，逆向: int → float
-                case Opcodes.I2D:   // int → double，逆向: double → int
-                case Opcodes.D2I:   // double → int，逆向: int → double
-                case Opcodes.D2F:   // double → float，逆向: float → double
-                case Opcodes.F2D:   // float → double，逆向: double → float
-                    return y -> y;  // 类型转换的逆操作就是再次转换，数值不变
-
-                default:
-                    return null;
-            }
-        }
-
-        public void identifyDataSource() {
-            if (returnValueSource == null) {
-                EcaLogger.warn("[HealthAnalyzer] No return value source found");
-                dataSource = new DataSourceInfo();
-                dataSource.sourceType = SourceType.UNKNOWN;
-                return;
-            }
-
-            //优先检查：如果检测到 EntityData 访问，立即标记为容器访问（最小可写单元）
-            if (entityDataAccessorName != null && entityDataAccessorOwner != null) {
-                dataSource = new DataSourceInfo();
-                dataSource.sourceType = SourceType.METHOD_CALL;
-                dataSource.owner = "net/minecraft/network/syncher/SynchedEntityData";
-                dataSource.name = "m_135370_";  //SynchedEntityData.get()
-                foundMinimalUnit = true;
-                return;
-            }
-
-            //优先检查：如果检测到 HashMap 访问，立即标记为容器访问（最小可写单元）
-            if (hashMapKeySource != null) {
-                dataSource = new DataSourceInfo();
-                dataSource.sourceType = SourceType.METHOD_CALL;
-                //使用专门保存的 hashMapMethodTarget，避免被异常分支覆盖
-                if (hashMapMethodTarget != null) {
-                    dataSource.owner = hashMapMethodTarget.owner;
-                    dataSource.name = hashMapMethodTarget.name;
-                } else {
-                    //备用：通用 HashMap 方法
-                    dataSource.owner = "java/util/HashMap";
-                    dataSource.name = "get";
-                    EcaLogger.warn("[HealthAnalyzer] No HashMap method target saved, using default");
-                }
-                foundMinimalUnit = true;
-                return;
-            }
-
-
-            dataSource = new DataSourceInfo();
-            dataSource.sourceType = mapElementType(returnValueSource.type);
-            dataSource.owner = returnValueSource.owner;
-            dataSource.name = (String) returnValueSource.value;
-            dataSource.descriptor = returnValueSource.descriptor;
-
-            //特殊处理：如果返回值是算术结果，但方法内部有方法调用，需要递归分析该方法
-            if (dataSource.sourceType == SourceType.ARITHMETIC && methodCallTarget != null) {
-                //不设置 foundMinimalUnit，让 hasMethodCall() 返回 true
-            }
-
-
-            //检查是否是最小可写单元
-            if (dataSource.sourceType == SourceType.DIRECT_FIELD) {
-                foundMinimalUnit = true;
-            } else if (dataSource.sourceType == SourceType.METHOD_CALL) {
-                //检查是否是容器访问
-                if (isContainerAccess(dataSource.owner, dataSource.name)) {
-                    foundMinimalUnit = true;
-                } else {
-                }
-            }
-        }
-
-        private SourceType mapElementType(ElementType type) {
-            switch (type) {
-                case CONSTANT: return SourceType.CONSTANT;
-                case FIELD_VALUE: return SourceType.DIRECT_FIELD;
-                case METHOD_RESULT: return SourceType.METHOD_CALL;
-                case ARITHMETIC_RESULT: return SourceType.ARITHMETIC;
-                default: return SourceType.UNKNOWN;
-            }
-        }
-
-        private boolean isContainerAccess(String owner, String name) {
-            if (owner == null || name == null) return false;
-
-            //HashMap/Map.get/getOrDefault
-            if (owner.contains("HashMap") || owner.contains("Map")) {
-                if (name.equals("get") || name.equals("getOrDefault")) {
-                    return true;
-                }
-            }
-
-            //ArrayList.get
-            if (owner.contains("ArrayList") && name.equals("get")) {
-                return true;
-            }
-
-            //SynchedEntityData.get
-            if (owner.contains("SynchedEntityData") && name.equals("m_135370_")) {
-                return true;
-            }
-
-            return false;
-        }
-
-        public boolean hasMethodCall() {
-            //情况1：直接方法调用（无算术运算）
-            if (dataSource != null && dataSource.sourceType == SourceType.METHOD_CALL && !foundMinimalUnit) {
-                return true;
-            }
-
-            //情况2：算术运算包装的方法调用（如: -getHealth() - 10.0）
-            if (dataSource != null && dataSource.sourceType == SourceType.ARITHMETIC && methodCallTarget != null && !foundMinimalUnit) {
-                return true;
-            }
-
-            return false;
-        }
-
-        //合并子结果
-        public void merge(AnalysisResult subResult) {
-
-            //合并最小可写单元（子结果优先）
-            if (subResult.foundMinimalUnit) {
-
-                this.foundMinimalUnit = true;
-                this.dataSource = subResult.dataSource;
-                this.containerInfo = subResult.containerInfo;
-
-                //合并 EntityData 信息
-                if (subResult.entityDataAccessorName != null) {
-                    this.entityDataAccessorName = subResult.entityDataAccessorName;
-                    this.entityDataAccessorOwner = subResult.entityDataAccessorOwner;
-                }
-
-                //合并 HashMap 信息
-                if (subResult.hashMapKeySource != null) {
-                    this.hashMapKeySource = subResult.hashMapKeySource;
-                }
-                if (subResult.hashMapContainerGetterMethod != null) {
-                    this.hashMapContainerGetterMethod = subResult.hashMapContainerGetterMethod;
-                    this.hashMapContainerGetterOwner = subResult.hashMapContainerGetterOwner;
-                }
-                if (subResult.hashMapMethodTarget != null) {
-                    this.hashMapMethodTarget = subResult.hashMapMethodTarget;
-                }
-            }
-
-            //合并字段访问路径（先当前，再子结果）
-
-            List<FieldAccessStep> mergedPath = new ArrayList<>();
-            mergedPath.addAll(this.fieldAccessPath);  //先当前层的字段
-            mergedPath.addAll(subResult.fieldAccessPath);  //再子结果的字段
-
-            //去重：移除连续的重复字段访问
-            List<FieldAccessStep> deduplicatedPath = new ArrayList<>();
-            FieldAccessStep lastStep = null;
-            for (FieldAccessStep step : mergedPath) {
-                //只有当前步骤与上一步不同时才添加
-                if (lastStep == null || !lastStep.ownerClass.equals(step.ownerClass) || !lastStep.fieldName.equals(step.fieldName)) {
-                    deduplicatedPath.add(step);
-                    lastStep = step;
-                } else {
-                }
-            }
-
-            this.fieldAccessPath = deduplicatedPath;
-
-            if (!deduplicatedPath.isEmpty()) {
-            }
-
-            //累积运算公式（先子结果，再当前）
-
-            List<ArithmeticOp> mergedOps = new ArrayList<>();
-            mergedOps.addAll(subResult.arithmeticOps);
-            mergedOps.addAll(this.arithmeticOps);
-            this.arithmeticOps = mergedOps;
-
-
-            //重新构建逆向公式
-            buildReverseFormula();
-        }
-    }
-
-    //字段访问步骤（用于嵌套字段）
-    public static class FieldAccessStep {
-        public String ownerClass;  //字段所在的类
-        public String fieldName;   //字段名
-        public String descriptor;  //字段描述符
-        public Class<?> fieldType; //字段类型
-
-        public FieldAccessStep(String ownerClass, String fieldName, String descriptor) {
-            this.ownerClass = ownerClass;
-            this.fieldName = fieldName;
-            this.descriptor = descriptor;
-        }
-
-        @Override
-        public String toString() {
-            return ownerClass + "." + fieldName;
-        }
-    }
-
-    //Data source information
-    public static class DataSourceInfo {
-        public SourceType sourceType;
-        public String owner;
-        public String name;
-        public String descriptor;
-    }
-
-    public enum SourceType {
-        CONSTANT, DIRECT_FIELD, METHOD_CALL, ARITHMETIC, UNKNOWN
-    }
-
-    //Container information
-    public static class ContainerInfo {
-        public String containerType;
-        public KeyInfo keyInfo;
-        public ContainerSource containerSource;
-    }
-
-    //Key information
-    public static class KeyInfo {
-        public KeySourceType sourceType;
-        public String methodName;
-        public String fieldName;
-        public Object constantValue;
-    }
-
-    public enum KeySourceType {
-        THIS, METHOD_CALL, STATIC_FIELD, INSTANCE_FIELD, CONSTANT
-    }
-
-    //Container source
-    public static class ContainerSource {
-        public ContainerSourceType type;
-        public String owner;
-        public String name;
-        public String descriptor;
-    }
-
-    public enum ContainerSourceType {
-        STATIC_METHOD, STATIC_FIELD, INSTANCE_FIELD, INSTANCE_METHOD
-    }
-
-    //Method call target
-    public static class MethodCallTarget {
-        public String owner;
-        public String name;
-        public String descriptor;
-    }
-
-    //Stack element (operand stack simulation)
-    public static class StackElement {
-        public ElementType type;
-        public Object value;
-        public String owner;
-        public String descriptor;
-        public boolean isStaticField = false;
-        public boolean isStaticMethod = false;
-
-        public StackElement(ElementType type) {
-            this.type = type;
-        }
-
-        @Override
-        public String toString() {
-            return "StackElement{type=" + type + ", value=" + value + ", owner=" + owner + "}";
-        }
-    }
-
-    public enum ElementType {
-        CONSTANT, THIS_REF, FIELD_VALUE, METHOD_RESULT, ARITHMETIC_RESULT, LOCAL_VAR, UNKNOWN
-    }
-
-    //Arithmetic operation
-    public static class ArithmeticOp {
-        public int opcode;
-        public Object operand;
-
-        public ArithmeticOp(int opcode, Object operand) {
-            this.opcode = opcode;
-            this.operand = operand;
-        }
-
-        public float getOperandFloat() {
-            if (operand instanceof Number) {
-                return ((Number) operand).floatValue();
-            }
-            return 0;
-        }
-
-        @Override
-        public String toString() {
-            String op = getOpName(opcode);
-            return operand != null ? op + "(" + operand + ")" : op;
-        }
-
-        private String getOpName(int opcode) {
-            switch (opcode) {
-                case Opcodes.FNEG: return "NEG";
-                case Opcodes.FADD: return "ADD";
-                case Opcodes.FSUB: return "SUB";
-                case Opcodes.FMUL: return "MUL";
-                case Opcodes.FDIV: return "DIV";
-                default: return "OP_" + opcode;
-            }
-        }
-    }
-
-    //Class visitor
-    private static class AnalysisVisitor extends ClassVisitor {
-        private final Class<?> targetClass;
-        private final String targetMethodName;
-        private final String targetMethodDesc;
-        public AnalysisResult result = new AnalysisResult();
-
-        public AnalysisVisitor(Class<?> targetClass, String methodName, String methodDesc) {
-            super(Opcodes.ASM9);
-            this.targetClass = targetClass;
-            this.targetMethodName = methodName;
-            this.targetMethodDesc = methodDesc;
-        }
-
-        @Override
-        public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
-            if (name.equals(targetMethodName) && descriptor.equals(targetMethodDesc)) {
-                result.foundMethod = true;
-                return new MethodAnalysisVisitor(this, access);
-            }
-            return null;
-        }
-    }
-
-    //Method visitor with operand stack simulation
-    private static class MethodAnalysisVisitor extends MethodVisitor {
-        private final AnalysisVisitor classVisitor;
-        private final Stack<StackElement> stack = new Stack<>();
-        private final boolean isStaticMethod;
-
-        public MethodAnalysisVisitor(AnalysisVisitor classVisitor, int access) {
-            super(Opcodes.ASM9);
-            this.classVisitor = classVisitor;
-            this.isStaticMethod = (access & Opcodes.ACC_STATIC) != 0;
-        }
-
-        @Override
-        public void visitVarInsn(int opcode, int var) {
-            StackElement element = new StackElement(ElementType.UNKNOWN);
-            if (opcode == Opcodes.ALOAD && var == 0) {
-                //静态方法：ALOAD_0 是第一个参数
-                //实例方法：ALOAD_0 是 this 引用
-                if (isStaticMethod) {
-                    element.type = ElementType.LOCAL_VAR;
-                    element.value = "param_0";
-                } else {
-                    element.type = ElementType.THIS_REF;
-                    element.value = "this";
-                }
-            } else if (opcode == Opcodes.FLOAD || opcode == Opcodes.ALOAD || opcode == Opcodes.ILOAD) {
-                element.type = ElementType.LOCAL_VAR;
-                element.value = "localVar_" + var;
-            }
-            stack.push(element);
-        }
-
-        @Override
-        public void visitFieldInsn(int opcode, String owner, String name, String descriptor) {
-            if (opcode == Opcodes.GETFIELD && !stack.isEmpty()) {
-
-                //记录字段访问路径（GETFIELD 是实例字段访问）
-                StackElement objRef = stack.peek();
-                if (objRef.type == ElementType.THIS_REF || objRef.type == ElementType.FIELD_VALUE) {
-                    //这是从 this 或另一个字段访问的字段，记录路径
-                    FieldAccessStep step = new FieldAccessStep(owner, name, descriptor);
-                    classVisitor.result.fieldAccessPath.add(step);
-                }
-
-                stack.pop(); //Pop object reference
-            } else if (opcode == Opcodes.GETSTATIC) {
-            }
-
-            StackElement fieldValue = new StackElement(ElementType.FIELD_VALUE);
-            fieldValue.owner = owner;
-            fieldValue.value = name;
-            fieldValue.descriptor = descriptor;
-
-            //标记 GETSTATIC 的静态字段
-            if (opcode == Opcodes.GETSTATIC) {
-                fieldValue.isStaticField = true;
-            }
-
-            stack.push(fieldValue);
-        }
-
-        @Override
-        public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean isInterface) {
-            String opcodeStr = opcode == Opcodes.INVOKEVIRTUAL ? "INVOKEVIRTUAL" :
-                              opcode == Opcodes.INVOKESTATIC ? "INVOKESTATIC" :
-                              opcode == Opcodes.INVOKEINTERFACE ? "INVOKEINTERFACE" :
-                              opcode == Opcodes.INVOKESPECIAL ? "INVOKESPECIAL" : "INVOKE";
-
-
-            //提取 EntityData 的 Key (GETSTATIC Accessor)
-            if (owner.contains("SynchedEntityData") && name.equals("m_135370_")) {
-                //栈顶是 accessor (key)
-                if (!stack.isEmpty()) {
-                    StackElement keyElement = stack.peek();
-                    if (keyElement.type == ElementType.FIELD_VALUE && keyElement.isStaticField) {
-                        classVisitor.result.entityDataAccessorName = (String) keyElement.value;
-                        classVisitor.result.entityDataAccessorOwner = keyElement.owner;
-                    }
-                }
-            }
-
-            //提取 HashMap 的 container getter 和 key（通用容器方法检测）
-            if (owner.contains("HashMap") || owner.contains("Map")) {
-                if (name.equals("get") || name.equals("getOrDefault") || name.equals("compute") ||
-                    name.equals("computeIfAbsent") || name.equals("computeIfPresent")) {
-
-
-                    //通用方案：从 descriptor 解析参数数量
-                    int paramCount = getParameterCount(descriptor);
-                    int containerIndex = paramCount + 1;  // receiver 在所有参数之前
-
-
-                    //栈布局: [容器, 参数1, 参数2, ..., 参数N]
-                    if (stack.size() >= containerIndex) {
-                        //第一个参数通常是 key
-                        if (paramCount >= 1 && stack.size() >= paramCount) {
-                            //key 在倒数第 paramCount 个位置
-                            classVisitor.result.hashMapKeySource = stack.get(stack.size() - paramCount);
-                        }
-
-                        //容器 getter 应该已经在 INVOKESTATIC 时被记录了
-                        if (classVisitor.result.hashMapContainerGetterMethod != null) {
-                        } else {
-                            EcaLogger.warn("[HealthAnalyzer] No container getter was captured");
-                        }
-
-                        //立即保存 HashMap 方法调用目标，避免被后续方法调用覆盖
-                        MethodCallTarget hashMapTarget = new MethodCallTarget();
-                        hashMapTarget.owner = owner;
-                        hashMapTarget.name = name;
-                        hashMapTarget.descriptor = descriptor;
-                        classVisitor.result.hashMapMethodTarget = hashMapTarget;
-                    }
-                }
-            }
-
-            //Pop receiver (this) for instance methods
-            if (opcode == Opcodes.INVOKEVIRTUAL || opcode == Opcodes.INVOKEINTERFACE) {
-                if (!stack.isEmpty()) {
-                    stack.pop();
-                }
-            }
-
-            //记录方法调用目标
-            MethodCallTarget callTarget = new MethodCallTarget();
-            callTarget.owner = owner;
-            callTarget.name = name;
-            callTarget.descriptor = descriptor;
-            classVisitor.result.methodCallTarget = callTarget;
-
-            StackElement methodResult = new StackElement(ElementType.METHOD_RESULT);
-            methodResult.owner = owner;
-            methodResult.value = name;
-            methodResult.descriptor = descriptor;
-
-            //标记静态方法调用
-            if (opcode == Opcodes.INVOKESTATIC) {
-                methodResult.isStaticMethod = true;
-
-                //特殊检测：如果这是返回容器的静态方法（方法名包含 HashMap/Map 相关），记录它
-                if ((name.toLowerCase().contains("map") || name.toLowerCase().contains("get")) &&
-                    (descriptor.contains("HashMap") || descriptor.contains("Map"))) {
-                    classVisitor.result.hashMapContainerGetterMethod = name;
-                    classVisitor.result.hashMapContainerGetterOwner = owner;
-                }
-            }
-
-            stack.push(methodResult);
-        }
-
-        @Override
-        public void visitLdcInsn(Object value) {
-
-            StackElement constant = new StackElement(ElementType.CONSTANT);
-            constant.value = value;
-            stack.push(constant);
-        }
-
-        @Override
-        public void visitInsn(int opcode) {
-            switch (opcode) {
-                //一元运算（取负）- Float/Int/Double
-                case Opcodes.FNEG:
-                case Opcodes.INEG:
-                case Opcodes.DNEG:
-                    if (!stack.isEmpty()) {
-                        stack.pop();
-                        StackElement result = new StackElement(ElementType.ARITHMETIC_RESULT);
-                        stack.push(result);
-                        classVisitor.result.arithmeticOps.add(new ArithmeticOp(opcode, null));
-                    }
-                    break;
-
-                //二元运算 - Float
-                case Opcodes.FADD:
-                case Opcodes.FSUB:
-                case Opcodes.FMUL:
-                case Opcodes.FDIV:
-                //二元运算 - Int
-                case Opcodes.IADD:
-                case Opcodes.ISUB:
-                case Opcodes.IMUL:
-                case Opcodes.IDIV:
-                //二元运算 - Double
-                case Opcodes.DADD:
-                case Opcodes.DSUB:
-                case Opcodes.DMUL:
-                case Opcodes.DDIV:
-                    if (stack.size() >= 2) {
-                        StackElement operand2 = stack.pop();
-                        stack.pop();
-                        StackElement result = new StackElement(ElementType.ARITHMETIC_RESULT);
-                        stack.push(result);
-                        classVisitor.result.arithmeticOps.add(new ArithmeticOp(opcode, operand2.value));
-                    }
-                    break;
-
-                //类型转换（Int/Float/Double 互转）
-                case Opcodes.I2F:   // int → float
-                case Opcodes.F2I:   // float → int
-                case Opcodes.I2D:   // int → double
-                case Opcodes.D2I:   // double → int
-                case Opcodes.D2F:   // double → float
-                case Opcodes.F2D:   // float → double
-                    if (!stack.isEmpty()) {
-                        stack.pop();
-                        StackElement result = new StackElement(ElementType.ARITHMETIC_RESULT);
-                        stack.push(result);
-                        classVisitor.result.arithmeticOps.add(new ArithmeticOp(opcode, null));
-                    }
-                    break;
-
-                //返回指令
-                case Opcodes.FRETURN:
-                case Opcodes.IRETURN:
-                case Opcodes.DRETURN:
-                    if (!stack.isEmpty()) {
-                        StackElement returnValue = stack.pop();
-                        classVisitor.result.returnValueSource = returnValue;
-                    }
-                    break;
-            }
-        }
-
-        @Override
-        public void visitEnd() {
-
-            //Build reverse formula and identify data source
-            classVisitor.result.buildReverseFormula();
-            classVisitor.result.identifyDataSource();
-
-
-            super.visitEnd();
-        }
-    }
-
-    // 生命值字段缓存
-    /**
-     * Cache for entity health field access information.
-     * Stores the analyzed access pattern and transformation formulas for each entity class.
-     */
-    public static class HealthFieldCache {
-
-        // 统一的访问模式
-        /**
-         * Unified access pattern for both fields and containers
-         */
-        public ContainerAccessPattern accessPattern;
-
-        // 逆向公式
-        /**
-         * Reverse transformation formula: converts target health to the value that needs to be written
-         */
-        public Function<Float, Float> reverseTransform;
-
-        // 统一的写入函数
-        /**
-         * Unified write function for modifying health values
-         */
-        public BiFunction<LivingEntity, Float, Boolean> writePath;
-
-        // 容器检测标志
-        /**
-         * Container detection flag (used for active scanning)
-         */
-        public boolean containerDetected = false;
-
-        // 容器类名
-        /**
-         * Container class name (for HashMap, etc.)
-         */
-        public String containerClass;
-
-        // 容器getter方法名
-        /**
-         * Container getter method name
-         */
-        public String containerGetterMethod;
-
-        // 容器类型
-        /**
-         * Container type (HashMap, WeakHashMap, etc.)
-         */
-        public String containerType;
-    }
-
-    // 容器访问模式
-    /**
-     * Container access pattern for describing how to access and modify values in containers.
-     * Supports various container types including HashMap, EntityData, and ArrayList.
-     */
-    public static class ContainerAccessPattern {
-
-        // 容器获取器
-        /**
-         * Container getter (static method/instance field/static field)
-         */
-        public ContainerGetter containerGetter;
-
-        // Key构造器
-        /**
-         * Key builder (this/getId()/static field/instance field)
-         */
-        public KeyBuilder keyBuilder;
-
-        // 值定位器
-        /**
-         * Value locator: finds the value holder object based on container and key
-         */
-        public ValueLocator valueLocator;
-
-        // 值的VarHandle
-        /**
-         * VarHandle for the value field
-         */
-        public VarHandle valueHandle;
-
-        // 是否是数组元素访问
-        /**
-         * Flag indicating whether this is an array element access (ArrayList, etc.)
-         */
-        public boolean isArrayElement;
-
-        // 容器获取器接口
-        /**
-         * Functional interface for getting the container from an entity.
-         */
-        @FunctionalInterface
-        public interface ContainerGetter {
-            /**
-             * Get the container from the entity.
-             * @param entity the living entity
-             * @return the container object
-             * @throws Exception if container cannot be retrieved
-             */
-            Object getContainer(LivingEntity entity) throws Exception;
-        }
-
-        // Key构造器接口
-        /**
-         * Functional interface for building the key from an entity.
-         */
-        @FunctionalInterface
-        public interface KeyBuilder {
-            /**
-             * Build the key from the entity.
-             * @param entity the living entity
-             * @return the key object
-             * @throws Exception if key cannot be built
-             */
-            Object buildKey(LivingEntity entity) throws Exception;
-        }
-
-        // 值定位器接口
-        /**
-         * Functional interface for locating the value holder object.
-         */
-        @FunctionalInterface
-        public interface ValueLocator {
-            /**
-             * Locate the value holder object.
-             * For HashMap: returns the Node
-             * For ArrayList: returns the elementData array
-             * For EntityData: returns the DataItem
-             * For field: returns the Entity itself
-             * @param container the container object
-             * @param key the key object
-             * @return the value holder object
-             * @throws Exception if value holder cannot be located
-             */
-            Object locateValueHolder(Object container, Object key) throws Exception;
-        }
-    }
 }

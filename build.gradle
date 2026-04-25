@@ -49,6 +49,8 @@ dependencies {
     implementation 'org.reflections:reflections:0.9.12'
     implementation 'org.ow2.asm:asm:9.7.1'
     implementation 'org.ow2.asm:asm-commons:9.7.1'
+    implementation 'org.ow2.asm:asm-tree:9.7.1'
+    implementation 'org.ow2.asm:asm-analysis:9.7.1'
     implementation fg.deobf("curse.maven:geckolib-388172:7553267")
 }
 
