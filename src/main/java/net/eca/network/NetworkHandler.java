@@ -6,6 +6,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraftforge.network.NetworkRegistry;
+import net.minecraftforge.network.NetworkDirection;
 import net.minecraftforge.network.PacketDistributor;
 import net.minecraftforge.network.simple.SimpleChannel;
 
@@ -130,6 +131,12 @@ public class NetworkHandler {
                 .encoder(BossShowSubtitlePacket::encode)
                 .decoder(BossShowSubtitlePacket::decode)
                 .consumerMainThread(BossShowSubtitlePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(FilterSyncPacket.class, id(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(FilterSyncPacket::encode)
+                .decoder(FilterSyncPacket::decode)
+                .consumerMainThread(FilterSyncPacket::handle)
                 .add();
     }
 

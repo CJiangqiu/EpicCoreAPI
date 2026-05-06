@@ -61,6 +61,7 @@ public class EntityUtil {
     public static EntityDataAccessor<String> HEALTH_LOCK_VALUE;
     public static EntityDataAccessor<String> HEAL_BAN_VALUE;
     public static EntityDataAccessor<Boolean> INVULNERABLE;
+    public static EntityDataAccessor<Boolean> RESURRECTION_TRACKED;
     public static EntityDataAccessor<String> MAX_HEALTH_LOCK_VALUE;
 
     //标记当前调用来自同步包，防止重复发包
@@ -210,7 +211,36 @@ public class EntityUtil {
         return result;
     }
 
-    private static Map<String, Boolean> checkEntityInServerContainers(ServerLevel level, UUID entityUUID) {
+    //检查实体全部状态（实体自身状态 + 服务端容器）
+    public static Map<String, Boolean> checkEntityAllStatus(Entity entity) {
+        Map<String, Boolean> result = new LinkedHashMap<>();
+        if (entity == null) {
+            return result;
+        }
+
+        // 实体自身状态
+        result.put("Entity.isAlive", entity.isAlive());
+        result.put("Entity.isRemoved", !entity.isRemoved());
+        result.put("Entity.removalReason", entity.getRemovalReason() == null);
+
+        if (entity instanceof LivingEntity living) {
+            float health = EntityUtil.getHealth(living);
+            result.put("LivingEntity.health", health > 0.0f);
+            result.put("LivingEntity.dead", !living.dead);
+            result.put("LivingEntity.deathTime", living.deathTime <= 0);
+        }
+
+        result.put("Entity.levelCallback", entity.levelCallback != EntityInLevelCallback.NULL);
+
+        // 服务端容器
+        if (entity.level() instanceof ServerLevel level) {
+            result.putAll(checkEntityInServerContainers(level, entity.getUUID()));
+        }
+
+        return result;
+    }
+
+    public static Map<String, Boolean> checkEntityInServerContainers(ServerLevel level, UUID entityUUID) {
         Map<String, Boolean> result = new LinkedHashMap<>();
         if (level == null || entityUUID == null) {
             return result;
@@ -363,7 +393,7 @@ public class EntityUtil {
             EcaLogger.info("[EntityUtil] Revive containers skipped: changing dimension, uuid={}", entity.getUUID());
             return result;
         }
-        return reviveAllContainers(serverLevel, entity.getUUID());
+        return reviveAllContainersDirect(serverLevel, entity);
     }
 
     //按UUID复活实体关键容器（服务端）
@@ -387,6 +417,13 @@ public class EntityUtil {
             return result;
         }
 
+        return reviveAllContainersDirect(level, entity);
+    }
+
+    //核心容器修复 — 直接接受实体引用，不依赖 getEntity() 查找，无 config 闸门
+    static Map<String, Boolean> reviveAllContainersDirect(ServerLevel level, Entity entity) {
+        Map<String, Boolean> result = new LinkedHashMap<>();
+        UUID entityUUID = entity.getUUID();
         PersistentEntitySectionManager<Entity> entityManager = level.entityManager;
         Map<String, Boolean> before = checkEntityInServerContainers(level, entityUUID);
 
@@ -400,12 +437,9 @@ public class EntityUtil {
             || !Boolean.TRUE.equals(before.get("EntityLookup.byUuid"))
             || !Boolean.TRUE.equals(before.get("EntityLookup.byId"))) {
             try {
-                // addNewEntity 内部会检查 knownUuids，如果已存在则直接返回 false
-                // 受保护实体的 UUID 通常不会从 knownUuids 移除，需要先临时移除再重新注册
                 entityManager.knownUuids.remove(entityUUID);
                 entityManager.addNewEntity(entity);
             } catch (Exception e) {
-                // 确保 knownUuids 不会因异常丢失
                 entityManager.knownUuids.add(entityUUID);
                 EcaLogger.info("[EntityUtil] addNewEntity failed, uuid={}, msg={}", entityUUID, e.getMessage());
             }
@@ -424,9 +458,7 @@ public class EntityUtil {
             try {
                 entityManager.callbacks.onTrackingStart(entity);
             } catch (Exception e) {
-                if (isAlreadyTrackedException(e)) {
-                    EcaLogger.info("[EntityUtil] Ignore already tracked during revive, uuid={}", entityUUID);
-                } else {
+                if (!isAlreadyTrackedException(e)) {
                     EcaLogger.info("[EntityUtil] onTrackingStart failed, uuid={}, msg={}", entityUUID, e.getMessage());
                 }
             }
@@ -449,7 +481,7 @@ public class EntityUtil {
         return result;
     }
 
-    private static void rebuildEntityLevelCallback(PersistentEntitySectionManager<Entity> entityManager, Entity entity) {
+    static void rebuildEntityLevelCallback(PersistentEntitySectionManager<Entity> entityManager, Entity entity) {
         if (entityManager == null || entity == null) {
             return;
         }
@@ -486,7 +518,7 @@ public class EntityUtil {
         revive(livingEntity);
     }
 
-    private static boolean isAlreadyTrackedException(Exception e) {
+    static boolean isAlreadyTrackedException(Exception e) {
         if (!(e instanceof IllegalStateException)) {
             return false;
         }
@@ -559,7 +591,6 @@ public class EntityUtil {
     /**
      * Mark an entity as currently changing dimensions.
      * Should be called when dimension change starts (removalReason = CHANGED_DIMENSION).
-     *
      * @param entity the entity starting dimension change
      */
     public static void markDimensionChanging(Entity entity) {
@@ -574,7 +605,6 @@ public class EntityUtil {
     /**
      * Unmark an entity from dimension changing state.
      * Should be called when dimension change completes.
-     *
      * @param entity the entity that finished dimension change
      */
     public static void unmarkDimensionChanging(Entity entity) {
@@ -628,6 +658,7 @@ public class EntityUtil {
         if (HEALTH_LOCK_VALUE != null) ECA_DATA_IDS.add(HEALTH_LOCK_VALUE.getId());
         if (HEAL_BAN_VALUE != null) ECA_DATA_IDS.add(HEAL_BAN_VALUE.getId());
         if (INVULNERABLE != null) ECA_DATA_IDS.add(INVULNERABLE.getId());
+        if (RESURRECTION_TRACKED != null) ECA_DATA_IDS.add(RESURRECTION_TRACKED.getId());
         if (MAX_HEALTH_LOCK_VALUE != null) ECA_DATA_IDS.add(MAX_HEALTH_LOCK_VALUE.getId());
     }
 
@@ -829,7 +860,7 @@ public class EntityUtil {
             //触发击杀成就
             triggerKillAdvancement(entity, damageSource);
             entity.dropAllDeathLoot(damageSource);
-            if (entity.isAlive() || ! entity.isRemoved()){
+            if (entity.isAlive()){
                 //保底清除实体
                 remove(entity, Entity.RemovalReason.KILLED);
             }
@@ -851,6 +882,7 @@ public class EntityUtil {
             setBasicHealth(entity, entity.getMaxHealth());
             entity.dead = false;
             entity.deathTime = 0;
+            entity.hurtTime = 0;
             // 恢复站立姿势（清除DYING姿势）
             entity.setPose(Pose.STANDING);
             // 安全清除移除原因（保护维度切换和区块卸载）

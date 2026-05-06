@@ -21,6 +21,8 @@ import net.eca.util.bossshow.BossShowDefinition;
 import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.bossshow.BossShowPlaybackTracker;
 import net.eca.util.bossshow.Trigger;
+import net.eca.util.filter.FilterManager;
+import net.eca.util.filter.FilterType;
 import net.eca.util.spawn_ban.SpawnBanManager;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -1091,6 +1093,72 @@ public final class EcaAPI {
             throw new IllegalArgumentException("Level cannot be null");
         }
         SpawnBanManager.clearAllBans(level);
+    }
+
+
+    // ==================== 滤镜系统 ====================
+
+    // 启用滤镜
+    /**
+     * Enable a filter for the specified player.
+     * The filter state is per-player and synced to the client via network packet.
+     * @param player the server player
+     * @param filter the filter type to enable
+     */
+    public static void enableFilter(ServerPlayer player, FilterType filter) {
+        if (player == null) {
+            throw new IllegalArgumentException("Player cannot be null");
+        }
+        if (filter == null) {
+            throw new IllegalArgumentException("FilterType cannot be null");
+        }
+        FilterManager.enable(player, filter);
+    }
+
+    // 禁用滤镜
+    /**
+     * Disable a filter for the specified player.
+     * @param player the server player
+     * @param filter the filter type to disable
+     */
+    public static void disableFilter(ServerPlayer player, FilterType filter) {
+        if (player == null) {
+            throw new IllegalArgumentException("Player cannot be null");
+        }
+        if (filter == null) {
+            throw new IllegalArgumentException("FilterType cannot be null");
+        }
+        FilterManager.disable(player, filter);
+    }
+
+    // 检查滤镜是否启用
+    /**
+     * Check if a filter is enabled for the specified player.
+     * @param player the server player
+     * @param filter the filter type to check
+     * @return true if the filter is enabled
+     */
+    public static boolean isFilterEnabled(ServerPlayer player, FilterType filter) {
+        if (player == null) {
+            throw new IllegalArgumentException("Player cannot be null");
+        }
+        if (filter == null) {
+            throw new IllegalArgumentException("FilterType cannot be null");
+        }
+        return FilterManager.isEnabled(player, filter);
+    }
+
+    // 获取玩家的所有活跃滤镜
+    /**
+     * Get all active filters for the specified player.
+     * @param player the server player
+     * @return unmodifiable set of active filter types
+     */
+    public static Set<FilterType> getActiveFilters(ServerPlayer player) {
+        if (player == null) {
+            throw new IllegalArgumentException("Player cannot be null");
+        }
+        return FilterManager.getActiveFilters(player);
     }
 
 

@@ -118,11 +118,19 @@ public class InvulnerableCommand {
                     String.format("§b%d. §f%s §7(ID: %d, UUID: %s)", finalIndex, entityName, entityId, uuid)
                 ), false);
 
-                Map<String, Boolean> containerCheck = EntityUtil.checkEntityInContainers(level, uuid);
+                Map<String, Boolean> allStatus = EntityUtil.checkEntityAllStatus(entity);
+                if (entity != null) {
+                    Map<String, Boolean> fullCheck = EntityUtil.checkEntityInContainers(level, uuid);
+                    for (Map.Entry<String, Boolean> entry : fullCheck.entrySet()) {
+                        if (entry.getKey().startsWith("Client")) {
+                            allStatus.put(entry.getKey(), entry.getValue());
+                        }
+                    }
+                }
 
                 source.sendSuccess(() -> Component.literal("§7  当前实体状态:"), false);
 
-                List<String> orderedStatus = buildOrderedEntityStatus(entity, containerCheck);
+                List<String> orderedStatus = buildOrderedEntityStatus(entity, allStatus);
                 for (String statusLine : orderedStatus) {
                     source.sendSuccess(() -> Component.literal(statusLine), false);
                 }
@@ -141,28 +149,39 @@ public class InvulnerableCommand {
         }
     }
 
-    private static List<String> buildOrderedEntityStatus(Entity entity, Map<String, Boolean> containerCheck) {
+    private static List<String> buildOrderedEntityStatus(Entity entity, Map<String, Boolean> allStatus) {
         List<String> lines = new ArrayList<>();
 
-        boolean alive = entity != null && entity.isAlive();
-        boolean removed = entity != null && entity.isRemoved();
-        boolean callbackBound = entity != null && entity.levelCallback != EntityInLevelCallback.NULL;
         String removalReason = entity == null || entity.getRemovalReason() == null ? "null" : entity.getRemovalReason().name();
 
-        lines.add(formatState("Entity.isAlive", alive, alive ? "alive" : "not alive"));
-        lines.add(formatState("Entity.isRemoved", !removed, removed ? "removed=true" : "removed=false"));
-        lines.add(formatState("Entity.removalReason", "null".equals(removalReason), "value=" + removalReason));
+        lines.add(formatState("Entity.isAlive",
+            Boolean.TRUE.equals(allStatus.get("Entity.isAlive")),
+            entity != null && entity.isAlive() ? "alive" : "not alive"));
+        lines.add(formatState("Entity.isRemoved",
+            Boolean.TRUE.equals(allStatus.get("Entity.isRemoved")),
+            entity != null && entity.isRemoved() ? "removed=true" : "removed=false"));
+        lines.add(formatState("Entity.removalReason",
+            Boolean.TRUE.equals(allStatus.get("Entity.removalReason")),
+            "value=" + removalReason));
 
         if (entity instanceof LivingEntity living) {
             float health = EntityUtil.getHealth(living);
             float maxHealth = living.getMaxHealth();
-            lines.add(formatState("LivingEntity.health", health > 0.0f, String.format("%.2f / %.2f", health, maxHealth)));
-            lines.add(formatState("LivingEntity.dead", !living.dead, "dead=" + living.dead));
-            lines.add(formatState("LivingEntity.deathTime", living.deathTime <= 0, "deathTime=" + living.deathTime));
+            lines.add(formatState("LivingEntity.health",
+                Boolean.TRUE.equals(allStatus.get("LivingEntity.health")),
+                String.format("%.2f / %.2f", health, maxHealth)));
+            lines.add(formatState("LivingEntity.dead",
+                Boolean.TRUE.equals(allStatus.get("LivingEntity.dead")),
+                "dead=" + living.dead));
+            lines.add(formatState("LivingEntity.deathTime",
+                Boolean.TRUE.equals(allStatus.get("LivingEntity.deathTime")),
+                "deathTime=" + living.deathTime));
             lines.add(formatState("LivingEntity.pose", true, "pose=" + living.getPose()));
         }
 
-        lines.add(formatState("Entity.levelCallback", callbackBound, callbackBound ? "bound" : "NULL"));
+        lines.add(formatState("Entity.levelCallback",
+            Boolean.TRUE.equals(allStatus.get("Entity.levelCallback")),
+            entity != null && entity.levelCallback != EntityInLevelCallback.NULL ? "bound" : "NULL"));
 
         List<String> orderedKeys = List.of(
             "ChunkMap.entityMap",
@@ -187,15 +206,15 @@ public class InvulnerableCommand {
 
         Set<String> visited = new LinkedHashSet<>();
         for (String key : orderedKeys) {
-            if (!containerCheck.containsKey(key)) {
+            if (!allStatus.containsKey(key)) {
                 continue;
             }
-            boolean ok = Boolean.TRUE.equals(containerCheck.get(key));
+            boolean ok = Boolean.TRUE.equals(allStatus.get(key));
             lines.add(formatState(key, ok, ok ? "ok" : "missing"));
             visited.add(key);
         }
 
-        for (Map.Entry<String, Boolean> entry : containerCheck.entrySet()) {
+        for (Map.Entry<String, Boolean> entry : allStatus.entrySet()) {
             if (visited.contains(entry.getKey())) {
                 continue;
             }

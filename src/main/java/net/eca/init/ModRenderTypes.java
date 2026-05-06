@@ -16,6 +16,7 @@ import net.eca.client.render.VolcanoRenderTypes;
 import net.eca.client.render.shader.ArcaneShader;
 import net.eca.client.render.shader.AuroraShader;
 import net.eca.client.render.shader.BlackHoleShader;
+import net.eca.client.render.shader.FilterRenderer;
 import net.eca.client.render.shader.CosmosShader;
 import net.eca.client.render.shader.DreamSakuraShader;
 import net.eca.client.render.shader.ForestShader;
@@ -52,6 +53,7 @@ public class ModRenderTypes {
         StarlightShader.register(event);
         CosmosShader.register(event);
         BlackHoleShader.register(event);
+        FilterRenderer.registerShaders(event);
 
         registerSkyboxPresets();
     }

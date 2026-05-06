@@ -38,6 +38,7 @@ LivingEntityMixin {
         EntityUtil.HEALTH_LOCK_VALUE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.STRING);
         EntityUtil.HEAL_BAN_VALUE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.STRING);
         EntityUtil.INVULNERABLE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.BOOLEAN);
+        EntityUtil.RESURRECTION_TRACKED = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.BOOLEAN);
         EntityUtil.MAX_HEALTH_LOCK_VALUE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.STRING);
     }
 
@@ -48,6 +49,7 @@ LivingEntityMixin {
         entity.getEntityData().define(EntityUtil.HEALTH_LOCK_VALUE, "-1024.0");
         entity.getEntityData().define(EntityUtil.HEAL_BAN_VALUE, "");
         entity.getEntityData().define(EntityUtil.INVULNERABLE, false);
+        entity.getEntityData().define(EntityUtil.RESURRECTION_TRACKED, false);
         entity.getEntityData().define(EntityUtil.MAX_HEALTH_LOCK_VALUE, "-1024.0");
     }
 
@@ -226,7 +228,9 @@ LivingEntityMixin {
     private void onTickDeath(CallbackInfo ci) {
         LivingEntity self = (LivingEntity) (Object) this;
         Float lockedValue = HealthLockManager.getLock(self);
-        if (EcaAPI.isInvulnerable(self) || lockedValue != null) {
+        boolean resurrectionTracked = EntityUtil.RESURRECTION_TRACKED != null
+            && self.getEntityData().get(EntityUtil.RESURRECTION_TRACKED);
+        if (EcaAPI.isInvulnerable(self) || lockedValue != null || resurrectionTracked) {
             ci.cancel();
         }
     }

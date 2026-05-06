@@ -65,7 +65,8 @@ public final class TransformerWhitelist {
         "me.fengming.vaultpatcher_asm.",
         "vectorwing.farmersdelight.", "jackiecrazy.attributizer.", "com.fe.", "com.mega.",
         "net.the_last_sword.", "net.mcreator.ultimateskeletons.", "com.core.dream_sakura.", "com.github.L_Ender.",
-        "com.github.tartaricacid.", "com.replaymod."
+        "com.github.tartaricacid.", "com.replaymod.", "com.udojava.",
+        "dev.shadowsoffire."
     );
 
     // 运行时自定义：跳过 AllReturn（API + JSON）
