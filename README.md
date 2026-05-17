@@ -409,8 +409,10 @@ public class MyBossExtension extends EntityExtension {
         };
     }
 
-    // Per-entity conditional triggers — evaluated each tick per entity instance
-    // Fog/skybox/music only activate when the corresponding condition returns true
+    /*
+     * Conditional on/off gate — fog/skybox/music activate only when the condition returns true.
+     * Re-evaluated periodically; for global-mode effects the entity is the dimension's primary entity.
+     */
     @Override
     public boolean shouldEnableFog(LivingEntity entity) {
         return entity.getHealth() < entity.getMaxHealth() * 0.5f;  // example: fog activates when entity is below 50% health
@@ -424,6 +426,23 @@ public class MyBossExtension extends EntityExtension {
     @Override
     public boolean shouldEnableMusic(LivingEntity entity) {
         return true;  // combat music activation condition per entity instance
+    }
+
+    /*
+     * Conditional switching — override the entity-aware variant to return a different extension
+     * object based on entity state (health, position, effects, etc.). Available on all five
+     * methods: bossBarExtension / entityLayerExtension / globalFogExtension /
+     * globalSkyboxExtension / combatMusicExtension. The entity argument may be null (effect init,
+     * or boss outside render range), so null-check it. Global effects (fog/skybox/music)
+     * re-evaluate roughly once per second against the dimension's primary entity; instance
+     * effects (boss bar/render layer) re-evaluate every frame per entity.
+     */
+    @Override
+    public GlobalSkyboxExtension globalSkyboxExtension(LivingEntity entity) {
+        if (entity != null && entity.getHealth() < entity.getMaxHealth() * 0.5f) {
+            return phase2Skybox;  // below 50% health: switch to another GlobalSkyboxExtension you defined
+        }
+        return globalSkyboxExtension();  // default: the no-arg skybox above
     }
 }
 ```
@@ -474,8 +493,10 @@ public class DiamondSwordExtension extends ItemExtension {
 
     @Override
     public float[] getColorKey() {
-        // Only pixels matching this RGB (0.0~1.0) will be overlaid with the shader.
-        // Return null to apply the shader to the entire item texture.
+        /*
+         * Only pixels matching this RGB (0.0~1.0) will be overlaid with the shader.
+         * Return null to apply the shader to the entire item texture.
+         */
         return new float[]{0.25f, 0.83f, 0.73f};
     }
 
@@ -1082,8 +1103,10 @@ public class MyBossExtension extends EntityExtension {
         };
     }
 
-    // 逐实体条件触发 — 每 tick 对每个实体实例单独判断
-    // 迷雾/天空盒/音乐仅在对应条件返回 true 时激活
+    /*
+     * 条件开关 — 迷雾/天空盒/音乐仅在对应条件返回 true 时激活。
+     * 定期重新求值；全局模式效果传入的实体为该维度的主实体。
+     */
     @Override
     public boolean shouldEnableFog(LivingEntity entity) {
         return entity.getHealth() < entity.getMaxHealth() * 0.5f;  // 示例：实体血量低于 50% 时触发迷雾
@@ -1097,6 +1120,21 @@ public class MyBossExtension extends EntityExtension {
     @Override
     public boolean shouldEnableMusic(LivingEntity entity) {
         return true;  // 战斗音乐触发条件
+    }
+
+    /*
+     * 条件切换 — 重写带实体参数的重载，按实体状态（血量、坐标、效果等）返回不同的扩展对象。
+     * 五个方法均可用：bossBarExtension / entityLayerExtension / globalFogExtension /
+     * globalSkyboxExtension / combatMusicExtension。entity 参数可能为 null（效果初始化，
+     * 或 Boss 不在渲染范围），需自行判空。全局效果（迷雾/天空盒/音乐）约每秒按维度主实体
+     * 重新求值；实例效果（Boss 血条/渲染层）每帧按实体重新求值。
+     */
+    @Override
+    public GlobalSkyboxExtension globalSkyboxExtension(LivingEntity entity) {
+        if (entity != null && entity.getHealth() < entity.getMaxHealth() * 0.5f) {
+            return phase2Skybox;  // 血量低于 50%：切换到你定义的另一个 GlobalSkyboxExtension
+        }
+        return globalSkyboxExtension();  // 默认：上面的无参天空盒
     }
 }
 ```
@@ -1147,8 +1185,10 @@ public class DiamondSwordExtension extends ItemExtension {
 
     @Override
     public float[] getColorKey() {
-        // 仅对匹配该 RGB（0.0~1.0）的像素叠加着色器。
-        // 返回 null 则对整个物品贴图应用着色器。
+        /*
+         * 仅对匹配该 RGB（0.0~1.0）的像素叠加着色器。
+         * 返回 null 则对整个物品贴图应用着色器。
+         */
         return new float[]{0.25f, 0.83f, 0.73f};
     }
 

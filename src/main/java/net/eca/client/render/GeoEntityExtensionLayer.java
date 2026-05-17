@@ -35,8 +35,8 @@ public class GeoEntityExtensionLayer<T extends Entity & GeoAnimatable> extends G
         EntityExtension extension = EntityExtensionManager.getExtension(animatable.getType());
         if (extension == null) return;
 
-        EntityLayerExtension layerExtension = extension.entityLayerExtension();
         LivingEntity livingAnimatable = animatable instanceof LivingEntity living ? living : null;
+        EntityLayerExtension layerExtension = extension.entityLayerExtension(livingAnimatable);
         if (layerExtension == null || !layerExtension.enabled() || !layerExtension.shouldRender(livingAnimatable)) return;
 
         RenderType shaderRenderType = layerExtension.getRenderType();

@@ -1,6 +1,6 @@
 package net.eca.network;
 
-import net.eca.util.EntityUtil;
+import net.eca.client.ClientEntityUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.network.FriendlyByteBuf;
@@ -36,7 +36,7 @@ public class EntityContainerCheckRequestPacket {
             Minecraft minecraft = Minecraft.getInstance();
             ClientLevel clientLevel = minecraft.level;
             if (clientLevel != null) {
-                result.putAll(EntityUtil.checkEntityInClientContainers(clientLevel, msg.entityUuid));
+                result.putAll(ClientEntityUtil.checkEntityInClientContainers(clientLevel, msg.entityUuid));
             } else {
                 result.put("ClientLevel.getEntity(uuid)", false);
                 result.put("ClientEntityStorage.entityLookup.byUuid", false);

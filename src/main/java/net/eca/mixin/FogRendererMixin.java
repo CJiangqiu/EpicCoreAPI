@@ -133,7 +133,7 @@ public class FogRendererMixin {
                 continue;
             }
 
-            GlobalFogExtension fog = extension.globalFogExtension();
+            GlobalFogExtension fog = extension.globalFogExtension(living);
             if (fog == null || !fog.enabled() || fog.globalMode()) {
                 continue;
             }

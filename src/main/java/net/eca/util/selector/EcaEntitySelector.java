@@ -1,7 +1,7 @@
 package net.eca.util.selector;
 
 import net.eca.api.EcaAPI;
-import net.minecraft.client.multiplayer.ClientLevel;
+import net.eca.client.ClientEntityUtil;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
@@ -43,12 +43,8 @@ public final class EcaEntitySelector {
             return findEntityInServerSectionsById(serverLevel, entityId);
         }
 
-        if (level instanceof ClientLevel clientLevel) {
-            Entity entity = clientLevel.entityStorage.entityStorage.getEntity(entityId);
-            if (entity != null) {
-                return entity;
-            }
-            return findEntityInClientSectionsById(clientLevel, entityId);
+        if (level.isClientSide()) {
+            return ClientEntityUtil.getEntityById(level, entityId);
         }
 
         return null;
@@ -67,12 +63,8 @@ public final class EcaEntitySelector {
             return findEntityInServerSectionsByUuid(serverLevel, uuid);
         }
 
-        if (level instanceof ClientLevel clientLevel) {
-            Entity entity = clientLevel.entityStorage.entityStorage.getEntity(uuid);
-            if (entity != null) {
-                return entity;
-            }
-            return findEntityInClientSectionsByUuid(clientLevel, uuid);
+        if (level.isClientSide()) {
+            return ClientEntityUtil.getEntityByUuid(level, uuid);
         }
 
         return null;
@@ -154,24 +146,8 @@ public final class EcaEntitySelector {
             return new ArrayList<>(unique.values());
         }
 
-        if (level instanceof ClientLevel clientLevel) {
-            for (Entity entity : clientLevel.entityStorage.entityStorage.getAllEntities()) {
-                if (entity != null && (!entity.isRemoved() || EcaAPI.isInvulnerable(entity)) && filter.test(entity)) {
-                    unique.put(entity.getUUID(), entity);
-                }
-            }
-
-            for (EntitySection<Entity> section : clientLevel.entityStorage.sectionStorage.sections.values()) {
-                if (section == null) {
-                    continue;
-                }
-                section.getEntities().forEach(entity -> {
-                    if (entity != null && (!entity.isRemoved() || EcaAPI.isInvulnerable(entity)) && filter.test(entity)) {
-                        unique.putIfAbsent(entity.getUUID(), entity);
-                    }
-                });
-            }
-            return new ArrayList<>(unique.values());
+        if (level.isClientSide()) {
+            return ClientEntityUtil.getEntities(level, filter);
         }
 
         return Collections.emptyList();
@@ -239,32 +215,6 @@ public final class EcaEntitySelector {
 
     private static Entity findEntityInServerSectionsByUuid(ServerLevel level, UUID uuid) {
         for (EntitySection<Entity> section : level.entityManager.sectionStorage.sections.values()) {
-            if (section == null) {
-                continue;
-            }
-            Entity entity = section.getEntities().filter(e -> uuid.equals(e.getUUID())).findFirst().orElse(null);
-            if (entity != null) {
-                return entity;
-            }
-        }
-        return null;
-    }
-
-    private static Entity findEntityInClientSectionsById(ClientLevel level, int entityId) {
-        for (EntitySection<Entity> section : level.entityStorage.sectionStorage.sections.values()) {
-            if (section == null) {
-                continue;
-            }
-            Entity entity = section.getEntities().filter(e -> e.getId() == entityId).findFirst().orElse(null);
-            if (entity != null) {
-                return entity;
-            }
-        }
-        return null;
-    }
-
-    private static Entity findEntityInClientSectionsByUuid(ClientLevel level, UUID uuid) {
-        for (EntitySection<Entity> section : level.entityStorage.sectionStorage.sections.values()) {
             if (section == null) {
                 continue;
             }

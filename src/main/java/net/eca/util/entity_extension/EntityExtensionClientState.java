@@ -30,11 +30,6 @@ public final class EntityExtensionClientState {
     private static final Set<ResourceLocation> OVERRIDE_SKYBOXES = ConcurrentHashMap.newKeySet();
     private static final Set<ResourceLocation> OVERRIDE_MUSICS = ConcurrentHashMap.newKeySet();
 
-    // 当前维度已配置的效果对象（不受 shouldXxx 条件影响，仅在 activeType 变更时更新）
-    private static final Map<ResourceLocation, GlobalFogExtension> CONFIGURED_FOGS = new ConcurrentHashMap<>();
-    private static final Map<ResourceLocation, GlobalSkyboxExtension> CONFIGURED_SKYBOXES = new ConcurrentHashMap<>();
-    private static final Map<ResourceLocation, CombatMusicExtension> CONFIGURED_MUSICS = new ConcurrentHashMap<>();
-
     public static void setActiveType(ResourceLocation dimensionId, ResourceLocation typeId) {
         if (dimensionId == null) {
             return;
@@ -164,36 +159,42 @@ public final class EntityExtensionClientState {
             return;
         }
         ACTIVE_PRIORITIES.put(dimensionId, extensionPriority);
-        GlobalFogExtension fog = extension.globalFogExtension();
-        if (fog != null && fog.enabled()) {
-            CONFIGURED_FOGS.put(dimensionId, fog);
-            ACTIVE_FOGS.put(dimensionId, fog);
-        } else {
-            CONFIGURED_FOGS.remove(dimensionId);
-            ACTIVE_FOGS.remove(dimensionId);
+        // activeType 切换瞬间先按默认状态解析一次，避免首个条件 tick 之前的空窗
+        resolveConditionalEffects(dimensionId, extension, null);
+    }
+
+    /*
+     * 按当前主实体状态重新解析全局效果，每个条件 tick 调用；维度被服务端覆写时跳过对应效果。
+     * 主实体未定位（entity 为 null）时不应用 shouldEnableXxx 门控，仅按 enabled() 解析。
+     */
+    private static void resolveConditionalEffects(ResourceLocation dimensionId, EntityExtension extension, LivingEntity entity) {
+        if (!OVERRIDE_FOGS.contains(dimensionId)) {
+            GlobalFogExtension fog = extension.globalFogExtension(entity);
+            if (fog != null && fog.enabled() && (entity == null || extension.shouldEnableFog(entity))) {
+                ACTIVE_FOGS.put(dimensionId, fog);
+            } else {
+                ACTIVE_FOGS.remove(dimensionId);
+            }
         }
-        GlobalSkyboxExtension skybox = extension.globalSkyboxExtension();
-        if (skybox != null && skybox.enabled()) {
-            CONFIGURED_SKYBOXES.put(dimensionId, skybox);
-            ACTIVE_SKYBOXES.put(dimensionId, skybox);
-        } else {
-            CONFIGURED_SKYBOXES.remove(dimensionId);
-            ACTIVE_SKYBOXES.remove(dimensionId);
+        if (!OVERRIDE_SKYBOXES.contains(dimensionId)) {
+            GlobalSkyboxExtension skybox = extension.globalSkyboxExtension(entity);
+            if (skybox != null && skybox.enabled() && (entity == null || extension.shouldEnableSkybox(entity))) {
+                ACTIVE_SKYBOXES.put(dimensionId, skybox);
+            } else {
+                ACTIVE_SKYBOXES.remove(dimensionId);
+            }
         }
-        CombatMusicExtension music = extension.combatMusicExtension();
-        if (music != null && music.enabled()) {
-            CONFIGURED_MUSICS.put(dimensionId, music);
-            ACTIVE_MUSICS.put(dimensionId, music);
-        } else {
-            CONFIGURED_MUSICS.remove(dimensionId);
-            ACTIVE_MUSICS.remove(dimensionId);
+        if (!OVERRIDE_MUSICS.contains(dimensionId)) {
+            CombatMusicExtension music = extension.combatMusicExtension(entity);
+            if (music != null && music.enabled() && (entity == null || extension.shouldEnableMusic(entity))) {
+                ACTIVE_MUSICS.put(dimensionId, music);
+            } else {
+                ACTIVE_MUSICS.remove(dimensionId);
+            }
         }
     }
 
     private static void clearEffectCaches(ResourceLocation dimensionId) {
-        CONFIGURED_FOGS.remove(dimensionId);
-        CONFIGURED_SKYBOXES.remove(dimensionId);
-        CONFIGURED_MUSICS.remove(dimensionId);
         if (!OVERRIDE_FOGS.contains(dimensionId)) {
             ACTIVE_FOGS.remove(dimensionId);
         }
@@ -221,34 +222,7 @@ public final class EntityExtensionClientState {
             return;
         }
 
-        LivingEntity entity = findPrimaryEntity(level, type);
-
-        GlobalFogExtension fog = CONFIGURED_FOGS.get(dimensionId);
-        if (fog != null) {
-            if (extension.shouldEnableFog(entity)) {
-                ACTIVE_FOGS.put(dimensionId, fog);
-            } else {
-                ACTIVE_FOGS.remove(dimensionId);
-            }
-        }
-
-        GlobalSkyboxExtension skybox = CONFIGURED_SKYBOXES.get(dimensionId);
-        if (skybox != null) {
-            if (extension.shouldEnableSkybox(entity)) {
-                ACTIVE_SKYBOXES.put(dimensionId, skybox);
-            } else {
-                ACTIVE_SKYBOXES.remove(dimensionId);
-            }
-        }
-
-        CombatMusicExtension music = CONFIGURED_MUSICS.get(dimensionId);
-        if (music != null) {
-            if (extension.shouldEnableMusic(entity)) {
-                ACTIVE_MUSICS.put(dimensionId, music);
-            } else {
-                ACTIVE_MUSICS.remove(dimensionId);
-            }
-        }
+        resolveConditionalEffects(dimensionId, extension, findPrimaryEntity(level, type));
     }
 
     private static LivingEntity findPrimaryEntity(ClientLevel level, EntityType<?> type) {

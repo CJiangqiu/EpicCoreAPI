@@ -54,12 +54,28 @@ public abstract class EntityExtension {
     @OnlyIn(Dist.CLIENT)
     public abstract BossBarExtension bossBarExtension();
 
+    // 带参重载用于按实体状态条件切换；entity 可能为 null，重写时需自行判空
+    @OnlyIn(Dist.CLIENT)
+    public BossBarExtension bossBarExtension(LivingEntity entity) {
+        return bossBarExtension();
+    }
+
     @OnlyIn(Dist.CLIENT)
     public abstract EntityLayerExtension entityLayerExtension();
 
     @OnlyIn(Dist.CLIENT)
+    public EntityLayerExtension entityLayerExtension(LivingEntity entity) {
+        return entityLayerExtension();
+    }
+
+    @OnlyIn(Dist.CLIENT)
     public GlobalFogExtension globalFogExtension() {
         return null;
+    }
+
+    @OnlyIn(Dist.CLIENT)
+    public GlobalFogExtension globalFogExtension(LivingEntity entity) {
+        return globalFogExtension();
     }
 
     @OnlyIn(Dist.CLIENT)
@@ -68,8 +84,18 @@ public abstract class EntityExtension {
     }
 
     @OnlyIn(Dist.CLIENT)
+    public GlobalSkyboxExtension globalSkyboxExtension(LivingEntity entity) {
+        return globalSkyboxExtension();
+    }
+
+    @OnlyIn(Dist.CLIENT)
     public CombatMusicExtension combatMusicExtension() {
         return null;
+    }
+
+    @OnlyIn(Dist.CLIENT)
+    public CombatMusicExtension combatMusicExtension(LivingEntity entity) {
+        return combatMusicExtension();
     }
 
     @OnlyIn(Dist.CLIENT)

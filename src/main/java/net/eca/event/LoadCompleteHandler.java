@@ -11,6 +11,7 @@ import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.item_extension.ItemExtensionManager;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
@@ -55,7 +56,11 @@ public final class LoadCompleteHandler {
 
         // 扫描并注册 Entity Extensions、Item Extensions、BossShow
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
-        event.enqueueWork(ItemExtensionManager::scanAndRegisterAll);
+        // Item Extension 系统纯客户端：ItemExtensionManager 标记 @OnlyIn(Dist.CLIENT)，
+        // 在专用服务端形成该方法引用会触发 RuntimeDistCleaner 崩溃
+        if (FMLEnvironment.dist.isClient()) {
+            event.enqueueWork(ItemExtensionManager::scanAndRegisterAll);
+        }
         event.enqueueWork(BossShowManager::scanAndRegisterAll);
 
         // 激进防御：FMLLoadComplete 后重应用 Entity + LivingEntity 转换

@@ -1,7 +1,7 @@
 package net.eca.network;
 
+import net.eca.client.ClientEntityUtil;
 import net.eca.util.EcaLogger;
-import net.eca.util.EntityUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.BossHealthOverlay;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -75,7 +75,7 @@ public class ClientRemovePacket {
                     entity.stopRiding();
                     entity.onRemovedFromWorld();
                     entity.levelCallback = EntityInLevelCallback.NULL;
-                    EntityUtil.removeFromClientContainers(clientLevel, entity);
+                    ClientEntityUtil.removeFromClientContainers(clientLevel, entity);
                 } else {
                     EcaLogger.debug("[ClientRemovePacket] Client entity removal: entity not found (ID: {})", msg.entityId);
                 }

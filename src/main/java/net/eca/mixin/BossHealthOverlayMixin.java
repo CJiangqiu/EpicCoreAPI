@@ -65,11 +65,6 @@ public class BossHealthOverlayMixin {
             return false;
         }
 
-        BossBarExtension bossBar = extension.bossBarExtension();
-        if (bossBar == null || !bossBar.enabled()) {
-            return false;
-        }
-
         UUID entityUuid = EntityExtensionClientState.getBossEventEntityUuid(event.getId());
         LivingEntity bossEntity = null;
         if (entityUuid != null) {
@@ -79,6 +74,11 @@ public class BossHealthOverlayMixin {
                     break;
                 }
             }
+        }
+
+        BossBarExtension bossBar = extension.bossBarExtension(bossEntity);
+        if (bossBar == null || !bossBar.enabled()) {
+            return false;
         }
         if (!bossBar.shouldRender(bossEntity)) {
             return true;

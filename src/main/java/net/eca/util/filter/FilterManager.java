@@ -21,7 +21,15 @@ public class FilterManager {
     private static final Map<UUID, Set<FilterType>> ACTIVE_FILTERS = new ConcurrentHashMap<>();
 
     public static void enable(ServerPlayer player, FilterType filter) {
-        ACTIVE_FILTERS.computeIfAbsent(player.getUUID(), k -> EnumSet.noneOf(FilterType.class)).add(filter);
+        Set<FilterType> filters = ACTIVE_FILTERS.computeIfAbsent(player.getUUID(), k -> EnumSet.noneOf(FilterType.class));
+        // 滤镜单一互斥：新滤镜替换掉当前已激活的滤镜
+        for (FilterType prev : EnumSet.copyOf(filters)) {
+            if (prev != filter) {
+                NetworkHandler.sendToPlayer(new FilterSyncPacket(prev, false), player);
+            }
+        }
+        filters.clear();
+        filters.add(filter);
         NetworkHandler.sendToPlayer(new FilterSyncPacket(filter, true), player);
     }
 

@@ -23,7 +23,6 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.server.level.*;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.entity.*;
 import net.minecraft.world.level.gameevent.DynamicGameEventListener;
@@ -526,68 +525,6 @@ public class EntityUtil {
         return msg != null && msg.contains("already tracked");
     }
 
-    //检查实体在客户端关键容器中的存在情况
-    public static Map<String, Boolean> checkEntityInClientContainers(ClientLevel clientLevel, UUID entityUUID) {
-        Map<String, Boolean> result = new LinkedHashMap<>();
-        if (clientLevel == null || entityUUID == null) {
-            return result;
-        }
-
-        Entity entity = null;
-        try {
-            entity = EcaEntitySelector.getEntity(clientLevel, entityUUID);
-        } catch (Exception ignored) {
-        }
-        result.put("ClientLevel.getEntity(uuid)", entity != null);
-
-        try {
-            result.put("ClientEntityStorage.entityLookup.byUuid", clientLevel.entityStorage.entityStorage.byUuid.containsKey(entityUUID));
-        } catch (Exception e) {
-            result.put("ClientEntityStorage.entityLookup.byUuid", false);
-        }
-
-        try {
-            boolean byId = entity != null && clientLevel.entityStorage.entityStorage.byId.containsKey(entity.getId());
-            result.put("ClientEntityStorage.entityLookup.byId", byId);
-        } catch (Exception e) {
-            result.put("ClientEntityStorage.entityLookup.byId", false);
-        }
-
-        try {
-            result.put("ClientLevel.tickingEntities", entity != null && clientLevel.tickingEntities.contains(entity));
-        } catch (Exception e) {
-            result.put("ClientLevel.tickingEntities", false);
-        }
-
-        try {
-            boolean inSection = false;
-            if (entity != null) {
-                Entity targetEntity = entity;
-                long sectionKey = SectionPos.asLong(entity.blockPosition());
-                EntitySection<Entity> section = clientLevel.entityStorage.sectionStorage.sections.get(sectionKey);
-                inSection = section != null && section.getEntities().anyMatch(e -> e == targetEntity);
-            }
-            result.put("ClientEntityStorage.sectionStorage", inSection);
-        } catch (Exception e) {
-            result.put("ClientEntityStorage.sectionStorage", false);
-        }
-
-        try {
-            result.put("ClientEntity.levelCallback", entity != null && entity.levelCallback != EntityInLevelCallback.NULL);
-        } catch (Exception e) {
-            result.put("ClientEntity.levelCallback", false);
-        }
-
-        try {
-            boolean inClientPlayers = !(entity instanceof Player) || clientLevel.players.contains(entity);
-            result.put("ClientLevel.players", inClientPlayers);
-        } catch (Exception e) {
-            result.put("ClientLevel.players", false);
-        }
-
-        return result;
-    }
-
     /**
      * Mark an entity as currently changing dimensions.
      * Should be called when dimension change starts (removalReason = CHANGED_DIMENSION).
@@ -1079,7 +1016,7 @@ public class EntityUtil {
     }
 
     //从 EntitySectionStorage 遍历所有 section 移除实体（直接操作 ClassInstanceMultiMap 底层，绕过可被 Mixin 的 MC 层 API）
-    private static void removeFromSectionStorage(EntitySectionStorage<Entity> sectionStorage, Entity entity) {
+    public static void removeFromSectionStorage(EntitySectionStorage<Entity> sectionStorage, Entity entity) {
         for (EntitySection<Entity> section : sectionStorage.sections.values()) {
             if (section != null) {
                 removeFromClassInstanceMultiMap(section.storage, entity);
@@ -1117,35 +1054,11 @@ public class EntityUtil {
     }
 
     //清理空的 EntitySection
-    private static void removeSectionIfEmpty(EntitySectionStorage<Entity> sectionStorage, Entity entity) {
+    public static void removeSectionIfEmpty(EntitySectionStorage<Entity> sectionStorage, Entity entity) {
         long sectionKey = SectionPos.asLong(entity.blockPosition());
         EntitySection<Entity> section = sectionStorage.sections.get(sectionKey);
         if (section != null && section.isEmpty()) {
             sectionStorage.sections.remove(sectionKey);
-        }
-    }
-
-    //客户端底层容器清除
-    public static void removeFromClientContainers(ClientLevel clientLevel, Entity entity) {
-        try {
-            clientLevel.players.remove(entity);
-
-            if (entity.isMultipartEntity()) {
-                for (PartEntity<?> part : entity.getParts()) {
-                    clientLevel.partEntities.remove(part.getId());
-                }
-            }
-
-            TransientEntitySectionManager<Entity> entityStorage = clientLevel.entityStorage;
-            removeFromSectionStorage(entityStorage.sectionStorage, entity);              //1. ClassInstanceMultiMap 直接操作
-            removeSectionIfEmpty(entityStorage.sectionStorage, entity);
-            removeFromEntityTickList(clientLevel.tickingEntities, entity);               //2. EntityTickList.active 直接操作
-            removeFromEntityLookup(entityStorage.entityStorage, entity);                 //3. EntityLookup byId/byUuid 直接操作
-
-        } catch (Exception e) {
-            EcaLogger.error("[EntityUtil] Failed to remove from client containers, entityId={}, type={}, uuid={}",
-                    entity.getId(), entity.getType(), entity.getUUID());
-            EcaLogger.error("[EntityUtil] Client container removal stacktrace", e);
         }
     }
 

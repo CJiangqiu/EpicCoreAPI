@@ -242,6 +242,7 @@ import java.lang.annotation.Target;
  *   <li>Each {@code EntityType} can only have ONE extension. Duplicate registrations will be rejected with an error log.</li>
  *   <li>Boss bars are automatically created for entities without native {@code ServerBossEvent} fields. For entities with native boss bars (Wither, Ender Dragon), custom rendering replaces the vanilla appearance.</li>
  *   <li>Global effects only activate when at least one entity of that type is alive in the dimension.</li>
+ *   <li>Conditional switching: every extension method has an entity-aware overload (e.g. {@code globalSkyboxExtension(LivingEntity)}) — override it to return a different extension object based on entity state. The entity argument may be null, so null-check it. Global effects re-evaluate roughly once per second against the dimension's primary entity; instance effects (boss bar, render layer) re-evaluate every frame per entity.</li>
  *   <li>The {@code texture()} helper automatically prepends "textures/" and uses your mod ID.</li>
  *   <li>All client-side methods are annotated with {@code @OnlyIn(Dist.CLIENT)} - do not call them on the server.</li>
  * </ul>
