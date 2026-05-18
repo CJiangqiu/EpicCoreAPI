@@ -74,25 +74,25 @@ public class EntityUtil {
 
     private static final StackWalker STACK_WALKER = StackWalker.getInstance();
     private static final List<String> VANILLA_ALLOWED_PREFIXES = List.of(
-        "java.", "sun.", "jdk.", "com.sun.",
-        "net.minecraft.", "com.mojang.",
-        "net.minecraftforge.", "cpw.mods.",
-        "org.spongepowered.asm.",
-        "net.eca."
+            "java.", "sun.", "jdk.", "com.sun.",
+            "net.minecraft.", "com.mojang.",
+            "net.minecraftforge.", "cpw.mods.",
+            "org.spongepowered.asm.",
+            "net.eca."
     );
 
     //检查调用栈中是否存在非原版/非ECA的外部调用者
     public static boolean hasExternalCaller(int limit) {
         return STACK_WALKER.walk(frames ->
-            frames.skip(2)
-                  .limit(limit)
-                  .anyMatch(f -> {
-                      String cls = f.getClassName();
-                      for (String prefix : VANILLA_ALLOWED_PREFIXES) {
-                          if (cls.startsWith(prefix)) return false;
-                      }
-                      return true;
-                  })
+                frames.skip(2)
+                        .limit(limit)
+                        .anyMatch(f -> {
+                            String cls = f.getClassName();
+                            for (String prefix : VANILLA_ALLOWED_PREFIXES) {
+                                if (cls.startsWith(prefix)) return false;
+                            }
+                            return true;
+                        })
         );
     }
 
@@ -114,9 +114,9 @@ public class EntityUtil {
 
         //初始化生命值黑名单默认值
         HEALTH_BLACKLIST_KEYWORDS.addAll(List.of(
-            "ai", "goal", "target", "brain", "memory", "sensor", "skill", "ability", "spell", "cast",
-            "animation", "swing", "cooldown", "duration", "delay", "timer", "tick", "time",
-            "age", "lifetime", "deathtime", "hurttime", "invulnerabletime", "hurt", "max"
+                "ai", "goal", "target", "brain", "memory", "sensor", "skill", "ability", "spell", "cast",
+                "animation", "swing", "cooldown", "duration", "delay", "timer", "tick", "time",
+                "age", "lifetime", "deathtime", "hurttime", "invulnerabletime", "hurt", "max"
         ));
     }
 
@@ -376,6 +376,13 @@ public class EntityUtil {
         }
     }
 
+    /*
+     * 防止 reviveAllContainersDirect 内的 addNewEntity 再次派发 EntityJoinLevelEvent，
+     * 让在该事件监听器里调用 EcaAPI.revive/setInvulnerable 的第三方 mod 不会陷入栈溢出。
+     * 同线程同 UUID 重入时直接返回当前快照，外层栈帧继续完成 join 流程即可。
+     */
+    private static final ThreadLocal<Set<UUID>> REVIVE_IN_PROGRESS = ThreadLocal.withInitial(HashSet::new);
+
     //按实体实例复活关键容器（服务端）
     public static Map<String, Boolean> reviveAllContainers(LivingEntity entity) {
         Map<String, Boolean> result = new LinkedHashMap<>();
@@ -423,61 +430,79 @@ public class EntityUtil {
     static Map<String, Boolean> reviveAllContainersDirect(ServerLevel level, Entity entity) {
         Map<String, Boolean> result = new LinkedHashMap<>();
         UUID entityUUID = entity.getUUID();
-        PersistentEntitySectionManager<Entity> entityManager = level.entityManager;
-        Map<String, Boolean> before = checkEntityInServerContainers(level, entityUUID);
 
-        // 先尝试修复 levelCallback，避免仅回调缺失时走 addNewEntity 造成不稳定
-        if (!Boolean.TRUE.equals(before.get("Entity.levelCallback"))) {
-            rebuildEntityLevelCallback(entityManager, entity);
+        /*
+         * 重入防护：若当前线程栈里已有针对该 UUID 的 reviveAllContainersDirect 调用，
+         * 直接返回最新容器快照，避免再次执行 addNewEntity 而二次派发 EntityJoinLevelEvent —
+         * 这正是第三方 mod 在该事件监听器里调用 EcaAPI.setInvulnerable/revive 时的死循环根因。
+         */
+        Set<UUID> inFlight = REVIVE_IN_PROGRESS.get();
+        if (!inFlight.add(entityUUID)) {
+            return checkEntityInServerContainers(level, entityUUID);
         }
 
-        //补Section/Lookup/levelCallback基础注册
-        if (!Boolean.TRUE.equals(before.get("EntitySectionStorage.sections"))
-            || !Boolean.TRUE.equals(before.get("EntityLookup.byUuid"))
-            || !Boolean.TRUE.equals(before.get("EntityLookup.byId"))) {
-            try {
-                entityManager.knownUuids.remove(entityUUID);
-                entityManager.addNewEntity(entity);
-            } catch (Exception e) {
-                entityManager.knownUuids.add(entityUUID);
-                EcaLogger.info("[EntityUtil] addNewEntity failed, uuid={}, msg={}", entityUUID, e.getMessage());
+        try {
+            PersistentEntitySectionManager<Entity> entityManager = level.entityManager;
+            Map<String, Boolean> before = checkEntityInServerContainers(level, entityUUID);
+
+            // 先尝试修复 levelCallback，避免仅回调缺失时走 addNewEntity 造成不稳定
+            if (!Boolean.TRUE.equals(before.get("Entity.levelCallback"))) {
+                rebuildEntityLevelCallback(entityManager, entity);
             }
-        } else if (!Boolean.TRUE.equals(before.get("PersistentEntitySectionManager.knownUuids"))) {
-            entityManager.knownUuids.add(entityUUID);
-        }
 
-        //补TickList
-        if (!level.entityTickList.contains(entity)) {
-            level.entityTickList.add(entity);
-        }
+            //补Section/Lookup/levelCallback基础注册
+            if (!Boolean.TRUE.equals(before.get("EntitySectionStorage.sections"))
+                    || !Boolean.TRUE.equals(before.get("EntityLookup.byUuid"))
+                    || !Boolean.TRUE.equals(before.get("EntityLookup.byId"))) {
+                try {
+                    entityManager.knownUuids.remove(entityUUID);
+                    entityManager.addNewEntity(entity);
+                } catch (Exception e) {
+                    entityManager.knownUuids.add(entityUUID);
+                    EcaLogger.info("[EntityUtil] addNewEntity failed, uuid={}, msg={}", entityUUID, e.getMessage());
+                }
+            } else if (!Boolean.TRUE.equals(before.get("PersistentEntitySectionManager.knownUuids"))) {
+                entityManager.knownUuids.add(entityUUID);
+            }
 
-        //补ChunkMap追踪
-        if (!level.chunkSource.chunkMap.entityMap.containsKey(entity.getId())
-            || !Boolean.TRUE.equals(before.get("ChunkMap.TrackedEntity.seenBy"))) {
-            try {
-                entityManager.callbacks.onTrackingStart(entity);
-            } catch (Exception e) {
-                if (!isAlreadyTrackedException(e)) {
-                    EcaLogger.info("[EntityUtil] onTrackingStart failed, uuid={}, msg={}", entityUUID, e.getMessage());
+            //补TickList
+            if (!level.entityTickList.contains(entity)) {
+                level.entityTickList.add(entity);
+            }
+
+            //补ChunkMap追踪
+            if (!level.chunkSource.chunkMap.entityMap.containsKey(entity.getId())
+                    || !Boolean.TRUE.equals(before.get("ChunkMap.TrackedEntity.seenBy"))) {
+                try {
+                    entityManager.callbacks.onTrackingStart(entity);
+                } catch (Exception e) {
+                    if (!isAlreadyTrackedException(e)) {
+                        EcaLogger.info("[EntityUtil] onTrackingStart failed, uuid={}, msg={}", entityUUID, e.getMessage());
+                    }
                 }
             }
-        }
 
-        //按类型补容器
-        if (entity instanceof ServerPlayer player && !level.players.contains(player)) {
-            level.players.add(player);
-        }
-        if (entity instanceof Mob mob && !level.navigatingMobs.contains(mob)) {
-            level.navigatingMobs.add(mob);
-        }
+            //按类型补容器
+            if (entity instanceof ServerPlayer player && !level.players.contains(player)) {
+                level.players.add(player);
+            }
+            if (entity instanceof Mob mob && !level.navigatingMobs.contains(mob)) {
+                level.navigatingMobs.add(mob);
+            }
 
-        // addNewEntity 返回 false 时不会抛异常，这里再兜底一次回调重建
-        if (entity.levelCallback == EntityInLevelCallback.NULL) {
-            rebuildEntityLevelCallback(entityManager, entity);
-        }
+            // addNewEntity 返回 false 时不会抛异常，这里再兜底一次回调重建
+            if (entity.levelCallback == EntityInLevelCallback.NULL) {
+                rebuildEntityLevelCallback(entityManager, entity);
+            }
 
-        result.putAll(checkEntityInServerContainers(level, entityUUID));
-        return result;
+            result.putAll(checkEntityInServerContainers(level, entityUUID));
+            return result;
+        } finally {
+            inFlight.remove(entityUUID);
+            if (inFlight.isEmpty()) {
+                REVIVE_IN_PROGRESS.remove();
+            }
+        }
     }
 
     static void rebuildEntityLevelCallback(PersistentEntitySectionManager<Entity> entityManager, Entity entity) {
@@ -687,8 +712,8 @@ public class EntityUtil {
 
         try {
             NetworkHandler.sendToTrackingClients(
-                new EntityHealthSyncPacket(entity.getId(), expectedHealth),
-                entity
+                    new EntityHealthSyncPacket(entity.getId(), expectedHealth),
+                    entity
             );
         } catch (Exception ignored) {}
     }
