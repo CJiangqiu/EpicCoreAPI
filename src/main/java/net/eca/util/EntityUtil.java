@@ -688,10 +688,20 @@ public class EntityUtil {
             //只在最后 verify 一次
             boolean ok = verifyHealthChange(entity, expectedHealth);
             syncHealthToClients(entity, expectedHealth, beforeHealth);
+            if (!ok) {
+                EcaLogger.warn("setHealth verify 失败 entity={} expected={} actual={} (上方 writeAll 诊断给出 Phase3 详情)",
+                    entity.getClass().getName(), expectedHealth, safeGet(entity));
+            }
             return ok;
         } catch (Exception e) {
+            EcaLogger.warn("setHealth 抛异常 entity={} expected={} msg={}",
+                entity == null ? "null" : entity.getClass().getName(), expectedHealth, e.getMessage());
             return false;
         }
+    }
+
+    private static float safeGet(LivingEntity entity) {
+        try { return entity.getHealth(); } catch (Throwable t) { return Float.NaN; }
     }
 
     //从同步包调用，在客户端执行改血（不再发包）

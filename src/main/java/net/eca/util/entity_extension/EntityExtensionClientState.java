@@ -276,5 +276,19 @@ public final class EntityExtensionClientState {
         return BOSS_EVENT_ENTITY_UUIDS.get(bossEventId);
     }
 
+    // 清除全部客户端状态，断开连接时调用，防止单人模式下静态状态跨存档残留
+    public static void clearAll() {
+        ACTIVE_TYPES.clear();
+        BOSS_EVENT_TYPES.clear();
+        BOSS_EVENT_ENTITY_UUIDS.clear();
+        ACTIVE_FOGS.clear();
+        ACTIVE_SKYBOXES.clear();
+        ACTIVE_MUSICS.clear();
+        ACTIVE_PRIORITIES.clear();
+        OVERRIDE_FOGS.clear();
+        OVERRIDE_SKYBOXES.clear();
+        OVERRIDE_MUSICS.clear();
+    }
+
     private EntityExtensionClientState() {}
 }

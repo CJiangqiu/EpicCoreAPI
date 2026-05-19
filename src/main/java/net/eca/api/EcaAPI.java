@@ -2,6 +2,7 @@ package net.eca.api;
 
 import net.eca.agent.EcaAgent;
 import net.eca.coremod.AllReturnToggle;
+import net.eca.coremod.RestoreManager;
 import net.eca.coremod.TransformerWhitelist;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
@@ -1260,6 +1261,44 @@ public final class EcaAPI {
         int lastDot = binaryName.lastIndexOf('.');
         if (lastDot <= 0) return null;
         return binaryName.substring(0, lastDot + 1).replace('.', '/');
+    }
+
+    // ==================== 类还原系统 ====================
+
+    // 类还原攻击（需要开启激进攻击逻辑配置）：将实体关键生命周期方法还原为原版实现
+    /**
+     * Restore an entity's critical lifecycle methods to their vanilla implementation.
+     * DANGER! Requires "Enable Radical Logic" in Attack config.
+     * <p>
+     * The entity's custom class chain is retransformed so that this specific instance
+     * delegates getHealth, getMaxHealth, setHealth, hurt, actuallyHurt, die, tickDeath,
+     * isAlive, isDeadOrDying and isRemoved to the vanilla {@code LivingEntity} behaviour,
+     * defeating custom health storage and anti-modification logic.
+     * The effect is per-instance and reversible via {@link #unrestoreEntity(LivingEntity)}.
+     * @param entity the living entity to restore
+     * @return true if the restore succeeded
+     */
+    public static boolean restoreEntity(LivingEntity entity) {
+        if (entity == null) return false;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
+            EcaLogger.warn("restoreEntity requires Attack Radical Logic to be enabled in config");
+            return false;
+        }
+        if (EcaAgent.getInstrumentation() == null) {
+            EcaLogger.warn("restoreEntity: Agent is not initialized");
+            return false;
+        }
+        return RestoreManager.restore(entity);
+    }
+
+    // 取消类还原：使实体恢复其原本的自定义实现
+    /**
+     * Cancel the class-restore on an entity, returning it to its custom implementation.
+     * The injected guards remain dormant for non-restored instances.
+     * @param entity the living entity to unrestore
+     */
+    public static void unrestoreEntity(LivingEntity entity) {
+        RestoreManager.unrestore(entity);
     }
 
     // ==================== 白名单 API ====================

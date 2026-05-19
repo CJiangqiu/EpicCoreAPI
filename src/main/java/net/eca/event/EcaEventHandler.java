@@ -14,6 +14,7 @@ import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 
@@ -110,5 +111,12 @@ public class EcaEventHandler {
     public void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
         BossShowPlaybackTracker.onServerTick(event.getServer());
+    }
+
+    //服务器停止时清空静态状态，防止单人模式下集成服务器跨存档残留
+    @SubscribeEvent
+    public void onServerStopped(ServerStoppedEvent event) {
+        GlobalEffectOverrideManager.clearAllDimensions();
+        EntityExtensionManager.clearAll();
     }
 }

@@ -103,6 +103,15 @@ public final class GlobalEffectOverrideManager {
         }
     }
 
+    // ==================== 跨存档隔离 ====================
+
+    // 清除所有维度的覆写状态，服务器停止时调用，防止单人模式下静态状态跨存档残留
+    public static void clearAllDimensions() {
+        FOG_OVERRIDES.clear();
+        SKYBOX_OVERRIDES.clear();
+        MUSIC_OVERRIDES.clear();
+    }
+
     // ==================== 玩家同步 ====================
 
     public static void syncToPlayer(ServerPlayer player) {

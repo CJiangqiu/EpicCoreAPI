@@ -382,6 +382,16 @@ public final class EntityExtensionManager {
         }
     }
 
+    // 清除所有维度状态，服务器停止时调用，防止单人模式下静态状态跨存档残留
+    public static void clearAll() {
+        for (DimensionState state : DIMENSION_STATES.values()) {
+            clearCustomBossEvents(state);
+        }
+        DIMENSION_STATES.clear();
+        ORDER_COUNTER.set(0);
+        validateTickCounter = 0;
+    }
+
     public static void onPlayerChangedDimension(ServerPlayer player, ResourceKey<Level> fromDimension) {
         if (player == null || fromDimension == null) {
             return;

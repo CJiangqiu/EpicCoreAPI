@@ -188,6 +188,13 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             anyTransformed = true;
         }
 
+        // 类还原 guard 注入（在 hook 之后，使还原 guard 位于 processGetHealth 之前）
+        byte[] restoreResult = ClassRestoreTransformer.transform(className, result);
+        if (restoreResult != null) {
+            result = restoreResult;
+            anyTransformed = true;
+        }
+
         return anyTransformed ? result : null;
     }
 

@@ -1,7 +1,6 @@
 package net.eca.coremod;
 
 import net.eca.api.EcaAPI;
-import net.eca.util.health.HealthAnalyzerManager;
 import net.eca.util.health.HealthLockManager;
 import net.minecraft.world.entity.LivingEntity;
 
@@ -20,24 +19,17 @@ public final class LivingEntityHook {
 
     // ==================== getHealth() hook ====================
 
-    // 处理 getHealth()：分析 + 锁血 + 禁疗，NaN 表示放行
+    // 处理 getHealth()：锁血 + 禁疗，NaN 表示放行
     /**
      * Process getHealth() at method HEAD.
      * Returns a float value to short-circuit, or NaN to fall through to original method.
      *
-     * Priority: analysis → health lock → heal ban → passthrough
+     * Priority: health lock → heal ban → passthrough
      *
      * @param entity the living entity
      * @return locked/banned health value, or NaN for passthrough
      */
     public static float processGetHealth(LivingEntity entity) {
-        // 始终触发分析（缓存机制会避免重复分析）
-        try {
-            String className = entity.getClass().getName().replace('.', '/');
-            HealthAnalyzerManager.onGetHealthCalled(entity, className);
-        } catch (Throwable t) {
-        }
-
         // 锁血：直接返回锁定值
         Float locked = HealthLockManager.getLock(entity);
         if (locked != null) {

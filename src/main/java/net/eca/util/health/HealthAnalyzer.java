@@ -1,34 +1,1020 @@
 package net.eca.util.health;
 
-import net.eca.coremod.TransformerWhitelist;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.util.EcaLogger;
+import net.eca.util.reflect.UnsafeUtil;
+import net.minecraft.network.syncher.EntityDataAccessor;
+import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.world.entity.LivingEntity;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
-import org.objectweb.asm.tree.*;
-import org.objectweb.asm.tree.analysis.*;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
+import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.analysis.Analyzer;
+import org.objectweb.asm.tree.analysis.Frame;
+import org.objectweb.asm.tree.analysis.Interpreter;
+import org.objectweb.asm.tree.analysis.Value;
 
 import java.io.InputStream;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.RecordComponent;
 import java.util.*;
-import java.util.function.BiFunction;
+import java.util.concurrent.ConcurrentHashMap;
 
 /*
- * Phase 3 数据流分析：反向追踪 getHealth() 的真实存储位置，之前的那个太复杂了，换成了现在通用性更强的版本
- * 沿继承链找到 m_21223_()F 最深的 override，用 ASM Analyzer + TaintInterpreter
- * 把字节码翻译成代数表达式树（Expr）。遇到 mod 方法会递归内联（深度上限 maxDepth），
- * java.lang / net.minecraft 的未识别调用保留为 UnresolvedCall，留给 Manager 走 sister-setter。
- * solve() 对表达式树做反向求解：给定期望返回值和目标叶子，沿运算链逐层求逆，
- * 算出叶子应该写什么值。不可逆节点返回 null，由上层兜底。
+ * 字节码反向数据流分析 + 对偶表求逆
+ * 从 getHealth 的 FRETURN 反向遍历指令序列构造 Expr 树,然后按 DualityTable 反推 sink 应写值
+ * Expr 节点只有 6 种(Primitive/Reference/Op/Call/Source/Choice),所有"类型差异"和"运算差异"
+ * 全部交给 DualityTable 的方法对偶对处理,不再按 leaf 类型展开
  */
 public final class HealthAnalyzer {
 
-    private static final String TARGET_METHOD_NAME = "m_21223_";
-    private static final String TARGET_METHOD_DESC = "()F";
-    private static final int DEFAULT_MAX_DEPTH = 10;
+    private static final String GETHEALTH_NAME = "m_21223_";
+    private static final String GETHEALTH_NAME_ALT = "getHealth";
+    private static final String GETHEALTH_DESC = "()F";
+    private static final int DEFAULT_MAX_DEPTH = 6;
+    private static final int DEFAULT_INLINE_BUDGET = 200;
 
     private HealthAnalyzer() {}
 
-    // ==================== 入口 ====================
+    private static final Map<Class<?>, Long> ENTRY_VALUE_OFFSET_CACHE = new ConcurrentHashMap<>();
+
+    /* ==================== Expr 类型系统 ==================== */
+
+    public interface Expr {}
+
+    //字面常量,jvmType 标记 IJFD/CSB/Z 等 JVM 类型字符
+    public record Primitive(Number value, char jvmType) implements Expr {}
+
+    //分析期已确定的对象引用(如 GETSTATIC EntityDataAccessor / 静态 Map)
+    public record Reference(Object value, String className) implements Expr {}
+
+    //JVM 算术/位/类型转换指令
+    public record Op(int opcode, List<Expr> args) implements Expr {
+        @Override public boolean equals(Object o) {
+            return this == o || (o instanceof Op other && opcode == other.opcode && args.equals(other.args));
+        }
+        @Override public int hashCode() { return opcode * 31 + args.hashCode(); }
+    }
+
+    //任意方法调用,args 含 receiver(若非 static)
+    public record Call(String owner, String name, String desc, List<Expr> args) implements Expr {}
+
+    //控制流汇合 / 多 return 路径的并集
+    public record Choice(List<Expr> alternatives) implements Expr {}
+
+    //分析期无法符号化的节点
+    public record UnknownExpr(String provenance) implements Expr {
+        public static final UnknownExpr UNKNOWN = new UnknownExpr("");
+    }
+
+    //数据源(sink 候选),内部封装 read/write IO,equals 按 canonicalKey
+    public static abstract class Source implements Expr {
+        public final Class<?> valueType;
+        public final String label;
+        protected Source(Class<?> valueType, String label) {
+            this.valueType = valueType;
+            this.label = label;
+        }
+        public abstract Object read(LivingEntity entity);
+        public abstract boolean write(LivingEntity entity, Object value);
+        protected abstract String canonicalKey();
+        @Override public boolean equals(Object o) {
+            return o instanceof Source s && canonicalKey().equals(s.canonicalKey());
+        }
+        @Override public int hashCode() { return canonicalKey().hashCode(); }
+        @Override public String toString() { return label; }
+    }
+
+    /* ==================== Source 子类 ==================== */
+
+    public record FieldStep(String ownerInternal, String name, String desc) {}
+
+    //this.a.b.c 字段链,可指向任意类型字段(数值/String/Object)
+    public static final class FieldChainSource extends Source {
+        public final List<FieldStep> chain;
+        private final VarHandle[] handles;
+
+        public FieldChainSource(List<FieldStep> chain, VarHandle[] handles, Class<?> valueType) {
+            super(valueType, "F:" + describe(chain));
+            this.chain = chain;
+            this.handles = handles;
+        }
+
+        private static String describe(List<FieldStep> chain) {
+            StringBuilder sb = new StringBuilder();
+            for (FieldStep s : chain) { if (sb.length() > 0) sb.append('.'); sb.append(s.name()); }
+            return sb.toString();
+        }
+
+        @Override public Object read(LivingEntity entity) {
+            try {
+                Object cur = entity;
+                for (VarHandle vh : handles) {
+                    if (cur == null) return null;
+                    cur = vh.get(cur);
+                }
+                return cur;
+            } catch (Throwable t) { return null; }
+        }
+
+        @Override public boolean write(LivingEntity entity, Object value) {
+            int n = handles.length;
+            FieldStep last = chain.get(n - 1);
+            Object coerced;
+            try {
+                coerced = coerceForType(value, valueType);
+                if (coerced == null && valueType.isPrimitive()) return false;
+            } catch (Throwable t) { return false; }
+
+            //最后一段属于 record:component 不可写(VarHandle/Unsafe 均被 JVM 拦),改为重建 record 写回上一级字段
+            Class<?> leafOwner = loadClass(last.ownerInternal());
+            if (leafOwner != null && leafOwner.isRecord() && n >= 2) {
+                try {
+                    Object holder = entity;
+                    for (int i = 0; i < n - 2; i++) {
+                        holder = handles[i].get(holder);
+                        if (holder == null) return false;
+                    }
+                    Object recordObj = handles[n - 2].get(holder);
+                    Object rebuilt = rebuildRecord(leafOwner, recordObj, last.name(), coerced);
+                    if (rebuilt == null) return false;
+                    handles[n - 2].set(holder, rebuilt);
+                    return true;
+                } catch (Throwable t) { return false; }
+            }
+
+            Object container;
+            try {
+                Object cur = entity;
+                for (int i = 0; i < n - 1; i++) {
+                    cur = handles[i].get(cur);
+                    if (cur == null) return false;
+                }
+                container = cur;
+            } catch (Throwable t) { return false; }
+
+            //普通字段:先走 VarHandle,失败(普通类的 final 字段)再走 Unsafe 兜底
+            try {
+                handles[n - 1].set(container, coerced);
+                return true;
+            } catch (Throwable ignored) {
+                Field f = resolveField(last);
+                if (f == null) return false;
+                return UnsafeUtil.unsafePutField(container, f, coerced);
+            }
+        }
+
+        @Override protected String canonicalKey() {
+            StringBuilder sb = new StringBuilder("FC:");
+            for (FieldStep s : chain) sb.append(s.ownerInternal()).append('.').append(s.name()).append(';');
+            return sb.toString();
+        }
+    }
+
+    //从 FieldStep 解析出 java.lang.reflect.Field,失败返回 null
+    private static Field resolveField(FieldStep step) {
+        try {
+            Class<?> owner = loadClass(step.ownerInternal());
+            if (owner == null) return null;
+            Field f = owner.getDeclaredField(step.name());
+            f.setAccessible(true);
+            return f;
+        } catch (Throwable t) { return null; }
+    }
+
+    //重建 record 实例:目标 component 用新值,其余 component 保留 current 的旧值。失败返回 null
+    private static Object rebuildRecord(Class<?> recordClass, Object current, String targetComponent, Object newValue) {
+        try {
+            RecordComponent[] comps = recordClass.getRecordComponents();
+            Class<?>[] types = new Class<?>[comps.length];
+            Object[] args = new Object[comps.length];
+            for (int i = 0; i < comps.length; i++) {
+                types[i] = comps[i].getType();
+                if (comps[i].getName().equals(targetComponent)) {
+                    args[i] = coerceForType(newValue, types[i]);
+                } else if (current != null) {
+                    Method acc = comps[i].getAccessor();
+                    acc.setAccessible(true);
+                    args[i] = acc.invoke(current);
+                } else {
+                    args[i] = types[i].isPrimitive() ? coerceForType(0, types[i]) : null;
+                }
+            }
+            Constructor<?> ctor = recordClass.getDeclaredConstructor(types);
+            ctor.setAccessible(true);
+            return ctor.newInstance(args);
+        } catch (Throwable t) { return null; }
+    }
+
+    //在非 this 受体上做字段链：root 是任意 Expr,运行时 eval 得到受体对象,再走 chain
+    public static final class ChainedFieldSource extends Source {
+        public final Expr root;
+        public final List<FieldStep> chain;
+
+        public ChainedFieldSource(Expr root, List<FieldStep> chain, Class<?> valueType) {
+            super(valueType, "CF:" + describe(chain));
+            this.root = root;
+            this.chain = chain;
+        }
+
+        private static String describe(List<FieldStep> chain) {
+            StringBuilder sb = new StringBuilder();
+            for (FieldStep s : chain) { if (sb.length() > 0) sb.append('.'); sb.append(s.name()); }
+            return sb.toString();
+        }
+
+        @Override public Object read(LivingEntity entity) {
+            try {
+                Object cur = evaluate(root, new SimpleEvalContext(entity));
+                for (FieldStep s : chain) {
+                    if (cur == null) return null;
+                    cur = readField(cur, s);
+                }
+                return cur;
+            } catch (Throwable t) { return null; }
+        }
+
+        @Override public boolean write(LivingEntity entity, Object value) {
+            try {
+                Object cur = evaluate(root, new SimpleEvalContext(entity));
+                if (cur == null) return false;
+                for (int i = 0; i < chain.size() - 1; i++) {
+                    cur = readField(cur, chain.get(i));
+                    if (cur == null) return false;
+                }
+                return writeField(cur, chain.get(chain.size() - 1), value);
+            } catch (Throwable t) { return false; }
+        }
+
+        @Override protected String canonicalKey() {
+            StringBuilder sb = new StringBuilder("CFS:").append(System.identityHashCode(root)).append(':');
+            for (FieldStep s : chain) sb.append(s.ownerInternal()).append('.').append(s.name()).append(';');
+            return sb.toString();
+        }
+    }
+
+    //SynchedEntityData.get(accessor) - 读写 DataItem.value
+    public static final class SynchedDataSource extends Source {
+        public final EntityDataAccessor<?> accessor;
+
+        public SynchedDataSource(EntityDataAccessor<?> accessor, Class<?> valueType) {
+            super(valueType, "SD:" + accessor.getId());
+            this.accessor = accessor;
+        }
+
+        @SuppressWarnings("rawtypes")
+        @Override public Object read(LivingEntity entity) {
+            try {
+                Int2ObjectMap<?> map = (Int2ObjectMap<?>) entity.getEntityData().itemsById;
+                SynchedEntityData.DataItem item = (SynchedEntityData.DataItem) map.get(accessor.getId());
+                return item == null ? null : item.value;
+            } catch (Throwable t) { return null; }
+        }
+
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        @Override public boolean write(LivingEntity entity, Object value) {
+            try {
+                SynchedEntityData ed = entity.getEntityData();
+                Int2ObjectMap<?> map = (Int2ObjectMap<?>) ed.itemsById;
+                SynchedEntityData.DataItem item = (SynchedEntityData.DataItem) map.get(accessor.getId());
+                if (item == null) return false;
+                Object coerced = coerceSameType(item.value, value);
+                if (coerced == null) return false;
+                item.value = coerced;
+                item.dirty = true;
+                ed.isDirty = true;
+                entity.onSyncedDataUpdated(accessor);
+                return true;
+            } catch (Throwable t) { return false; }
+        }
+
+        @Override protected String canonicalKey() { return "SD:" + accessor.getId(); }
+    }
+
+    //在某个容器对象上做 .get(key)。ownerClassInternal 非空时启用兄弟表联写,对抗影子表回滚
+    public static final class MapEntrySource extends Source {
+        public final Expr containerExpr;
+        public final Expr keyExpr;
+        public final KeyKind keyKind;
+        public final String ownerClassInternal;
+
+        public enum KeyKind { ENTITY, ENTITY_UUID, ENTITY_ID, UNKNOWN }
+
+        public MapEntrySource(Expr containerExpr, Expr keyExpr, KeyKind keyKind,
+                              String ownerClassInternal, Class<?> valueType, String label) {
+            super(valueType, "M:" + label);
+            this.containerExpr = containerExpr;
+            this.keyExpr = keyExpr;
+            this.keyKind = keyKind;
+            this.ownerClassInternal = ownerClassInternal;
+        }
+
+        @Override public Object read(LivingEntity entity) {
+            try {
+                Object obj = evaluate(containerExpr, new SimpleEvalContext(entity));
+                if (!(obj instanceof Map<?, ?> map)) return null;
+                Object key = matchKey(map, entity, keyKind);
+                return key == null ? null : map.get(key);
+            } catch (Throwable t) { return null; }
+        }
+
+        @Override public boolean write(LivingEntity entity, Object value) {
+            boolean any = false;
+            Set<Object> writtenMaps = Collections.newSetFromMap(new IdentityHashMap<>());
+
+            // 主表
+            try {
+                Object obj = evaluate(containerExpr, new SimpleEvalContext(entity));
+                if (obj instanceof Map<?, ?> map && writtenMaps.add(map)) {
+                    Object key = matchKey(map, entity, keyKind);
+                    if (key != null && unsafeModifyMapEntry(map, key, value)) any = true;
+                }
+            } catch (Throwable ignored) {}
+
+            // 兄弟表：owner class 的所有静态 Map 字段一起写,对抗影子表回滚
+            if (ownerClassInternal != null) {
+                Class<?> ownerClass = loadClass(ownerClassInternal);
+                if (ownerClass != null) {
+                    for (Field f : ownerClass.getDeclaredFields()) {
+                        if (!Modifier.isStatic(f.getModifiers())) continue;
+                        if (!Map.class.isAssignableFrom(f.getType())) continue;
+                        try {
+                            f.setAccessible(true);
+                            Object obj = f.get(null);
+                            if (!(obj instanceof Map<?, ?> map)) continue;
+                            if (!writtenMaps.add(map)) continue;
+                            Object key = matchKey(map, entity, keyKind);
+                            if (key == null) continue;
+                            if (unsafeModifyMapEntry(map, key, value)) any = true;
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            }
+            return any;
+        }
+
+        @Override protected String canonicalKey() {
+            return "ME:" + System.identityHashCode(containerExpr) + ":" + keyKind;
+        }
+    }
+
+    //arr[i] - arrayExpr 和 indexExpr 都是 Expr
+    public static final class ArrayElementSource extends Source {
+        public final Expr arrayExpr;
+        public final Expr indexExpr;
+
+        public ArrayElementSource(Expr arrayExpr, Expr indexExpr, Class<?> valueType, String label) {
+            super(valueType, "A:" + label);
+            this.arrayExpr = arrayExpr;
+            this.indexExpr = indexExpr;
+        }
+
+        @Override public Object read(LivingEntity entity) {
+            try {
+                EvalContext ctx = new SimpleEvalContext(entity);
+                Object arr = evaluate(arrayExpr, ctx);
+                Object idx = evaluate(indexExpr, ctx);
+                if (arr == null || !(idx instanceof Number n)) return null;
+                return java.lang.reflect.Array.get(arr, n.intValue());
+            } catch (Throwable t) { return null; }
+        }
+
+        @Override public boolean write(LivingEntity entity, Object value) {
+            try {
+                EvalContext ctx = new SimpleEvalContext(entity);
+                Object arr = evaluate(arrayExpr, ctx);
+                Object idx = evaluate(indexExpr, ctx);
+                if (arr == null || !(idx instanceof Number n) || !(value instanceof Number v)) return false;
+                int i = n.intValue();
+                Class<?> ct = arr.getClass().getComponentType();
+                if (ct == int.class) java.lang.reflect.Array.setInt(arr, i, v.intValue());
+                else if (ct == long.class) java.lang.reflect.Array.setLong(arr, i, v.longValue());
+                else if (ct == float.class) java.lang.reflect.Array.setFloat(arr, i, v.floatValue());
+                else if (ct == double.class) java.lang.reflect.Array.setDouble(arr, i, v.doubleValue());
+                else if (ct == short.class) java.lang.reflect.Array.setShort(arr, i, v.shortValue());
+                else if (ct == byte.class) java.lang.reflect.Array.setByte(arr, i, v.byteValue());
+                else java.lang.reflect.Array.set(arr, i, value);
+                return true;
+            } catch (Throwable t) { return false; }
+        }
+
+        @Override protected String canonicalKey() {
+            return "AE:" + System.identityHashCode(arrayExpr) + ":" + System.identityHashCode(indexExpr);
+        }
+    }
+
+    /* ==================== Map 写入：兄弟表 + entrySet 遍历 + Unsafe ==================== */
+
+    private static Object matchKey(Map<?, ?> map, LivingEntity entity, MapEntrySource.KeyKind kind) {
+        Object primary = switch (kind) {
+            case ENTITY -> entity;
+            case ENTITY_UUID -> entity.getUUID();
+            case ENTITY_ID -> entity.getId();
+            case UNKNOWN -> entity;
+        };
+        if (primary != null && map.containsKey(primary)) return primary;
+        Object[] fb = {entity, entity.getUUID(), entity.getId()};
+        for (Object k : fb) if (k != null && map.containsKey(k)) return k;
+        return null;
+    }
+
+    /* 遍历 entrySet 写所有 key 匹配的 entry(WeakHashMap 多 entry 同 key 的坑),
+     * 用 Entry.setValue 绕过 Map.put(常见 mixin 拦截点),失败走 Unsafe 写字段偏移
+     */
+    private static boolean unsafeModifyMapEntry(Map<?, ?> map, Object targetKey, Object newValue) {
+        int written = 0;
+        try {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                Object ek = entry.getKey();
+                if (ek != targetKey && (targetKey == null || !targetKey.equals(ek))) continue;
+                Object cur = entry.getValue();
+                Object boxed = cur == null ? newValue : coerceSameType(cur, newValue);
+                if (boxed == null) boxed = newValue;
+
+                boolean wrote = false;
+                try {
+                    @SuppressWarnings({"unchecked", "rawtypes"})
+                    Map.Entry rawEntry = entry;
+                    rawEntry.setValue(boxed);
+                    if (boxed.equals(entry.getValue())) wrote = true;
+                } catch (Throwable ignored) {}
+
+                if (!wrote) {
+                    long offset = getEntryValueOffset(entry);
+                    if (offset != -1) {
+                        UnsafeUtil.lwjglPutObject(entry, offset, boxed);
+                        if (boxed.equals(entry.getValue())) wrote = true;
+                    }
+                }
+                if (wrote) written++;
+            }
+        } catch (Throwable ignored) {}
+        return written > 0;
+    }
+
+    private static long getEntryValueOffset(Object entry) {
+        Class<?> ec = entry.getClass();
+        Long cached = ENTRY_VALUE_OFFSET_CACHE.get(ec);
+        if (cached != null) return cached;
+        for (Class<?> cls = ec; cls != null && cls != Object.class; cls = cls.getSuperclass()) {
+            for (Field f : cls.getDeclaredFields()) {
+                String n = f.getName();
+                if (n.equals("value") || n.equals("val")) {
+                    long off = UnsafeUtil.lwjglObjectFieldOffset(f);
+                    if (off != -1) {
+                        ENTRY_VALUE_OFFSET_CACHE.put(ec, off);
+                        return off;
+                    }
+                }
+            }
+        }
+        return -1;
+    }
+
+    /* ==================== 求逆接口与对偶表 ==================== */
+
+    public interface Inverter {
+        Object invert(Object target, List<Expr> args, int sinkArgIdx, EvalContext ctx);
+    }
+
+    public interface EvalContext {
+        Object eval(Expr e);
+        LivingEntity entity();
+    }
+
+    public static final class DualityTable {
+        private final Map<Integer, Inverter> opRules = new HashMap<>();
+        private final Map<String, Inverter> callRules = new HashMap<>();
+        public void registerOp(int opcode, Inverter inv) { opRules.put(opcode, inv); }
+        public void registerCall(String owner, String name, String desc, Inverter inv) {
+            callRules.put(owner + "#" + name + "#" + desc, inv);
+        }
+        public Inverter lookupOp(int opcode) { return opRules.get(opcode); }
+        public Inverter lookupCall(String owner, String name, String desc) {
+            return callRules.get(owner + "#" + name + "#" + desc);
+        }
+    }
+
+    public static final DualityTable TABLE = new DualityTable();
+    static { initDefaultRules(); }
+
+    /* ==================== Solve / Evaluate ==================== */
+
+    public static Object solveFor(Expr root, Source sink, Object target, EvalContext ctx) {
+        if (sameSource(root, sink)) return coerceForType(target, sink.valueType);
+        if (root instanceof Choice c) {
+            for (Expr alt : c.alternatives()) {
+                if (!containsSink(alt, sink)) continue;
+                Object v = solveFor(alt, sink, target, ctx);
+                if (v != null) return v;
+            }
+            return null;
+        }
+        if (root instanceof Op op) {
+            int idx = findArgWithSink(op.args(), sink);
+            if (idx < 0) return null;
+            Inverter inv = TABLE.lookupOp(op.opcode());
+            if (inv == null) return null;
+            Object newT = inv.invert(target, op.args(), idx, ctx);
+            if (newT == null) return null;
+            return solveFor(op.args().get(idx), sink, newT, ctx);
+        }
+        if (root instanceof Call call) {
+            int idx = findArgWithSink(call.args(), sink);
+            if (idx < 0) return null;
+            Inverter inv = TABLE.lookupCall(call.owner(), call.name(), call.desc());
+            if (inv == null) return null;
+            Object newT = inv.invert(target, call.args(), idx, ctx);
+            if (newT == null) return null;
+            return solveFor(call.args().get(idx), sink, newT, ctx);
+        }
+        return null;
+    }
+
+    private static boolean sameSource(Expr a, Source sink) {
+        return a == sink || (a instanceof Source s && s.canonicalKey().equals(sink.canonicalKey()));
+    }
+
+    public static boolean containsSink(Expr e, Source sink) {
+        if (sameSource(e, sink)) return true;
+        if (e instanceof Op op) {
+            for (Expr a : op.args()) if (containsSink(a, sink)) return true;
+        }
+        if (e instanceof Call call) {
+            for (Expr a : call.args()) if (containsSink(a, sink)) return true;
+        }
+        if (e instanceof Choice c) {
+            for (Expr a : c.alternatives()) if (containsSink(a, sink)) return true;
+        }
+        return false;
+    }
+
+    private static int findArgWithSink(List<Expr> args, Source sink) {
+        int found = -1;
+        for (int i = 0; i < args.size(); i++) {
+            if (containsSink(args.get(i), sink)) {
+                if (found >= 0) return -1;
+                found = i;
+            }
+        }
+        return found;
+    }
+
+    public static Set<Source> collectSources(Expr e) {
+        Set<Source> out = new LinkedHashSet<>();
+        collect(e, out);
+        return out;
+    }
+
+    private static void collect(Expr e, Set<Source> out) {
+        if (e instanceof Source s) out.add(s);
+        else if (e instanceof Op op) for (Expr a : op.args()) collect(a, out);
+        else if (e instanceof Call call) for (Expr a : call.args()) collect(a, out);
+        else if (e instanceof Choice c) for (Expr a : c.alternatives()) collect(a, out);
+    }
+
+    public static Object evaluate(Expr e, EvalContext ctx) {
+        if (e instanceof Primitive p) return p.value();
+        if (e instanceof Reference r) return r.value();
+        if (e instanceof Source s) return s.read(ctx.entity());
+        if (e instanceof Choice c) {
+            for (Expr alt : c.alternatives()) {
+                Object v = evaluate(alt, ctx);
+                if (v != null) return v;
+            }
+            return null;
+        }
+        if (e instanceof Op op) {
+            List<Object> ev = new ArrayList<>(op.args().size());
+            for (Expr a : op.args()) {
+                Object v = evaluate(a, ctx);
+                if (v == null) return null;
+                ev.add(v);
+            }
+            return execOp(op.opcode(), ev);
+        }
+        if (e instanceof Call call) {
+            return invokeCall(call, ctx);
+        }
+        return null;
+    }
+
+    /* ==================== 预置对偶规则 ==================== */
+
+    private static void initDefaultRules() {
+        registerArith(Opcodes.IADD, 'I');
+        registerArith(Opcodes.LADD, 'J');
+        registerArith(Opcodes.FADD, 'F');
+        registerArith(Opcodes.DADD, 'D');
+        registerSub(Opcodes.ISUB, 'I');
+        registerSub(Opcodes.LSUB, 'J');
+        registerSub(Opcodes.FSUB, 'F');
+        registerSub(Opcodes.DSUB, 'D');
+        registerMul(Opcodes.IMUL, 'I');
+        registerMul(Opcodes.LMUL, 'J');
+        registerMul(Opcodes.FMUL, 'F');
+        registerMul(Opcodes.DMUL, 'D');
+        registerDiv(Opcodes.IDIV, 'I');
+        registerDiv(Opcodes.LDIV, 'J');
+        registerDiv(Opcodes.FDIV, 'F');
+        registerDiv(Opcodes.DDIV, 'D');
+        registerUnaryNeg(Opcodes.INEG, 'I');
+        registerUnaryNeg(Opcodes.LNEG, 'J');
+        registerUnaryNeg(Opcodes.FNEG, 'F');
+        registerUnaryNeg(Opcodes.DNEG, 'D');
+
+        // XOR 自逆
+        TABLE.registerOp(Opcodes.IXOR, (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            return Integer.valueOf(((Number) t).intValue() ^ o.intValue());
+        });
+        TABLE.registerOp(Opcodes.LXOR, (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            return Long.valueOf(((Number) t).longValue() ^ o.longValue());
+        });
+
+        // 移位
+        TABLE.registerOp(Opcodes.ISHL, (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number sh = num(ctx.eval(args.get(1))); if (sh == null) return null;
+            return Integer.valueOf(((Number) t).intValue() >>> sh.intValue());
+        });
+        TABLE.registerOp(Opcodes.LSHL, (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number sh = num(ctx.eval(args.get(1))); if (sh == null) return null;
+            return Long.valueOf(((Number) t).longValue() >>> sh.intValue());
+        });
+        TABLE.registerOp(Opcodes.ISHR, (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number sh = num(ctx.eval(args.get(1))); if (sh == null) return null;
+            return Integer.valueOf(((Number) t).intValue() << sh.intValue());
+        });
+        TABLE.registerOp(Opcodes.LSHR, (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number sh = num(ctx.eval(args.get(1))); if (sh == null) return null;
+            return Long.valueOf(((Number) t).longValue() << sh.intValue());
+        });
+        TABLE.registerOp(Opcodes.IUSHR, (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number sh = num(ctx.eval(args.get(1))); if (sh == null) return null;
+            return Integer.valueOf(((Number) t).intValue() << sh.intValue());
+        });
+        TABLE.registerOp(Opcodes.LUSHR, (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number sh = num(ctx.eval(args.get(1))); if (sh == null) return null;
+            return Long.valueOf(((Number) t).longValue() << sh.intValue());
+        });
+
+        // 位掩码
+        TABLE.registerOp(Opcodes.IAND, (t, args, idx, ctx) -> {
+            Number m = num(ctx.eval(args.get(1 - idx))); if (m == null) return null;
+            int target = ((Number) t).intValue(), mask = m.intValue();
+            if ((target & mask) != target) return null;
+            return Integer.valueOf(target);
+        });
+        TABLE.registerOp(Opcodes.LAND, (t, args, idx, ctx) -> {
+            Number m = num(ctx.eval(args.get(1 - idx))); if (m == null) return null;
+            long target = ((Number) t).longValue(), mask = m.longValue();
+            if ((target & mask) != target) return null;
+            return Long.valueOf(target);
+        });
+        TABLE.registerOp(Opcodes.IOR, (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            return Integer.valueOf(((Number) t).intValue() & ~o.intValue());
+        });
+        TABLE.registerOp(Opcodes.LOR, (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            return Long.valueOf(((Number) t).longValue() & ~o.longValue());
+        });
+
+        // 类型转换
+        TABLE.registerOp(Opcodes.I2F, (t, args, idx, ctx) -> Integer.valueOf(((Number) t).intValue()));
+        TABLE.registerOp(Opcodes.I2L, (t, args, idx, ctx) -> Integer.valueOf((int) ((Number) t).longValue()));
+        TABLE.registerOp(Opcodes.I2D, (t, args, idx, ctx) -> Integer.valueOf(((Number) t).intValue()));
+        TABLE.registerOp(Opcodes.I2B, (t, args, idx, ctx) -> Integer.valueOf(((Number) t).intValue() & 0xFF));
+        TABLE.registerOp(Opcodes.I2C, (t, args, idx, ctx) -> Integer.valueOf(((Number) t).intValue() & 0xFFFF));
+        TABLE.registerOp(Opcodes.I2S, (t, args, idx, ctx) -> Integer.valueOf((short) ((Number) t).intValue()));
+        TABLE.registerOp(Opcodes.L2I, (t, args, idx, ctx) -> Long.valueOf(((Number) t).intValue()));
+        TABLE.registerOp(Opcodes.L2F, (t, args, idx, ctx) -> Long.valueOf((long) ((Number) t).floatValue()));
+        TABLE.registerOp(Opcodes.L2D, (t, args, idx, ctx) -> Long.valueOf((long) ((Number) t).doubleValue()));
+        TABLE.registerOp(Opcodes.F2I, (t, args, idx, ctx) -> Float.valueOf(((Number) t).intValue()));
+        TABLE.registerOp(Opcodes.F2L, (t, args, idx, ctx) -> Float.valueOf(((Number) t).longValue()));
+        TABLE.registerOp(Opcodes.F2D, (t, args, idx, ctx) -> Float.valueOf((float) ((Number) t).doubleValue()));
+        TABLE.registerOp(Opcodes.D2I, (t, args, idx, ctx) -> Double.valueOf(((Number) t).intValue()));
+        TABLE.registerOp(Opcodes.D2L, (t, args, idx, ctx) -> Double.valueOf(((Number) t).longValue()));
+        TABLE.registerOp(Opcodes.D2F, (t, args, idx, ctx) -> Double.valueOf(((Number) t).floatValue()));
+
+        // JDK 位转换
+        TABLE.registerCall("java/lang/Float", "intBitsToFloat", "(I)F",
+            (t, args, idx, ctx) -> Integer.valueOf(Float.floatToRawIntBits(((Number) t).floatValue())));
+        TABLE.registerCall("java/lang/Float", "floatToRawIntBits", "(F)I",
+            (t, args, idx, ctx) -> Float.valueOf(Float.intBitsToFloat(((Number) t).intValue())));
+        TABLE.registerCall("java/lang/Float", "floatToIntBits", "(F)I",
+            (t, args, idx, ctx) -> Float.valueOf(Float.intBitsToFloat(((Number) t).intValue())));
+        TABLE.registerCall("java/lang/Double", "longBitsToDouble", "(J)D",
+            (t, args, idx, ctx) -> Long.valueOf(Double.doubleToRawLongBits(((Number) t).doubleValue())));
+        TABLE.registerCall("java/lang/Double", "doubleToRawLongBits", "(D)J",
+            (t, args, idx, ctx) -> Double.valueOf(Double.longBitsToDouble(((Number) t).longValue())));
+
+        // JDK 位操作 (自逆)
+        TABLE.registerCall("java/lang/Long", "reverse", "(J)J",
+            (t, args, idx, ctx) -> Long.valueOf(Long.reverse(((Number) t).longValue())));
+        TABLE.registerCall("java/lang/Integer", "reverse", "(I)I",
+            (t, args, idx, ctx) -> Integer.valueOf(Integer.reverse(((Number) t).intValue())));
+        TABLE.registerCall("java/lang/Integer", "reverseBytes", "(I)I",
+            (t, args, idx, ctx) -> Integer.valueOf(Integer.reverseBytes(((Number) t).intValue())));
+        TABLE.registerCall("java/lang/Long", "reverseBytes", "(J)J",
+            (t, args, idx, ctx) -> Long.valueOf(Long.reverseBytes(((Number) t).longValue())));
+
+        // JDK 文本 <-> 数字
+        TABLE.registerCall("java/lang/Float", "parseFloat", "(Ljava/lang/String;)F",
+            (t, args, idx, ctx) -> Float.toString(((Number) t).floatValue()));
+        TABLE.registerCall("java/lang/Double", "parseDouble", "(Ljava/lang/String;)D",
+            (t, args, idx, ctx) -> Double.toString(((Number) t).doubleValue()));
+        TABLE.registerCall("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I",
+            (t, args, idx, ctx) -> Integer.toString(((Number) t).intValue()));
+        TABLE.registerCall("java/lang/Long", "parseLong", "(Ljava/lang/String;)J",
+            (t, args, idx, ctx) -> Long.toString(((Number) t).longValue()));
+        TABLE.registerCall("java/lang/Integer", "parseInt", "(Ljava/lang/String;I)I",
+            (t, args, idx, ctx) -> {
+                if (idx != 0) return null;
+                Number radix = num(ctx.eval(args.get(1))); if (radix == null) return null;
+                return Integer.toString(((Number) t).intValue(), radix.intValue());
+            });
+        TABLE.registerCall("java/lang/Long", "parseLong", "(Ljava/lang/String;I)J",
+            (t, args, idx, ctx) -> {
+                if (idx != 0) return null;
+                Number radix = num(ctx.eval(args.get(1))); if (radix == null) return null;
+                return Long.toString(((Number) t).longValue(), radix.intValue());
+            });
+        TABLE.registerCall("java/lang/Float", "valueOf", "(Ljava/lang/String;)Ljava/lang/Float;",
+            (t, args, idx, ctx) -> Float.toString(((Number) t).floatValue()));
+        TABLE.registerCall("java/lang/Integer", "valueOf", "(Ljava/lang/String;)Ljava/lang/Integer;",
+            (t, args, idx, ctx) -> Integer.toString(((Number) t).intValue()));
+
+        // JDK 数学函数
+        TABLE.registerCall("java/lang/Math", "sqrt", "(D)D",
+            (t, args, idx, ctx) -> { double x = ((Number) t).doubleValue(); return Double.valueOf(x * x); });
+        TABLE.registerCall("java/lang/Math", "cbrt", "(D)D",
+            (t, args, idx, ctx) -> { double x = ((Number) t).doubleValue(); return Double.valueOf(x * x * x); });
+        TABLE.registerCall("java/lang/Math", "log", "(D)D",
+            (t, args, idx, ctx) -> Double.valueOf(Math.exp(((Number) t).doubleValue())));
+        TABLE.registerCall("java/lang/Math", "exp", "(D)D",
+            (t, args, idx, ctx) -> Double.valueOf(Math.log(((Number) t).doubleValue())));
+        TABLE.registerCall("java/lang/Math", "log10", "(D)D",
+            (t, args, idx, ctx) -> Double.valueOf(Math.pow(10.0, ((Number) t).doubleValue())));
+        //Math.max/min 双源防御 (如 ModularGolems: max(vanillaHp, shadowHp))
+        //无条件返回 target,依赖 Phase 1 同步写另一边,把双源防御打穿
+        TABLE.registerCall("java/lang/Math", "max", "(FF)F",
+            (t, args, idx, ctx) -> Float.valueOf(((Number) t).floatValue()));
+        TABLE.registerCall("java/lang/Math", "min", "(FF)F",
+            (t, args, idx, ctx) -> Float.valueOf(((Number) t).floatValue()));
+        TABLE.registerCall("java/lang/Math", "max", "(II)I",
+            (t, args, idx, ctx) -> Integer.valueOf(((Number) t).intValue()));
+        TABLE.registerCall("java/lang/Math", "min", "(II)I",
+            (t, args, idx, ctx) -> Integer.valueOf(((Number) t).intValue()));
+        TABLE.registerCall("java/lang/Math", "max", "(DD)D",
+            (t, args, idx, ctx) -> Double.valueOf(((Number) t).doubleValue()));
+        TABLE.registerCall("java/lang/Math", "min", "(DD)D",
+            (t, args, idx, ctx) -> Double.valueOf(((Number) t).doubleValue()));
+        TABLE.registerCall("java/lang/Math", "pow", "(DD)D", (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number exp = num(ctx.eval(args.get(1))); if (exp == null) return null;
+            double e = exp.doubleValue();
+            if (Math.abs(e) < 1e-9) return null;
+            return Double.valueOf(Math.pow(((Number) t).doubleValue(), 1.0 / e));
+        });
+
+        // Number 拆箱 / Wrapper 装箱 (identity)
+        registerIdentityCall("java/lang/Float", "floatValue", "()F");
+        registerIdentityCall("java/lang/Double", "doubleValue", "()D");
+        registerIdentityCall("java/lang/Integer", "intValue", "()I");
+        registerIdentityCall("java/lang/Long", "longValue", "()J");
+        registerIdentityCall("java/lang/Short", "shortValue", "()S");
+        registerIdentityCall("java/lang/Byte", "byteValue", "()B");
+        registerIdentityCall("java/lang/Number", "floatValue", "()F");
+        registerIdentityCall("java/lang/Number", "doubleValue", "()D");
+        registerIdentityCall("java/lang/Number", "intValue", "()I");
+        registerIdentityCall("java/lang/Number", "longValue", "()J");
+        registerIdentityCall("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;");
+        registerIdentityCall("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;");
+        registerIdentityCall("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;");
+        registerIdentityCall("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;");
+
+        // Minecraft CompoundTag getXxx (identity,写回由 sink IO 完成)
+        registerIdentityCall("net/minecraft/nbt/CompoundTag", "m_128457_", "(Ljava/lang/String;)F");
+        registerIdentityCall("net/minecraft/nbt/CompoundTag", "m_128451_", "(Ljava/lang/String;)I");
+        registerIdentityCall("net/minecraft/nbt/CompoundTag", "m_128454_", "(Ljava/lang/String;)J");
+        registerIdentityCall("net/minecraft/nbt/CompoundTag", "m_128459_", "(Ljava/lang/String;)D");
+        registerIdentityCall("net/minecraft/nbt/CompoundTag", "getFloat", "(Ljava/lang/String;)F");
+        registerIdentityCall("net/minecraft/nbt/CompoundTag", "getInt", "(Ljava/lang/String;)I");
+        registerIdentityCall("net/minecraft/nbt/CompoundTag", "getLong", "(Ljava/lang/String;)J");
+        registerIdentityCall("net/minecraft/nbt/CompoundTag", "getDouble", "(Ljava/lang/String;)D");
+    }
+
+    private static void registerArith(int op, char domain) {
+        TABLE.registerOp(op, (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            return subDomain(t, o, domain);
+        });
+    }
+    private static void registerSub(int op, char domain) {
+        TABLE.registerOp(op, (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            if (idx == 0) return addDomain(t, o, domain);
+            return subDomain(o, (Number) t, domain);
+        });
+    }
+    private static void registerMul(int op, char domain) {
+        TABLE.registerOp(op, (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            if (isZero(o, domain)) return null;
+            return divDomain(t, o, domain);
+        });
+    }
+    private static void registerDiv(int op, char domain) {
+        TABLE.registerOp(op, (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            if (idx == 0) return mulDomain(t, o, domain);
+            if (isZero((Number) t, domain)) return null;
+            return divDomain(o, (Number) t, domain);
+        });
+    }
+    private static void registerUnaryNeg(int op, char domain) {
+        TABLE.registerOp(op, (t, args, idx, ctx) -> negDomain((Number) t, domain));
+    }
+    private static void registerIdentityCall(String owner, String name, String desc) {
+        TABLE.registerCall(owner, name, desc, (t, args, idx, ctx) -> t);
+    }
+
+    private static Object addDomain(Object t, Number o, char d) {
+        return switch (d) {
+            case 'I' -> Integer.valueOf(((Number) t).intValue() + o.intValue());
+            case 'J' -> Long.valueOf(((Number) t).longValue() + o.longValue());
+            case 'F' -> Float.valueOf(((Number) t).floatValue() + o.floatValue());
+            case 'D' -> Double.valueOf(((Number) t).doubleValue() + o.doubleValue());
+            default -> null;
+        };
+    }
+    private static Object subDomain(Object t, Number o, char d) {
+        return switch (d) {
+            case 'I' -> Integer.valueOf(((Number) t).intValue() - o.intValue());
+            case 'J' -> Long.valueOf(((Number) t).longValue() - o.longValue());
+            case 'F' -> Float.valueOf(((Number) t).floatValue() - o.floatValue());
+            case 'D' -> Double.valueOf(((Number) t).doubleValue() - o.doubleValue());
+            default -> null;
+        };
+    }
+    private static Object mulDomain(Object t, Number o, char d) {
+        return switch (d) {
+            case 'I' -> Integer.valueOf(((Number) t).intValue() * o.intValue());
+            case 'J' -> Long.valueOf(((Number) t).longValue() * o.longValue());
+            case 'F' -> Float.valueOf(((Number) t).floatValue() * o.floatValue());
+            case 'D' -> Double.valueOf(((Number) t).doubleValue() * o.doubleValue());
+            default -> null;
+        };
+    }
+    private static Object divDomain(Object t, Number o, char d) {
+        return switch (d) {
+            case 'I' -> Integer.valueOf(((Number) t).intValue() / o.intValue());
+            case 'J' -> Long.valueOf(((Number) t).longValue() / o.longValue());
+            case 'F' -> Float.valueOf(((Number) t).floatValue() / o.floatValue());
+            case 'D' -> Double.valueOf(((Number) t).doubleValue() / o.doubleValue());
+            default -> null;
+        };
+    }
+    private static Object negDomain(Number t, char d) {
+        return switch (d) {
+            case 'I' -> Integer.valueOf(-t.intValue());
+            case 'J' -> Long.valueOf(-t.longValue());
+            case 'F' -> Float.valueOf(-t.floatValue());
+            case 'D' -> Double.valueOf(-t.doubleValue());
+            default -> null;
+        };
+    }
+    private static boolean isZero(Number n, char d) {
+        return switch (d) {
+            case 'I' -> n.intValue() == 0;
+            case 'J' -> n.longValue() == 0L;
+            case 'F' -> n.floatValue() == 0f;
+            case 'D' -> n.doubleValue() == 0d;
+            default -> false;
+        };
+    }
+
+    private static Number num(Object v) { return v instanceof Number n ? n : null; }
+
+    /* ==================== execOp / invokeCall ==================== */
+
+    private static Object execOp(int op, List<Object> a) {
+        try {
+            return switch (op) {
+                case Opcodes.IADD -> ((Number) a.get(0)).intValue() + ((Number) a.get(1)).intValue();
+                case Opcodes.ISUB -> ((Number) a.get(0)).intValue() - ((Number) a.get(1)).intValue();
+                case Opcodes.IMUL -> ((Number) a.get(0)).intValue() * ((Number) a.get(1)).intValue();
+                case Opcodes.IDIV -> ((Number) a.get(0)).intValue() / ((Number) a.get(1)).intValue();
+                case Opcodes.IREM -> ((Number) a.get(0)).intValue() % ((Number) a.get(1)).intValue();
+                case Opcodes.LADD -> ((Number) a.get(0)).longValue() + ((Number) a.get(1)).longValue();
+                case Opcodes.LSUB -> ((Number) a.get(0)).longValue() - ((Number) a.get(1)).longValue();
+                case Opcodes.LMUL -> ((Number) a.get(0)).longValue() * ((Number) a.get(1)).longValue();
+                case Opcodes.LDIV -> ((Number) a.get(0)).longValue() / ((Number) a.get(1)).longValue();
+                case Opcodes.LREM -> ((Number) a.get(0)).longValue() % ((Number) a.get(1)).longValue();
+                case Opcodes.FADD -> ((Number) a.get(0)).floatValue() + ((Number) a.get(1)).floatValue();
+                case Opcodes.FSUB -> ((Number) a.get(0)).floatValue() - ((Number) a.get(1)).floatValue();
+                case Opcodes.FMUL -> ((Number) a.get(0)).floatValue() * ((Number) a.get(1)).floatValue();
+                case Opcodes.FDIV -> ((Number) a.get(0)).floatValue() / ((Number) a.get(1)).floatValue();
+                case Opcodes.DADD -> ((Number) a.get(0)).doubleValue() + ((Number) a.get(1)).doubleValue();
+                case Opcodes.DSUB -> ((Number) a.get(0)).doubleValue() - ((Number) a.get(1)).doubleValue();
+                case Opcodes.DMUL -> ((Number) a.get(0)).doubleValue() * ((Number) a.get(1)).doubleValue();
+                case Opcodes.DDIV -> ((Number) a.get(0)).doubleValue() / ((Number) a.get(1)).doubleValue();
+                case Opcodes.INEG -> -((Number) a.get(0)).intValue();
+                case Opcodes.LNEG -> -((Number) a.get(0)).longValue();
+                case Opcodes.FNEG -> -((Number) a.get(0)).floatValue();
+                case Opcodes.DNEG -> -((Number) a.get(0)).doubleValue();
+                case Opcodes.IXOR -> ((Number) a.get(0)).intValue() ^ ((Number) a.get(1)).intValue();
+                case Opcodes.LXOR -> ((Number) a.get(0)).longValue() ^ ((Number) a.get(1)).longValue();
+                case Opcodes.IAND -> ((Number) a.get(0)).intValue() & ((Number) a.get(1)).intValue();
+                case Opcodes.LAND -> ((Number) a.get(0)).longValue() & ((Number) a.get(1)).longValue();
+                case Opcodes.IOR  -> ((Number) a.get(0)).intValue() | ((Number) a.get(1)).intValue();
+                case Opcodes.LOR  -> ((Number) a.get(0)).longValue() | ((Number) a.get(1)).longValue();
+                case Opcodes.ISHL -> ((Number) a.get(0)).intValue() << ((Number) a.get(1)).intValue();
+                case Opcodes.LSHL -> ((Number) a.get(0)).longValue() << ((Number) a.get(1)).intValue();
+                case Opcodes.ISHR -> ((Number) a.get(0)).intValue() >> ((Number) a.get(1)).intValue();
+                case Opcodes.LSHR -> ((Number) a.get(0)).longValue() >> ((Number) a.get(1)).intValue();
+                case Opcodes.IUSHR -> ((Number) a.get(0)).intValue() >>> ((Number) a.get(1)).intValue();
+                case Opcodes.LUSHR -> ((Number) a.get(0)).longValue() >>> ((Number) a.get(1)).intValue();
+                case Opcodes.I2F -> (float) ((Number) a.get(0)).intValue();
+                case Opcodes.I2L -> (long)  ((Number) a.get(0)).intValue();
+                case Opcodes.I2D -> (double)((Number) a.get(0)).intValue();
+                case Opcodes.I2B -> (int)(byte) ((Number) a.get(0)).intValue();
+                case Opcodes.I2C -> (int)(char) ((Number) a.get(0)).intValue();
+                case Opcodes.I2S -> (int)(short) ((Number) a.get(0)).intValue();
+                case Opcodes.L2I -> (int)   ((Number) a.get(0)).longValue();
+                case Opcodes.L2F -> (float) ((Number) a.get(0)).longValue();
+                case Opcodes.L2D -> (double)((Number) a.get(0)).longValue();
+                case Opcodes.F2I -> (int)   ((Number) a.get(0)).floatValue();
+                case Opcodes.F2L -> (long)  ((Number) a.get(0)).floatValue();
+                case Opcodes.F2D -> (double)((Number) a.get(0)).floatValue();
+                case Opcodes.D2I -> (int)   ((Number) a.get(0)).doubleValue();
+                case Opcodes.D2L -> (long)  ((Number) a.get(0)).doubleValue();
+                case Opcodes.D2F -> (float) ((Number) a.get(0)).doubleValue();
+                default -> null;
+            };
+        } catch (Throwable t) { return null; }
+    }
+
+    private static Object invokeCall(Call call, EvalContext ctx) {
+        try {
+            Class<?> owner = loadClass(call.owner());
+            if (owner == null) return null;
+            Type[] argTypes = Type.getArgumentTypes(call.desc());
+            boolean hasRecv = call.args().size() > argTypes.length;
+            int start = hasRecv ? 1 : 0;
+            Object recv = null;
+            if (hasRecv) {
+                recv = evaluate(call.args().get(0), ctx);
+                if (recv == null) return null;
+            }
+            Class<?>[] pts = new Class<?>[argTypes.length];
+            Object[] pvs = new Object[argTypes.length];
+            for (int i = 0; i < argTypes.length; i++) {
+                pts[i] = asmTypeToClass(argTypes[i]);
+                if (pts[i] == null) return null;
+                Object v = evaluate(call.args().get(start + i), ctx);
+                pvs[i] = coerceArg(v, pts[i]);
+            }
+            Method m = findMethod(owner, call.name(), pts);
+            if (m == null) return null;
+            m.setAccessible(true);
+            return m.invoke(recv, pvs);
+        } catch (Throwable t) { return null; }
+    }
+
+    /* ==================== AnalysisResult + 入口 ==================== */
+
+    public static final class AnalysisResult {
+        public static final AnalysisResult EMPTY = new AnalysisResult(UnknownExpr.UNKNOWN, List.of());
+        public final Expr returnExpr;
+        public final List<Source> sources;
+        private AnalysisResult(Expr e, List<Source> s) { this.returnExpr = e; this.sources = s; }
+        public boolean isEmpty() { return sources.isEmpty(); }
+        public static AnalysisResult of(Expr e) {
+            return new AnalysisResult(e, List.copyOf(collectSources(e)));
+        }
+    }
 
     public static AnalysisResult analyze(Class<?> entityClass) {
         return analyze(entityClass, DEFAULT_MAX_DEPTH);
@@ -36,133 +1022,24 @@ public final class HealthAnalyzer {
 
     public static AnalysisResult analyze(Class<?> entityClass, int maxDepth) {
         try {
-            Class<?> owner = findMethodOwner(entityClass, TARGET_METHOD_NAME, TARGET_METHOD_DESC);
-            if (owner == null) return AnalysisResult.EMPTY;
-            AnalysisContext ctx = new AnalysisContext(maxDepth);
-            Expr ret = analyzeMethod(owner, TARGET_METHOD_NAME, TARGET_METHOD_DESC, null, ctx, 0);
-            if (ret == null) return AnalysisResult.EMPTY;
-            return AnalysisResult.from(ret);
+            ClassAndMethod target = findMethodOwner(entityClass);
+            if (target == null) return AnalysisResult.EMPTY;
+            AnalysisCtx ctx = new AnalysisCtx(maxDepth);
+            Expr ret = analyzeMethod(target.owner(), target.name(), GETHEALTH_DESC, null, ctx, 0);
+            if (ret == null || ret instanceof UnknownExpr) return AnalysisResult.EMPTY;
+            return AnalysisResult.of(ret);
         } catch (Throwable t) {
             EcaLogger.info("[HealthAnalyzer] analyze {} failed: {}", entityClass.getName(), t.toString());
             return AnalysisResult.EMPTY;
         }
     }
 
-    // ==================== 表达式树 ====================
+    private record ClassAndMethod(Class<?> owner, String name) {}
 
-    public interface Expr {}
-
-    public record FieldLeaf(List<FieldStep> path) implements Expr {
-        public record FieldStep(String ownerInternal, String name, String desc) {}
-    }
-
-    public record EntityDataLeaf(String accessorOwnerInternal, String accessorName) implements Expr {}
-
-    public record MapEntryLeaf(String containerOwnerInternal, String containerGetterName, KeyKind keyKind) implements Expr {
-        public enum KeyKind { ENTITY, ENTITY_ID, ENTITY_UUID, UNKNOWN }
-    }
-
-    //Map.get 受体来自 GETSTATIC 而不是 INVOKESTATIC 时使用
-    public record MapByStaticFieldLeaf(String fieldOwnerInternal, String fieldName, MapEntryLeaf.KeyKind keyKind) implements Expr {}
-
-    //数组元素访问：arr[idx]，indexExpr 可以是 Const 或其他 leaf 表达式（如 GETFIELD 链）
-    public record ArrayIndexLeaf(Expr arrayExpr, Expr indexExpr) implements Expr {}
-
-    //在非 this 受体上做 GETFIELD 链：root 是某个 leaf（MapEntry / MapByStaticField / ArrayIndex / UnresolvedCall 等），path 是后续字段链
-    public record ChainedFieldLeaf(Expr root, List<FieldLeaf.FieldStep> path) implements Expr {}
-
-    public record Const(float value) implements Expr {}
-
-    public record BinaryOp(int opcode, Expr left, Expr right) implements Expr {}
-
-    public record UnaryOp(int opcode, Expr operand) implements Expr {}
-
-    //已知可逆/可特殊处理的方法调用（Long.reverse / Float.intBitsToFloat / Float.floatToRawIntBits / Math.max(F,F)）
-    public record InvertibleCall(InvertibleKind kind, List<Expr> args) implements Expr {
-        public enum InvertibleKind {
-            LONG_REVERSE,           // Long.reverse(long): long, 自逆
-            INT_BITS_TO_FLOAT,      // Float.intBitsToFloat(int): float, 反向是 floatToRawIntBits
-            FLOAT_TO_RAW_INT_BITS,  // Float.floatToRawIntBits(float): int, 反向是 intBitsToFloat
-            MATH_MAX_F              // Math.max(float, float): float, target>0 时若一边是 0 即直通另一边
-        }
-    }
-
-    public record UnresolvedCall(String owner, String name, String desc, List<Expr> args) implements Expr {}
-
-    public record Choice(List<Expr> alternatives) implements Expr {}
-
-    public record UnknownExpr() implements Expr {
-        public static final UnknownExpr I = new UnknownExpr();
-    }
-
-    // 分析期内部占位符（最终结果不应该再出现这些）
-    record EntityParamMarker() implements Expr { static final EntityParamMarker I = new EntityParamMarker(); }
-    record StaticFieldMarker(String ownerInternal, String name, String desc) implements Expr {}
-    record StaticMethodResult(String ownerInternal, String name, String desc) implements Expr {}
-
-    // ==================== 分析结果 ====================
-
-    public static final class AnalysisResult {
-        public static final AnalysisResult EMPTY = new AnalysisResult(UnknownExpr.I, List.of());
-        public final Expr returnExpr;
-        public final List<WriteTarget> writeTargets;
-
-        private AnalysisResult(Expr returnExpr, List<WriteTarget> writeTargets) {
-            this.returnExpr = returnExpr;
-            this.writeTargets = writeTargets;
-        }
-
-        public boolean isEmpty() { return writeTargets.isEmpty(); }
-
-        static AnalysisResult from(Expr ret) {
-            List<WriteTarget> targets = new ArrayList<>();
-            Set<Expr> seenSinks = new HashSet<>();
-            collectWriteTargets(ret, ret, targets, seenSinks);
-            return new AnalysisResult(ret, List.copyOf(targets));
-        }
-
-        private static void collectWriteTargets(Expr root, Expr current, List<WriteTarget> out, Set<Expr> seen) {
-            if (current instanceof Choice c) {
-                for (Expr alt : c.alternatives) collectWriteTargets(root, alt, out, seen);
-                return;
-            }
-            collectLeaves(current, leaf -> {
-                if (seen.add(leaf)) out.add(new WriteTarget(leaf, root));
-            });
-        }
-
-        private static void collectLeaves(Expr e, java.util.function.Consumer<Expr> sink) {
-            if (e instanceof FieldLeaf || e instanceof EntityDataLeaf || e instanceof MapEntryLeaf
-                || e instanceof MapByStaticFieldLeaf || e instanceof ArrayIndexLeaf || e instanceof ChainedFieldLeaf) {
-                sink.accept(e);
-            } else if (e instanceof BinaryOp b) {
-                collectLeaves(b.left, sink);
-                collectLeaves(b.right, sink);
-            } else if (e instanceof UnaryOp u) {
-                collectLeaves(u.operand, sink);
-            } else if (e instanceof Choice c) {
-                for (Expr a : c.alternatives) collectLeaves(a, sink);
-            } else if (e instanceof UnresolvedCall uc) {
-                for (Expr a : uc.args) collectLeaves(a, sink);
-            } else if (e instanceof InvertibleCall ic) {
-                for (Expr a : ic.args) collectLeaves(a, sink);
-            }
-        }
-    }
-
-    public record WriteTarget(Expr sink, Expr fullExpr) {}
-
-    // ==================== 分析实现 ====================
-
-    private static final class AnalysisContext {
-        final int maxDepth;
-        final Map<String, Expr> methodCache = new HashMap<>();
-        AnalysisContext(int maxDepth) { this.maxDepth = maxDepth; }
-    }
-
-    private static Class<?> findMethodOwner(Class<?> startClass, String name, String desc) {
+    private static ClassAndMethod findMethodOwner(Class<?> startClass) {
         for (Class<?> c = startClass; c != null && c != Object.class; c = c.getSuperclass()) {
-            if (classDefinesMethod(c, name, desc)) return c;
+            if (classDefinesMethod(c, GETHEALTH_NAME, GETHEALTH_DESC)) return new ClassAndMethod(c, GETHEALTH_NAME);
+            if (classDefinesMethod(c, GETHEALTH_NAME_ALT, GETHEALTH_DESC)) return new ClassAndMethod(c, GETHEALTH_NAME_ALT);
         }
         return null;
     }
@@ -178,10 +1055,22 @@ public final class HealthAnalyzer {
         return false;
     }
 
+    private static final class AnalysisCtx {
+        final int maxDepth;
+        final Map<String, Expr> methodCache = new HashMap<>();
+        //当前调用栈上正在分析的方法,用于内联环检测
+        final Set<String> inflight = new HashSet<>();
+        //全局熔断：内联次数上限,超出后直接返回 Unknown,防止指数膨胀
+        int inlineBudget = DEFAULT_INLINE_BUDGET;
+        AnalysisCtx(int maxDepth) { this.maxDepth = maxDepth; }
+    }
+
+    /* ==================== ASM analyzeMethod / Interpreter ==================== */
+
+    @SuppressWarnings("unchecked")
     private static Expr analyzeMethod(Class<?> owner, String name, String desc,
-                                       TaintValue[] seedLocals, AnalysisContext ctx, int depth) {
+                                       TaintValue[] seedLocals, AnalysisCtx ctx, int depth) {
         if (owner.getClassLoader() == null) return null;
-        if (TransformerWhitelist.isProtected(owner.getName())) return null;
 
         String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc;
         if (seedLocals == null) {
@@ -205,7 +1094,6 @@ public final class HealthAnalyzer {
             Analyzer<TaintValue> analyzer = new Analyzer<>(interp);
             Frame<TaintValue>[] frames = analyzer.analyze(ownerInternal, mn);
 
-            // 收集所有 return 指令处栈顶的 Expr，union 成 Choice
             List<Expr> returns = new ArrayList<>();
             int idx = 0;
             for (AbstractInsnNode insn : mn.instructions) {
@@ -214,13 +1102,13 @@ public final class HealthAnalyzer {
                     || op == Opcodes.DRETURN || op == Opcodes.ARETURN) {
                     Frame<TaintValue> f = frames[idx];
                     if (f != null && f.getStackSize() > 0) {
-                        Expr e = cleanMarkers(f.getStack(f.getStackSize() - 1).expr);
-                        if (e != null) returns.add(e);
+                        Expr e = f.getStack(f.getStackSize() - 1).expr;
+                        if (e != null && !(e instanceof UnknownExpr)) returns.add(e);
                     }
                 }
                 idx++;
             }
-            Expr result = returns.isEmpty() ? UnknownExpr.I
+            Expr result = returns.isEmpty() ? UnknownExpr.UNKNOWN
                 : (returns.size() == 1 ? returns.get(0) : new Choice(dedupe(returns)));
             if (seedLocals == null) ctx.methodCache.put(cacheKey, result);
             return result;
@@ -236,41 +1124,6 @@ public final class HealthAnalyzer {
         return out;
     }
 
-    // 保留 markers（EntityParamMarker / StaticFieldMarker / StaticMethodResult）在 args 里，给运行时 resolveExprObject 用
-    // 它们不会被 collectLeaves 收集为 sink，所以不会污染 WriteTarget 列表
-    private static Expr cleanMarkers(Expr e) {
-        if (e instanceof BinaryOp b) {
-            return new BinaryOp(b.opcode, cleanMarkers(b.left), cleanMarkers(b.right));
-        }
-        if (e instanceof UnaryOp u) {
-            return new UnaryOp(u.opcode, cleanMarkers(u.operand));
-        }
-        if (e instanceof Choice c) {
-            List<Expr> alts = new ArrayList<>();
-            for (Expr a : c.alternatives) alts.add(cleanMarkers(a));
-            return alts.size() == 1 ? alts.get(0) : new Choice(dedupe(alts));
-        }
-        if (e instanceof UnresolvedCall uc) {
-            List<Expr> args = new ArrayList<>();
-            for (Expr a : uc.args) args.add(cleanMarkers(a));
-            return new UnresolvedCall(uc.owner, uc.name, uc.desc, args);
-        }
-        if (e instanceof InvertibleCall ic) {
-            List<Expr> args = new ArrayList<>();
-            for (Expr a : ic.args) args.add(cleanMarkers(a));
-            return new InvertibleCall(ic.kind, args);
-        }
-        if (e instanceof ArrayIndexLeaf ai) {
-            return new ArrayIndexLeaf(cleanMarkers(ai.arrayExpr), cleanMarkers(ai.indexExpr));
-        }
-        if (e instanceof ChainedFieldLeaf cf) {
-            return new ChainedFieldLeaf(cleanMarkers(cf.root), cf.path);
-        }
-        return e;
-    }
-
-    // ==================== Interpreter ====================
-
     private static final class TaintValue implements Value {
         final int size;
         final Expr expr;
@@ -282,125 +1135,93 @@ public final class HealthAnalyzer {
         @Override public int hashCode() { return Objects.hash(size, expr); }
     }
 
+    private static final class EntityParamMarker implements Expr {
+        static final EntityParamMarker I = new EntityParamMarker();
+    }
+
     private static final class TaintInterpreter extends Interpreter<TaintValue> {
-        final AnalysisContext ctx;
+        final AnalysisCtx ctx;
         final int depth;
         final String currentOwner;
         final TaintValue[] seedLocals;
 
-        TaintInterpreter(AnalysisContext ctx, int depth, String currentOwner, TaintValue[] seedLocals) {
+        TaintInterpreter(AnalysisCtx ctx, int depth, String currentOwner, TaintValue[] seedLocals) {
             super(Opcodes.ASM9);
-            this.ctx = ctx;
-            this.depth = depth;
-            this.currentOwner = currentOwner;
-            this.seedLocals = seedLocals;
+            this.ctx = ctx; this.depth = depth;
+            this.currentOwner = currentOwner; this.seedLocals = seedLocals;
         }
 
         @Override public TaintValue newValue(Type type) {
-            if (type == null) return new TaintValue(1, UnknownExpr.I);
+            if (type == null) return new TaintValue(1, UnknownExpr.UNKNOWN);
             if (type == Type.VOID_TYPE) return null;
-            return new TaintValue(type.getSize(), UnknownExpr.I);
+            return new TaintValue(type.getSize(), UnknownExpr.UNKNOWN);
         }
 
         @Override public TaintValue newParameterValue(boolean isInstanceMethod, int local, Type type) {
-            if (seedLocals != null && local < seedLocals.length && seedLocals[local] != null) {
-                return seedLocals[local];
-            }
+            if (seedLocals != null && local < seedLocals.length && seedLocals[local] != null) return seedLocals[local];
             if (isInstanceMethod && local == 0) return new TaintValue(1, EntityParamMarker.I);
-            return new TaintValue(type.getSize(), UnknownExpr.I);
+            return new TaintValue(type.getSize(), UnknownExpr.UNKNOWN);
         }
 
         @Override public TaintValue newOperation(AbstractInsnNode insn) {
             return switch (insn.getOpcode()) {
-                case Opcodes.ACONST_NULL -> new TaintValue(1, UnknownExpr.I);
-                case Opcodes.ICONST_M1 -> new TaintValue(1, new Const(-1f));
-                case Opcodes.ICONST_0 -> new TaintValue(1, new Const(0f));
-                case Opcodes.ICONST_1 -> new TaintValue(1, new Const(1f));
-                case Opcodes.ICONST_2 -> new TaintValue(1, new Const(2f));
-                case Opcodes.ICONST_3 -> new TaintValue(1, new Const(3f));
-                case Opcodes.ICONST_4 -> new TaintValue(1, new Const(4f));
-                case Opcodes.ICONST_5 -> new TaintValue(1, new Const(5f));
-                case Opcodes.LCONST_0 -> new TaintValue(2, new Const(0f));
-                case Opcodes.LCONST_1 -> new TaintValue(2, new Const(1f));
-                case Opcodes.FCONST_0 -> new TaintValue(1, new Const(0f));
-                case Opcodes.FCONST_1 -> new TaintValue(1, new Const(1f));
-                case Opcodes.FCONST_2 -> new TaintValue(1, new Const(2f));
-                case Opcodes.DCONST_0 -> new TaintValue(2, new Const(0f));
-                case Opcodes.DCONST_1 -> new TaintValue(2, new Const(1f));
-                case Opcodes.BIPUSH, Opcodes.SIPUSH -> new TaintValue(1, new Const(((IntInsnNode) insn).operand));
-                case Opcodes.LDC -> {
-                    Object cst = ((LdcInsnNode) insn).cst;
-                    int sz = (cst instanceof Long || cst instanceof Double) ? 2 : 1;
-                    if (cst instanceof Number n) yield new TaintValue(sz, new Const(n.floatValue()));
-                    yield new TaintValue(sz, UnknownExpr.I);
-                }
+                case Opcodes.ACONST_NULL -> new TaintValue(1, UnknownExpr.UNKNOWN);
+                case Opcodes.ICONST_M1 -> primI(-1);
+                case Opcodes.ICONST_0 -> primI(0);
+                case Opcodes.ICONST_1 -> primI(1);
+                case Opcodes.ICONST_2 -> primI(2);
+                case Opcodes.ICONST_3 -> primI(3);
+                case Opcodes.ICONST_4 -> primI(4);
+                case Opcodes.ICONST_5 -> primI(5);
+                case Opcodes.LCONST_0 -> primL(0);
+                case Opcodes.LCONST_1 -> primL(1);
+                case Opcodes.FCONST_0 -> primF(0f);
+                case Opcodes.FCONST_1 -> primF(1f);
+                case Opcodes.FCONST_2 -> primF(2f);
+                case Opcodes.DCONST_0 -> primD(0d);
+                case Opcodes.DCONST_1 -> primD(1d);
+                case Opcodes.BIPUSH, Opcodes.SIPUSH -> primI(((IntInsnNode) insn).operand);
+                case Opcodes.LDC -> ldcValue((LdcInsnNode) insn);
                 case Opcodes.GETSTATIC -> {
                     FieldInsnNode f = (FieldInsnNode) insn;
                     Type t = Type.getType(f.desc);
-                    yield new TaintValue(t.getSize(), new StaticFieldMarker(f.owner, f.name, f.desc));
+                    Object resolved = resolveStaticField(f.owner, f.name);
+                    if (resolved != null) yield new TaintValue(t.getSize(), new Reference(resolved, f.owner));
+                    yield new TaintValue(t.getSize(), UnknownExpr.UNKNOWN);
                 }
-                case Opcodes.NEW -> new TaintValue(1, UnknownExpr.I);
-                case Opcodes.JSR -> new TaintValue(1, UnknownExpr.I);
-                default -> new TaintValue(1, UnknownExpr.I);
+                default -> new TaintValue(1, UnknownExpr.UNKNOWN);
             };
         }
 
-        @Override public TaintValue copyOperation(AbstractInsnNode insn, TaintValue value) {
-            return value;
-        }
+        @Override public TaintValue copyOperation(AbstractInsnNode insn, TaintValue value) { return value; }
 
         @Override public TaintValue unaryOperation(AbstractInsnNode insn, TaintValue value) {
             int op = insn.getOpcode();
             return switch (op) {
-                case Opcodes.INEG, Opcodes.FNEG -> new TaintValue(1, new UnaryOp(op, value.expr));
-                case Opcodes.LNEG, Opcodes.DNEG -> new TaintValue(2, new UnaryOp(op, value.expr));
-                case Opcodes.I2F, Opcodes.L2F, Opcodes.D2F -> new TaintValue(1, new UnaryOp(op, value.expr));
-                case Opcodes.F2I, Opcodes.L2I, Opcodes.D2I, Opcodes.I2B, Opcodes.I2C, Opcodes.I2S -> new TaintValue(1, new UnaryOp(op, value.expr));
-                case Opcodes.I2L, Opcodes.F2L, Opcodes.D2L -> new TaintValue(2, new UnaryOp(op, value.expr));
-                case Opcodes.I2D, Opcodes.L2D, Opcodes.F2D -> new TaintValue(2, new UnaryOp(op, value.expr));
+                case Opcodes.INEG, Opcodes.FNEG -> new TaintValue(1, new Op(op, List.of(value.expr)));
+                case Opcodes.LNEG, Opcodes.DNEG -> new TaintValue(2, new Op(op, List.of(value.expr)));
+                case Opcodes.I2F, Opcodes.L2F, Opcodes.D2F -> new TaintValue(1, new Op(op, List.of(value.expr)));
+                case Opcodes.F2I, Opcodes.L2I, Opcodes.D2I, Opcodes.I2B, Opcodes.I2C, Opcodes.I2S
+                    -> new TaintValue(1, new Op(op, List.of(value.expr)));
+                case Opcodes.I2L, Opcodes.F2L, Opcodes.D2L -> new TaintValue(2, new Op(op, List.of(value.expr)));
+                case Opcodes.I2D, Opcodes.L2D, Opcodes.F2D -> new TaintValue(2, new Op(op, List.of(value.expr)));
                 case Opcodes.GETFIELD -> {
                     FieldInsnNode f = (FieldInsnNode) insn;
                     Type t = Type.getType(f.desc);
-                    FieldLeaf.FieldStep step = new FieldLeaf.FieldStep(f.owner, f.name, f.desc);
-                    Expr newExpr;
-                    if (value.expr instanceof FieldLeaf existing) {
-                        // 现有 entity-rooted 字段链，追加一节
-                        List<FieldLeaf.FieldStep> path = new ArrayList<>(existing.path);
-                        path.add(step);
-                        newExpr = new FieldLeaf(path);
-                    } else if (value.expr instanceof EntityParamMarker) {
-                        // this.field 起步
-                        newExpr = new FieldLeaf(List.of(step));
-                    } else if (value.expr instanceof ChainedFieldLeaf existing) {
-                        // 已经在非 this 受体上的字段链，追加
-                        List<FieldLeaf.FieldStep> path = new ArrayList<>(existing.path);
-                        path.add(step);
-                        newExpr = new ChainedFieldLeaf(existing.root, path);
-                    } else if (value.expr instanceof MapEntryLeaf
-                            || value.expr instanceof MapByStaticFieldLeaf
-                            || value.expr instanceof ArrayIndexLeaf
-                            || value.expr instanceof UnresolvedCall
-                            || value.expr instanceof InvertibleCall) {
-                        // 受体是其他 leaf 形式（map.get 结果、数组元素、未知方法返回值等）→ 启动新 ChainedFieldLeaf
-                        newExpr = new ChainedFieldLeaf(value.expr, List.of(step));
-                    } else if (value.expr instanceof StaticFieldMarker sfm) {
-                        // 静态字段对象上取字段，把 sfm 当成 root（极少见，但允许）
-                        newExpr = new ChainedFieldLeaf(sfm, List.of(step));
-                    } else {
-                        newExpr = UnknownExpr.I;
-                    }
-                    yield new TaintValue(t.getSize(), newExpr);
+                    Expr field = buildGetFieldSource(f, value.expr);
+                    if (field == null) field = UnknownExpr.UNKNOWN;
+                    yield new TaintValue(t.getSize(), field);
                 }
                 case Opcodes.CHECKCAST -> value;
-                case Opcodes.INSTANCEOF -> new TaintValue(1, UnknownExpr.I);
-                case Opcodes.ARRAYLENGTH -> new TaintValue(1, UnknownExpr.I);
-                case Opcodes.NEWARRAY, Opcodes.ANEWARRAY -> new TaintValue(1, UnknownExpr.I);
+                case Opcodes.INSTANCEOF -> new TaintValue(1, UnknownExpr.UNKNOWN);
+                case Opcodes.ARRAYLENGTH -> new TaintValue(1, UnknownExpr.UNKNOWN);
+                case Opcodes.NEWARRAY, Opcodes.ANEWARRAY -> new TaintValue(1, UnknownExpr.UNKNOWN);
                 case Opcodes.IFEQ, Opcodes.IFNE, Opcodes.IFLT, Opcodes.IFGE,
                      Opcodes.IFGT, Opcodes.IFLE, Opcodes.IFNULL, Opcodes.IFNONNULL,
                      Opcodes.TABLESWITCH, Opcodes.LOOKUPSWITCH,
                      Opcodes.PUTSTATIC, Opcodes.ATHROW,
                      Opcodes.MONITORENTER, Opcodes.MONITOREXIT -> null;
-                default -> new TaintValue(1, UnknownExpr.I);
+                default -> new TaintValue(1, UnknownExpr.UNKNOWN);
             };
         }
 
@@ -409,21 +1230,20 @@ public final class HealthAnalyzer {
             return switch (op) {
                 case Opcodes.IADD, Opcodes.ISUB, Opcodes.IMUL, Opcodes.IDIV, Opcodes.IREM,
                      Opcodes.FADD, Opcodes.FSUB, Opcodes.FMUL, Opcodes.FDIV, Opcodes.FREM,
-                     Opcodes.IAND, Opcodes.IOR, Opcodes.IXOR, Opcodes.ISHL, Opcodes.ISHR, Opcodes.IUSHR ->
-                    new TaintValue(1, new BinaryOp(op, v1.expr, v2.expr));
+                     Opcodes.IAND, Opcodes.IOR, Opcodes.IXOR, Opcodes.ISHL, Opcodes.ISHR, Opcodes.IUSHR
+                    -> new TaintValue(1, new Op(op, List.of(v1.expr, v2.expr)));
                 case Opcodes.LADD, Opcodes.LSUB, Opcodes.LMUL, Opcodes.LDIV, Opcodes.LREM,
                      Opcodes.DADD, Opcodes.DSUB, Opcodes.DMUL, Opcodes.DDIV, Opcodes.DREM,
-                     Opcodes.LAND, Opcodes.LOR, Opcodes.LXOR ->
-                    new TaintValue(2, new BinaryOp(op, v1.expr, v2.expr));
-                case Opcodes.LSHL, Opcodes.LSHR, Opcodes.LUSHR ->
-                    new TaintValue(2, new BinaryOp(op, v1.expr, v2.expr));
-                // 数组元素加载：返回元素，size 由元素类型决定
+                     Opcodes.LAND, Opcodes.LOR, Opcodes.LXOR
+                    -> new TaintValue(2, new Op(op, List.of(v1.expr, v2.expr)));
+                case Opcodes.LSHL, Opcodes.LSHR, Opcodes.LUSHR
+                    -> new TaintValue(2, new Op(op, List.of(v1.expr, v2.expr)));
                 case Opcodes.AALOAD, Opcodes.IALOAD, Opcodes.FALOAD,
-                     Opcodes.BALOAD, Opcodes.CALOAD, Opcodes.SALOAD ->
-                    new TaintValue(1, new ArrayIndexLeaf(v1.expr, v2.expr));
-                case Opcodes.LALOAD, Opcodes.DALOAD ->
-                    new TaintValue(2, new ArrayIndexLeaf(v1.expr, v2.expr));
-                default -> new TaintValue(1, UnknownExpr.I);
+                     Opcodes.BALOAD, Opcodes.CALOAD, Opcodes.SALOAD
+                    -> new TaintValue(1, new ArrayElementSource(v1.expr, v2.expr, guessArrayElementType(op), "arr"));
+                case Opcodes.LALOAD, Opcodes.DALOAD
+                    -> new TaintValue(2, new ArrayElementSource(v1.expr, v2.expr, guessArrayElementType(op), "arr"));
+                default -> new TaintValue(1, UnknownExpr.UNKNOWN);
             };
         }
 
@@ -432,169 +1252,92 @@ public final class HealthAnalyzer {
         }
 
         @Override public TaintValue naryOperation(AbstractInsnNode insn, List<? extends TaintValue> values) {
-            if (insn.getOpcode() == Opcodes.MULTIANEWARRAY) return new TaintValue(1, UnknownExpr.I);
+            if (insn.getOpcode() == Opcodes.MULTIANEWARRAY) return new TaintValue(1, UnknownExpr.UNKNOWN);
             if (insn.getOpcode() == Opcodes.INVOKEDYNAMIC) {
                 Type ret = Type.getReturnType(((InvokeDynamicInsnNode) insn).desc);
-                return ret == Type.VOID_TYPE ? null : new TaintValue(ret.getSize(), UnknownExpr.I);
+                return ret == Type.VOID_TYPE ? null : new TaintValue(ret.getSize(), UnknownExpr.UNKNOWN);
             }
             MethodInsnNode m = (MethodInsnNode) insn;
             Type retType = Type.getReturnType(m.desc);
             int sz = retType == Type.VOID_TYPE ? 0 : retType.getSize();
             if (retType == Type.VOID_TYPE) return null;
 
-            // Number 拆箱（floatValue/doubleValue/intValue/...）当 identity，剥掉 SynchedEntityData.get 后编译器插入的 CHECKCAST + 拆箱包装
-            if (m.getOpcode() == Opcodes.INVOKEVIRTUAL && values.size() == 1
-                && isNumberUnboxingMethod(m.owner, m.name, m.desc)) {
-                return new TaintValue(sz, values.get(0).expr);
+            // super.getHealth() / 父类 INVOKESPECIAL on getHealth → 沿继承链最终读 DATA_HEALTH_ID
+            // 假设链路上没有再 override (绝大多数 mod 满足),把 super 调用直接识别为 DATA_HEALTH_ID 的 Source
+            if (m.getOpcode() == Opcodes.INVOKESPECIAL
+                && m.desc.equals(GETHEALTH_DESC)
+                && (m.name.equals(GETHEALTH_NAME) || m.name.equals(GETHEALTH_NAME_ALT))
+                && values.size() >= 1
+                && values.get(0).expr == EntityParamMarker.I) {
+                return new TaintValue(sz, new SynchedDataSource(LivingEntity.DATA_HEALTH_ID, float.class));
             }
 
-            // 包装类装箱（Float.valueOf / Integer.valueOf / ...）当 identity
-            if (m.getOpcode() == Opcodes.INVOKESTATIC && values.size() == 1
-                && isWrapperValueOfMethod(m.owner, m.name, m.desc)) {
-                return new TaintValue(sz, values.get(0).expr);
-            }
-
-            // 已知可逆/特殊静态方法（位运算反向）
-            InvertibleCall.InvertibleKind invKind = detectInvertible(m);
-            if (invKind != null) {
-                List<Expr> argExprs = new ArrayList<>(values.size());
-                for (TaintValue v : values) argExprs.add(v.expr);
-                return new TaintValue(sz, new InvertibleCall(invKind, argExprs));
-            }
-
-            // SynchedEntityData.get(accessor)
+            // SynchedEntityData.get
             if (m.owner.equals("net/minecraft/network/syncher/SynchedEntityData")
                 && (m.name.equals("m_135370_") || m.name.equals("get"))
                 && values.size() >= 2) {
-                TaintValue accessorArg = values.get(1);
-                if (accessorArg.expr instanceof StaticFieldMarker sfm) {
-                    return new TaintValue(sz, new EntityDataLeaf(sfm.ownerInternal, sfm.name));
+                Expr accExpr = values.get(1).expr;
+                if (accExpr instanceof Reference ref && ref.value() instanceof EntityDataAccessor<?> acc) {
+                    return new TaintValue(sz, new SynchedDataSource(acc, Object.class));
                 }
-                return new TaintValue(sz, UnknownExpr.I);
+                return new TaintValue(sz, UnknownExpr.UNKNOWN);
             }
 
-            // Map.get / getOrDefault —— 容器来自静态方法 或 静态字段
+            // Map.get / getOrDefault (任意 owner,运行时反射检测)
             if ((m.name.equals("get") || m.name.equals("getOrDefault"))
                 && values.size() >= 2
-                && (m.owner.endsWith("Map") || m.owner.endsWith("HashMap")
-                    || m.owner.equals("java/util/Map")
-                    || m.owner.equals("java/util/HashMap")
-                    || m.owner.equals("java/util/WeakHashMap")
-                    || m.owner.equals("java/util/concurrent/ConcurrentHashMap"))) {
-                TaintValue recv = values.get(0);
-                TaintValue keyArg = values.get(1);
-                MapEntryLeaf.KeyKind kind = detectKeyKind(keyArg.expr);
-                if (recv.expr instanceof StaticMethodResult smr) {
-                    return new TaintValue(sz, new MapEntryLeaf(smr.ownerInternal, smr.name, kind));
-                }
-                if (recv.expr instanceof StaticFieldMarker sfm) {
-                    return new TaintValue(sz, new MapByStaticFieldLeaf(sfm.ownerInternal, sfm.name, kind));
-                }
+                && isMapClassByName(m.owner)) {
+                Expr container = values.get(0).expr;
+                Expr key = values.get(1).expr;
+                MapEntrySource.KeyKind kk = detectKeyKind(key);
+                String ownerHint = mapOwnerHint(container);
+                return new TaintValue(sz, new MapEntrySource(container, key, kk, ownerHint, Object.class, m.owner));
             }
 
-            // 尝试递归分析
+            // 递归内联
             if (depth + 1 < ctx.maxDepth && !m.name.startsWith("<")) {
-                Expr inlined = tryInlineInvoke(m, values);
+                Expr inlined = tryInline(m, values);
                 if (inlined != null && !(inlined instanceof UnknownExpr)) {
                     return new TaintValue(sz, inlined);
                 }
             }
 
-            // 静态方法返回对象 —— 记为容器 getter 候选
-            if (m.getOpcode() == Opcodes.INVOKESTATIC && retType.getSort() == Type.OBJECT) {
-                return new TaintValue(sz, new StaticMethodResult(m.owner, m.name, m.desc));
-            }
-
-            // 兜底
+            // 兜底 Call 节点
             List<Expr> argExprs = new ArrayList<>(values.size());
             for (TaintValue v : values) argExprs.add(v.expr);
-            return new TaintValue(sz, new UnresolvedCall(m.owner, m.name, m.desc, argExprs));
+            return new TaintValue(sz, new Call(m.owner, m.name, m.desc, argExprs));
         }
 
-        private Expr tryInlineInvoke(MethodInsnNode m, List<? extends TaintValue> values) {
-            if (m.owner.startsWith("java/") || m.owner.startsWith("net/minecraft/")) return null;
-            Class<?> owner;
+        private Expr tryInline(MethodInsnNode m, List<? extends TaintValue> values) {
+            Class<?> owner = loadClass(m.owner);
+            if (owner == null) return null;
+            if (m.owner.startsWith("java/") || m.owner.startsWith("net/minecraft/")) {
+                Method jm = findAnyMethod(owner, m.name, m.desc);
+                if (jm == null) return null;
+                int mods = jm.getModifiers();
+                if (!(Modifier.isFinal(mods) || Modifier.isStatic(mods) || Modifier.isPrivate(mods))) return null;
+            }
+            //环检测 + 全局熔断,避免无 cache 的 seed 内联指数膨胀 / 主线程卡死
+            String inflightKey = m.owner + "#" + m.name + "#" + m.desc;
+            if (!ctx.inflight.add(inflightKey)) return UnknownExpr.UNKNOWN;
+            if (ctx.inlineBudget <= 0) { ctx.inflight.remove(inflightKey); return UnknownExpr.UNKNOWN; }
+            ctx.inlineBudget--;
             try {
-                owner = Class.forName(m.owner.replace('/', '.'), false, Thread.currentThread().getContextClassLoader());
-            } catch (Throwable t) { return null; }
-            boolean isStatic = m.getOpcode() == Opcodes.INVOKESTATIC;
-            Type[] argTypes = Type.getArgumentTypes(m.desc);
-            int localCount = (isStatic ? 0 : 1);
-            for (Type at : argTypes) localCount += at.getSize();
-            TaintValue[] seed = new TaintValue[localCount + 8];
-            int idx = 0;
-            int vidx = 0;
-            if (!isStatic) { seed[idx++] = values.get(vidx++); }
-            for (Type at : argTypes) {
-                TaintValue arg = values.get(vidx++);
-                seed[idx] = arg;
-                idx += at.getSize();
+                boolean isStatic = m.getOpcode() == Opcodes.INVOKESTATIC;
+                Type[] argTypes = Type.getArgumentTypes(m.desc);
+                int localCount = (isStatic ? 0 : 1);
+                for (Type at : argTypes) localCount += at.getSize();
+                TaintValue[] seed = new TaintValue[localCount + 8];
+                int idx = 0, vidx = 0;
+                if (!isStatic) seed[idx++] = values.get(vidx++);
+                for (Type at : argTypes) {
+                    seed[idx] = values.get(vidx++);
+                    idx += at.getSize();
+                }
+                return analyzeMethod(owner, m.name, m.desc, seed, ctx, depth + 1);
+            } finally {
+                ctx.inflight.remove(inflightKey);
             }
-            return analyzeMethod(owner, m.name, m.desc, seed, ctx, depth + 1);
-        }
-
-        private static boolean isWrapperValueOfMethod(String owner, String name, String desc) {
-            if (!name.equals("valueOf")) return false;
-            if (!owner.startsWith("java/lang/")) return false;
-            String simple = owner.substring(10);
-            return (simple.equals("Float") && desc.equals("(F)Ljava/lang/Float;"))
-                || (simple.equals("Double") && desc.equals("(D)Ljava/lang/Double;"))
-                || (simple.equals("Integer") && desc.equals("(I)Ljava/lang/Integer;"))
-                || (simple.equals("Long") && desc.equals("(J)Ljava/lang/Long;"))
-                || (simple.equals("Short") && desc.equals("(S)Ljava/lang/Short;"))
-                || (simple.equals("Byte") && desc.equals("(B)Ljava/lang/Byte;"))
-                || (simple.equals("Boolean") && desc.equals("(Z)Ljava/lang/Boolean;"))
-                || (simple.equals("Character") && desc.equals("(C)Ljava/lang/Character;"));
-        }
-
-        private static InvertibleCall.InvertibleKind detectInvertible(MethodInsnNode m) {
-            if (m.getOpcode() != Opcodes.INVOKESTATIC) return null;
-            if (m.owner.equals("java/lang/Long")
-                && m.name.equals("reverse") && m.desc.equals("(J)J")) {
-                return InvertibleCall.InvertibleKind.LONG_REVERSE;
-            }
-            if (m.owner.equals("java/lang/Float")
-                && m.name.equals("intBitsToFloat") && m.desc.equals("(I)F")) {
-                return InvertibleCall.InvertibleKind.INT_BITS_TO_FLOAT;
-            }
-            if (m.owner.equals("java/lang/Float")
-                && (m.name.equals("floatToRawIntBits") || m.name.equals("floatToIntBits"))
-                && m.desc.equals("(F)I")) {
-                return InvertibleCall.InvertibleKind.FLOAT_TO_RAW_INT_BITS;
-            }
-            if (m.owner.equals("java/lang/Math")
-                && m.name.equals("max") && m.desc.equals("(FF)F")) {
-                return InvertibleCall.InvertibleKind.MATH_MAX_F;
-            }
-            return null;
-        }
-
-        private static boolean isNumberUnboxingMethod(String owner, String name, String desc) {
-            if (!owner.startsWith("java/lang/")) return false;
-            String simple = owner.substring(10);
-            boolean wrapper = simple.equals("Float") || simple.equals("Double")
-                || simple.equals("Integer") || simple.equals("Long")
-                || simple.equals("Short") || simple.equals("Byte")
-                || simple.equals("Boolean") || simple.equals("Character")
-                || simple.equals("Number");
-            if (!wrapper) return false;
-            return (name.equals("floatValue") && desc.equals("()F"))
-                || (name.equals("doubleValue") && desc.equals("()D"))
-                || (name.equals("intValue") && desc.equals("()I"))
-                || (name.equals("longValue") && desc.equals("()J"))
-                || (name.equals("shortValue") && desc.equals("()S"))
-                || (name.equals("byteValue") && desc.equals("()B"))
-                || (name.equals("booleanValue") && desc.equals("()Z"))
-                || (name.equals("charValue") && desc.equals("()C"));
-        }
-
-        private MapEntryLeaf.KeyKind detectKeyKind(Expr keyExpr) {
-            if (keyExpr instanceof EntityParamMarker) return MapEntryLeaf.KeyKind.ENTITY;
-            if (keyExpr instanceof UnresolvedCall uc && uc.args.size() >= 1 && uc.args.get(0) instanceof EntityParamMarker) {
-                if (uc.name.equals("m_19879_") || uc.name.equals("getId")) return MapEntryLeaf.KeyKind.ENTITY_ID;
-                if (uc.name.equals("m_20148_") || uc.name.equals("getUUID")) return MapEntryLeaf.KeyKind.ENTITY_UUID;
-            }
-            return MapEntryLeaf.KeyKind.UNKNOWN;
         }
 
         @Override public void returnOperation(AbstractInsnNode insn, TaintValue value, TaintValue expected) {}
@@ -604,265 +1347,289 @@ public final class HealthAnalyzer {
             List<Expr> alts = new ArrayList<>();
             addAlt(alts, v1.expr);
             addAlt(alts, v2.expr);
-            if (alts.size() == 1) return new TaintValue(Math.max(v1.size, v2.size), alts.get(0));
-            return new TaintValue(Math.max(v1.size, v2.size), new Choice(alts));
+            int size = Math.max(v1.size, v2.size);
+            if (alts.size() == 1) return new TaintValue(size, alts.get(0));
+            return new TaintValue(size, new Choice(alts));
         }
 
         private static void addAlt(List<Expr> into, Expr e) {
             if (e instanceof Choice c) {
-                for (Expr a : c.alternatives) if (!into.contains(a)) into.add(a);
+                for (Expr a : c.alternatives()) if (!into.contains(a)) into.add(a);
             } else if (!into.contains(e)) into.add(e);
         }
-    }
 
-    // ==================== 反向求解 ====================
-
-    //给定表达式 e、目标返回值 target、写入的 sink（表达式里的某个叶子）、以及读运行时值的函数，
-    //解出 sink 应该写什么值。不可解时返回 null。target 和 readCurrent 用 Number 承载，让 long-domain（XOR/Long.reverse 等）也能解。
-    public static Number solve(Expr e, Expr sink, Number target, BiFunction<Expr, Void, Number> readCurrent) {
-        if (e == sink) return target;
-        if (e instanceof Choice c) {
-            for (Expr alt : c.alternatives) {
-                if (!containsSink(alt, sink)) continue;
-                Number v = solve(alt, sink, target, readCurrent);
-                if (v != null) return v;
+        private Expr buildGetFieldSource(FieldInsnNode f, Expr receiver) {
+            FieldStep step = new FieldStep(f.owner, f.name, f.desc);
+            if (receiver == EntityParamMarker.I) {
+                return makeFieldChain(List.of(step));
             }
-            return null;
+            if (receiver instanceof FieldChainSource fcs) {
+                List<FieldStep> ext = new ArrayList<>(fcs.chain);
+                ext.add(step);
+                return makeFieldChain(ext);
+            }
+            if (receiver instanceof ChainedFieldSource cfs) {
+                List<FieldStep> ext = new ArrayList<>(cfs.chain);
+                ext.add(step);
+                Class<?> vt = descriptorToClass(step.desc());
+                return new ChainedFieldSource(cfs.root, ext, vt == null ? Object.class : vt);
+            }
+            if (receiver instanceof UnknownExpr || receiver == null) {
+                return UnknownExpr.UNKNOWN;
+            }
+            // receiver 是 MapEntrySource / ArrayElementSource / Reference / Call / Op：启动非 this 字段链
+            Class<?> vt = descriptorToClass(step.desc());
+            return new ChainedFieldSource(receiver, List.of(step), vt == null ? Object.class : vt);
         }
-        if (e instanceof BinaryOp b) {
-            boolean leftContains = containsSink(b.left, sink);
-            boolean rightContains = containsSink(b.right, sink);
-            if (leftContains == rightContains) return null;
-            if (leftContains) {
-                Number rv = evaluate(b.right, readCurrent);
-                if (rv == null) return null;
-                Number lt = invertBinary(b.opcode, target, rv, true);
-                if (lt == null) return null;
-                return solve(b.left, sink, lt, readCurrent);
-            } else {
-                Number lv = evaluate(b.left, readCurrent);
-                if (lv == null) return null;
-                Number rt = invertBinary(b.opcode, target, lv, false);
-                if (rt == null) return null;
-                return solve(b.right, sink, rt, readCurrent);
-            }
-        }
-        if (e instanceof UnaryOp u) {
-            Number inner = invertUnary(u.opcode, target);
-            if (inner == null) return null;
-            return solve(u.operand, sink, inner, readCurrent);
-        }
-        if (e instanceof InvertibleCall ic) {
-            Number newTarget = invertInvertibleCall(ic, target, sink, readCurrent);
-            if (newTarget == null) return null;
-            Expr argWithSink = null;
-            for (Expr arg : ic.args) {
-                if (containsSink(arg, sink)) { argWithSink = arg; break; }
-            }
-            if (argWithSink == null) return null;
-            return solve(argWithSink, sink, newTarget, readCurrent);
-        }
-        return null;
-    }
 
-    private static Number invertBinary(int op, Number target, Number other, boolean solveLeft) {
-        return switch (op) {
-            case Opcodes.IADD -> Integer.valueOf(target.intValue() - other.intValue());
-            case Opcodes.LADD -> Long.valueOf(target.longValue() - other.longValue());
-            case Opcodes.FADD -> Float.valueOf(target.floatValue() - other.floatValue());
-            case Opcodes.DADD -> Double.valueOf(target.doubleValue() - other.doubleValue());
-            case Opcodes.ISUB -> Integer.valueOf(solveLeft ? target.intValue() + other.intValue() : other.intValue() - target.intValue());
-            case Opcodes.LSUB -> Long.valueOf(solveLeft ? target.longValue() + other.longValue() : other.longValue() - target.longValue());
-            case Opcodes.FSUB -> Float.valueOf(solveLeft ? target.floatValue() + other.floatValue() : other.floatValue() - target.floatValue());
-            case Opcodes.DSUB -> Double.valueOf(solveLeft ? target.doubleValue() + other.doubleValue() : other.doubleValue() - target.doubleValue());
-            case Opcodes.IMUL -> other.intValue() == 0 ? null : Integer.valueOf(target.intValue() / other.intValue());
-            case Opcodes.LMUL -> other.longValue() == 0 ? null : Long.valueOf(target.longValue() / other.longValue());
-            case Opcodes.FMUL -> other.floatValue() == 0 ? null : Float.valueOf(target.floatValue() / other.floatValue());
-            case Opcodes.DMUL -> other.doubleValue() == 0 ? null : Double.valueOf(target.doubleValue() / other.doubleValue());
-            case Opcodes.IDIV -> {
-                if (solveLeft) yield Integer.valueOf(target.intValue() * other.intValue());
-                if (target.intValue() == 0) yield null;
-                yield Integer.valueOf(other.intValue() / target.intValue());
-            }
-            case Opcodes.LDIV -> {
-                if (solveLeft) yield Long.valueOf(target.longValue() * other.longValue());
-                if (target.longValue() == 0) yield null;
-                yield Long.valueOf(other.longValue() / target.longValue());
-            }
-            case Opcodes.FDIV -> {
-                if (solveLeft) yield Float.valueOf(target.floatValue() * other.floatValue());
-                if (target.floatValue() == 0f) yield null;
-                yield Float.valueOf(other.floatValue() / target.floatValue());
-            }
-            case Opcodes.DDIV -> {
-                if (solveLeft) yield Double.valueOf(target.doubleValue() * other.doubleValue());
-                if (target.doubleValue() == 0d) yield null;
-                yield Double.valueOf(other.doubleValue() / target.doubleValue());
-            }
-            // XOR 自逆：x ^ o = t → x = t ^ o
-            case Opcodes.IXOR -> Integer.valueOf((int)(target.longValue() ^ other.longValue()));
-            case Opcodes.LXOR -> Long.valueOf(target.longValue() ^ other.longValue());
-            default -> null;
-        };
-    }
-
-    private static Number invertUnary(int op, Number target) {
-        return switch (op) {
-            case Opcodes.INEG -> Integer.valueOf(-target.intValue());
-            case Opcodes.LNEG -> Long.valueOf(-target.longValue());
-            case Opcodes.FNEG -> Float.valueOf(-target.floatValue());
-            case Opcodes.DNEG -> Double.valueOf(-target.doubleValue());
-            // L2I 截低 32：写时高 32 填 0（任意值都行，read 时同样会被截）
-            case Opcodes.L2I -> Long.valueOf(target.longValue() & 0xFFFFFFFFL);
-            case Opcodes.I2L -> Integer.valueOf(target.intValue());
-            case Opcodes.I2F, Opcodes.L2F, Opcodes.D2F -> Float.valueOf(target.floatValue());
-            case Opcodes.F2I, Opcodes.D2I -> Integer.valueOf(target.intValue());
-            case Opcodes.F2L, Opcodes.D2L -> Long.valueOf(target.longValue());
-            case Opcodes.F2D, Opcodes.I2D, Opcodes.L2D -> Double.valueOf(target.doubleValue());
-            case Opcodes.I2B, Opcodes.I2C, Opcodes.I2S -> target;
-            default -> null;
-        };
-    }
-
-    private static Number invertInvertibleCall(InvertibleCall ic, Number target, Expr sink,
-                                               BiFunction<Expr, Void, Number> readCurrent) {
-        return switch (ic.kind) {
-            case LONG_REVERSE -> Long.valueOf(Long.reverse(target.longValue()));
-            case INT_BITS_TO_FLOAT -> Integer.valueOf(Float.floatToRawIntBits(target.floatValue()));
-            case FLOAT_TO_RAW_INT_BITS -> Float.valueOf(Float.intBitsToFloat(target.intValue()));
-            case MATH_MAX_F -> {
-                // max(a, b) = target；只解含 sink 的那个 arg，另一个 evaluate
-                Expr argWithSink = null, other = null;
-                for (Expr arg : ic.args) {
-                    if (containsSink(arg, sink)) argWithSink = arg;
-                    else other = arg;
+        private Expr makeFieldChain(List<FieldStep> chain) {
+            try {
+                VarHandle[] handles = new VarHandle[chain.size()];
+                Class<?> lastType = null;
+                for (int i = 0; i < chain.size(); i++) {
+                    FieldStep s = chain.get(i);
+                    Class<?> owner = loadClass(s.ownerInternal());
+                    if (owner == null) return UnknownExpr.UNKNOWN;
+                    Class<?> ft = descriptorToClass(s.desc());
+                    if (ft == null) return UnknownExpr.UNKNOWN;
+                    MethodHandles.Lookup lk = MethodHandles.privateLookupIn(owner, MethodHandles.lookup());
+                    handles[i] = lk.findVarHandle(owner, s.name(), ft);
+                    lastType = ft;
                 }
-                if (argWithSink == null) yield null;
-                Number otherVal = other != null ? evaluate(other, readCurrent) : Float.valueOf(0f);
-                if (otherVal == null) yield null;
-                float t = target.floatValue(), o = otherVal.floatValue();
-                // target >= other 时 sink_arg = target；否则不可解
-                if (t >= o) yield Float.valueOf(t);
-                yield null;
+                return new FieldChainSource(chain, handles, lastType);
+            } catch (Throwable t) {
+                return UnknownExpr.UNKNOWN;
             }
+        }
+
+        private Object resolveStaticField(String ownerInternal, String name) {
+            try {
+                Class<?> owner = loadClass(ownerInternal);
+                if (owner == null) return null;
+                Field f = owner.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(null);
+            } catch (Throwable t) { return null; }
+        }
+    }
+
+    //从 Map.get 的 receiver 表达式推断容器所属类(用于兄弟表扫描),无法确定返回 null
+    private static String mapOwnerHint(Expr container) {
+        if (container instanceof Reference ref) return ref.className();
+        if (container instanceof Call call) return call.owner();
+        return null;
+    }
+
+    /* ==================== 工具 ==================== */
+
+    private static TaintValue primI(int v) { return new TaintValue(1, new Primitive(v, 'I')); }
+    private static TaintValue primL(long v) { return new TaintValue(2, new Primitive(v, 'J')); }
+    private static TaintValue primF(float v) { return new TaintValue(1, new Primitive(v, 'F')); }
+    private static TaintValue primD(double v) { return new TaintValue(2, new Primitive(v, 'D')); }
+
+    private static TaintValue ldcValue(LdcInsnNode insn) {
+        Object cst = insn.cst;
+        int sz = (cst instanceof Long || cst instanceof Double) ? 2 : 1;
+        if (cst instanceof Integer i) return new TaintValue(sz, new Primitive(i, 'I'));
+        if (cst instanceof Long l) return new TaintValue(sz, new Primitive(l, 'J'));
+        if (cst instanceof Float f) return new TaintValue(sz, new Primitive(f, 'F'));
+        if (cst instanceof Double d) return new TaintValue(sz, new Primitive(d, 'D'));
+        if (cst instanceof String s) return new TaintValue(sz, new Reference(s, "java/lang/String"));
+        return new TaintValue(sz, UnknownExpr.UNKNOWN);
+    }
+
+    private static boolean isMapClassByName(String internal) {
+        if (internal.equals("java/util/Map") || internal.equals("java/util/HashMap")
+            || internal.equals("java/util/concurrent/ConcurrentHashMap") || internal.equals("java/util/WeakHashMap")
+            || internal.equals("java/util/LinkedHashMap") || internal.equals("java/util/IdentityHashMap")
+            || internal.equals("java/util/TreeMap")) return true;
+        if (internal.endsWith("Map") || internal.endsWith("HashMap")) return true;
+        Class<?> c = loadClass(internal);
+        return c != null && Map.class.isAssignableFrom(c);
+    }
+
+    private static MapEntrySource.KeyKind detectKeyKind(Expr key) {
+        if (key == EntityParamMarker.I) return MapEntrySource.KeyKind.ENTITY;
+        if (key instanceof Call call && call.args().size() == 1 && call.args().get(0) == EntityParamMarker.I) {
+            if (call.name().equals("m_19879_") || call.name().equals("getId")) return MapEntrySource.KeyKind.ENTITY_ID;
+            if (call.name().equals("m_20148_") || call.name().equals("getUUID")) return MapEntrySource.KeyKind.ENTITY_UUID;
+        }
+        return MapEntrySource.KeyKind.UNKNOWN;
+    }
+
+    private static Class<?> guessArrayElementType(int loadOp) {
+        return switch (loadOp) {
+            case Opcodes.IALOAD -> int.class;
+            case Opcodes.LALOAD -> long.class;
+            case Opcodes.FALOAD -> float.class;
+            case Opcodes.DALOAD -> double.class;
+            case Opcodes.BALOAD -> byte.class;
+            case Opcodes.CALOAD -> char.class;
+            case Opcodes.SALOAD -> short.class;
+            default -> Object.class;
         };
     }
 
-    private static boolean containsSink(Expr e, Expr sink) {
-        if (e == sink) return true;
-        if (e instanceof BinaryOp b) return containsSink(b.left, sink) || containsSink(b.right, sink);
-        if (e instanceof UnaryOp u) return containsSink(u.operand, sink);
-        if (e instanceof Choice c) {
-            for (Expr a : c.alternatives) if (containsSink(a, sink)) return true;
-            return false;
-        }
-        if (e instanceof InvertibleCall ic) {
-            for (Expr a : ic.args) if (containsSink(a, sink)) return true;
-            return false;
-        }
-        if (e instanceof UnresolvedCall uc) {
-            for (Expr a : uc.args) if (containsSink(a, sink)) return true;
-            return false;
-        }
-        return false;
+    private static Class<?> loadClass(String internalName) {
+        try { return Class.forName(internalName.replace('/', '.'), false, Thread.currentThread().getContextClassLoader()); }
+        catch (Throwable t) { return null; }
     }
 
-    public static Number evaluate(Expr e, BiFunction<Expr, Void, Number> readCurrent) {
-        if (e instanceof Const c) return Float.valueOf(c.value);
-        if (e instanceof FieldLeaf || e instanceof EntityDataLeaf || e instanceof MapEntryLeaf
-            || e instanceof MapByStaticFieldLeaf || e instanceof ArrayIndexLeaf || e instanceof ChainedFieldLeaf) {
-            return readCurrent.apply(e, null);
-        }
-        if (e instanceof Choice c) {
-            for (Expr alt : c.alternatives) {
-                Number v = evaluate(alt, readCurrent);
-                if (v != null) return v;
+    private static Method findAnyMethod(Class<?> owner, String name, String desc) {
+        for (Class<?> c = owner; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Method m : c.getDeclaredMethods()) {
+                if (m.getName().equals(name) && Type.getMethodDescriptor(m).equals(desc)) return m;
             }
-            return null;
-        }
-        if (e instanceof BinaryOp b) {
-            Number l = evaluate(b.left, readCurrent);
-            Number r = evaluate(b.right, readCurrent);
-            if (l == null || r == null) return null;
-            return computeBinary(b.opcode, l, r);
-        }
-        if (e instanceof UnaryOp u) {
-            Number v = evaluate(u.operand, readCurrent);
-            if (v == null) return null;
-            return computeUnary(u.opcode, v);
-        }
-        if (e instanceof InvertibleCall ic) {
-            List<Number> argVals = new ArrayList<>();
-            for (Expr arg : ic.args) {
-                Number v = evaluate(arg, readCurrent);
-                if (v == null) return null;
-                argVals.add(v);
-            }
-            return applyInvertibleCall(ic.kind, argVals);
         }
         return null;
     }
 
-    private static Number computeBinary(int op, Number l, Number r) {
-        return switch (op) {
-            case Opcodes.IADD -> Integer.valueOf(l.intValue() + r.intValue());
-            case Opcodes.LADD -> Long.valueOf(l.longValue() + r.longValue());
-            case Opcodes.FADD -> Float.valueOf(l.floatValue() + r.floatValue());
-            case Opcodes.DADD -> Double.valueOf(l.doubleValue() + r.doubleValue());
-            case Opcodes.ISUB -> Integer.valueOf(l.intValue() - r.intValue());
-            case Opcodes.LSUB -> Long.valueOf(l.longValue() - r.longValue());
-            case Opcodes.FSUB -> Float.valueOf(l.floatValue() - r.floatValue());
-            case Opcodes.DSUB -> Double.valueOf(l.doubleValue() - r.doubleValue());
-            case Opcodes.IMUL -> Integer.valueOf(l.intValue() * r.intValue());
-            case Opcodes.LMUL -> Long.valueOf(l.longValue() * r.longValue());
-            case Opcodes.FMUL -> Float.valueOf(l.floatValue() * r.floatValue());
-            case Opcodes.DMUL -> Double.valueOf(l.doubleValue() * r.doubleValue());
-            case Opcodes.IDIV -> r.intValue() == 0 ? null : Integer.valueOf(l.intValue() / r.intValue());
-            case Opcodes.LDIV -> r.longValue() == 0L ? null : Long.valueOf(l.longValue() / r.longValue());
-            case Opcodes.FDIV -> r.floatValue() == 0f ? null : Float.valueOf(l.floatValue() / r.floatValue());
-            case Opcodes.DDIV -> r.doubleValue() == 0d ? null : Double.valueOf(l.doubleValue() / r.doubleValue());
-            case Opcodes.IXOR -> Integer.valueOf(l.intValue() ^ r.intValue());
-            case Opcodes.LXOR -> Long.valueOf(l.longValue() ^ r.longValue());
-            case Opcodes.IAND -> Integer.valueOf(l.intValue() & r.intValue());
-            case Opcodes.LAND -> Long.valueOf(l.longValue() & r.longValue());
-            case Opcodes.IOR -> Integer.valueOf(l.intValue() | r.intValue());
-            case Opcodes.LOR -> Long.valueOf(l.longValue() | r.longValue());
+    private static Method findMethod(Class<?> owner, String name, Class<?>[] paramTypes) {
+        for (Class<?> c = owner; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Method m : c.getDeclaredMethods()) {
+                if (!m.getName().equals(name)) continue;
+                Class<?>[] mp = m.getParameterTypes();
+                if (mp.length != paramTypes.length) continue;
+                boolean match = true;
+                for (int i = 0; i < mp.length; i++) {
+                    if (!mp[i].equals(paramTypes[i]) && !mp[i].isAssignableFrom(paramTypes[i])) { match = false; break; }
+                }
+                if (match) return m;
+            }
+        }
+        return null;
+    }
+
+    static Class<?> asmTypeToClass(Type t) {
+        return switch (t.getSort()) {
+            case Type.BOOLEAN -> boolean.class;
+            case Type.CHAR -> char.class;
+            case Type.BYTE -> byte.class;
+            case Type.SHORT -> short.class;
+            case Type.INT -> int.class;
+            case Type.FLOAT -> float.class;
+            case Type.LONG -> long.class;
+            case Type.DOUBLE -> double.class;
+            case Type.OBJECT, Type.ARRAY -> {
+                try { yield Class.forName(t.getClassName(), false, Thread.currentThread().getContextClassLoader()); }
+                catch (Throwable e) { yield null; }
+            }
             default -> null;
         };
     }
 
-    private static Number computeUnary(int op, Number v) {
-        return switch (op) {
-            case Opcodes.INEG -> Integer.valueOf(-v.intValue());
-            case Opcodes.LNEG -> Long.valueOf(-v.longValue());
-            case Opcodes.FNEG -> Float.valueOf(-v.floatValue());
-            case Opcodes.DNEG -> Double.valueOf(-v.doubleValue());
-            case Opcodes.L2I -> Integer.valueOf((int) v.longValue());
-            case Opcodes.I2L -> Long.valueOf(v.intValue());
-            case Opcodes.F2I -> Integer.valueOf((int) v.floatValue());
-            case Opcodes.I2F -> Float.valueOf(v.intValue());
-            case Opcodes.D2F -> Float.valueOf((float) v.doubleValue());
-            case Opcodes.F2D -> Double.valueOf(v.floatValue());
-            case Opcodes.L2F -> Float.valueOf(v.longValue());
-            case Opcodes.F2L -> Long.valueOf((long) v.floatValue());
-            case Opcodes.D2L -> Long.valueOf((long) v.doubleValue());
-            case Opcodes.L2D -> Double.valueOf(v.longValue());
-            case Opcodes.D2I -> Integer.valueOf((int) v.doubleValue());
-            case Opcodes.I2D -> Double.valueOf(v.intValue());
-            case Opcodes.I2B -> Integer.valueOf((byte) v.intValue());
-            case Opcodes.I2C -> Integer.valueOf((char) v.intValue());
-            case Opcodes.I2S -> Integer.valueOf((short) v.intValue());
-            default -> v;
+    private static Class<?> descriptorToClass(String d) {
+        if (d == null || d.isEmpty()) return null;
+        return switch (d.charAt(0)) {
+            case 'F' -> float.class;
+            case 'D' -> double.class;
+            case 'I' -> int.class;
+            case 'J' -> long.class;
+            case 'S' -> short.class;
+            case 'B' -> byte.class;
+            case 'C' -> char.class;
+            case 'Z' -> boolean.class;
+            case 'L' -> loadClass(d.substring(1, d.length() - 1));
+            case '[' -> loadClass(d);
+            default -> null;
         };
     }
 
-    private static Number applyInvertibleCall(InvertibleCall.InvertibleKind kind, List<Number> args) {
-        return switch (kind) {
-            case LONG_REVERSE -> args.size() < 1 ? null : Long.valueOf(Long.reverse(args.get(0).longValue()));
-            case INT_BITS_TO_FLOAT -> args.size() < 1 ? null : Float.valueOf(Float.intBitsToFloat(args.get(0).intValue()));
-            case FLOAT_TO_RAW_INT_BITS -> args.size() < 1 ? null : Integer.valueOf(Float.floatToRawIntBits(args.get(0).floatValue()));
-            case MATH_MAX_F -> args.size() < 2 ? null : Float.valueOf(Math.max(args.get(0).floatValue(), args.get(1).floatValue()));
-        };
+    static Object coerceForType(Object v, Class<?> type) {
+        if (v == null) return null;
+        if (type == float.class || type == Float.class)
+            return v instanceof Number n ? n.floatValue() : null;
+        if (type == double.class || type == Double.class)
+            return v instanceof Number n ? n.doubleValue() : null;
+        if (type == int.class || type == Integer.class)
+            return v instanceof Number n ? n.intValue() : null;
+        if (type == long.class || type == Long.class)
+            return v instanceof Number n ? n.longValue() : null;
+        if (type == short.class || type == Short.class)
+            return v instanceof Number n ? n.shortValue() : null;
+        if (type == byte.class || type == Byte.class)
+            return v instanceof Number n ? n.byteValue() : null;
+        if (type == char.class || type == Character.class)
+            return v instanceof Number n ? (char) n.intValue() : null;
+        if (type == String.class) return v.toString();
+        return v;
     }
 
+    static Object coerceSameType(Object reference, Object value) {
+        if (reference == null) return value;
+        if (reference instanceof Float) return value instanceof Number n ? n.floatValue() : null;
+        if (reference instanceof Double) return value instanceof Number n ? n.doubleValue() : null;
+        if (reference instanceof Integer) return value instanceof Number n ? n.intValue() : null;
+        if (reference instanceof Long) return value instanceof Number n ? n.longValue() : null;
+        if (reference instanceof Short) return value instanceof Number n ? n.shortValue() : null;
+        if (reference instanceof Byte) return value instanceof Number n ? n.byteValue() : null;
+        if (reference instanceof String) return value == null ? null : value.toString();
+        return value;
+    }
+
+    private static Object coerceArg(Object v, Class<?> targetType) {
+        if (v == null) return targetType.isPrimitive() ? defaultPrim(targetType) : null;
+        if (targetType.isInstance(v)) return v;
+        if (v instanceof Number n) {
+            if (targetType == int.class || targetType == Integer.class) return n.intValue();
+            if (targetType == long.class || targetType == Long.class) return n.longValue();
+            if (targetType == float.class || targetType == Float.class) return n.floatValue();
+            if (targetType == double.class || targetType == Double.class) return n.doubleValue();
+            if (targetType == short.class || targetType == Short.class) return n.shortValue();
+            if (targetType == byte.class || targetType == Byte.class) return n.byteValue();
+        }
+        return v;
+    }
+
+    private static Object defaultPrim(Class<?> t) {
+        if (t == int.class) return 0;
+        if (t == long.class) return 0L;
+        if (t == float.class) return 0f;
+        if (t == double.class) return 0d;
+        if (t == short.class) return (short) 0;
+        if (t == byte.class) return (byte) 0;
+        if (t == boolean.class) return false;
+        if (t == char.class) return (char) 0;
+        return null;
+    }
+
+    private static Object readField(Object target, FieldStep step) {
+        try {
+            Class<?> owner = loadClass(step.ownerInternal());
+            if (owner == null) return null;
+            Field f = owner.getDeclaredField(step.name());
+            f.setAccessible(true);
+            return f.get(target);
+        } catch (Throwable t) { return null; }
+    }
+
+    private static boolean writeField(Object target, FieldStep step, Object value) {
+        Field f;
+        Class<?> ft;
+        try {
+            Class<?> owner = loadClass(step.ownerInternal());
+            if (owner == null) return false;
+            f = owner.getDeclaredField(step.name());
+            f.setAccessible(true);
+            ft = f.getType();
+        } catch (Throwable t) { return false; }
+
+        try {
+            if (ft == float.class) f.setFloat(target, ((Number) value).floatValue());
+            else if (ft == double.class) f.setDouble(target, ((Number) value).doubleValue());
+            else if (ft == int.class) f.setInt(target, ((Number) value).intValue());
+            else if (ft == long.class) f.setLong(target, ((Number) value).longValue());
+            else if (ft == short.class) f.setShort(target, ((Number) value).shortValue());
+            else if (ft == byte.class) f.setByte(target, ((Number) value).byteValue());
+            else f.set(target, coerceForType(value, ft));
+            return true;
+        } catch (Throwable ignored) {
+            //final 字段 / 模块系统访问限制 → 走 Unsafe 兜底
+            return UnsafeUtil.unsafePutField(target, f, value);
+        }
+    }
+
+    private record SimpleEvalContext(LivingEntity entity) implements EvalContext {
+        @Override public Object eval(Expr e) { return evaluate(e, this); }
+    }
 }

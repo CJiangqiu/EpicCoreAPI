@@ -24,6 +24,7 @@ import net.minecraftforge.entity.PartEntity;
 import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.*;
 
@@ -67,6 +68,10 @@ public class UnsafeUtil {
     private static Method PUT_INT_METHOD;
     private static Method PUT_LONG_METHOD;
     private static Method PUT_BOOLEAN_METHOD;
+    private static Method PUT_FLOAT_METHOD;
+    private static Method PUT_DOUBLE_METHOD;
+    private static Method PUT_SHORT_METHOD;
+    private static Method PUT_BYTE_METHOD;
     private static Method GET_OBJECT_METHOD;
     private static Method OBJECT_FIELD_OFFSET_METHOD;
 
@@ -145,6 +150,10 @@ public class UnsafeUtil {
         PUT_INT_METHOD = unsafeClass.getMethod("putInt", Object.class, long.class, int.class);
         PUT_LONG_METHOD = unsafeClass.getMethod("putLong", Object.class, long.class, long.class);
         PUT_BOOLEAN_METHOD = unsafeClass.getMethod("putBoolean", Object.class, long.class, boolean.class);
+        PUT_FLOAT_METHOD = unsafeClass.getMethod("putFloat", Object.class, long.class, float.class);
+        PUT_DOUBLE_METHOD = unsafeClass.getMethod("putDouble", Object.class, long.class, double.class);
+        PUT_SHORT_METHOD = unsafeClass.getMethod("putShort", Object.class, long.class, short.class);
+        PUT_BYTE_METHOD = unsafeClass.getMethod("putByte", Object.class, long.class, byte.class);
         GET_OBJECT_METHOD = unsafeClass.getMethod("getObject", Object.class, long.class);
         OBJECT_FIELD_OFFSET_METHOD = unsafeClass.getMethod("objectFieldOffset", Field.class);
     }
@@ -256,6 +265,94 @@ public class UnsafeUtil {
         } catch (Exception e) {
             EcaLogger.info("[UnsafeUtil] objectFieldOffset failed: {}", e.getMessage());
             return -1;
+        }
+    }
+
+    public static void lwjglPutFloat(Object target, long offset, float value) {
+        if (!available || PUT_FLOAT_METHOD == null) return;
+        try {
+            PUT_FLOAT_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
+        } catch (Exception e) {
+            EcaLogger.info("[UnsafeUtil] putFloat failed: {}", e.getMessage());
+        }
+    }
+
+    public static void lwjglPutDouble(Object target, long offset, double value) {
+        if (!available || PUT_DOUBLE_METHOD == null) return;
+        try {
+            PUT_DOUBLE_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
+        } catch (Exception e) {
+            EcaLogger.info("[UnsafeUtil] putDouble failed: {}", e.getMessage());
+        }
+    }
+
+    public static void lwjglPutLong(Object target, long offset, long value) {
+        if (!available || PUT_LONG_METHOD == null) return;
+        try {
+            PUT_LONG_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
+        } catch (Exception e) {
+            EcaLogger.info("[UnsafeUtil] putLong failed: {}", e.getMessage());
+        }
+    }
+
+    public static void lwjglPutShort(Object target, long offset, short value) {
+        if (!available || PUT_SHORT_METHOD == null) return;
+        try {
+            PUT_SHORT_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
+        } catch (Exception e) {
+            EcaLogger.info("[UnsafeUtil] putShort failed: {}", e.getMessage());
+        }
+    }
+
+    public static void lwjglPutByte(Object target, long offset, byte value) {
+        if (!available || PUT_BYTE_METHOD == null) return;
+        try {
+            PUT_BYTE_METHOD.invoke(LWJGL_UNSAFE, target, offset, value);
+        } catch (Exception e) {
+            EcaLogger.info("[UnsafeUtil] putByte failed: {}", e.getMessage());
+        }
+    }
+
+    // 通过 LWJGL Unsafe 通道写字段（绕过 final、access 检查、VarHandle 限制）
+    /**
+     * Write a value to a field through the LWJGL Unsafe channel.
+     * Bypasses final / access modifier / VarHandle restrictions, allowing writes to
+     * record components and other read-only fields. Auto-dispatches by field type
+     * and unboxes {@link Number} for primitive targets.
+     * @param target the receiving object instance (null for static — not supported here)
+     * @param field the target field (must be accessible enough for objectFieldOffset)
+     * @param value the value to write; primitive targets auto-unbox from Number
+     * @return true on success, false otherwise
+     */
+    public static boolean unsafePutField(Object target, Field field, Object value) {
+        if (!available || target == null || field == null) return false;
+        try {
+            long offset = (long) OBJECT_FIELD_OFFSET_METHOD.invoke(LWJGL_UNSAFE, field);
+            Class<?> type = field.getType();
+            if (type == float.class) {
+                lwjglPutFloat(target, offset, value instanceof Number n ? n.floatValue() : 0f);
+            } else if (type == double.class) {
+                lwjglPutDouble(target, offset, value instanceof Number n ? n.doubleValue() : 0d);
+            } else if (type == int.class) {
+                lwjglPutInt(target, offset, value instanceof Number n ? n.intValue() : 0);
+            } else if (type == long.class) {
+                lwjglPutLong(target, offset, value instanceof Number n ? n.longValue() : 0L);
+            } else if (type == short.class) {
+                lwjglPutShort(target, offset, value instanceof Number n ? n.shortValue() : (short) 0);
+            } else if (type == byte.class) {
+                lwjglPutByte(target, offset, value instanceof Number n ? n.byteValue() : (byte) 0);
+            } else if (type == boolean.class) {
+                lwjglPutBoolean(target, offset, value instanceof Boolean b ? b : false);
+            } else {
+                lwjglPutObject(target, offset, value);
+            }
+            return true;
+        } catch (Exception e) {
+            //InvocationTargetException 自身 message 为 null,需取 cause 才能看到真实异常
+            Throwable real = (e instanceof InvocationTargetException ite && ite.getCause() != null)
+                ? ite.getCause() : e;
+            EcaLogger.info("[UnsafeUtil] unsafePutField failed: {}", real);
+            return false;
         }
     }
 
