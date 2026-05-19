@@ -169,24 +169,24 @@ public final class EntityExtensionClientState {
      */
     private static void resolveConditionalEffects(ResourceLocation dimensionId, EntityExtension extension, LivingEntity entity) {
         if (!OVERRIDE_FOGS.contains(dimensionId)) {
-            GlobalFogExtension fog = extension.globalFogExtension(entity);
-            if (fog != null && fog.enabled() && (entity == null || extension.shouldEnableFog(entity))) {
+            GlobalFogExtension fog = EntityExtensionSafeAccess.globalFogExtension(extension, entity);
+            if (fog != null && fog.enabled() && EntityExtensionSafeAccess.shouldEnableFog(extension, entity)) {
                 ACTIVE_FOGS.put(dimensionId, fog);
             } else {
                 ACTIVE_FOGS.remove(dimensionId);
             }
         }
         if (!OVERRIDE_SKYBOXES.contains(dimensionId)) {
-            GlobalSkyboxExtension skybox = extension.globalSkyboxExtension(entity);
-            if (skybox != null && skybox.enabled() && (entity == null || extension.shouldEnableSkybox(entity))) {
+            GlobalSkyboxExtension skybox = EntityExtensionSafeAccess.globalSkyboxExtension(extension, entity);
+            if (skybox != null && skybox.enabled() && EntityExtensionSafeAccess.shouldEnableSkybox(extension, entity)) {
                 ACTIVE_SKYBOXES.put(dimensionId, skybox);
             } else {
                 ACTIVE_SKYBOXES.remove(dimensionId);
             }
         }
         if (!OVERRIDE_MUSICS.contains(dimensionId)) {
-            CombatMusicExtension music = extension.combatMusicExtension(entity);
-            if (music != null && music.enabled() && (entity == null || extension.shouldEnableMusic(entity))) {
+            CombatMusicExtension music = EntityExtensionSafeAccess.combatMusicExtension(extension, entity);
+            if (music != null && music.enabled() && EntityExtensionSafeAccess.shouldEnableMusic(extension, entity)) {
                 ACTIVE_MUSICS.put(dimensionId, music);
             } else {
                 ACTIVE_MUSICS.remove(dimensionId);

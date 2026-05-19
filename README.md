@@ -24,6 +24,7 @@ Use `/eca` command (requires OP permission level 2):
 - `/eca cleanBossBar <targets>` - Clean up boss bars
 - `/eca allReturn <targets> <true|false>` - DANGER! Requires Attack Radical Logic config. Enable/disable return transformation on all boolean and void methods of the target entity's mod
 - `/eca allReturn global <true|false>` - DANGER! Enable/disable global AllReturn for all non-whitelisted mods
+- `/eca restore <targets> <true|false>` - DANGER! Requires Attack Radical Logic config. Force/cancel an entity instance delegating its core lifecycle methods (getHealth, setHealth, hurt, die, etc.) to vanilla LivingEntity behaviour
 - `/eca banSpawn <targets> <seconds>` - Ban spawning of selected entities' types for specified duration
 - `/eca banSpawn clear` - Unban all spawns in current dimension
 - `/eca setForceLoading <targets> <true|false>` - Enable/disable force chunk loading for entities
@@ -120,6 +121,8 @@ side="BOTH"
 - `isAllReturnWhitelisted(className)` - Check if a class is protected from AllReturn
 - `isTransformWhitelisted(className)` - Check if a class is protected from all ECA transformations
 - `getAllWhitelistedPackages()` - Get all whitelist prefixes (both levels, built-in + custom)
+- `restoreEntity(entity)` - DANGER! Requires Attack Radical Logic config. Retransform the entity's custom class chain so this instance delegates getHealth/getMaxHealth/setHealth/hurt/die and other core lifecycle methods to vanilla LivingEntity behaviour (per-instance, reversible)
+- `unrestoreEntity(entity)` - Cancel the class-restore, returning the entity to its custom implementation
 - `getEntityExtensionRegistry()` - Get all registered entity extensions (Map<EntityType, EntityExtension>)
 - `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
 - `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
@@ -131,6 +134,10 @@ side="BOTH"
 - `setGlobalMusic(level, musicData)` - Set global combat music effect override for a dimension (does not change effect priority)
 - `clearGlobalMusic(level)` - Clear global combat music effect override
 - `clearAllGlobalEffects(level)` - Clear all global effect overrides (fog, skybox, music) for a dimension
+- `enableFilter(player, filterType)` - Apply a screen filter to a player (FilterType: SKETCH, SPOTLIGHT, MATRIX, RAIN, DESERT, SNOW, TOXIC)
+- `disableFilter(player, filterType)` - Remove a screen filter from a player
+- `isFilterEnabled(player, filterType)` - Check whether a filter is active on a player
+- `getActiveFilters(player)` - Get a player's active filters (unmodifiable Set<FilterType>)
 - `banSpawn(level, entityType, seconds)` - Ban entity type from spawning for specified duration
 - `isSpawnBanned(level, entityType)` - Check if entity type is banned from spawning
 - `getSpawnBanTime(level, entityType)` - Get remaining spawn ban time in seconds
@@ -409,10 +416,7 @@ public class MyBossExtension extends EntityExtension {
         };
     }
 
-    /*
-     * Conditional on/off gate — fog/skybox/music activate only when the condition returns true.
-     * Re-evaluated periodically; for global-mode effects the entity is the dimension's primary entity.
-     */
+    // Conditional gate: fog/skybox/music activate only when the matching shouldEnableXxx returns true; re-checked ~once/sec against the dimension's primary entity
     @Override
     public boolean shouldEnableFog(LivingEntity entity) {
         return entity.getHealth() < entity.getMaxHealth() * 0.5f;  // example: fog activates when entity is below 50% health
@@ -429,17 +433,14 @@ public class MyBossExtension extends EntityExtension {
     }
 
     /*
-     * Conditional switching — override the entity-aware variant to return a different extension
-     * object based on entity state (health, position, effects, etc.). Available on all five
-     * methods: bossBarExtension / entityLayerExtension / globalFogExtension /
-     * globalSkyboxExtension / combatMusicExtension. The entity argument may be null (effect init,
-     * or boss outside render range), so null-check it. Global effects (fog/skybox/music)
-     * re-evaluate roughly once per second against the dimension's primary entity; instance
-     * effects (boss bar/render layer) re-evaluate every frame per entity.
+     * Conditional switching — override the entity-aware overload (on all five extension methods: bossBar / entityLayer / globalFog /
+     * globalSkybox / combatMusic) to return a different extension object based on entity state. ECA invokes the entity-aware overload only
+     * with a non-null entity (other cases use the no-arg variant) and catches any exception it throws, falling back to the no-arg variant.
+     * Global effects re-evaluate ~once/sec against the dimension's primary entity; instance effects (boss bar/render layer) re-evaluate per frame.
      */
     @Override
     public GlobalSkyboxExtension globalSkyboxExtension(LivingEntity entity) {
-        if (entity != null && entity.getHealth() < entity.getMaxHealth() * 0.5f) {
+        if (entity.getHealth() < entity.getMaxHealth() * 0.5f) {
             return phase2Skybox;  // below 50% health: switch to another GlobalSkyboxExtension you defined
         }
         return globalSkyboxExtension();  // default: the no-arg skybox above
@@ -533,6 +534,21 @@ Available presets:
 - `StarlightRenderTypes` — Starlight
 - `CosmosRenderTypes` — Cosmos
 - `BlackHoleRenderTypes` — Black Hole
+
+### Screen Filter System
+
+ECA provides a set of full-screen post-processing filters that the server can apply per player, either by command or through the API. A filter is synced to the client and rendered as a shader pass over the level. Each player can have only one filter active at a time — applying a new one replaces the current one — and a player's filter is cleared automatically on logout.
+
+Filter types (`net.eca.util.filter.FilterType`):
+- `SKETCH` — sketch
+- `SPOTLIGHT` — spotlight
+- `MATRIX` — matrix
+- `RAIN` — rain
+- `DESERT` — desert
+- `SNOW` — snow
+- `TOXIC` — toxic
+
+Apply a filter with `/eca setFilter <targets> true <type>` or `EcaAPI.enableFilter(player, FilterType.SKETCH)`; clear filters with `/eca setFilter <targets> false` or `EcaAPI.disableFilter(player, type)`.
 
 ### BossShow Cinematic System
 
@@ -718,6 +734,7 @@ Any `.json` filename works, and you can have multiple files.
 - `/eca cleanBossBar <目标>` - 清理 Boss 血条
 - `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体的所属mod的全部布尔和void方法的return transformation
 - `/eca allReturn global <true|false>` - 危险！启用/禁用全局AllReturn，影响所有非白名单mod
+- `/eca restore <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，还原/取消还原实体：强制指定实例将核心生命周期方法（getHealth、setHealth、hurt、die 等）委托给原版 LivingEntity 行为
 - `/eca banSpawn <目标> <秒数>` - 禁止选中实体的类型生成指定时长
 - `/eca banSpawn clear` - 解除当前维度所有禁生成
 - `/eca setForceLoading <目标> <true|false>` - 启用/禁用实体强加载
@@ -814,6 +831,8 @@ side="BOTH"
 - `isAllReturnWhitelisted(className)` - 检查类是否在 AllReturn 白名单中
 - `isTransformWhitelisted(className)` - 检查类是否在转换白名单中（跳过全部转换）
 - `getAllWhitelistedPackages()` - 获取所有白名单前缀（两级合并，内置 + 自定义）
+- `restoreEntity(entity)` - 危险！需要开启激进攻击逻辑配置，重转换实体的自定义类链，使该实例将 getHealth/getMaxHealth/setHealth/hurt/die 等核心生命周期方法委托给原版 LivingEntity 行为（按实例生效，可逆）
+- `unrestoreEntity(entity)` - 取消类还原，使实体恢复其自定义实现
 - `getEntityExtensionRegistry()` - 获取所有已注册的实体扩展（Map<EntityType, EntityExtension>）
 - `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
 - `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）
@@ -825,6 +844,10 @@ side="BOTH"
 - `setGlobalMusic(level, musicData)` - 设置维度全局战斗音乐效果覆盖（不改变效果优先级）
 - `clearGlobalMusic(level)` - 清除全局战斗音乐效果覆盖
 - `clearAllGlobalEffects(level)` - 清除维度所有全局效果覆盖（雾气、天空盒、音乐）
+- `enableFilter(player, filterType)` - 为玩家施加屏幕滤镜（FilterType：SKETCH、SPOTLIGHT、MATRIX、RAIN、DESERT、SNOW、TOXIC）
+- `disableFilter(player, filterType)` - 移除玩家的某个屏幕滤镜
+- `isFilterEnabled(player, filterType)` - 检查玩家是否激活了某个滤镜
+- `getActiveFilters(player)` - 获取玩家激活的滤镜（不可变 Set<FilterType>）
 - `banSpawn(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
 - `isSpawnBanned(level, entityType)` - 检查实体类型是否被禁生成
 - `getSpawnBanTime(level, entityType)` - 获取禁生成剩余秒数
@@ -1103,10 +1126,7 @@ public class MyBossExtension extends EntityExtension {
         };
     }
 
-    /*
-     * 条件开关 — 迷雾/天空盒/音乐仅在对应条件返回 true 时激活。
-     * 定期重新求值；全局模式效果传入的实体为该维度的主实体。
-     */
+    // 条件开关：迷雾/天空盒/音乐仅在对应 shouldEnableXxx 返回 true 时激活；框架约每秒按该维度主实体重新检查一次
     @Override
     public boolean shouldEnableFog(LivingEntity entity) {
         return entity.getHealth() < entity.getMaxHealth() * 0.5f;  // 示例：实体血量低于 50% 时触发迷雾
@@ -1123,15 +1143,13 @@ public class MyBossExtension extends EntityExtension {
     }
 
     /*
-     * 条件切换 — 重写带实体参数的重载，按实体状态（血量、坐标、效果等）返回不同的扩展对象。
-     * 五个方法均可用：bossBarExtension / entityLayerExtension / globalFogExtension /
-     * globalSkyboxExtension / combatMusicExtension。entity 参数可能为 null（效果初始化，
-     * 或 Boss 不在渲染范围），需自行判空。全局效果（迷雾/天空盒/音乐）约每秒按维度主实体
-     * 重新求值；实例效果（Boss 血条/渲染层）每帧按实体重新求值。
+     * 条件切换 — 重写带实体参数的重载（五个扩展方法都有：bossBar / entityLayer / globalFog / globalSkybox / combatMusic），按实体状态返回不同的扩展对象。
+     * ECA 只在 entity 非 null 时调用带参重载（其余走无参版），重写抛出的异常会被捕获并退回无参版，写错不会崩客户端。
+     * 全局效果约每秒按维度主实体重新求值，实例效果（Boss 血条/渲染层）每帧按实体重新求值。
      */
     @Override
     public GlobalSkyboxExtension globalSkyboxExtension(LivingEntity entity) {
-        if (entity != null && entity.getHealth() < entity.getMaxHealth() * 0.5f) {
+        if (entity.getHealth() < entity.getMaxHealth() * 0.5f) {
             return phase2Skybox;  // 血量低于 50%：切换到你定义的另一个 GlobalSkyboxExtension
         }
         return globalSkyboxExtension();  // 默认：上面的无参天空盒
@@ -1225,6 +1243,21 @@ public class DiamondSwordExtension extends ItemExtension {
 - `StarlightRenderTypes` — 星辉
 - `CosmosRenderTypes` — 宇宙
 - `BlackHoleRenderTypes` — 黑洞
+
+### 屏幕滤镜系统
+
+ECA 提供一组全屏后处理滤镜，可由服务端按玩家施加，通过命令或 API 均可。滤镜会同步到客户端，作为一道着色器 pass 叠加在世界画面上。每个玩家同一时刻只能激活一个滤镜——施加新滤镜会替换当前滤镜——玩家退出登录时其滤镜会自动清除。
+
+滤镜类型（`net.eca.util.filter.FilterType`）：
+- `SKETCH` — 素描
+- `SPOTLIGHT` — 聚光灯
+- `MATRIX` — 矩阵
+- `RAIN` — 雨
+- `DESERT` — 沙漠
+- `SNOW` — 雪
+- `TOXIC` — 剧毒
+
+施加滤镜：`/eca setFilter <目标> true <类型>` 或 `EcaAPI.enableFilter(player, FilterType.SKETCH)`；清除滤镜：`/eca setFilter <目标> false` 或 `EcaAPI.disableFilter(player, 类型)`。
 
 ### BossShow 演出系统
 

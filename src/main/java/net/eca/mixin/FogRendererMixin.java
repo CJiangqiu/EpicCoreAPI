@@ -5,6 +5,7 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.eca.util.entity_extension.EntityExtensionClientState;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.entity_extension.EntityExtensionSafeAccess;
 import net.eca.util.entity_extension.GlobalFogExtension;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
@@ -133,12 +134,12 @@ public class FogRendererMixin {
                 continue;
             }
 
-            GlobalFogExtension fog = extension.globalFogExtension(living);
+            GlobalFogExtension fog = EntityExtensionSafeAccess.globalFogExtension(extension, living);
             if (fog == null || !fog.enabled() || fog.globalMode()) {
                 continue;
             }
 
-            if (!extension.shouldEnableFog(living)) {
+            if (!EntityExtensionSafeAccess.shouldEnableFog(extension, living)) {
                 continue;
             }
 

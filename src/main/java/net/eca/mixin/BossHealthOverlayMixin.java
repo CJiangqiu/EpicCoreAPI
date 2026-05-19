@@ -13,6 +13,7 @@ import net.eca.util.entity_extension.EntityExtensionClientState;
 import net.eca.client.render.TextureSizeCache;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.entity_extension.EntityExtensionSafeAccess;
 import net.eca.util.EcaLogger;
 import net.eca.util.entity_extension.BossBarExtension;
 import net.minecraft.client.Minecraft;
@@ -76,7 +77,7 @@ public class BossHealthOverlayMixin {
             }
         }
 
-        BossBarExtension bossBar = extension.bossBarExtension(bossEntity);
+        BossBarExtension bossBar = EntityExtensionSafeAccess.bossBarExtension(extension, bossEntity);
         if (bossBar == null || !bossBar.enabled()) {
             return false;
         }

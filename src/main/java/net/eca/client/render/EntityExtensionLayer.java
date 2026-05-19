@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import net.eca.client.render.shader.EcaShaderInstance;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.entity_extension.EntityExtensionSafeAccess;
 import net.eca.util.entity_extension.EntityLayerExtension;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
@@ -36,7 +37,7 @@ public class EntityExtensionLayer<T extends LivingEntity, M extends net.minecraf
             return;
         }
 
-        EntityLayerExtension layerExtension = extension.entityLayerExtension(entity);
+        EntityLayerExtension layerExtension = EntityExtensionSafeAccess.entityLayerExtension(extension, entity);
         if (layerExtension == null || !layerExtension.enabled() || !layerExtension.shouldRender(entity)) {
             return;
         }

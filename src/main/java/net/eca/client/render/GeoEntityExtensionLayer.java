@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import net.eca.client.render.shader.EcaShaderInstance;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.entity_extension.EntityExtensionSafeAccess;
 import net.eca.util.entity_extension.EntityLayerExtension;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
@@ -36,7 +37,7 @@ public class GeoEntityExtensionLayer<T extends Entity & GeoAnimatable> extends G
         if (extension == null) return;
 
         LivingEntity livingAnimatable = animatable instanceof LivingEntity living ? living : null;
-        EntityLayerExtension layerExtension = extension.entityLayerExtension(livingAnimatable);
+        EntityLayerExtension layerExtension = EntityExtensionSafeAccess.entityLayerExtension(extension, livingAnimatable);
         if (layerExtension == null || !layerExtension.enabled() || !layerExtension.shouldRender(livingAnimatable)) return;
 
         RenderType shaderRenderType = layerExtension.getRenderType();
