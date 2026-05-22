@@ -3,6 +3,8 @@ package net.eca.event;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import net.eca.util.bossshow.BossShowClientState;
+import net.eca.util.bossshow.BossShowEditorState;
+import net.eca.util.bossshow.BossShowPose;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
@@ -78,8 +80,15 @@ public final class BossShowClientEvents {
     //相机角度最终锁定（防止其它 mod 的 ViewportEvent 订阅者覆写我们）
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void onComputeCameraAngles(ViewportEvent.ComputeCameraAngles event) {
-        if (!BossShowClientState.isActive()) return;
-        var pose = BossShowClientState.computePoseForRender((float) event.getPartialTick());
+        //播放优先；播放未激活时才考虑编辑器预览（二者互斥）
+        BossShowPose pose;
+        if (BossShowClientState.isActive()) {
+            pose = BossShowClientState.computePoseForRender((float) event.getPartialTick());
+        } else if (BossShowEditorState.isPreviewActive()) {
+            pose = BossShowEditorState.computePreviewPose();
+        } else {
+            return;
+        }
         event.setYaw(pose.yaw);
         event.setPitch(pose.pitch);
         event.setRoll(0f);

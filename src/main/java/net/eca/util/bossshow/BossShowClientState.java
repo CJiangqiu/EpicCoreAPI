@@ -7,8 +7,7 @@ import net.eca.network.BossShowStartPacket;
 import net.eca.network.BossShowStopPacket;
 import net.eca.network.BossShowSubtitlePacket;
 import net.eca.network.NetworkHandler;
-import net.eca.util.bossshow.BossShowDefinition.Marker;
-import net.eca.util.bossshow.BossShowDefinition.Sample;
+import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.language.I18n;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -23,7 +22,7 @@ import java.util.UUID;
 
 /**
  * Client-side state of the currently-playing BossShow cutscene.
- * Holds the full sample list so we can interpolate the camera each frame
+ * Holds the full frame list so we can interpolate the camera each render frame
  * without per-tick network traffic.
  */
 @OnlyIn(Dist.CLIENT)
@@ -35,8 +34,7 @@ public final class BossShowClientState {
     private static EntityType<?> targetType;
     private static double anchorX, anchorY, anchorZ;
     private static float anchorYaw;
-    private static List<Sample> samples;
-    private static List<Marker> markers;
+    private static List<Frame> frames;
     private static boolean cinematic;
     private static int tickCounter;
     private static final BossShowPose POSE = new BossShowPose();
@@ -57,8 +55,7 @@ public final class BossShowClientState {
         anchorY = msg.anchorY();
         anchorZ = msg.anchorZ();
         anchorYaw = msg.anchorYaw();
-        samples = msg.samples();
-        markers = msg.markers();
+        frames = msg.frames();
         cinematic = msg.cinematic();
         tickCounter = 0;
         active = true;
@@ -70,7 +67,7 @@ public final class BossShowClientState {
             subtitleComponent = null;
             return;
         }
-        //整合包 config override 优先：命中当前 locale 直接用，不命中回退 I18n（由 vanilla 做 mod(current)→mod(en_us) 兜底）
+        //整合包 config override 优先：命中当前 locale 直接用，不命中回退 I18n
         String overridden = BossShowLangOverride.lookup(text);
         if (overridden != null) {
             subtitleComponent = Component.literal(overridden);
@@ -94,11 +91,10 @@ public final class BossShowClientState {
         cutsceneId = null;
         targetUuid = null;
         targetType = null;
-        samples = null;
-        markers = null;
+        frames = null;
         tickCounter = 0;
         subtitleComponent = null;
-        //如果 editor session 还活着（玩家通过 Home Play 触发的试播），自动回到 Home
+        //如果 editor session 还活着（试播结束），自动回到 Home
         if (BossShowEditorState.isActive()) {
             Minecraft mc = Minecraft.getInstance();
             if (mc.screen == null) {
@@ -123,7 +119,7 @@ public final class BossShowClientState {
     }
 
     public static BossShowPose computePoseForRender(float partialTick) {
-        if (!active || samples == null || samples.isEmpty()) {
+        if (!active || frames == null || frames.isEmpty()) {
             POSE.x = POSE.y = POSE.z = 0;
             POSE.yaw = POSE.pitch = 0;
             POSE.cinematic = false;
@@ -131,7 +127,7 @@ public final class BossShowClientState {
         }
 
         double cursor = tickCounter + partialTick;
-        BossShowInterpolator.computePose(samples, markers, cinematic, cursor,
+        BossShowInterpolator.computePose(frames, cinematic, cursor,
             anchorX, anchorY, anchorZ, anchorYaw, POSE);
         return POSE;
     }

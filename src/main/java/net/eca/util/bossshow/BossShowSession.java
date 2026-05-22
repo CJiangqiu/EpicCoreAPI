@@ -19,8 +19,8 @@ public final class BossShowSession implements BossShowContext {
     public final float anchorYaw;
 
     public int ticksElapsed = 0;
-    //已派发过事件的 marker 索引上界（exclusive）；初始 0
-    public int nextMarkerIndex = 0;
+    //下一个待检查关键帧派发的帧下标（exclusive upper bound of already-dispatched frames）
+    public int nextDispatchIndex = 0;
     public boolean finished = false;
 
     public BossShowSession(ServerPlayer viewer, LivingEntity target, BossShowDefinition definition,

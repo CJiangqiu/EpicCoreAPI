@@ -2,8 +2,7 @@ package net.eca.network;
 
 import net.eca.client.gui.BossShowEditorHomeScreen;
 import net.eca.util.bossshow.BossShowDefinition;
-import net.eca.util.bossshow.BossShowDefinition.Marker;
-import net.eca.util.bossshow.BossShowDefinition.Sample;
+import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowNetCodec;
 import net.eca.util.bossshow.Trigger;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -40,8 +39,7 @@ public class BossShowOpenEditorHomePacket {
             BossShowNetCodec.writeTrigger(buf, def.trigger());
             buf.writeBoolean(def.cinematic());
             buf.writeBoolean(def.allowRepeat());
-            BossShowNetCodec.writeSamples(buf, def.samples());
-            BossShowNetCodec.writeMarkers(buf, def.markers());
+            BossShowNetCodec.writeFrames(buf, def.frames());
             buf.writeFloat(def.anchorYawDeg());
         }
     }
@@ -55,13 +53,12 @@ public class BossShowOpenEditorHomePacket {
             Trigger trig = BossShowNetCodec.readTrigger(buf);
             boolean cine = buf.readBoolean();
             boolean allowRepeat = buf.readBoolean();
-            List<Sample> samples = BossShowNetCodec.readSamples(buf);
-            List<Marker> markers = BossShowNetCodec.readMarkers(buf);
+            List<Frame> frames = BossShowNetCodec.readFrames(buf);
             float yaw = buf.readFloat();
             EntityType<?> type = (typeId != null && BuiltInRegistries.ENTITY_TYPE.containsKey(typeId))
                 ? BuiltInRegistries.ENTITY_TYPE.get(typeId)
                 : null;
-            defs.add(new BossShowDefinition(id, type, trig, cine, allowRepeat, samples, markers, BossShowDefinition.Source.CONFIG, yaw));
+            defs.add(new BossShowDefinition(id, type, trig, cine, allowRepeat, frames, BossShowDefinition.Source.CONFIG, yaw));
         }
         return new BossShowOpenEditorHomePacket(defs);
     }

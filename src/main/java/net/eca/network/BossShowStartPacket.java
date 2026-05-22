@@ -2,8 +2,7 @@ package net.eca.network;
 
 import net.eca.util.bossshow.BossShowClientState;
 import net.eca.util.bossshow.BossShowDefinition;
-import net.eca.util.bossshow.BossShowDefinition.Marker;
-import net.eca.util.bossshow.BossShowDefinition.Sample;
+import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowNetCodec;
 import net.eca.util.bossshow.Trigger;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -29,8 +28,7 @@ public class BossShowStartPacket {
     private final String triggerType;
     private final double triggerRadius;
     private final boolean cinematic;
-    private final List<Sample> samples;
-    private final List<Marker> markers;
+    private final List<Frame> frames;
 
     public BossShowStartPacket(BossShowDefinition def, UUID targetUuid, double anchorX, double anchorY, double anchorZ, float anchorYaw) {
         this.cutsceneId = def.id();
@@ -45,14 +43,13 @@ public class BossShowStartPacket {
         this.triggerType = def.trigger().type();
         this.triggerRadius = def.trigger() instanceof Trigger.Range r ? r.effectRadius() : 0.0;
         this.cinematic = def.cinematic();
-        this.samples = def.samples();
-        this.markers = def.markers();
+        this.frames = def.frames();
     }
 
     private BossShowStartPacket(ResourceLocation cutsceneId, ResourceLocation targetTypeId, UUID targetUuid,
                                 double anchorX, double anchorY, double anchorZ, float anchorYaw,
                                 String triggerType, double triggerRadius, boolean cinematic,
-                                List<Sample> samples, List<Marker> markers) {
+                                List<Frame> frames) {
         this.cutsceneId = cutsceneId;
         this.targetTypeId = targetTypeId;
         this.targetUuid = targetUuid;
@@ -63,8 +60,7 @@ public class BossShowStartPacket {
         this.triggerType = triggerType;
         this.triggerRadius = triggerRadius;
         this.cinematic = cinematic;
-        this.samples = samples;
-        this.markers = markers;
+        this.frames = frames;
     }
 
     public static void encode(BossShowStartPacket msg, FriendlyByteBuf buf) {
@@ -78,8 +74,7 @@ public class BossShowStartPacket {
         buf.writeUtf(msg.triggerType);
         buf.writeDouble(msg.triggerRadius);
         buf.writeBoolean(msg.cinematic);
-        BossShowNetCodec.writeSamples(buf, msg.samples);
-        BossShowNetCodec.writeMarkers(buf, msg.markers);
+        BossShowNetCodec.writeFrames(buf, msg.frames);
     }
 
     public static BossShowStartPacket decode(FriendlyByteBuf buf) {
@@ -93,9 +88,8 @@ public class BossShowStartPacket {
         String trigType = buf.readUtf(64);
         double trigRadius = buf.readDouble();
         boolean cine = buf.readBoolean();
-        List<Sample> samples = BossShowNetCodec.readSamples(buf);
-        List<Marker> markers = BossShowNetCodec.readMarkers(buf);
-        return new BossShowStartPacket(cutsceneId, typeId, uuid, ax, ay, az, yaw, trigType, trigRadius, cine, samples, markers);
+        List<Frame> frames = BossShowNetCodec.readFrames(buf);
+        return new BossShowStartPacket(cutsceneId, typeId, uuid, ax, ay, az, yaw, trigType, trigRadius, cine, frames);
     }
 
     public static void handle(BossShowStartPacket msg, Supplier<NetworkEvent.Context> ctxSup) {
@@ -114,8 +108,7 @@ public class BossShowStartPacket {
     public String triggerType() { return triggerType; }
     public double triggerRadius() { return triggerRadius; }
     public boolean cinematic() { return cinematic; }
-    public List<Sample> samples() { return Collections.unmodifiableList(samples); }
-    public List<Marker> markers() { return Collections.unmodifiableList(markers); }
+    public List<Frame> frames() { return Collections.unmodifiableList(frames); }
 
     private static final class ClientHandlerRef {
         static void onStart(BossShowStartPacket msg) {

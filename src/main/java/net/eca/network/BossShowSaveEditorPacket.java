@@ -1,8 +1,7 @@
 package net.eca.network;
 
 import net.eca.util.bossshow.BossShowDefinition;
-import net.eca.util.bossshow.BossShowDefinition.Marker;
-import net.eca.util.bossshow.BossShowDefinition.Sample;
+import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.bossshow.BossShowNetCodec;
 import net.eca.util.bossshow.Trigger;
@@ -25,21 +24,18 @@ public class BossShowSaveEditorPacket {
     private final Trigger trigger;
     private final boolean cinematic;
     private final boolean allowRepeat;
-    private final List<Sample> samples;
-    private final List<Marker> markers;
+    private final List<Frame> frames;
     private final float anchorYawDeg;
 
     public BossShowSaveEditorPacket(ResourceLocation cutsceneId, ResourceLocation targetTypeId,
                                     Trigger trigger, boolean cinematic, boolean allowRepeat,
-                                    List<Sample> samples, List<Marker> markers,
-                                    float anchorYawDeg) {
+                                    List<Frame> frames, float anchorYawDeg) {
         this.cutsceneId = cutsceneId;
         this.targetTypeId = targetTypeId;
         this.trigger = trigger;
         this.cinematic = cinematic;
         this.allowRepeat = allowRepeat;
-        this.samples = samples;
-        this.markers = markers;
+        this.frames = frames;
         this.anchorYawDeg = anchorYawDeg;
     }
 
@@ -49,8 +45,7 @@ public class BossShowSaveEditorPacket {
         BossShowNetCodec.writeTrigger(buf, msg.trigger);
         buf.writeBoolean(msg.cinematic);
         buf.writeBoolean(msg.allowRepeat);
-        BossShowNetCodec.writeSamples(buf, msg.samples);
-        BossShowNetCodec.writeMarkers(buf, msg.markers);
+        BossShowNetCodec.writeFrames(buf, msg.frames);
         buf.writeFloat(msg.anchorYawDeg);
     }
 
@@ -60,10 +55,9 @@ public class BossShowSaveEditorPacket {
         Trigger trigger = BossShowNetCodec.readTrigger(buf);
         boolean cine = buf.readBoolean();
         boolean allowRepeat = buf.readBoolean();
-        List<Sample> samples = BossShowNetCodec.readSamples(buf);
-        List<Marker> markers = BossShowNetCodec.readMarkers(buf);
+        List<Frame> frames = BossShowNetCodec.readFrames(buf);
         float yaw = buf.readFloat();
-        return new BossShowSaveEditorPacket(cutsceneId, typeId, trigger, cine, allowRepeat, samples, markers, yaw);
+        return new BossShowSaveEditorPacket(cutsceneId, typeId, trigger, cine, allowRepeat, frames, yaw);
     }
 
     public static void handle(BossShowSaveEditorPacket msg, Supplier<NetworkEvent.Context> ctxSup) {
@@ -74,18 +68,9 @@ public class BossShowSaveEditorPacket {
             EntityType<?> type = (msg.targetTypeId != null && BuiltInRegistries.ENTITY_TYPE.containsKey(msg.targetTypeId))
                 ? BuiltInRegistries.ENTITY_TYPE.get(msg.targetTypeId)
                 : null;
-            //过滤越界 marker，与 BossShowJsonCodec.parse 行为一致
-            int sampleCount = msg.samples.size();
-            List<Marker> sanitized = new java.util.ArrayList<>(msg.markers.size());
-            for (Marker m : msg.markers) {
-                if (m.tickOffset() >= 0 && m.tickOffset() < sampleCount) {
-                    sanitized.add(m);
-                }
-            }
             BossShowDefinition def = new BossShowDefinition(
                 msg.cutsceneId, type, msg.trigger, msg.cinematic, msg.allowRepeat,
-                msg.samples, sanitized,
-                BossShowDefinition.Source.CONFIG, msg.anchorYawDeg);
+                msg.frames, BossShowDefinition.Source.CONFIG, msg.anchorYawDeg);
             boolean ok = BossShowManager.save(def);
             if (ok) {
                 player.sendSystemMessage(Component.literal("§aSaved BossShow " + msg.cutsceneId));

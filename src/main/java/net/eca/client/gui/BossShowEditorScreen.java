@@ -3,15 +3,19 @@ package net.eca.client.gui;
 import net.eca.network.BossShowSaveEditorPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.bossshow.BossShowDefinition;
-import net.eca.util.bossshow.BossShowDefinition.Marker;
+import net.eca.util.bossshow.BossShowDefinition.Frame;
+import net.eca.util.bossshow.BossShowDefinition.Keyframe;
 import net.eca.util.bossshow.BossShowEditorState;
 import net.eca.util.bossshow.Curve;
 import net.eca.util.bossshow.Trigger;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.ObjectSelectionList;
+import net.minecraft.client.gui.narration.NarratedElementType;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.gui.screens.Screen;
@@ -22,7 +26,7 @@ import net.minecraft.world.entity.EntityType;
 
 import java.util.List;
 
-//BossShow 编辑器：trigger + cinematic + marker 列表 + 录制控制
+//BossShow 编辑器：trigger + cinematic + 关键帧列表 + 录制控制
 public class BossShowEditorScreen extends Screen {
 
     private static final int LABEL_W = 60;
@@ -35,11 +39,20 @@ public class BossShowEditorScreen extends Screen {
     private Button triggerTypeBtn;
     private EditBox triggerRadiusBox;
     private EditBox customEventNameBox;
-    private MarkerList markerList;
-    private Button removeMarkerBtn;
+    private KeyframeList keyframeList;
+    private Button removeKeyframeBtn;
 
-    //右侧 marker 编辑
-    private EditBox markerEventBox;
+    //时间轴 + 区间操作
+    private Timeline timeline;
+    private Button setInBtn;
+    private Button setOutBtn;
+    private Button copyBtn;
+    private Button cutBtn;
+    private Button deleteRangeBtn;
+    private Button pasteBtn;
+
+    //右侧关键帧编辑
+    private EditBox eventIdBox;
     private EditBox subtitleBox;
     private Button curveBtn;
 
@@ -89,7 +102,7 @@ public class BossShowEditorScreen extends Screen {
         ).bounds(leftX + 138, topY, 130, 20).build();
         this.addRenderableWidget(cinematicBtn);
 
-        //=== Row 1: target_type label + EditBox（空 = 不绑定实体类型，Range 触发将不生效） ===
+        //=== Row 1: target_type ===
         targetTypeBox = new EditBox(this.font, leftX, topY + 26, leftW, 16,
             Component.translatable("gui.eca.bossshow.editor.target_type_placeholder"));
         targetTypeBox.setMaxLength(128);
@@ -112,7 +125,7 @@ public class BossShowEditorScreen extends Screen {
         });
         this.addRenderableWidget(targetTypeBox);
 
-        //=== Row 2: trigger button + 动态字段（Range 时为 radius，Custom 时为 eventName） ===
+        //=== Row 2: trigger ===
         Trigger trig = BossShowEditorState.getTrigger();
         triggerTypeBtn = Button.builder(
             Component.translatable("gui.eca.bossshow.editor.trigger", Component.translatable(trig.translationKey())),
@@ -145,53 +158,87 @@ public class BossShowEditorScreen extends Screen {
         });
         this.addRenderableWidget(customEventNameBox);
 
-        //=== marker 列表 ===
-        int listTop = topY + 76;
-        int listBottom = bottomBarY - 30;
-        markerList = new MarkerList(this.minecraft, leftW, listBottom - listTop, listTop, listBottom, 18);
-        markerList.setLeftPos(leftX);
-        markerList.setRenderBackground(false);
-        markerList.setRenderTopAndBottom(false);
-        this.addWidget(markerList);
-        //注意：rebuild 会触发 setSelected → syncFromState，必须等右侧 widget 全部就绪后再调用
+        //底部自下而上：record/save/close → 时间轴 → 区间操作 → 关键帧列表
+        int timelineY = bottomBarY - 22;
+        int rangeOpsY = bottomBarY - 46;
 
-        removeMarkerBtn = Button.builder(Component.translatable("gui.eca.bossshow.editor.remove_marker"), b -> {
-            int idx = BossShowEditorState.getSelectedMarker();
-            if (BossShowEditorState.removeMarker(idx)) {
-                rebuildMarkerList();
+        //=== 关键帧列表 ===
+        int listTop = topY + 76;
+        int listBottom = rangeOpsY - 28;
+        keyframeList = new KeyframeList(this.minecraft, leftW, listBottom - listTop, listTop, listBottom, 18);
+        keyframeList.setLeftPos(leftX);
+        keyframeList.setRenderBackground(false);
+        keyframeList.setRenderTopAndBottom(false);
+        this.addWidget(keyframeList);
+
+        removeKeyframeBtn = Button.builder(Component.translatable("gui.eca.bossshow.editor.remove_keyframe"), b -> {
+            int frameIdx = BossShowEditorState.getSelectedKeyframeFrameIndex();
+            if (BossShowEditorState.removeKeyframe(frameIdx)) {
+                rebuildKeyframeList();
                 syncFromState();
             }
-        }).bounds(leftX, listBottom + 4, 130, 20).build();
-        this.addRenderableWidget(removeMarkerBtn);
+        }).bounds(leftX, listBottom + 4, 130, 18).build();
+        this.addRenderableWidget(removeKeyframeBtn);
 
-        //=== 右侧：选中 marker 编辑 ===
-        markerEventBox = new EditBox(this.font, rightX + LABEL_W + 40, topY + 1, FIELD_W, 16,
-            Component.translatable("gui.eca.bossshow.editor.label.event"));
-        markerEventBox.setMaxLength(64);
-        markerEventBox.setResponder(s -> {
-            if (suppressResponders) return;
-            int idx = BossShowEditorState.getSelectedMarker();
-            Marker m = BossShowEditorState.getSelectedMarkerObj();
-            if (m == null) return;
-            BossShowEditorState.replaceMarker(idx,
-                new Marker(m.tickOffset(), s.isEmpty() ? null : s, m.subtitleText(), m.curve()));
+        //=== 区间操作按钮（全宽 6 等分）===
+        int opsX = leftX;
+        int opsTotalW = this.width - 16;
+        int opsGap = 4;
+        int opsBtnW = (opsTotalW - 5 * opsGap) / 6;
+        setInBtn = addRangeOpButton(opsX, rangeOpsY, opsBtnW, "set_in", b -> {
+            BossShowEditorState.setInPoint(BossShowEditorState.getPlayhead());
+            updateTimelineButtons();
         });
-        this.addRenderableWidget(markerEventBox);
+        setOutBtn = addRangeOpButton(opsX + (opsBtnW + opsGap), rangeOpsY, opsBtnW, "set_out", b -> {
+            BossShowEditorState.setOutPoint(BossShowEditorState.getPlayhead());
+            updateTimelineButtons();
+        });
+        copyBtn = addRangeOpButton(opsX + 2 * (opsBtnW + opsGap), rangeOpsY, opsBtnW, "copy", b -> {
+            BossShowEditorState.copyRange();
+            updateTimelineButtons();
+        });
+        cutBtn = addRangeOpButton(opsX + 3 * (opsBtnW + opsGap), rangeOpsY, opsBtnW, "cut", b -> {
+            if (BossShowEditorState.cutRange()) afterStructuralEdit();
+        });
+        deleteRangeBtn = addRangeOpButton(opsX + 4 * (opsBtnW + opsGap), rangeOpsY, opsBtnW, "delete_range", b -> {
+            if (BossShowEditorState.deleteRange()) afterStructuralEdit();
+        });
+        pasteBtn = addRangeOpButton(opsX + 5 * (opsBtnW + opsGap), rangeOpsY, opsBtnW, "paste", b -> {
+            if (BossShowEditorState.pasteAtPlayhead()) afterStructuralEdit();
+        });
+
+        //=== 时间轴 ===
+        timeline = new Timeline(leftX, timelineY, this.width - 16, 14);
+        this.addRenderableWidget(timeline);
+
+        //=== 右侧：选中关键帧编辑 ===
+        eventIdBox = new EditBox(this.font, rightX + LABEL_W + 40, topY + 1, FIELD_W, 16,
+            Component.translatable("gui.eca.bossshow.editor.label.event"));
+        eventIdBox.setMaxLength(64);
+        eventIdBox.setResponder(s -> {
+            if (suppressResponders) return;
+            int frameIdx = BossShowEditorState.getSelectedKeyframeFrameIndex();
+            Keyframe kf = BossShowEditorState.getSelectedKeyframeData();
+            if (kf == null) return;
+            BossShowEditorState.replaceKeyframe(frameIdx,
+                new Keyframe(s.isEmpty() ? null : s, kf.subtitleText(), kf.curve()));
+        });
+        this.addRenderableWidget(eventIdBox);
 
         subtitleBox = new EditBox(this.font, rightX + LABEL_W + 40, topY + 23, FIELD_W, 16,
             Component.translatable("gui.eca.bossshow.editor.label.subtitle"));
         subtitleBox.setMaxLength(256);
         subtitleBox.setResponder(s -> {
             if (suppressResponders) return;
-            int idx = BossShowEditorState.getSelectedMarker();
-            Marker m = BossShowEditorState.getSelectedMarkerObj();
-            if (m == null) return;
-            BossShowEditorState.replaceMarker(idx,
-                new Marker(m.tickOffset(), m.eventId(), s.isEmpty() ? null : s, m.curve()));
+            int frameIdx = BossShowEditorState.getSelectedKeyframeFrameIndex();
+            Keyframe kf = BossShowEditorState.getSelectedKeyframeData();
+            if (kf == null) return;
+            BossShowEditorState.replaceKeyframe(frameIdx,
+                new Keyframe(kf.eventId(), s.isEmpty() ? null : s, kf.curve()));
         });
         this.addRenderableWidget(subtitleBox);
 
-        //=== curve 行 ===
+        //=== curve ===
         curveBtn = Button.builder(Component.translatable(Curve.NONE.translationKey()), b -> cycleCurve())
             .bounds(rightX + LABEL_W + 40, topY + 45, FIELD_W, 20).build();
         this.addRenderableWidget(curveBtn);
@@ -209,8 +256,44 @@ public class BossShowEditorScreen extends Screen {
             .bounds(this.width - 128, bottomBarY, 120, 20).build();
         this.addRenderableWidget(closeBtn);
 
-        rebuildMarkerList();
+        rebuildKeyframeList();
         syncFromState();
+        updateTimelineButtons();
+        //编辑器界面打开期间启用相机预览（播放头帧位姿）
+        BossShowEditorState.setPreviewEnabled(true);
+    }
+
+    @Override
+    public void removed() {
+        BossShowEditorState.setPreviewEnabled(false);
+        super.removed();
+    }
+
+    private Button addRangeOpButton(int x, int y, int w, String key, Button.OnPress onPress) {
+        Button b = Button.builder(Component.translatable("gui.eca.bossshow.editor.timeline." + key), onPress)
+            .bounds(x, y, w, 18).build();
+        this.addRenderableWidget(b);
+        return b;
+    }
+
+    //结构性编辑（剪切/删除/粘贴）后刷新列表、右侧面板、按钮状态
+    private void afterStructuralEdit() {
+        rebuildKeyframeList();
+        syncFromState();
+        updateTimelineButtons();
+    }
+
+    private void updateTimelineButtons() {
+        if (setInBtn == null) return;
+        boolean hasFrames = BossShowEditorState.frameCount() > 0;
+        boolean range = BossShowEditorState.hasValidRange();
+        boolean clip = BossShowEditorState.hasClipboard();
+        setInBtn.active = hasFrames;
+        setOutBtn.active = hasFrames;
+        copyBtn.active = range;
+        cutBtn.active = range;
+        deleteRangeBtn.active = range;
+        pasteBtn.active = clip;
     }
 
     private static Component flagText(boolean v) {
@@ -225,7 +308,6 @@ public class BossShowEditorScreen extends Screen {
         applyTriggerFieldVisibility(next);
     }
 
-    //radiusBox 与 customEventNameBox 互斥；按当前 trigger 类型决定哪一个可见可编辑
     private void applyTriggerFieldVisibility(Trigger trig) {
         suppressResponders = true;
         try {
@@ -244,21 +326,22 @@ public class BossShowEditorScreen extends Screen {
     }
 
     private void cycleCurve() {
-        int idx = BossShowEditorState.getSelectedMarker();
-        Marker m = BossShowEditorState.getSelectedMarkerObj();
-        if (m == null) return;
-        Curve next = m.curve().next();
-        BossShowEditorState.replaceMarker(idx, new Marker(m.tickOffset(), m.eventId(), m.subtitleText(), next));
+        int frameIdx = BossShowEditorState.getSelectedKeyframeFrameIndex();
+        Keyframe kf = BossShowEditorState.getSelectedKeyframeData();
+        if (kf == null) return;
+        Curve next = kf.curve().next();
+        BossShowEditorState.replaceKeyframe(frameIdx, new Keyframe(kf.eventId(), kf.subtitleText(), next));
         curveBtn.setMessage(Component.translatable(next.translationKey()));
     }
 
-    private void rebuildMarkerList() {
-        if (markerList == null) return;
-        markerList.rebuild();
+    private void rebuildKeyframeList() {
+        if (keyframeList == null) return;
+        keyframeList.rebuild();
     }
 
     public void syncFromState() {
-        if (triggerTypeBtn == null || markerEventBox == null || subtitleBox == null || removeMarkerBtn == null || curveBtn == null) return;
+        if (triggerTypeBtn == null || eventIdBox == null || subtitleBox == null
+            || removeKeyframeBtn == null || curveBtn == null) return;
         suppressResponders = true;
         try {
             Trigger trig = BossShowEditorState.getTrigger();
@@ -273,18 +356,18 @@ public class BossShowEditorScreen extends Screen {
             ResourceLocation curTypeId = curType != null ? BuiltInRegistries.ENTITY_TYPE.getKey(curType) : null;
             targetTypeBox.setValue(curTypeId != null ? curTypeId.toString() : "");
 
-            Marker sel = BossShowEditorState.getSelectedMarkerObj();
+            Keyframe sel = BossShowEditorState.getSelectedKeyframeData();
             boolean en = sel != null;
-            markerEventBox.setEditable(en);
+            eventIdBox.setEditable(en);
             subtitleBox.setEditable(en);
             curveBtn.active = en;
-            removeMarkerBtn.active = en;
+            removeKeyframeBtn.active = en;
             if (sel != null) {
-                markerEventBox.setValue(sel.eventId() == null ? "" : sel.eventId());
+                eventIdBox.setValue(sel.eventId() == null ? "" : sel.eventId());
                 subtitleBox.setValue(sel.subtitleText() == null ? "" : sel.subtitleText());
                 curveBtn.setMessage(Component.translatable(sel.curve().translationKey()));
             } else {
-                markerEventBox.setValue("");
+                eventIdBox.setValue("");
                 subtitleBox.setValue("");
                 curveBtn.setMessage(Component.translatable(Curve.NONE.translationKey()));
             }
@@ -296,17 +379,17 @@ public class BossShowEditorScreen extends Screen {
         applyTriggerFieldVisibility(BossShowEditorState.getTrigger());
     }
 
-    public void onMarkerSelectionChanged() {
+    public void onKeyframeSelectionChanged() {
         syncFromState();
     }
 
     private void startRecording() {
         if (!BossShowEditorState.hasAnchor()) return;
-        if (!BossShowEditorState.getSamples().isEmpty()) {
+        if (!BossShowEditorState.getFrames().isEmpty()) {
             ConfirmScreen confirm = new ConfirmScreen(
                 this::onConfirmStartRecording,
                 Component.translatable("gui.eca.bossshow.editor.start_rec.title"),
-                Component.translatable("gui.eca.bossshow.editor.start_rec.body", BossShowEditorState.sampleCount())
+                Component.translatable("gui.eca.bossshow.editor.start_rec.body", BossShowEditorState.frameCount())
             );
             this.minecraft.setScreen(confirm);
         } else {
@@ -323,7 +406,6 @@ public class BossShowEditorScreen extends Screen {
     }
 
     private void doStartRecording() {
-        //进入待录制 standby：HUD 显示，等用户按 J 才真正开始捕获
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null) return;
         BossShowEditorState.enterRecordingStandby(mc.level.getGameTime());
@@ -341,12 +423,10 @@ public class BossShowEditorScreen extends Screen {
             BossShowEditorState.getTrigger(),
             BossShowEditorState.isCinematic(),
             BossShowEditorState.isAllowRepeat(),
-            new java.util.ArrayList<>(BossShowEditorState.getSamples()),
-            new java.util.ArrayList<>(BossShowEditorState.getMarkers()),
+            new java.util.ArrayList<>(BossShowEditorState.getFrames()),
             BossShowEditorState.getAnchorYawDeg()
         );
         NetworkHandler.sendToServer(pkt);
-        //乐观更新本地 Home 列表缓存，免去返回 Home 时还得等服务端重发
         BossShowDefinition snapshot = BossShowEditorState.buildDefinition();
         if (snapshot != null) {
             BossShowEditorState.upsertAvailableDef(snapshot);
@@ -416,10 +496,10 @@ public class BossShowEditorScreen extends Screen {
             BossShowEditorState.isDirty() ? "gui.eca.bossshow.editor.unsaved" : "gui.eca.bossshow.editor.clean");
         g.drawCenteredString(this.font,
             Component.translatable("gui.eca.bossshow.editor.meta", typeComp,
-                BossShowEditorState.sampleCount(), BossShowEditorState.getMarkers().size(), dirtyComp),
+                BossShowEditorState.frameCount(), BossShowEditorState.keyframeCount(), dirtyComp),
             this.width / 2, 26, 0xAAAAAA);
 
-        if (markerList != null) markerList.render(g, mouseX, mouseY, partialTick);
+        if (keyframeList != null) keyframeList.render(g, mouseX, mouseY, partialTick);
 
         //右侧 label
         int rightX = this.width / 2 + 8;
@@ -431,24 +511,41 @@ public class BossShowEditorScreen extends Screen {
         g.drawString(this.font, Component.translatable("gui.eca.bossshow.editor.label.curve"),
             rightX + 40, topY + 51, 0xCCCCCC, false);
 
+        //时间轴 tick / 区间数值（画在右半区操作按钮上方的空白处）
+        int frameCount = BossShowEditorState.frameCount();
+        if (frameCount > 0) {
+            int rangeOpsY = (this.height - 28) - 46;
+            String info = "tick " + BossShowEditorState.getPlayhead() + " / " + (frameCount - 1);
+            if (BossShowEditorState.hasValidRange()) {
+                info += "   in " + BossShowEditorState.getInPoint()
+                    + " → out " + BossShowEditorState.getOutPoint();
+            }
+            g.drawString(this.font, info, rightX, rangeOpsY - 12, 0xFFAAAAAA, false);
+        }
+
         super.render(g, mouseX, mouseY, partialTick);
     }
 
-    //=== marker 列表 widget ===
-    private class MarkerList extends ObjectSelectionList<MarkerList.Entry> {
-        MarkerList(Minecraft mc, int width, int height, int top, int bottom, int itemHeight) {
+    //=== 关键帧列表 widget ===
+    private class KeyframeList extends ObjectSelectionList<KeyframeList.Entry> {
+        KeyframeList(Minecraft mc, int width, int height, int top, int bottom, int itemHeight) {
             super(mc, width, height, top, bottom, itemHeight);
         }
 
         public void rebuild() {
             this.clearEntries();
-            List<Marker> markers = BossShowEditorState.getMarkers();
-            for (int i = 0; i < markers.size(); i++) {
-                this.addEntry(new Entry(i));
+            List<Frame> frames = BossShowEditorState.getFrames();
+            for (int i = 0; i < frames.size(); i++) {
+                if (frames.get(i).keyframe() != null) {
+                    this.addEntry(new Entry(i));
+                }
             }
-            int sel = BossShowEditorState.getSelectedMarker();
-            if (sel >= 0 && sel < this.children().size()) {
-                this.setSelected(this.children().get(sel));
+            int sel = BossShowEditorState.getSelectedKeyframeFrameIndex();
+            for (Entry e : this.children()) {
+                if (e.frameIndex == sel) {
+                    this.setSelected(e);
+                    break;
+                }
             }
         }
 
@@ -459,8 +556,10 @@ public class BossShowEditorScreen extends Screen {
         public void setSelected(Entry entry) {
             super.setSelected(entry);
             if (entry != null) {
-                BossShowEditorState.setSelectedMarker(entry.index);
-                onMarkerSelectionChanged();
+                BossShowEditorState.setSelectedKeyframeFrameIndex(entry.frameIndex);
+                //选中关键帧时把播放头移到该帧，预览相机随之跳转
+                BossShowEditorState.setPlayhead(entry.frameIndex);
+                onKeyframeSelectionChanged();
             }
         }
 
@@ -470,12 +569,12 @@ public class BossShowEditorScreen extends Screen {
         }
 
         class Entry extends ObjectSelectionList.Entry<Entry> {
-            final int index;
-            Entry(int index) { this.index = index; }
+            final int frameIndex;
+            Entry(int frameIndex) { this.frameIndex = frameIndex; }
 
-            @Override public Component getNarration() { return Component.literal("Marker " + index); }
+            @Override public Component getNarration() { return Component.literal("Keyframe at tick " + frameIndex); }
 
-            // 返回 true 以让 AbstractSelectionList 触发 setFocused→setSelected；默认实现返回 false 会导致点击不生效
+            // 返回 true 以让 AbstractSelectionList 触发 setFocused→setSelected
             @Override
             public boolean mouseClicked(double mouseX, double mouseY, int button) {
                 return button == 0;
@@ -484,15 +583,83 @@ public class BossShowEditorScreen extends Screen {
             @Override
             public void render(GuiGraphics g, int entryIdx, int top, int left, int width, int height,
                                int mouseX, int mouseY, boolean isHovering, float partialTick) {
-                List<Marker> ms = BossShowEditorState.getMarkers();
-                if (index < 0 || index >= ms.size()) return;
-                Marker m = ms.get(index);
-                int color = (MarkerList.this.getSelected() == this) ? 0xFFFFFF55 : 0xFFFFFFFF;
-                Component head = Component.translatable("gui.eca.bossshow.editor.marker.row",
-                    index, m.tickOffset(), String.format("%.2f", m.tickOffset() / 20.0),
-                    m.eventId() == null ? "—" : m.eventId());
+                List<Frame> frames = BossShowEditorState.getFrames();
+                if (frameIndex < 0 || frameIndex >= frames.size()) return;
+                Keyframe kf = frames.get(frameIndex).keyframe();
+                if (kf == null) return;
+                int color = (KeyframeList.this.getSelected() == this) ? 0xFFFFFF55 : 0xFFFFFFFF;
+                Component head = Component.translatable("gui.eca.bossshow.editor.keyframe.row",
+                    entryIdx, frameIndex, String.format("%.2f", frameIndex / 20.0),
+                    kf.eventId() == null ? "—" : kf.eventId());
                 g.drawString(Minecraft.getInstance().font, head, left + 4, top + 4, color, false);
             }
+        }
+    }
+
+    //=== 时间轴 widget：播放头 + 区间 + 关键帧刻度，可点击/拖动 scrub ===
+    private static final class Timeline extends AbstractWidget {
+        Timeline(int x, int y, int width, int height) {
+            super(x, y, width, height, Component.empty());
+        }
+
+        private int xToFrame(double mouseX, int frameCount) {
+            if (frameCount <= 1) return 0;
+            double frac = (mouseX - this.getX()) / (this.getWidth() - 1);
+            frac = Math.max(0.0, Math.min(1.0, frac));
+            return (int) Math.round(frac * (frameCount - 1));
+        }
+
+        private int frameToX(int idx, int frameCount) {
+            if (frameCount <= 1) return this.getX();
+            return this.getX() + (int) Math.round((idx / (double) (frameCount - 1)) * (this.getWidth() - 1));
+        }
+
+        private void seek(double mouseX) {
+            if (BossShowEditorState.frameCount() <= 0) return;
+            BossShowEditorState.setPlayhead(xToFrame(mouseX, BossShowEditorState.frameCount()));
+        }
+
+        @Override
+        public void onClick(double mouseX, double mouseY) { seek(mouseX); }
+
+        @Override
+        protected void onDrag(double mouseX, double mouseY, double dragX, double dragY) { seek(mouseX); }
+
+        @Override
+        protected void renderWidget(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+            int x0 = this.getX(), y0 = this.getY(), w = this.getWidth(), h = this.getHeight();
+            g.fill(x0, y0, x0 + w, y0 + h, 0xCC101010);
+
+            Font font = Minecraft.getInstance().font;
+            int frameCount = BossShowEditorState.frameCount();
+            if (frameCount <= 0) {
+                g.drawCenteredString(font, Component.translatable("gui.eca.bossshow.editor.timeline.empty"),
+                    x0 + w / 2, y0 + (h - font.lineHeight) / 2, 0xFFAAAAAA);
+                return;
+            }
+
+            //in/out 区间阴影
+            if (BossShowEditorState.hasValidRange()) {
+                int xi = frameToX(BossShowEditorState.getInPoint(), frameCount);
+                int xo = frameToX(BossShowEditorState.getOutPoint(), frameCount);
+                g.fill(xi, y0 + 1, xo + 1, y0 + h - 1, 0x553388FF);
+            }
+
+            //关键帧刻度
+            for (int idx : BossShowEditorState.getKeyframeFrameIndices()) {
+                int kx = frameToX(idx, frameCount);
+                g.fill(kx, y0 + 1, kx + 1, y0 + h - 1, 0xFFFFDD33);
+            }
+
+            //播放头
+            int px = frameToX(BossShowEditorState.getPlayhead(), frameCount);
+            g.fill(px, y0, px + 1, y0 + h, 0xFFFFFFFF);
+        }
+
+        @Override
+        protected void updateWidgetNarration(NarrationElementOutput output) {
+            output.add(NarratedElementType.TITLE,
+                Component.translatable("gui.eca.bossshow.editor.timeline.narration"));
         }
     }
 }

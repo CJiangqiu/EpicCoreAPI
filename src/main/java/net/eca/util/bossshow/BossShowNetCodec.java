@@ -1,14 +1,14 @@
 package net.eca.util.bossshow;
 
-import net.eca.util.bossshow.BossShowDefinition.Marker;
-import net.eca.util.bossshow.BossShowDefinition.Sample;
+import net.eca.util.bossshow.BossShowDefinition.Frame;
+import net.eca.util.bossshow.BossShowDefinition.Keyframe;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 
 import java.util.ArrayList;
 import java.util.List;
 
-//Sample / Marker / Trigger 在 FriendlyByteBuf 上的共享序列化逻辑
+//Frame / Keyframe / Trigger 在 FriendlyByteBuf 上的共享序列化逻辑
 public final class BossShowNetCodec {
 
     private BossShowNetCodec() {}
@@ -22,56 +22,48 @@ public final class BossShowNetCodec {
         return buf.readBoolean() ? buf.readResourceLocation() : null;
     }
 
-    public static void writeSamples(FriendlyByteBuf buf, List<Sample> samples) {
-        buf.writeVarInt(samples.size());
-        for (Sample s : samples) {
-            buf.writeDouble(s.dx());
-            buf.writeDouble(s.dy());
-            buf.writeDouble(s.dz());
-            buf.writeFloat(s.yaw());
-            buf.writeFloat(s.pitch());
+    public static void writeFrames(FriendlyByteBuf buf, List<Frame> frames) {
+        buf.writeVarInt(frames.size());
+        for (Frame f : frames) {
+            buf.writeDouble(f.dx());
+            buf.writeDouble(f.dy());
+            buf.writeDouble(f.dz());
+            buf.writeFloat(f.yaw());
+            buf.writeFloat(f.pitch());
+            Keyframe kf = f.keyframe();
+            buf.writeBoolean(kf != null);
+            if (kf != null) {
+                buf.writeBoolean(kf.eventId() != null);
+                if (kf.eventId() != null) buf.writeUtf(kf.eventId());
+                buf.writeBoolean(kf.subtitleText() != null);
+                if (kf.subtitleText() != null) buf.writeUtf(kf.subtitleText());
+                buf.writeByte(kf.curve().ordinal());
+            }
         }
     }
 
-    public static List<Sample> readSamples(FriendlyByteBuf buf) {
+    public static List<Frame> readFrames(FriendlyByteBuf buf) {
         int n = buf.readVarInt();
-        List<Sample> out = new ArrayList<>(n);
+        List<Frame> out = new ArrayList<>(n);
         for (int i = 0; i < n; i++) {
             double dx = buf.readDouble();
             double dy = buf.readDouble();
             double dz = buf.readDouble();
             float yaw = buf.readFloat();
             float pitch = buf.readFloat();
-            out.add(new Sample(dx, dy, dz, yaw, pitch));
-        }
-        return out;
-    }
-
-    public static void writeMarkers(FriendlyByteBuf buf, List<Marker> markers) {
-        buf.writeVarInt(markers.size());
-        for (Marker m : markers) {
-            buf.writeVarInt(m.tickOffset());
-            buf.writeBoolean(m.eventId() != null);
-            if (m.eventId() != null) buf.writeUtf(m.eventId());
-            buf.writeBoolean(m.subtitleText() != null);
-            if (m.subtitleText() != null) buf.writeUtf(m.subtitleText());
-            buf.writeByte(m.curve().ordinal());
-        }
-    }
-
-    public static List<Marker> readMarkers(FriendlyByteBuf buf) {
-        int n = buf.readVarInt();
-        List<Marker> out = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            int t = buf.readVarInt();
-            boolean hasEvt = buf.readBoolean();
-            String eid = hasEvt ? buf.readUtf(256) : null;
-            boolean hasSub = buf.readBoolean();
-            String sub = hasSub ? buf.readUtf(512) : null;
-            int ci = buf.readByte();
-            Curve[] cv = Curve.values();
-            Curve curve = (ci >= 0 && ci < cv.length) ? cv[ci] : Curve.NONE;
-            out.add(new Marker(t, eid, sub, curve));
+            boolean hasKf = buf.readBoolean();
+            Keyframe kf = null;
+            if (hasKf) {
+                boolean hasEvt = buf.readBoolean();
+                String eid = hasEvt ? buf.readUtf(256) : null;
+                boolean hasSub = buf.readBoolean();
+                String sub = hasSub ? buf.readUtf(512) : null;
+                int ci = buf.readByte() & 0xFF;
+                Curve[] cv = Curve.values();
+                Curve curve = (ci < cv.length) ? cv[ci] : Curve.NONE;
+                kf = new Keyframe(eid, sub, curve);
+            }
+            out.add(new Frame(dx, dy, dz, yaw, pitch, kf));
         }
         return out;
     }

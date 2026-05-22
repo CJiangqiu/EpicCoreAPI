@@ -83,7 +83,7 @@ public class BossShowEditorHomeScreen extends Screen {
     private void editExisting(BossShowDefinition def) {
         BossShowEditorState.enter(def);
         //没有锚点时，把 anchor 落到玩家前方 4 格的空间坐标上（不绑定实体）
-        //非空 def 必须保留 enter() 已经从 def 恢复的 yaw，否则新录 sample 和旧 sample 坐标系错乱
+        //非空 def 必须保留 enter() 已经从 def 恢复的 yaw，否则新录帧和旧帧坐标系错乱
         if (!BossShowEditorState.hasAnchor()) {
             LocalPlayer p = this.minecraft.player;
             if (p != null) {
@@ -91,7 +91,7 @@ public class BossShowEditorHomeScreen extends Screen {
                 double ax = p.getX() + look.x * 4.0;
                 double ay = p.getY();
                 double az = p.getZ() + look.z * 4.0;
-                if (def.samples().isEmpty()) {
+                if (def.frames().isEmpty()) {
                     BossShowEditorState.setAnchor(null, ax, ay, az, 0f);
                 } else {
                     BossShowEditorState.setAnchorPositionKeepYaw(null, ax, ay, az);
@@ -223,9 +223,11 @@ public class BossShowEditorHomeScreen extends Screen {
                                int mouseX, int mouseY, boolean isHovering, float partialTick) {
                 ResourceLocation typeId = BuiltInRegistries.ENTITY_TYPE.getKey(def.targetType());
                 String idLine = def.id().toString();
+                int kfCount = 0;
+                for (BossShowDefinition.Frame f : def.frames()) { if (f.keyframe() != null) kfCount++; }
                 String meta = (typeId != null ? typeId.toString() : "?")
-                    + "    " + def.samples().size() + " samples    "
-                    + def.markers().size() + " markers    " + def.trigger().type();
+                    + "    " + def.frames().size() + " frames    "
+                    + kfCount + " keyframes    " + def.trigger().type();
                 g.drawString(Minecraft.getInstance().font, idLine, left + 4, top + 2, 0xFFFFFF, false);
                 g.drawString(Minecraft.getInstance().font, meta, left + 4, top + 12, 0xAAAAAA, false);
 

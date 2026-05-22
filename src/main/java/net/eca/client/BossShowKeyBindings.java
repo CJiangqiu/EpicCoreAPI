@@ -24,9 +24,9 @@ public final class BossShowKeyBindings {
         CATEGORY
     );
 
-    //K = 添加 marker
-    public static final KeyMapping ADD_MARKER = new KeyMapping(
-        "key.eca.bossshow.add_marker",
+    //K = 标记关键帧
+    public static final KeyMapping MARK_KEYFRAME = new KeyMapping(
+        "key.eca.bossshow.mark_keyframe",
         KeyConflictContext.UNIVERSAL,
         InputConstants.Type.KEYSYM.getOrCreate(GLFW.GLFW_KEY_K),
         CATEGORY
@@ -45,7 +45,7 @@ public final class BossShowKeyBindings {
     @SubscribeEvent
     public static void onRegisterKeys(RegisterKeyMappingsEvent event) {
         event.register(REC_START);
-        event.register(ADD_MARKER);
+        event.register(MARK_KEYFRAME);
         event.register(REC_PAUSE);
     }
 }

@@ -1,6 +1,5 @@
 package net.eca.event;
 
-import net.eca.util.bossshow.BossShowDefinition.Marker;
 import net.eca.util.bossshow.BossShowEditorState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
@@ -13,7 +12,7 @@ import net.minecraftforge.fml.common.Mod;
 
 import java.util.List;
 
-//BossShow 录制模式 HUD：顶部时间轴 + sample 数 + marker 标记
+//BossShow 录制模式 HUD：顶部时间轴 + 帧数 + 关键帧标记
 @Mod.EventBusSubscriber(modid = "eca", value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class BossShowRecordingHud {
 
@@ -35,8 +34,8 @@ public final class BossShowRecordingHud {
         int w = mc.getWindow().getGuiScaledWidth();
         int h = mc.getWindow().getGuiScaledHeight();
 
-        int sampleCount = BossShowEditorState.sampleCount();
-        double elapsedSec = sampleCount / 20.0;
+        int frameCount = BossShowEditorState.frameCount();
+        double elapsedSec = frameCount / 20.0;
 
         //=== 时间轴 ===
         double windowSec = Math.max(MIN_WINDOW_SECONDS, Math.ceil(elapsedSec / MIN_WINDOW_SECONDS) * MIN_WINDOW_SECONDS);
@@ -53,16 +52,16 @@ public final class BossShowRecordingHud {
         if (progressX > barRight) progressX = barRight;
         g.fill(barLeft, BAR_Y, progressX, BAR_Y + BAR_HEIGHT, fillColor);
 
-        //marker 竖线
-        List<Marker> markers = BossShowEditorState.getMarkers();
-        for (int i = 0; i < markers.size(); i++) {
-            Marker m = markers.get(i);
-            double sec = m.tickOffset() / 20.0;
+        //关键帧竖线
+        List<Integer> keyframeIndices = BossShowEditorState.getKeyframeFrameIndices();
+        for (int i = 0; i < keyframeIndices.size(); i++) {
+            int frameIdx = keyframeIndices.get(i);
+            double sec = frameIdx / 20.0;
             if (sec > windowSec) break;
-            int markerX = barLeft + (int) Math.round(barWidth * (sec / windowSec));
-            g.fill(markerX - 1, BAR_Y - 4, markerX + 1, BAR_Y + BAR_HEIGHT + 4, 0xFFFFFF55);
+            int tickX = barLeft + (int) Math.round(barWidth * (sec / windowSec));
+            g.fill(tickX - 1, BAR_Y - 4, tickX + 1, BAR_Y + BAR_HEIGHT + 4, 0xFFFFFF55);
             String idxStr = String.valueOf(i);
-            g.drawString(font, idxStr, markerX - font.width(idxStr) / 2, BAR_Y - 14, 0xFFFFFF55, false);
+            g.drawString(font, idxStr, tickX - font.width(idxStr) / 2, BAR_Y - 14, 0xFFFFFF55, false);
         }
 
         //时间标签
@@ -81,7 +80,7 @@ public final class BossShowRecordingHud {
             recDot = Component.translatable("gui.eca.bossshow.recording.paused_dot");
         }
         Component line1 = Component.translatable("gui.eca.bossshow.recording.line1",
-            recDot, formatTime(elapsedSec), sampleCount, markers.size());
+            recDot, formatTime(elapsedSec), frameCount, keyframeIndices.size());
         Component line2 = Component.translatable("gui.eca.bossshow.recording.line2");
         int cy = h / 4;
         g.drawCenteredString(font, line1, w / 2, cy, 0xFFFFFF);

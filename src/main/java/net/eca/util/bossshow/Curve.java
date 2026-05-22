@@ -1,6 +1,6 @@
 package net.eca.util.bossshow;
 
-//关键帧曲线预设：控制 marker 区间内的播放速度缓动
+//关键帧曲线预设：控制关键帧区间内的播放速度缓动
 public enum Curve {
 
     NONE,

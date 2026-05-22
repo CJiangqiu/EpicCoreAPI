@@ -7,8 +7,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.eca.util.EcaLogger;
-import net.eca.util.bossshow.BossShowDefinition.Marker;
-import net.eca.util.bossshow.BossShowDefinition.Sample;
+import net.eca.util.bossshow.BossShowDefinition.Frame;
+import net.eca.util.bossshow.BossShowDefinition.Keyframe;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EntityType;
@@ -16,8 +16,8 @@ import net.minecraft.world.entity.EntityType;
 import java.util.ArrayList;
 import java.util.List;
 
-//JSON 编解码（samples + markers 模型）
-//samples 用紧凑数组形式 [[dx,dy,dz,yaw,pitch],...] 减小体积
+/* JSON 编解码，新帧模型：frames[] 每帧一个 JSON 对象，关键帧帧内含 keyframe 子对象。
+ * 不兼容旧版 samples/markers 格式，旧字段被完全忽略。 */
 public final class BossShowJsonCodec {
 
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
@@ -38,7 +38,7 @@ public final class BossShowJsonCodec {
             }
             JsonObject root = rootEl.getAsJsonObject();
 
-            //target_type 可选：缺省/无效字符串/未注册类型 → null（不绑定具体 entity 类型）
+            //target_type 可选：缺省/无效字符串/未注册类型 → null
             EntityType<?> targetType = null;
             if (root.has("target_type") && !root.get("target_type").isJsonNull()) {
                 String typeStr = root.get("target_type").getAsString();
@@ -54,68 +54,47 @@ public final class BossShowJsonCodec {
                 }
             }
 
-            //trigger
             Trigger trigger = parseTrigger(root.has("trigger") ? root.getAsJsonObject("trigger") : null, id);
-
-            //cinematic（per-def 单一开关，默认 true）
             boolean cinematic = !root.has("cinematic") || root.get("cinematic").getAsBoolean();
-
-            //allow_repeat（默认 false：一个 viewer 终身只看一次）
             boolean allowRepeat = root.has("allow_repeat") && root.get("allow_repeat").getAsBoolean();
-
-            //anchor_yaw：录制时烤入的参考 yaw（无字段 → 0，沿 Z+ 方向）
             float anchorYawDeg = root.has("anchor_yaw") ? root.get("anchor_yaw").getAsFloat() : 0f;
 
-            //samples
-            List<Sample> samples = new ArrayList<>();
-            if (root.has("samples") && root.get("samples").isJsonArray()) {
-                JsonArray arr = root.getAsJsonArray("samples");
-                for (JsonElement el : arr) {
-                    if (!el.isJsonArray()) continue;
-                    JsonArray row = el.getAsJsonArray();
-                    if (row.size() < 5) continue;
-                    samples.add(new Sample(
-                        row.get(0).getAsDouble(),
-                        row.get(1).getAsDouble(),
-                        row.get(2).getAsDouble(),
-                        row.get(3).getAsFloat(),
-                        row.get(4).getAsFloat()
-                    ));
-                }
-            }
-
-            //markers
-            List<Marker> markers = new ArrayList<>();
-            if (root.has("markers") && root.get("markers").isJsonArray()) {
-                JsonArray arr = root.getAsJsonArray("markers");
-                for (JsonElement el : arr) {
+            List<Frame> frames = new ArrayList<>();
+            if (root.has("frames") && root.get("frames").isJsonArray()) {
+                for (JsonElement el : root.getAsJsonArray("frames")) {
                     if (!el.isJsonObject()) continue;
-                    JsonObject mObj = el.getAsJsonObject();
-                    int t = mObj.has("t") ? mObj.get("t").getAsInt() : 0;
-                    String evt = mObj.has("event_id") && !mObj.get("event_id").isJsonNull()
-                        ? mObj.get("event_id").getAsString() : null;
-                    String sub = mObj.has("subtitle") && !mObj.get("subtitle").isJsonNull()
-                        ? mObj.get("subtitle").getAsString() : null;
-                    if (t < 0 || t >= samples.size()) {
-                        EcaLogger.warn("BossShow {} marker tickOffset {} out of range [0,{}); dropping", id, t, samples.size());
-                        continue;
+                    JsonObject fObj = el.getAsJsonObject();
+                    double dx = fObj.has("dx") ? fObj.get("dx").getAsDouble() : 0.0;
+                    double dy = fObj.has("dy") ? fObj.get("dy").getAsDouble() : 0.0;
+                    double dz = fObj.has("dz") ? fObj.get("dz").getAsDouble() : 0.0;
+                    float yaw = fObj.has("yaw") ? fObj.get("yaw").getAsFloat() : 0f;
+                    float pitch = fObj.has("pitch") ? fObj.get("pitch").getAsFloat() : 0f;
+                    Keyframe kf = null;
+                    if (fObj.has("keyframe") && fObj.get("keyframe").isJsonObject()) {
+                        kf = parseKeyframe(fObj.getAsJsonObject("keyframe"));
                     }
-                    Curve curve = mObj.has("curve") ? Curve.fromKey(mObj.get("curve").getAsString()) : Curve.NONE;
-                    markers.add(new Marker(t, evt, sub, curve));
+                    frames.add(new Frame(dx, dy, dz, yaw, pitch, kf));
                 }
             }
 
-            return new BossShowDefinition(id, targetType, trigger, cinematic, allowRepeat, samples, markers, source, anchorYawDeg);
+            return new BossShowDefinition(id, targetType, trigger, cinematic, allowRepeat, frames, source, anchorYawDeg);
         } catch (Throwable t) {
             EcaLogger.error("BossShow {} JSON parse failed: {}", id, t.getMessage());
             return null;
         }
     }
 
+    private static Keyframe parseKeyframe(JsonObject obj) {
+        String evt = obj.has("event_id") && !obj.get("event_id").isJsonNull()
+            ? obj.get("event_id").getAsString() : null;
+        String sub = obj.has("subtitle") && !obj.get("subtitle").isJsonNull()
+            ? obj.get("subtitle").getAsString() : null;
+        Curve curve = obj.has("curve") ? Curve.fromKey(obj.get("curve").getAsString()) : Curve.NONE;
+        return new Keyframe(evt, sub, curve);
+    }
+
     private static Trigger parseTrigger(JsonObject obj, ResourceLocation id) {
-        if (obj == null) {
-            return new Trigger.Custom("");
-        }
+        if (obj == null) return new Trigger.Custom("");
         String type = obj.has("type") ? obj.get("type").getAsString() : "custom";
         if ("range".equalsIgnoreCase(type)) {
             double radius = obj.has("effect_radius") ? obj.get("effect_radius").getAsDouble() : 32.0;
@@ -135,9 +114,7 @@ public final class BossShowJsonCodec {
         ResourceLocation typeKey = def.targetType() != null
             ? BuiltInRegistries.ENTITY_TYPE.getKey(def.targetType())
             : null;
-        if (typeKey != null) {
-            root.addProperty("target_type", typeKey.toString());
-        }
+        if (typeKey != null) root.addProperty("target_type", typeKey.toString());
 
         JsonObject trig = new JsonObject();
         trig.addProperty("type", def.trigger().type());
@@ -152,28 +129,25 @@ public final class BossShowJsonCodec {
         root.addProperty("allow_repeat", def.allowRepeat());
         root.addProperty("anchor_yaw", def.anchorYawDeg());
 
-        JsonArray sArr = new JsonArray();
-        for (Sample s : def.samples()) {
-            JsonArray row = new JsonArray();
-            row.add(round(s.dx()));
-            row.add(round(s.dy()));
-            row.add(round(s.dz()));
-            row.add(s.yaw());
-            row.add(s.pitch());
-            sArr.add(row);
+        JsonArray fArr = new JsonArray();
+        for (Frame f : def.frames()) {
+            JsonObject fObj = new JsonObject();
+            fObj.addProperty("dx", round(f.dx()));
+            fObj.addProperty("dy", round(f.dy()));
+            fObj.addProperty("dz", round(f.dz()));
+            fObj.addProperty("yaw", f.yaw());
+            fObj.addProperty("pitch", f.pitch());
+            if (f.keyframe() != null) {
+                Keyframe kf = f.keyframe();
+                JsonObject kfObj = new JsonObject();
+                if (kf.eventId() != null) kfObj.addProperty("event_id", kf.eventId());
+                if (kf.subtitleText() != null) kfObj.addProperty("subtitle", kf.subtitleText());
+                if (kf.curve() != Curve.NONE) kfObj.addProperty("curve", kf.curve().key());
+                fObj.add("keyframe", kfObj);
+            }
+            fArr.add(fObj);
         }
-        root.add("samples", sArr);
-
-        JsonArray mArr = new JsonArray();
-        for (Marker m : def.markers()) {
-            JsonObject mObj = new JsonObject();
-            mObj.addProperty("t", m.tickOffset());
-            if (m.eventId() != null) mObj.addProperty("event_id", m.eventId());
-            if (m.subtitleText() != null) mObj.addProperty("subtitle", m.subtitleText());
-            if (m.curve() != Curve.NONE) mObj.addProperty("curve", m.curve().key());
-            mArr.add(mObj);
-        }
-        root.add("markers", mArr);
+        root.add("frames", fArr);
 
         return GSON.toJson(root);
     }

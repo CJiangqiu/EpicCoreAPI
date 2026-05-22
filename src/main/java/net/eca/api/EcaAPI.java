@@ -187,16 +187,18 @@ public final class EcaAPI {
         return EntityUtil.getHealth(entity);
     }
 
-    // 设置实体血量（多阶段）
+    // 设置实体血量（三阶段）
     /**
      * Set entity health using multi-phase modification.
-     * Phase 1: Modify vanilla DATA_HEALTH_ID
-     * Phase 2: Smart scan for EntityDataAccessors and fields matching health keywords
-     * Phase 3: Bytecode reverse tracking via HealthAnalyzerManager
-     * Phase 4: Radical mode - all numeric fields (only if phases 1-3 fail, requires config)
+     * Phase 1: Directly write vanilla DATA_HEALTH_ID (bypasses any setHealth override).
+     * Phase 2: Reflectively scan the entity class hierarchy for methods named set/modify/update + health/hp
+     *          (single numeric parameter, no "max" in name) and invoke the first match.
+     * Phase 3: Bytecode dataflow analysis via HealthAnalyzerManager to locate and write the real health storage.
+     * Players only undergo Phase 1. All phases run unconditionally in order; a verify step at the end
+     * checks entity.getHealth() within ±10.0 of the target.
      * @param entity the living entity
      * @param health the target health value
-     * @return true if modification succeeded
+     * @return true if the post-modification verify passed
      */
     public static boolean setHealth(LivingEntity entity, float health) {
         return EntityUtil.setHealth(entity, health);
@@ -865,7 +867,6 @@ public final class EcaAPI {
     /**
      * Clear the active entity extension table for a level.
      * @param level the server level
-     * @return void
      * @throws IllegalArgumentException if level is null
      */
     public static void clearActiveEntityExtensionTable(ServerLevel level) {

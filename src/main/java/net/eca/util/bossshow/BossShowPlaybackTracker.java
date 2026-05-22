@@ -6,7 +6,8 @@ import net.eca.network.BossShowStopPacket;
 import net.eca.network.BossShowSubtitlePacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
-import net.eca.util.bossshow.BossShowDefinition.Marker;
+import net.eca.util.bossshow.BossShowDefinition.Frame;
+import net.eca.util.bossshow.BossShowDefinition.Keyframe;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -24,8 +25,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Server-side BossShow playback engine.
  *
- * Each session is advanced one tick per server tick, dispatching marker events as
- * they are crossed and ending when all samples have been consumed.
+ * Each session is advanced one tick per server tick, dispatching keyframe events as
+ * they are crossed and ending when all frames have been consumed.
  */
 public final class BossShowPlaybackTracker {
 
@@ -102,7 +103,7 @@ public final class BossShowPlaybackTracker {
         return viewer != null ? ACTIVE.get(viewer.getUUID()) : null;
     }
 
-    //服务端每 tick 调用一次（与维度数量无关）：推进所有 session + 周期性扫描所有维度的 range 触发器
+    //服务端每 tick 调用一次：推进所有 session + 周期性扫描所有维度的 range 触发器
     public static void onServerTick(net.minecraft.server.MinecraftServer server) {
         if (!ACTIVE.isEmpty()) {
             List<BossShowSession> toFinish = new ArrayList<>();
@@ -136,19 +137,23 @@ public final class BossShowPlaybackTracker {
         int total = session.definition.totalDurationTicks();
         session.ticksElapsed++;
 
-        //事件/字幕分发：所有 tickOffset <= ticksElapsed 的 marker 都派发
-        //两个字段独立：一个 marker 可同时触发字幕 + 用户事件 hook
-        List<Marker> markers = session.definition.markers();
-        while (session.nextMarkerIndex < markers.size()
-            && markers.get(session.nextMarkerIndex).tickOffset() <= session.ticksElapsed) {
-            Marker m = markers.get(session.nextMarkerIndex);
-            if (m.subtitleText() != null) {
-                dispatchSubtitle(session, m.subtitleText());
+        //逐帧推进派发指针，遇到关键帧才触发事件/字幕
+        //条件 nextDispatchIndex < ticksElapsed 保证帧 i 在第 i+1 tick 时派发
+        List<Frame> frames = session.definition.frames();
+        while (session.nextDispatchIndex < frames.size()
+            && session.nextDispatchIndex < session.ticksElapsed) {
+            Frame f = frames.get(session.nextDispatchIndex);
+            if (f.keyframe() != null) {
+                Keyframe kf = f.keyframe();
+                //字幕与事件完全独立：可同时触发、只有其一、都没有
+                if (kf.subtitleText() != null) {
+                    dispatchSubtitle(session, kf.subtitleText());
+                }
+                if (kf.eventId() != null) {
+                    dispatchKeyframeEvent(session, kf.eventId());
+                }
             }
-            if (m.eventId() != null) {
-                dispatchMarkerEvent(session, m.eventId());
-            }
-            session.nextMarkerIndex++;
+            session.nextDispatchIndex++;
         }
 
         if (session.ticksElapsed >= total) {
@@ -156,19 +161,19 @@ public final class BossShowPlaybackTracker {
         }
     }
 
-    //字幕文本特殊值 "clear" 表示清空当前字幕（与空串等价，但语义更明确）
+    //字幕文本特殊值 "clear" 表示清空当前字幕
     private static void dispatchSubtitle(BossShowSession session, String text) {
         if ("clear".equals(text)) text = "";
         NetworkHandler.sendToPlayer(new BossShowSubtitlePacket(text), session.viewer);
     }
 
-    private static void dispatchMarkerEvent(BossShowSession session, String eventId) {
+    private static void dispatchKeyframeEvent(BossShowSession session, String eventId) {
         BossShow hook = BossShowManager.getCodeHook(session.definition.id());
         if (hook == null) return;
         try {
-            hook.onMarkerEvent(eventId, session);
+            hook.onKeyframeEvent(eventId, session);
         } catch (Throwable t) {
-            EcaLogger.error("BossShow {} onMarkerEvent({}) threw: {}", session.definition.id(), eventId, t.getMessage());
+            EcaLogger.error("BossShow {} onKeyframeEvent({}) threw: {}", session.definition.id(), eventId, t.getMessage());
         }
     }
 

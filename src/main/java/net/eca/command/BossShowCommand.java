@@ -140,8 +140,10 @@ public class BossShowCommand {
         source.sendSuccess(() -> Component.literal("§aLoaded BossShows (" + all.size() + "):"), false);
         for (Map.Entry<ResourceLocation, BossShowDefinition> e : all.entrySet()) {
             BossShowDefinition def = e.getValue();
-            String line = "§7 - §f" + e.getKey() + " §7(" + def.samples().size() + " samples, "
-                + def.markers().size() + " markers, " + def.totalDurationTicks() + "t, trigger="
+            int kfCount = 0;
+            for (BossShowDefinition.Frame f : def.frames()) { if (f.keyframe() != null) kfCount++; }
+            String line = "§7 - §f" + e.getKey() + " §7(" + def.frames().size() + " frames, "
+                + kfCount + " keyframes, " + def.totalDurationTicks() + "t, trigger="
                 + def.trigger().type() + ")";
             source.sendSuccess(() -> Component.literal(line), false);
         }

@@ -27,7 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Two kinds of registration:</p>
  * <ul>
  *   <li><b>Code</b> — Classes annotated {@code @RegisterBossShow} register a {@link BossShow}
- *       instance in a static block. This provides server-side event hooks (onMarkerEvent etc).</li>
+ *       instance in a static block. This provides server-side event hooks (onKeyframeEvent etc).</li>
  *   <li><b>JSON</b> — Definitions loaded from {@code config/eca/bossshow/<namespace>/<name>.json}.
  *       These provide the keyframes, trigger config, and target entity type.</li>
  * </ul>
@@ -233,9 +233,9 @@ public final class BossShowManager {
     }
 
     private static BossShowDefinition buildTemplate(ResourceLocation id, EntityType<?> targetType) {
-        //空白模板：无 sample，无 marker。code-registered cutscene 由作者后续录制填充
+        //空白模板：无帧数据，code-registered cutscene 由作者后续录制填充
         return new BossShowDefinition(id, targetType, new Trigger.Custom(""), true, false,
-            new ArrayList<>(), new ArrayList<>(), BossShowDefinition.Source.CODE, 0f);
+            new ArrayList<>(), BossShowDefinition.Source.CODE, 0f);
     }
 
     //==================== 查询 API ====================

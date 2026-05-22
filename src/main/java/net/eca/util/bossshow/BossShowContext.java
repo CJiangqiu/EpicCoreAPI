@@ -4,7 +4,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.LivingEntity;
 
 /**
- * Context passed to {@link BossShow#onMarkerEvent(String, BossShowContext)} when a marker
+ * Context passed to {@link BossShow#onKeyframeEvent(String, BossShowContext)} when a keyframe
  * with an event id is reached on the server.
  */
 public interface BossShowContext {

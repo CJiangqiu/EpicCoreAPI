@@ -78,12 +78,12 @@ public final class BossShowEditorClientEvents {
                     showToast(Component.translatable("gui.eca.bossshow.recording.paused"), 1000L);
                 }
             }
-            //K = 添加 marker（录制和暂停都可）
-            while (BossShowKeyBindings.ADD_MARKER.consumeClick()) {
+            //K = 将当前帧标记为关键帧（录制和暂停都可）
+            while (BossShowKeyBindings.MARK_KEYFRAME.consumeClick()) {
                 if (BossShowEditorState.isRecordingMode()) {
-                    int t = BossShowEditorState.addMarkerAtCurrentTick();
+                    int t = BossShowEditorState.markCurrentFrameAsKeyframe();
                     if (t >= 0) {
-                        showToast(Component.translatable("gui.eca.bossshow.recording.marker_added", t), 1000L);
+                        showToast(Component.translatable("gui.eca.bossshow.recording.keyframe_added", t), 1000L);
                     }
                 }
             }
@@ -91,7 +91,7 @@ public final class BossShowEditorClientEvents {
             //drain 掉避免延后误触发
             while (BossShowKeyBindings.REC_START.consumeClick()) {}
             while (BossShowKeyBindings.REC_PAUSE.consumeClick()) {}
-            while (BossShowKeyBindings.ADD_MARKER.consumeClick()) {}
+            while (BossShowKeyBindings.MARK_KEYFRAME.consumeClick()) {}
         }
 
         //=== 每 tick 采样（仅 RECORDING 状态）===
@@ -100,7 +100,7 @@ public final class BossShowEditorClientEvents {
             && BossShowEditorState.hasAnchor()
             && mc.gameRenderer != null) {
             Camera cam = mc.gameRenderer.getMainCamera();
-            BossShowEditorState.captureSampleFromCamera(
+            BossShowEditorState.captureFrameFromCamera(
                 cam.getPosition().x, cam.getPosition().y, cam.getPosition().z,
                 cam.getYRot(), cam.getXRot()
             );

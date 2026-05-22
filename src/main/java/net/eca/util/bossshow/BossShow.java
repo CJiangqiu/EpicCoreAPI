@@ -11,7 +11,7 @@ import net.minecraft.world.entity.EntityType;
  *
  * Each BossShow must match a JSON file at {@code data/<namespace>/bossshow/<path>.json}
  * (or an override at {@code config/eca/bossshow/<namespace>/<path>.json}). The Java class
- * exists so that cutscenes can react to marker events server-side.
+ * exists so that cutscenes can react to keyframe events server-side.
  */
 public abstract class BossShow {
 
@@ -30,10 +30,10 @@ public abstract class BossShow {
     public final EntityType<?> targetType() { return targetType; }
 
     /**
-     * Called on the server when a marker with a non-empty eventId is reached.
-     * Default implementation does nothing. Override to react to marker events.
+     * Called on the server when a keyframe with a non-empty eventId is reached.
+     * Default implementation does nothing. Override to react to keyframe events.
      */
-    public void onMarkerEvent(String eventId, BossShowContext ctx) {
+    public void onKeyframeEvent(String eventId, BossShowContext ctx) {
     }
 
     /**
