@@ -6,6 +6,8 @@
   "minVersion": "0.8",
   "client": [
     "BossHealthOverlayMixin",
+    "BossShowCameraMixin",
+    "CameraAccessor",
     "ClientEntityCallbacksMixin",
     "ClientLevelMixin",
     "DeathScreenMixin",
@@ -16,7 +18,8 @@
     "LivingEntityRendererMixin",
     "LocalPlayerMixin",
     "MinecraftMixin",
-    "SoundManagerMixin"
+    "SoundManagerMixin",
+    "ItemRendererMixin"
   ],
   "mixins": [
     "CapabilityDispatcherMixin",
