@@ -67,6 +67,10 @@ public abstract class ItemRendererMixin {
         float[] colorKey = extension.getColorKey();
         if (colorKey != null && colorKey.length >= 3) {
             EcaShaderInstance.setColorKey(colorKey[0], colorKey[1], colorKey[2], extension.getColorKeyTolerance());
+        } else {
+            // 未指定 ColorKey：仍按物品贴图 alpha 做蒙版，使叠加效果贴合物品形状而非铺满整个 quad。
+            // 颜色取黑、容差 2.0（> 最大 RGB 距离 √3≈1.73），因此 shader 只会 discard 透明像素，不做颜色过滤。
+            EcaShaderInstance.setColorKey(0.0f, 0.0f, 0.0f, 2.0f);
         }
 
         // 用扩展 RenderType 手动再绘制一次同一个 BakedModel 的 quad 列表

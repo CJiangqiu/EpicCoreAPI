@@ -1,5 +1,6 @@
 package net.eca.util;
 
+import net.eca.util.item_extension.EcaText;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
@@ -9,6 +10,16 @@ import net.minecraft.network.chat.TextColor;
 public final class ItemUtil {
 
     private ItemUtil() {}
+
+    //链式文字效果入口
+    public static EcaText of(String text) {
+        return new EcaText(text);
+    }
+
+    //链式文字效果入口，立即取组件纯文本
+    public static EcaText of(Component component) {
+        return new EcaText(component.getString());
+    }
 
     //颜色变化周期
     private static final long DEFAULT_PERIOD = 3000L;

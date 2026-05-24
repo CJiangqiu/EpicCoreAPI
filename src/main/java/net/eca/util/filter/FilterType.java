@@ -7,5 +7,6 @@ public enum FilterType {
     RAIN,
     DESERT,
     SNOW,
-    TOXIC
+    TOXIC,
+    COSMOS
 }

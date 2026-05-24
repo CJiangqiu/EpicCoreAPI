@@ -1,11 +1,16 @@
 package net.eca.util.item_extension;
 
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.TooltipFlag;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+
+import java.util.List;
 
 @SuppressWarnings("removal")
 @OnlyIn(Dist.CLIENT)
@@ -43,6 +48,21 @@ public abstract class ItemExtension {
 
     public float getColorKeyTolerance() {
         return 0.1f;
+    }
+
+    /**
+     * Override the item's display name. Return null to keep the vanilla name.
+     * Called client-side; player-set custom names (anvil) always take priority.
+     */
+    public MutableComponent getItemName(ItemStack stack) {
+        return null;
+    }
+
+    /**
+     * Append or modify tooltip lines in place. Called client-side.
+     * Index 0 is the item name line.
+     */
+    public void appendTooltip(ItemStack stack, TooltipFlag flag, List<Component> lines) {
     }
 
     protected abstract String getModId();

@@ -26,6 +26,7 @@ import net.minecraftforge.client.event.RegisterShadersEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+import org.joml.Matrix3f;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
@@ -47,12 +48,15 @@ public class FilterRenderer {
     private static ShaderInstance desertShader;
     private static ShaderInstance snowShader;
     private static ShaderInstance toxicShader;
+    private static ShaderInstance cosmosShader;
     private static long matrixStartNanos;
     private static long rainStartNanos;
     private static long desertStartNanos;
     private static long snowStartNanos;
     private static long toxicStartNanos;
+    private static long cosmosStartNanos;
     private static final Set<FilterType> activeFilters = EnumSet.noneOf(FilterType.class);
+    private static final ResourceLocation COSMOS_TEXTURE = new ResourceLocation(EcaMod.MOD_ID, "textures/shader/cosmos.png");
 
     private static int copyFbo = -1;
     private static int depthCopyTexture = -1;
@@ -65,6 +69,13 @@ public class FilterRenderer {
     private static int spotlightColorTexture = -1;
     private static int spotlightWidth;
     private static int spotlightHeight;
+
+    /* 宇宙滤镜专用：在实体绘制前（AFTER_CUTOUT_BLOCKS_LAYER）快照纯地形深度，
+       用于 AFTER_LEVEL 合成时区分实体像素与方块像素（阶段 AFTER_CUTOUT_BLOCKS） */
+    private static int cosmosTerrainFbo = -1;
+    private static int cosmosTerrainDepthTexture = -1;
+    private static int cosmosTerrainWidth;
+    private static int cosmosTerrainHeight;
 
     public static void registerShaders(RegisterShadersEvent event) throws IOException {
         event.registerShader(
@@ -123,6 +134,14 @@ public class FilterRenderer {
                 ),
                 instance -> toxicShader = instance
         );
+        event.registerShader(
+                EcaShaderInstance.create(
+                        event.getResourceProvider(),
+                        new ResourceLocation(EcaMod.MOD_ID, "eca_cosmos"),
+                        DefaultVertexFormat.POSITION_TEX
+                ),
+                instance -> cosmosShader = instance
+        );
     }
 
     public static void enable(FilterType filter) {
@@ -145,11 +164,13 @@ public class FilterRenderer {
         activeFilters.clear();
         destroyCopyTargets();
         destroySpotlightTargets();
+        destroyCosmosTerrainTarget();
         matrixStartNanos = 0;
         rainStartNanos = 0;
         desertStartNanos = 0;
         snowStartNanos = 0;
         toxicStartNanos = 0;
+        cosmosStartNanos = 0;
     }
 
     @SubscribeEvent
@@ -198,6 +219,17 @@ public class FilterRenderer {
         if (activeFilters.contains(FilterType.TOXIC) && toxicShader != null) {
             if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_LEVEL) {
                 renderToxic();
+                return;
+            }
+            return;
+        }
+        if (activeFilters.contains(FilterType.COSMOS)) {
+            if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_CUTOUT_BLOCKS) {
+                captureCosmosTerrainDepth();
+                return;
+            }
+            if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_LEVEL && cosmosShader != null) {
+                renderCosmos(event);
                 return;
             }
             return;
@@ -310,6 +342,59 @@ public class FilterRenderer {
             GL30.glDeleteFramebuffers(spotlightFbo);
             spotlightFbo = -1;
         }
+    }
+
+    private static void ensureCosmosTerrainTarget(int width, int height) {
+        if (cosmosTerrainFbo != -1 && cosmosTerrainWidth == width && cosmosTerrainHeight == height) return;
+        destroyCosmosTerrainTarget();
+
+        cosmosTerrainDepthTexture = GlStateManager._genTexture();
+        GlStateManager._bindTexture(cosmosTerrainDepthTexture);
+        GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+        GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
+        GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL14.GL_TEXTURE_COMPARE_MODE, GL11.GL_NONE);
+        GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+        GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+        GlStateManager._texImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_DEPTH_COMPONENT, width, height, 0,
+                GL11.GL_DEPTH_COMPONENT, GL11.GL_FLOAT, null);
+
+        cosmosTerrainFbo = GL30.glGenFramebuffers();
+        GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, cosmosTerrainFbo);
+        GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_DEPTH_ATTACHMENT,
+                GL11.GL_TEXTURE_2D, cosmosTerrainDepthTexture, 0);
+        GL11.glDrawBuffer(GL11.GL_NONE);
+        GL11.glReadBuffer(GL11.GL_NONE);
+
+        GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+        cosmosTerrainWidth = width;
+        cosmosTerrainHeight = height;
+    }
+
+    private static void destroyCosmosTerrainTarget() {
+        if (cosmosTerrainDepthTexture != -1) {
+            GlStateManager._deleteTexture(cosmosTerrainDepthTexture);
+            cosmosTerrainDepthTexture = -1;
+        }
+        if (cosmosTerrainFbo != -1) {
+            GL30.glDeleteFramebuffers(cosmosTerrainFbo);
+            cosmosTerrainFbo = -1;
+        }
+    }
+
+    private static void captureCosmosTerrainDepth() {
+        Minecraft mc = Minecraft.getInstance();
+        RenderTarget mainTarget = mc.getMainRenderTarget();
+        int width = mainTarget.width;
+        int height = mainTarget.height;
+
+        ensureCosmosTerrainTarget(width, height);
+
+        GlStateManager._glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, mainTarget.frameBufferId);
+        GlStateManager._glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, cosmosTerrainFbo);
+        GL30.glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+                GL11.GL_DEPTH_BUFFER_BIT, GL11.GL_NEAREST);
+
+        mainTarget.bindWrite(false);
     }
 
     @SuppressWarnings("deprecation")
@@ -555,6 +640,97 @@ public class FilterRenderer {
             RenderSystem.setShader(() -> shader);
             RenderSystem.setShaderTexture(0, depthCopyTexture);
             RenderSystem.setShaderTexture(1, colorCopyTexture);
+            uniformApplier.accept(shader);
+
+            drawFullscreenQuad(width, height);
+        } finally {
+            RenderSystem.getModelViewStack().popPose();
+            RenderSystem.applyModelViewMatrix();
+            RenderSystem.setProjectionMatrix(savedProj, VertexSorting.DISTANCE_TO_ORIGIN);
+            RenderSystem.enableCull();
+            RenderSystem.depthMask(true);
+            RenderSystem.enableDepthTest();
+            RenderSystem.enableBlend();
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static void renderCosmos(RenderLevelStageEvent event) {
+        if (cosmosStartNanos == 0) {
+            cosmosStartNanos = System.nanoTime();
+        }
+        float time = (System.nanoTime() - cosmosStartNanos) / 1_000_000_000.0f;
+        renderWorldFilterPass(event, cosmosShader, shader -> {
+            Minecraft mc = Minecraft.getInstance();
+            RenderSystem.setShaderTexture(2, COSMOS_TEXTURE);
+            RenderSystem.setShaderTexture(3, cosmosTerrainDepthTexture);
+            if (shader.getUniform("ScreenSize") != null) {
+                shader.getUniform("ScreenSize").set((float) mc.getMainRenderTarget().width, (float) mc.getMainRenderTarget().height);
+            }
+            if (shader.getUniform("Time") != null) {
+                shader.getUniform("Time").set(time);
+            }
+        });
+    }
+
+    /* 世界空间滤镜通道：在 renderFilterPass 的基础上，额外向着色器提供逐像素世界坐标
+       反算所需的数据，使效果附着在世界表面而非屏幕。任何"贴世界表面"的滤镜均可复用。
+       视图旋转取自 RenderSystem 的逆视图旋转矩阵（AFTER_LEVEL 阶段 event 的 poseStack
+       是投影栈，不可用）。着色器契约（除 Sampler0=深度、Sampler1=颜色外）：
+         uniform mat4 InvViewProjMat  // inverse(ProjMat * ViewRotMat)，相机相对
+         uniform vec3 CameraPos       // 相机世界坐标
+       反算公式：worldPos = (InvViewProjMat * vec4(ndc, 1)).xyz / w + CameraPos */
+    @SuppressWarnings("deprecation")
+    private static void renderWorldFilterPass(RenderLevelStageEvent event, ShaderInstance shader, Consumer<ShaderInstance> uniformApplier) {
+        if (shader == null) {
+            return;
+        }
+        Minecraft mc = Minecraft.getInstance();
+        RenderTarget mainTarget = mc.getMainRenderTarget();
+        int width = mainTarget.width;
+        int height = mainTarget.height;
+
+        ensureCopyTargets(width, height);
+
+        GlStateManager._glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, mainTarget.frameBufferId);
+        GlStateManager._glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, copyFbo);
+        GL30.glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+                GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT, GL11.GL_NEAREST);
+
+        mainTarget.bindWrite(false);
+
+        // 相机相对反算矩阵：AFTER_LEVEL 阶段 event.getPoseStack() 实为投影栈，不能用；
+        // 视图旋转改从 RenderSystem 的逆视图旋转矩阵还原，再与投影组合求逆
+        Matrix3f viewRot = new Matrix3f(RenderSystem.getInverseViewRotationMatrix()).invert();
+        Matrix4f view = new Matrix4f().set(viewRot);
+        Matrix4f invViewProj = new Matrix4f(event.getProjectionMatrix())
+                .mul(view)
+                .invert();
+        Vec3 cam = event.getCamera().getPosition();
+
+        RenderSystem.disableDepthTest();
+        RenderSystem.depthMask(false);
+        RenderSystem.disableCull();
+        RenderSystem.disableBlend();
+
+        Matrix4f savedProj = RenderSystem.getProjectionMatrix();
+        Matrix4f ortho = new Matrix4f().setOrtho(0.0f, (float) width, (float) height, 0.0f, -1000.0f, 1000.0f);
+        RenderSystem.setProjectionMatrix(ortho, VertexSorting.ORTHOGRAPHIC_Z);
+
+        RenderSystem.getModelViewStack().pushPose();
+        try {
+            RenderSystem.getModelViewStack().setIdentity();
+            RenderSystem.applyModelViewMatrix();
+
+            RenderSystem.setShader(() -> shader);
+            RenderSystem.setShaderTexture(0, depthCopyTexture);
+            RenderSystem.setShaderTexture(1, colorCopyTexture);
+            if (shader.getUniform("InvViewProjMat") != null) {
+                shader.getUniform("InvViewProjMat").set(invViewProj);
+            }
+            if (shader.getUniform("CameraPos") != null) {
+                shader.getUniform("CameraPos").set((float) cam.x, (float) cam.y, (float) cam.z);
+            }
             uniformApplier.accept(shader);
 
             drawFullscreenQuad(width, height);
