@@ -351,8 +351,13 @@ public class MyBossExtension extends EntityExtension {
     }
 
     @Override
+    public boolean enableBossBar() {
+        return true;  // master switch for boss bar takeover: whether ECA clears the entity's native boss bar and replaces it with ECA's. Default false — when not enabled, ECA never touches the entity's own boss bar. Must be true for bossBarExtension() / shouldShowBossBar() / custom health override to have any effect
+    }
+
+    @Override
     public boolean shouldShowBossBar(LivingEntity entity) {
-        return entity != null && entity.isAlive();  // boss bar display condition
+        return entity != null && entity.isAlive();  // boss bar display condition (only effective when enableBossBar() is true)
     }
 
     @Override
@@ -375,7 +380,7 @@ public class MyBossExtension extends EntityExtension {
         return entity.getEntityData().get(YOUR_CUSTOM_MAX_HEALTH_DATA);  // the actual value to use as max health (e.g. entity data, custom field), null = fallback to vanilla
     }
 
-    // Custom boss health bar
+    // Custom boss health bar (requires enableBossBar() = true)
     @Override
     public BossBarExtension bossBarExtension() {
         return new BossBarExtension() {
@@ -1104,8 +1109,13 @@ public class MyBossExtension extends EntityExtension {
     }
 
     @Override
+    public boolean enableBossBar() {
+        return true;  // 血条接管总开关：是否由 ECA 清除实体原生血条并改用 ECA 的。默认 false——不启用时 ECA 完全不碰实体自带血条。bossBarExtension() / shouldShowBossBar() / 自定义血量覆盖均需此项为 true 才生效
+    }
+
+    @Override
     public boolean shouldShowBossBar(LivingEntity entity) {
-        return entity != null && entity.isAlive();  // Boss 血条显示条件
+        return entity != null && entity.isAlive();  // Boss 血条显示条件（仅在 enableBossBar() 为 true 时生效）
     }
 
     @Override
@@ -1128,7 +1138,7 @@ public class MyBossExtension extends EntityExtension {
         return entity.getEntityData().get(YOUR_CUSTOM_MAX_HEALTH_DATA);  // 实际用作最大血量的值（如实体数据、自定义字段等），为 null 则回退到原版
     }
 
-    // 自定义 Boss 血条
+    // 自定义 Boss 血条（需 enableBossBar() = true）
     @Override
     public BossBarExtension bossBarExtension() {
         return new BossBarExtension() {

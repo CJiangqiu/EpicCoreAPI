@@ -69,6 +69,9 @@ public class EntityUtil {
     //标记是否正在调用实体自身 setHealth，防止递归重入
     private static final ThreadLocal<Boolean> IS_IN_ENTITY_HEALTH_SETTER = ThreadLocal.withInitial(() -> false);
 
+    //标记是否正在执行 Phase 3：反射/ASM 写入若绕经其他 mod 钩子后再次重入改血，由此闸门短路，防止无限递归爆栈
+    private static final ThreadLocal<Boolean> IS_IN_PHASE3 = ThreadLocal.withInitial(() -> false);
+
     //正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
 
@@ -796,9 +799,14 @@ public class EntityUtil {
 
     //Phase 3：ASM dataflow 分析器追踪真实血量存储并写入
     private static void setHealthViaPhase3(LivingEntity entity, float expectedHealth) {
+        if (IS_IN_PHASE3.get()) return;
+        IS_IN_PHASE3.set(true);
         try {
             HealthAnalyzerManager.writeAll(entity, expectedHealth);
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        } finally {
+            IS_IN_PHASE3.set(false);
+        }
     }
 
     // ==================== 实体死亡模块 ====================

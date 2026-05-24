@@ -59,7 +59,8 @@ public final class HealthAnalyzerManager {
         }
 
         if (!anyWrote) {
-            boolean sister = trySisterSetters(entity, expected, ar);
+            //诊断递归卡死：临时禁用 sister-setter（它会反射调用 entity.setHealth + getHealth，最可能踩 mhzy 钩子）
+            boolean sister = false; // trySisterSetters(entity, expected, ar);
             diag.add(sister ? "  sister-setter: OK" : "  sister-setter: failed");
             anyWrote = sister;
         }

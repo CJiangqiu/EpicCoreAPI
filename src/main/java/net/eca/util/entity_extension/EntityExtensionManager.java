@@ -126,8 +126,11 @@ public final class EntityExtensionManager {
             return;
         }
 
-        // 清除原生 boss bar，由 ECA 扩展系统接管
-        EntityUtil.cleanupBossBar(entity);
+        // 仅在扩展显式启用血条接管时清除原生 boss bar，否则保留实体自带血条
+        boolean takeOverBossBar = extension.enableBossBar();
+        if (takeOverBossBar) {
+            EntityUtil.cleanupBossBar(entity);
+        }
 
         ResourceKey<Level> dimension = level.dimension();
         DimensionState state = DIMENSION_STATES.computeIfAbsent(dimension, k -> new DimensionState());
@@ -138,8 +141,10 @@ public final class EntityExtensionManager {
         typeState.priority = extension.getPriority();
         typeState.order = order;
 
-        createCustomBossEventIfNeeded(entity, extension, state);
-        syncBossEventTypeMappings(entity, extension, state);
+        if (takeOverBossBar) {
+            createCustomBossEventIfNeeded(entity, extension, state);
+            syncBossEventTypeMappings(entity, extension, state);
+        }
 
         if (state.activeType == null) {
             state.activate(type, typeState);

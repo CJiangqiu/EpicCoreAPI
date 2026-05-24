@@ -61,6 +61,11 @@ import java.lang.annotation.Target;
  *     }
  *
  *     @Override
+ *     public boolean enableBossBar() {
+ *         return true; // opt-in: let ECA take over this entity's boss bar (default false). Required for bossBarExtension() to take effect
+ *     }
+ *
+ *     @Override
  *     public BossBarExtension bossBarExtension() {
  *         return new BossBarExtension() {
  *             @Override
@@ -240,7 +245,7 @@ import java.lang.annotation.Target;
  * <p><b>Important Notes</b></p>
  * <ul>
  *   <li>Each {@code EntityType} can only have ONE extension. Duplicate registrations will be rejected with an error log.</li>
- *   <li>Boss bars are automatically created for entities without native {@code ServerBossEvent} fields. For entities with native boss bars (Wither, Ender Dragon), custom rendering replaces the vanilla appearance.</li>
+ *   <li>Boss bar takeover is opt-in: override {@code enableBossBar()} to return {@code true} (default {@code false}). Only then does ECA clear the entity's native {@code ServerBossEvent} fields and manage the bar itself; when left disabled, the entity's own/vanilla boss bar is left completely untouched.</li>
  *   <li>Global effects only activate when at least one entity of that type is alive in the dimension.</li>
  *   <li>Conditional switching: every extension method has an entity-aware overload (e.g. {@code globalSkyboxExtension(LivingEntity)}) — override it to return a different extension object based on entity state. ECA invokes the entity-aware overload with a non-null entity (the init / no-primary-entity case is routed to the no-arg overload) and catches any exception it throws, falling back to the no-arg overload. Global effects re-evaluate roughly once per second against the dimension's primary entity; instance effects (boss bar, render layer) re-evaluate every frame per entity.</li>
  *   <li>The {@code texture()} helper automatically prepends "textures/" and uses your mod ID.</li>

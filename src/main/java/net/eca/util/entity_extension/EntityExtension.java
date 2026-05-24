@@ -31,6 +31,11 @@ public abstract class EntityExtension {
         return false;
     }
 
+    // 是否由 ECA 接管此实体的 boss 血条（清除原生血条 + 改用 ECA BossEvent）。默认 false：不接管时完全不碰实体自带血条
+    public boolean enableBossBar() {
+        return false;
+    }
+
     public boolean shouldShowBossBar(LivingEntity entity) {
         return entity != null && entity.isAlive();
     }

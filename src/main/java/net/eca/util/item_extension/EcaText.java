@@ -16,7 +16,7 @@ public final class EcaText {
 
     private static final long DEFAULT_PERIOD = 3000L;
 
-    EcaText(String text) {
+    public EcaText(String text) {
         this.text = text != null ? text : "";
     }
 
