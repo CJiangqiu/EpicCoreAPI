@@ -46,6 +46,10 @@ public final class HealthAnalyzer {
     private static final String GETHEALTH_DESC = "()F";
     private static final int DEFAULT_MAX_DEPTH = 6;
     private static final int DEFAULT_INLINE_BUDGET = 200;
+    //表达式节点总预算：构造组合表达式时递减，耗尽即坍缩为 Unknown，防止复杂/互递归 getHealth 把表达式树撑爆导致分析卡死
+    private static final int DEFAULT_NODE_BUDGET = 20000;
+    //控制流汇合处 Choice 分支上限，超出即加宽为 Unknown，保证格有限高、数据流分析收敛
+    private static final int MAX_CHOICE_ALTS = 8;
 
     private HealthAnalyzer() {}
 
@@ -127,7 +131,7 @@ public final class HealthAnalyzer {
                     cur = vh.get(cur);
                 }
                 return cur;
-            } catch (Throwable t) { return null; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
 
         @Override public boolean write(LivingEntity entity, Object value) {
@@ -137,7 +141,7 @@ public final class HealthAnalyzer {
             try {
                 coerced = coerceForType(value, valueType);
                 if (coerced == null && valueType.isPrimitive()) return false;
-            } catch (Throwable t) { return false; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return false; }
 
             //最后一段属于 record:component 不可写(VarHandle/Unsafe 均被 JVM 拦),改为重建 record 写回上一级字段
             Class<?> leafOwner = loadClass(last.ownerInternal());
@@ -153,7 +157,7 @@ public final class HealthAnalyzer {
                     if (rebuilt == null) return false;
                     handles[n - 2].set(holder, rebuilt);
                     return true;
-                } catch (Throwable t) { return false; }
+                } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return false; }
             }
 
             Object container;
@@ -164,13 +168,14 @@ public final class HealthAnalyzer {
                     if (cur == null) return false;
                 }
                 container = cur;
-            } catch (Throwable t) { return false; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return false; }
 
             //普通字段:先走 VarHandle,失败(普通类的 final 字段)再走 Unsafe 兜底
             try {
                 handles[n - 1].set(container, coerced);
                 return true;
             } catch (Throwable ignored) {
+                if (ignored instanceof VirtualMachineError) throw (VirtualMachineError) ignored;
                 Field f = resolveField(last);
                 if (f == null) return false;
                 return UnsafeUtil.unsafePutField(container, f, coerced);
@@ -192,7 +197,7 @@ public final class HealthAnalyzer {
             Field f = owner.getDeclaredField(step.name());
             f.setAccessible(true);
             return f;
-        } catch (Throwable t) { return null; }
+        } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
     }
 
     //重建 record 实例:目标 component 用新值,其余 component 保留 current 的旧值。失败返回 null
@@ -216,7 +221,7 @@ public final class HealthAnalyzer {
             Constructor<?> ctor = recordClass.getDeclaredConstructor(types);
             ctor.setAccessible(true);
             return ctor.newInstance(args);
-        } catch (Throwable t) { return null; }
+        } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
     }
 
     //在非 this 受体上做字段链：root 是任意 Expr,运行时 eval 得到受体对象,再走 chain
@@ -244,7 +249,7 @@ public final class HealthAnalyzer {
                     cur = readField(cur, s);
                 }
                 return cur;
-            } catch (Throwable t) { return null; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
 
         @Override public boolean write(LivingEntity entity, Object value) {
@@ -256,7 +261,7 @@ public final class HealthAnalyzer {
                     if (cur == null) return false;
                 }
                 return writeField(cur, chain.get(chain.size() - 1), value);
-            } catch (Throwable t) { return false; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return false; }
         }
 
         @Override protected String canonicalKey() {
@@ -281,7 +286,7 @@ public final class HealthAnalyzer {
                 Int2ObjectMap<?> map = (Int2ObjectMap<?>) entity.getEntityData().itemsById;
                 SynchedEntityData.DataItem item = (SynchedEntityData.DataItem) map.get(accessor.getId());
                 return item == null ? null : item.value;
-            } catch (Throwable t) { return null; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
 
         @SuppressWarnings({"unchecked", "rawtypes"})
@@ -298,7 +303,7 @@ public final class HealthAnalyzer {
                 ed.isDirty = true;
                 entity.onSyncedDataUpdated(accessor);
                 return true;
-            } catch (Throwable t) { return false; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return false; }
         }
 
         @Override protected String canonicalKey() { return "SD:" + accessor.getId(); }
@@ -328,7 +333,7 @@ public final class HealthAnalyzer {
                 if (!(obj instanceof Map<?, ?> map)) return null;
                 Object key = matchKey(map, entity, keyKind);
                 return key == null ? null : map.get(key);
-            } catch (Throwable t) { return null; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
 
         @Override public boolean write(LivingEntity entity, Object value) {
@@ -342,7 +347,7 @@ public final class HealthAnalyzer {
                     Object key = matchKey(map, entity, keyKind);
                     if (key != null && unsafeModifyMapEntry(map, key, value)) any = true;
                 }
-            } catch (Throwable ignored) {}
+            } catch (Throwable ignored) { if (ignored instanceof VirtualMachineError) throw (VirtualMachineError) ignored; }
 
             // 兄弟表：owner class 的所有静态 Map 字段一起写,对抗影子表回滚
             if (ownerClassInternal != null) {
@@ -359,7 +364,7 @@ public final class HealthAnalyzer {
                             Object key = matchKey(map, entity, keyKind);
                             if (key == null) continue;
                             if (unsafeModifyMapEntry(map, key, value)) any = true;
-                        } catch (Throwable ignored) {}
+                        } catch (Throwable ignored) { if (ignored instanceof VirtualMachineError) throw (VirtualMachineError) ignored; }
                     }
                 }
             }
@@ -389,7 +394,7 @@ public final class HealthAnalyzer {
                 Object idx = evaluate(indexExpr, ctx);
                 if (arr == null || !(idx instanceof Number n)) return null;
                 return java.lang.reflect.Array.get(arr, n.intValue());
-            } catch (Throwable t) { return null; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
 
         @Override public boolean write(LivingEntity entity, Object value) {
@@ -408,7 +413,7 @@ public final class HealthAnalyzer {
                 else if (ct == byte.class) java.lang.reflect.Array.setByte(arr, i, v.byteValue());
                 else java.lang.reflect.Array.set(arr, i, value);
                 return true;
-            } catch (Throwable t) { return false; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return false; }
         }
 
         @Override protected String canonicalKey() {
@@ -450,7 +455,7 @@ public final class HealthAnalyzer {
                     Map.Entry rawEntry = entry;
                     rawEntry.setValue(boxed);
                     if (boxed.equals(entry.getValue())) wrote = true;
-                } catch (Throwable ignored) {}
+                } catch (Throwable ignored) { if (ignored instanceof VirtualMachineError) throw (VirtualMachineError) ignored; }
 
                 if (!wrote) {
                     long offset = getEntryValueOffset(entry);
@@ -461,7 +466,7 @@ public final class HealthAnalyzer {
                 }
                 if (wrote) written++;
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable ignored) { if (ignored instanceof VirtualMachineError) throw (VirtualMachineError) ignored; }
         return written > 0;
     }
 
@@ -739,6 +744,28 @@ public final class HealthAnalyzer {
         TABLE.registerCall("java/lang/Long", "reverseBytes", "(J)J",
             (t, args, idx, ctx) -> Long.valueOf(Long.reverseBytes(((Number) t).longValue())));
 
+        // 循环移位：rotateLeft(v,n) 的逆是 rotateRight(target,n)，反之亦然。n 必须可求值，且 sink 须在值参(idx==0)
+        TABLE.registerCall("java/lang/Long", "rotateLeft", "(JI)J", (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number n = num(ctx.eval(args.get(1))); if (n == null) return null;
+            return Long.valueOf(Long.rotateRight(((Number) t).longValue(), n.intValue()));
+        });
+        TABLE.registerCall("java/lang/Long", "rotateRight", "(JI)J", (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number n = num(ctx.eval(args.get(1))); if (n == null) return null;
+            return Long.valueOf(Long.rotateLeft(((Number) t).longValue(), n.intValue()));
+        });
+        TABLE.registerCall("java/lang/Integer", "rotateLeft", "(II)I", (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number n = num(ctx.eval(args.get(1))); if (n == null) return null;
+            return Integer.valueOf(Integer.rotateRight(((Number) t).intValue(), n.intValue()));
+        });
+        TABLE.registerCall("java/lang/Integer", "rotateRight", "(II)I", (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number n = num(ctx.eval(args.get(1))); if (n == null) return null;
+            return Integer.valueOf(Integer.rotateLeft(((Number) t).intValue(), n.intValue()));
+        });
+
         // JDK 文本 <-> 数字
         TABLE.registerCall("java/lang/Float", "parseFloat", "(Ljava/lang/String;)F",
             (t, args, idx, ctx) -> Float.toString(((Number) t).floatValue()));
@@ -798,6 +825,70 @@ public final class HealthAnalyzer {
             return Double.valueOf(Math.pow(((Number) t).doubleValue(), 1.0 / e));
         });
 
+        // Math 精确算术：与普通 +/-/×/取负/±1 等价的双射，混淆器常用它伪装成不同形态
+        TABLE.registerCall("java/lang/Math", "addExact", "(II)I", (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            return subDomain(t, o, 'I');
+        });
+        TABLE.registerCall("java/lang/Math", "addExact", "(JJ)J", (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            return subDomain(t, o, 'J');
+        });
+        TABLE.registerCall("java/lang/Math", "subtractExact", "(II)I", (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            return idx == 0 ? addDomain(t, o, 'I') : subDomain(o, (Number) t, 'I');
+        });
+        TABLE.registerCall("java/lang/Math", "subtractExact", "(JJ)J", (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
+            return idx == 0 ? addDomain(t, o, 'J') : subDomain(o, (Number) t, 'J');
+        });
+        TABLE.registerCall("java/lang/Math", "multiplyExact", "(II)I", (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null || isZero(o, 'I')) return null;
+            return divDomain(t, o, 'I');
+        });
+        TABLE.registerCall("java/lang/Math", "multiplyExact", "(JJ)J", (t, args, idx, ctx) -> {
+            Number o = num(ctx.eval(args.get(1 - idx))); if (o == null || isZero(o, 'J')) return null;
+            return divDomain(t, o, 'J');
+        });
+        TABLE.registerCall("java/lang/Math", "multiplyExact", "(JI)J", (t, args, idx, ctx) -> {
+            if (idx != 0) return null;
+            Number o = num(ctx.eval(args.get(1))); if (o == null || o.longValue() == 0L) return null;
+            return Long.valueOf(((Number) t).longValue() / o.longValue());
+        });
+        TABLE.registerCall("java/lang/Math", "negateExact", "(I)I", (t, args, idx, ctx) -> negDomain((Number) t, 'I'));
+        TABLE.registerCall("java/lang/Math", "negateExact", "(J)J", (t, args, idx, ctx) -> negDomain((Number) t, 'J'));
+        TABLE.registerCall("java/lang/Math", "incrementExact", "(I)I", (t, args, idx, ctx) -> Integer.valueOf(((Number) t).intValue() - 1));
+        TABLE.registerCall("java/lang/Math", "incrementExact", "(J)J", (t, args, idx, ctx) -> Long.valueOf(((Number) t).longValue() - 1L));
+        TABLE.registerCall("java/lang/Math", "decrementExact", "(I)I", (t, args, idx, ctx) -> Integer.valueOf(((Number) t).intValue() + 1));
+        TABLE.registerCall("java/lang/Math", "decrementExact", "(J)J", (t, args, idx, ctx) -> Long.valueOf(((Number) t).longValue() + 1L));
+        TABLE.registerCall("java/lang/Math", "toIntExact", "(J)I", (t, args, idx, ctx) -> Long.valueOf(((Number) t).intValue()));
+
+        // 字节翻转 / 无符号转换补全（自逆 / 截断回原宽度）
+        TABLE.registerCall("java/lang/Short", "reverseBytes", "(S)S",
+            (t, args, idx, ctx) -> Integer.valueOf(Short.reverseBytes(((Number) t).shortValue())));
+        TABLE.registerCall("java/lang/Integer", "toUnsignedLong", "(I)J",
+            (t, args, idx, ctx) -> Integer.valueOf((int) ((Number) t).longValue()));
+
+        // Base64 解码 → 逆为编码(byte[] → String)。decode 目标是 byte[]，逆推产出可被同款解码器还原的字符串
+        TABLE.registerCall("java/util/Base64$Decoder", "decode", "(Ljava/lang/String;)[B",
+            (t, args, idx, ctx) -> t instanceof byte[] b ? base64EncodeMatching(args, ctx, b) : null);
+        TABLE.registerCall("java/util/Base64$Encoder", "encodeToString", "([B)Ljava/lang/String;",
+            (t, args, idx, ctx) -> t instanceof String s ? Base64.getUrlDecoder().decode(s) : null);
+
+        // String.replace(search, "")：去掉子串。仅当替换串为空且 sink 是 receiver 时可逆——把 search 加回到 target 前缀。
+        // 要求 target 不含 search(否则去除非单射)，否则返回 null。covers "去前缀" 这类编码。
+        TABLE.registerCall("java/lang/String", "replace", "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;",
+            (t, args, idx, ctx) -> {
+                if (idx != 0 || !(t instanceof String target)) return null;        //sink 须为 receiver
+                Object search = ctx.eval(args.get(1));
+                Object replacement = ctx.eval(args.get(2));
+                if (!(search instanceof CharSequence se) || !(replacement instanceof CharSequence re)) return null;
+                if (re.length() != 0) return null;                                  //仅支持替换为空串(纯删除)
+                String s = se.toString();
+                if (s.isEmpty() || target.contains(s)) return null;                 //保证 (s+target).replace(s,"")==target
+                return s + target;
+            });
+
         // Number 拆箱 / Wrapper 装箱 (identity)
         registerIdentityCall("java/lang/Float", "floatValue", "()F");
         registerIdentityCall("java/lang/Double", "doubleValue", "()D");
@@ -842,8 +933,65 @@ public final class HealthAnalyzer {
         TABLE.registerOp(op, (t, args, idx, ctx) -> {
             Number o = num(ctx.eval(args.get(1 - idx))); if (o == null) return null;
             if (isZero(o, domain)) return null;
-            return divDomain(t, o, domain);
+            return mulInvert(t, o, domain);
         });
+    }
+
+    /* 乘法求逆：浮点用实数除法；整数(I/J)在模 2^n 环上——乘奇数常量可逆(乘其模逆元)，
+       乘偶数常量仅当整除时退化为除法，否则不可逆返回 null。修正了整数乘以整除求逆的错误。 */
+    private static Object mulInvert(Object t, Number o, char d) {
+        switch (d) {
+            case 'F' -> { float f = o.floatValue(); return f == 0f ? null : Float.valueOf(((Number) t).floatValue() / f); }
+            case 'D' -> { double db = o.doubleValue(); return db == 0d ? null : Double.valueOf(((Number) t).doubleValue() / db); }
+            case 'I' -> {
+                int c = o.intValue(), ti = ((Number) t).intValue();
+                if ((c & 1) != 0) return Integer.valueOf(ti * modInverse32(c));   // 奇数：模逆元
+                return c != 0 && ti % c == 0 ? Integer.valueOf(ti / c) : null;     // 偶数：仅整除可逆
+            }
+            case 'J' -> {
+                long c = o.longValue(), tl = ((Number) t).longValue();
+                if ((c & 1L) != 0L) return Long.valueOf(tl * modInverse64(c));
+                return c != 0 && tl % c == 0 ? Long.valueOf(tl / c) : null;
+            }
+            default -> { return null; }
+        }
+    }
+
+    //奇数 a 模 2^32 的逆元(Newton 迭代，每轮翻倍正确低位数)
+    private static int modInverse32(int a) {
+        int x = a;
+        for (int i = 0; i < 5; i++) x *= 2 - a * x;
+        return x;
+    }
+
+    //奇数 a 模 2^64 的逆元
+    private static long modInverse64(long a) {
+        long x = a;
+        for (int i = 0; i < 6; i++) x *= 2 - a * x;
+        return x;
+    }
+
+    /* Base64 解码的逆：产出能被「同一个解码器实例」还原成 target 的字符串。
+       逐个尝试 url/basic/mime × 有无 padding，用真实解码器验证 round-trip，命中即返回，保证正确。 */
+    private static String base64EncodeMatching(List<Expr> args, EvalContext ctx, byte[] target) {
+        try {
+            Object dec = evaluate(args.get(0), ctx);
+            Base64.Encoder[] cands = {
+                Base64.getUrlEncoder().withoutPadding(), Base64.getUrlEncoder(),
+                Base64.getEncoder().withoutPadding(), Base64.getEncoder(),
+                Base64.getMimeEncoder().withoutPadding(), Base64.getMimeEncoder()
+            };
+            if (dec instanceof Base64.Decoder decoder) {
+                for (Base64.Encoder e : cands) {
+                    String s = e.encodeToString(target);
+                    try { if (Arrays.equals(decoder.decode(s), target)) return s; } catch (Throwable ignored) {}
+                }
+            }
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(target);   // 兜底
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+            return null;
+        }
     }
     private static void registerDiv(int op, char domain) {
         TABLE.registerOp(op, (t, args, idx, ctx) -> {
@@ -973,7 +1121,7 @@ public final class HealthAnalyzer {
                 case Opcodes.D2F -> (float) ((Number) a.get(0)).doubleValue();
                 default -> null;
             };
-        } catch (Throwable t) { return null; }
+        } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
     }
 
     private static Object invokeCall(Call call, EvalContext ctx) {
@@ -1000,7 +1148,7 @@ public final class HealthAnalyzer {
             if (m == null) return null;
             m.setAccessible(true);
             return m.invoke(recv, pvs);
-        } catch (Throwable t) { return null; }
+        } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
     }
 
     /* ==================== AnalysisResult + 入口 ==================== */
@@ -1029,8 +1177,29 @@ public final class HealthAnalyzer {
             if (ret == null || ret instanceof UnknownExpr) return AnalysisResult.EMPTY;
             return AnalysisResult.of(ret);
         } catch (Throwable t) {
+            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
             EcaLogger.info("[HealthAnalyzer] analyze {} failed: {}", entityClass.getName(), t.toString());
             return AnalysisResult.EMPTY;
+        }
+    }
+
+    /* 动态求解用：以具体种子分析任意方法的返回表达式。seedExprs[i] 对应方法第 i 个局部槽
+       (实例方法 0=this)；通常 this 传 Reference(真实对象)，参数传 Primitive(真实值)，
+       于是树中所有字段/数组叶子都根植于具体对象，可被 evaluate/solveFor 直接 concrete 求值。 */
+    public static Expr analyzeSeeded(Class<?> owner, String methodName, String desc, Expr[] seedExprs) {
+        try {
+            TaintValue[] seed = new TaintValue[seedExprs.length];
+            for (int i = 0; i < seedExprs.length; i++) {
+                if (seedExprs[i] == null) continue;
+                int size = (seedExprs[i] instanceof Primitive p && (p.jvmType() == 'J' || p.jvmType() == 'D')) ? 2 : 1;
+                seed[i] = new TaintValue(size, seedExprs[i]);
+            }
+            AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+            Expr ret = analyzeMethod(owner, methodName, desc, seed, ctx, 0);
+            return (ret == null || ret instanceof UnknownExpr) ? null : ret;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+            return null;
         }
     }
 
@@ -1045,14 +1214,39 @@ public final class HealthAnalyzer {
     }
 
     private static boolean classDefinesMethod(Class<?> clazz, String name, String desc) {
-        if (clazz.getClassLoader() == null) return false;
-        try (InputStream is = clazz.getClassLoader().getResourceAsStream(clazz.getName().replace('.', '/') + ".class")) {
-            if (is == null) return false;
+        byte[] bytes = classBytes(clazz);
+        if (bytes == null) return false;
+        try {
             ClassNode cn = new ClassNode();
-            new ClassReader(is).accept(cn, 0);
+            new ClassReader(bytes).accept(cn, 0);
             for (MethodNode mn : cn.methods) if (mn.name.equals(name) && mn.desc.equals(desc)) return true;
         } catch (Exception ignored) {}
         return false;
+    }
+
+    /* 取类字节码：优先运行期(mixin/coremod 转换后)版本，使分析能看见 mixin 对 getHealth 等的修改；
+       取不到再回退磁盘原始 .class（隐藏类 Foo/0x... 剥去后缀按模板类加载，逻辑一致）。 */
+    private static byte[] classBytes(Class<?> clazz) {
+        if (clazz == null) return null;
+        try {
+            byte[] runtime = net.eca.coremod.RuntimeBytecodeProvider.get(clazz);
+            if (runtime != null) return runtime;
+        } catch (Throwable ignored) {}
+        ClassLoader cl = clazz.getClassLoader();
+        if (cl == null) cl = ClassLoader.getSystemClassLoader();
+        try (InputStream is = cl.getResourceAsStream(internalName(clazz) + ".class")) {
+            return is == null ? null : is.readAllBytes();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+            return null;
+        }
+    }
+
+    //类内部名：剥去隐藏类的运行期后缀(Foo/0x000... → Foo)，以便按磁盘模板类定位字节码
+    private static String internalName(Class<?> clazz) {
+        String n = clazz.getName().replace('.', '/');
+        int hidden = n.indexOf("/0x");
+        return hidden >= 0 ? n.substring(0, hidden) : n;
     }
 
     private static final class AnalysisCtx {
@@ -1062,6 +1256,8 @@ public final class HealthAnalyzer {
         final Set<String> inflight = new HashSet<>();
         //全局熔断：内联次数上限,超出后直接返回 Unknown,防止指数膨胀
         int inlineBudget = DEFAULT_INLINE_BUDGET;
+        //表达式节点预算：构造组合表达式时递减,耗尽即坍缩 Unknown
+        int nodeBudget = DEFAULT_NODE_BUDGET;
         AnalysisCtx(int maxDepth) { this.maxDepth = maxDepth; }
     }
 
@@ -1078,18 +1274,20 @@ public final class HealthAnalyzer {
             if (cached != null) return cached;
         }
 
-        try (InputStream is = owner.getClassLoader().getResourceAsStream(
-                owner.getName().replace('.', '/') + ".class")) {
-            if (is == null) return null;
+        //环检测：覆盖顶层方法 + 跨方法环(如 getHealth↔position↔setHealth 互相调用),已在分析栈上则坍缩 Unknown
+        if (!ctx.inflight.add(cacheKey)) return UnknownExpr.UNKNOWN;
+        try {
+            byte[] bytes = classBytes(owner);
+            if (bytes == null) return null;
             ClassNode cn = new ClassNode();
-            new ClassReader(is).accept(cn, ClassReader.EXPAND_FRAMES);
+            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
             MethodNode mn = null;
             for (MethodNode m : cn.methods) {
                 if (m.name.equals(name) && m.desc.equals(desc)) { mn = m; break; }
             }
             if (mn == null || mn.instructions.size() == 0) return null;
 
-            String ownerInternal = owner.getName().replace('.', '/');
+            String ownerInternal = internalName(owner);
             TaintInterpreter interp = new TaintInterpreter(ctx, depth, ownerInternal, seedLocals);
             Analyzer<TaintValue> analyzer = new Analyzer<>(interp);
             Frame<TaintValue>[] frames = analyzer.analyze(ownerInternal, mn);
@@ -1113,8 +1311,11 @@ public final class HealthAnalyzer {
             if (seedLocals == null) ctx.methodCache.put(cacheKey, result);
             return result;
         } catch (Throwable t) {
+            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
             EcaLogger.info("[HealthAnalyzer] analyzeMethod {}.{} failed: {}", owner.getName(), name, t.toString());
             return null;
+        } finally {
+            ctx.inflight.remove(cacheKey);
         }
     }
 
@@ -1261,6 +1462,8 @@ public final class HealthAnalyzer {
             Type retType = Type.getReturnType(m.desc);
             int sz = retType == Type.VOID_TYPE ? 0 : retType.getSize();
             if (retType == Type.VOID_TYPE) return null;
+            //节点预算耗尽：停止展开调用/内联，坍缩 Unknown，防止表达式树爆炸
+            if (--ctx.nodeBudget <= 0) return new TaintValue(sz, UnknownExpr.UNKNOWN);
 
             // super.getHealth() / 父类 INVOKESPECIAL on getHealth → 沿继承链最终读 DATA_HEALTH_ID
             // 假设链路上没有再 override (绝大多数 mod 满足),把 super 调用直接识别为 DATA_HEALTH_ID 的 Source
@@ -1294,6 +1497,13 @@ public final class HealthAnalyzer {
                 return new TaintValue(sz, new MapEntrySource(container, key, kk, ownerHint, Object.class, m.owner));
             }
 
+            // 反射常量化：getDeclaredMethod/getMethod(name).invoke(recv) 或 getDeclaredField/getField(name).get(recv)
+            // 当目标名是分析期常量时，重写为对真实方法的内联 / 真实字段的 Source，使反射隐藏的存储也能被符号化
+            {
+                TaintValue reflective = tryReflection(m, values, sz);
+                if (reflective != null) return reflective;
+            }
+
             // 递归内联
             if (depth + 1 < ctx.maxDepth && !m.name.startsWith("<")) {
                 Expr inlined = tryInline(m, values);
@@ -1308,6 +1518,81 @@ public final class HealthAnalyzer {
             return new TaintValue(sz, new Call(m.owner, m.name, m.desc, argExprs));
         }
 
+        /* 反射常量化：把 Class.getDeclaredMethod(name,..).invoke(recv,..) / getDeclaredField(name).get(recv)
+           在「类与名字均为分析期常量」时，重写为对真实方法的内联或真实字段的 FieldChainSource。
+           无法常量化(名字是变量等)时返回 null，退回原有流程(动态分析兜底)。 */
+        private TaintValue tryReflection(MethodInsnNode m, List<? extends TaintValue> values, int sz) {
+            if (!m.owner.equals("java/lang/reflect/Method") && !m.owner.equals("java/lang/reflect/Field")) return null;
+
+            boolean isInvoke = m.owner.equals("java/lang/reflect/Method") && m.name.equals("invoke");
+            boolean isGet = m.owner.equals("java/lang/reflect/Field") && m.name.equals("get");
+            if (!isInvoke && !isGet) return null;
+            if (values.isEmpty()) return null;
+
+            // receiver(values[0]) 应是上游 Class.getDeclaredMethod/Field(...) 的 Call 节点
+            Expr accessorExpr = values.get(0).expr;
+            if (!(accessorExpr instanceof Call acc)) return null;
+
+            Class<?> targetClass = constClass(acc.args());      // 第 1 个 Class 常量参(getDeclaredMethod 的 receiver)
+            String memberName = constString(acc.args());        // 第 1 个 String 常量参(成员名)
+            if (targetClass == null || memberName == null) return null;
+
+            // invoke/get 的目标对象：Method.invoke(obj, args)→args[1]; Field.get(obj)→args[1]
+            Expr targetObj = values.size() >= 2 ? values.get(1).expr : null;
+            boolean onEntity = targetObj == EntityParamMarker.I;
+
+            if (isGet) {
+                // 反射读字段 → 当作字段链 Source(仅支持 this 上的字段，可写回)
+                if (!onEntity) return null;
+                try {
+                    Field f = targetClass.getDeclaredField(memberName);
+                    FieldStep step = new FieldStep(targetClass.getName().replace('.', '/'), memberName,
+                        Type.getDescriptor(f.getType()));
+                    Expr src = makeFieldChain(List.of(step));
+                    return src instanceof UnknownExpr ? null : new TaintValue(sz, src);
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+                    return null;
+                }
+            }
+
+            // isInvoke：无参实例方法 + 目标是 this → 内联该真实方法
+            if (!onEntity || depth + 1 >= ctx.maxDepth) return null;
+            Method jm = findZeroArgMethod(targetClass, memberName);
+            if (jm == null || ctx.inlineBudget <= 0) return null;
+            ctx.inlineBudget--;
+            String ownerInternal = targetClass.getName().replace('.', '/');
+            TaintValue[] seed = new TaintValue[8];
+            seed[0] = new TaintValue(1, EntityParamMarker.I);   // this
+            Expr inlined = analyzeMethod(targetClass, jm.getName(), Type.getMethodDescriptor(jm), seed, ctx, depth + 1);
+            return (inlined == null || inlined instanceof UnknownExpr) ? null : new TaintValue(sz, inlined);
+        }
+
+        //取 Call 参数里第一个解析到具体 Class 的常量(类字面量经 ldcValue → Reference(Class))
+        private static Class<?> constClass(List<Expr> args) {
+            for (Expr a : args) {
+                if (a instanceof Reference r && r.value() instanceof Class<?> k) return k;
+            }
+            return null;
+        }
+
+        //取 Call 参数里第一个 String 常量(成员名)
+        private static String constString(List<Expr> args) {
+            for (Expr a : args) {
+                if (a instanceof Reference r && r.value() instanceof String s) return s;
+            }
+            return null;
+        }
+
+        private static Method findZeroArgMethod(Class<?> owner, String name) {
+            for (Class<?> c = owner; c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Method mm : c.getDeclaredMethods()) {
+                    if (mm.getName().equals(name) && mm.getParameterCount() == 0) return mm;
+                }
+            }
+            return null;
+        }
+
         private Expr tryInline(MethodInsnNode m, List<? extends TaintValue> values) {
             Class<?> owner = loadClass(m.owner);
             if (owner == null) return null;
@@ -1317,37 +1602,34 @@ public final class HealthAnalyzer {
                 int mods = jm.getModifiers();
                 if (!(Modifier.isFinal(mods) || Modifier.isStatic(mods) || Modifier.isPrivate(mods))) return null;
             }
-            //环检测 + 全局熔断,避免无 cache 的 seed 内联指数膨胀 / 主线程卡死
-            String inflightKey = m.owner + "#" + m.name + "#" + m.desc;
-            if (!ctx.inflight.add(inflightKey)) return UnknownExpr.UNKNOWN;
-            if (ctx.inlineBudget <= 0) { ctx.inflight.remove(inflightKey); return UnknownExpr.UNKNOWN; }
+            //全局熔断：内联次数上限(环检测已由 analyzeMethod 的 inflight 统一负责)
+            if (ctx.inlineBudget <= 0) return UnknownExpr.UNKNOWN;
             ctx.inlineBudget--;
-            try {
-                boolean isStatic = m.getOpcode() == Opcodes.INVOKESTATIC;
-                Type[] argTypes = Type.getArgumentTypes(m.desc);
-                int localCount = (isStatic ? 0 : 1);
-                for (Type at : argTypes) localCount += at.getSize();
-                TaintValue[] seed = new TaintValue[localCount + 8];
-                int idx = 0, vidx = 0;
-                if (!isStatic) seed[idx++] = values.get(vidx++);
-                for (Type at : argTypes) {
-                    seed[idx] = values.get(vidx++);
-                    idx += at.getSize();
-                }
-                return analyzeMethod(owner, m.name, m.desc, seed, ctx, depth + 1);
-            } finally {
-                ctx.inflight.remove(inflightKey);
+            boolean isStatic = m.getOpcode() == Opcodes.INVOKESTATIC;
+            Type[] argTypes = Type.getArgumentTypes(m.desc);
+            int localCount = (isStatic ? 0 : 1);
+            for (Type at : argTypes) localCount += at.getSize();
+            TaintValue[] seed = new TaintValue[localCount + 8];
+            int idx = 0, vidx = 0;
+            if (!isStatic) seed[idx++] = values.get(vidx++);
+            for (Type at : argTypes) {
+                seed[idx] = values.get(vidx++);
+                idx += at.getSize();
             }
+            return analyzeMethod(owner, m.name, m.desc, seed, ctx, depth + 1);
         }
 
         @Override public void returnOperation(AbstractInsnNode insn, TaintValue value, TaintValue expected) {}
 
         @Override public TaintValue merge(TaintValue v1, TaintValue v2) {
             if (v1.equals(v2)) return v1;
+            int size = Math.max(v1.size, v2.size);
+            if (--ctx.nodeBudget <= 0) return new TaintValue(size, UnknownExpr.UNKNOWN);
             List<Expr> alts = new ArrayList<>();
             addAlt(alts, v1.expr);
             addAlt(alts, v2.expr);
-            int size = Math.max(v1.size, v2.size);
+            //加宽：分支过多直接坍缩 Unknown，让格有限高、循环处数据流收敛
+            if (alts.size() > MAX_CHOICE_ALTS) return new TaintValue(size, UnknownExpr.UNKNOWN);
             if (alts.size() == 1) return new TaintValue(size, alts.get(0));
             return new TaintValue(size, new Choice(alts));
         }
@@ -1398,6 +1680,7 @@ public final class HealthAnalyzer {
                 }
                 return new FieldChainSource(chain, handles, lastType);
             } catch (Throwable t) {
+                if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
                 return UnknownExpr.UNKNOWN;
             }
         }
@@ -1409,7 +1692,7 @@ public final class HealthAnalyzer {
                 Field f = owner.getDeclaredField(name);
                 f.setAccessible(true);
                 return f.get(null);
-            } catch (Throwable t) { return null; }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
     }
 
@@ -1435,6 +1718,11 @@ public final class HealthAnalyzer {
         if (cst instanceof Float f) return new TaintValue(sz, new Primitive(f, 'F'));
         if (cst instanceof Double d) return new TaintValue(sz, new Primitive(d, 'D'));
         if (cst instanceof String s) return new TaintValue(sz, new Reference(s, "java/lang/String"));
+        //类字面量 X.class：解析为具体 Class 引用，供反射 getDeclaredMethod/Field 定位 owner
+        if (cst instanceof Type tp && (tp.getSort() == Type.OBJECT || tp.getSort() == Type.ARRAY)) {
+            Class<?> k = loadClass(tp.getInternalName());
+            if (k != null) return new TaintValue(sz, new Reference(k, "java/lang/Class"));
+        }
         return new TaintValue(sz, UnknownExpr.UNKNOWN);
     }
 
@@ -1472,7 +1760,7 @@ public final class HealthAnalyzer {
 
     private static Class<?> loadClass(String internalName) {
         try { return Class.forName(internalName.replace('/', '.'), false, Thread.currentThread().getContextClassLoader()); }
-        catch (Throwable t) { return null; }
+        catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
     }
 
     private static Method findAnyMethod(Class<?> owner, String name, String desc) {
@@ -1512,7 +1800,7 @@ public final class HealthAnalyzer {
             case Type.DOUBLE -> double.class;
             case Type.OBJECT, Type.ARRAY -> {
                 try { yield Class.forName(t.getClassName(), false, Thread.currentThread().getContextClassLoader()); }
-                catch (Throwable e) { yield null; }
+                catch (Throwable e) { if (e instanceof VirtualMachineError) throw (VirtualMachineError) e; yield null; }
             }
             default -> null;
         };
@@ -1600,7 +1888,7 @@ public final class HealthAnalyzer {
             Field f = owner.getDeclaredField(step.name());
             f.setAccessible(true);
             return f.get(target);
-        } catch (Throwable t) { return null; }
+        } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
     }
 
     private static boolean writeField(Object target, FieldStep step, Object value) {
@@ -1612,7 +1900,7 @@ public final class HealthAnalyzer {
             f = owner.getDeclaredField(step.name());
             f.setAccessible(true);
             ft = f.getType();
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return false; }
 
         try {
             if (ft == float.class) f.setFloat(target, ((Number) value).floatValue());
@@ -1624,6 +1912,7 @@ public final class HealthAnalyzer {
             else f.set(target, coerceForType(value, ft));
             return true;
         } catch (Throwable ignored) {
+            if (ignored instanceof VirtualMachineError) throw (VirtualMachineError) ignored;
             //final 字段 / 模块系统访问限制 → 走 Unsafe 兜底
             return UnsafeUtil.unsafePutField(target, f, value);
         }

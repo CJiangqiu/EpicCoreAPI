@@ -31,9 +31,15 @@ public final class HealthAnalyzerManager {
 
     private static final Map<Class<?>, AnalysisResult> CACHE = new ConcurrentHashMap<>();
 
+    //已完整记录过写入失败的实体类，去重用：每类只告警一次（含失败原因），之后永久静默，避免每-tick 改血的实体刷屏
+    private static final Set<String> WARNED_FAILURES = ConcurrentHashMap.newKeySet();
+
+    //已打印过完整动态轨迹的实体类：verbose dump 每类只打一次（仅控制日志详尽度，不影响是否执行动态求解）
+    private static final Set<String> DYNAMIC_DUMPED = ConcurrentHashMap.newKeySet();
+
     /* ==================== 对外入口 ==================== */
 
-    //主入口：把每个 Source 反推后写入,任意一个写成功即 true
+    //Phase 3 静态：按 per-class 缓存的分析结果反推每个 Source 并写入 + sister-setter 兜底。任一写成功即 true
     public static boolean writeAll(LivingEntity entity, float expected) {
         if (entity == null) return false;
         AnalysisResult ar = CACHE.computeIfAbsent(entity.getClass(), HealthAnalyzerManager::safeAnalyze);
@@ -42,14 +48,14 @@ public final class HealthAnalyzerManager {
         List<String> diag = new ArrayList<>();
         boolean anyWrote = false;
         if (ar.isEmpty()) {
-            diag.add("  AnalysisResult.EMPTY: 未识别到 Source (getHealth 未 override 或字节码无法符号化)");
+            diag.add("  AnalysisResult.EMPTY: no Source identified (getHealth not overridden or bytecode not symbolizable)");
         } else {
-            diag.add("  Source 数量=" + ar.sources.size());
+            diag.add("  Source count=" + ar.sources.size());
             EvalContext ctx = new EvalCtx(entity);
             for (Source sink : ar.sources) {
                 Object value = HealthAnalyzer.solveFor(ar.returnExpr, sink, Float.valueOf(expected), ctx);
                 if (value == null) {
-                    diag.add("    [" + sink.label + "] solve=null (对偶表缺规则或多 sink 出现在同一支)");
+                    diag.add("    [" + sink.label + "] solve=null (missing duality rule or multiple sinks in one branch)");
                     continue;
                 }
                 boolean ok = sink.write(entity, value);
@@ -59,28 +65,37 @@ public final class HealthAnalyzerManager {
         }
 
         if (!anyWrote) {
-            //诊断递归卡死：临时禁用 sister-setter（它会反射调用 entity.setHealth + getHealth，最可能踩 mhzy 钩子）
-            boolean sister = false; // trySisterSetters(entity, expected, ar);
+            boolean sister = trySisterSetters(entity, expected, ar);
             diag.add(sister ? "  sister-setter: OK" : "  sister-setter: failed");
             anyWrote = sister;
         }
 
-        if (!anyWrote) {
-            EcaLogger.warn("writeAll 全部失败 entity={} expected={} current={}",
+        //失败日志按实体类去重：每个类只完整记录一次（含原因），之后永久静默
+        if (!anyWrote && WARNED_FAILURES.add(entity.getClass().getName())) {
+            EcaLogger.warn("writeAll(static) failed entity={} expected={} current={} (further failures for this class are suppressed)",
                 entity.getClass().getName(), expected, safeGetHealth(entity));
             for (String line : diag) EcaLogger.warn(line);
         }
         return anyWrote;
     }
 
+    //Phase 4 动态：静态彻底无法定位存储时，运行时插桩取证 + 反演写回。每次调用都现场探测，不做失败跳过
+    public static boolean dynamicResolve(LivingEntity entity, float expected) {
+        if (entity == null) return false;
+        //verbose dump 每类只打一次，避免刷屏（求解本身每次都跑）
+        boolean verbose = DYNAMIC_DUMPED.add(entity.getClass().getName());
+        return DynamicHealthAnalyzer.probeAndResolve(entity, expected, verbose);
+    }
+
     private static float safeGetHealth(LivingEntity entity) {
-        try { return entity.getHealth(); } catch (Throwable t) { return Float.NaN; }
+        try { return entity.getHealth(); } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return Float.NaN; }
     }
 
     private static AnalysisResult safeAnalyze(Class<?> c) {
         try {
             return HealthAnalyzer.analyze(c);
         } catch (Throwable t) {
+            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
             EcaLogger.info("[HealthAnalyzerManager] analyze {} failed: {}", c.getName(), t.toString());
             return AnalysisResult.EMPTY;
         }
@@ -164,6 +179,7 @@ public final class HealthAnalyzerManager {
             writer.invoke(recv, args);
             return Math.abs(entity.getHealth() - expected) < 1.0f;
         } catch (Throwable t) {
+            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
             return false;
         }
     }
@@ -209,7 +225,7 @@ public final class HealthAnalyzerManager {
                     m.setAccessible(true);
                     m.invoke(entity, coerceNumber(expected, p));
                     if (Math.abs(entity.getHealth() - expected) < 1.0f) return true;
-                } catch (Throwable ignored) {}
+                } catch (Throwable ignored) { if (ignored instanceof VirtualMachineError) throw (VirtualMachineError) ignored; }
             }
         }
         return false;

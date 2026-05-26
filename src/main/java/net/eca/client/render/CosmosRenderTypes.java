@@ -43,7 +43,7 @@ public class CosmosRenderTypes {
         true,
         RenderType.CompositeState.builder()
             .setShaderState(SHADER_STATE)
-            .setTransparencyState(RenderType.ADDITIVE_TRANSPARENCY)
+            .setTransparencyState(RenderType.TRANSLUCENT_TRANSPARENCY)
             .setCullState(RenderType.NO_CULL)
             .setWriteMaskState(RenderType.COLOR_WRITE)
             .createCompositeState(false)

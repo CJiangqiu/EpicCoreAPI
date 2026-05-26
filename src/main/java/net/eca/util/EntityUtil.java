@@ -72,6 +72,9 @@ public class EntityUtil {
     //标记是否正在执行 Phase 3：反射/ASM 写入若绕经其他 mod 钩子后再次重入改血，由此闸门短路，防止无限递归爆栈
     private static final ThreadLocal<Boolean> IS_IN_PHASE3 = ThreadLocal.withInitial(() -> false);
 
+    //已记录过 verify 失败的实体类，去重用：每类只告警一次，之后永久静默，避免每-tick 改血的实体刷屏
+    private static final Set<String> VERIFY_WARNED = ConcurrentHashMap.newKeySet();
+
     //正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
 
@@ -434,11 +437,7 @@ public class EntityUtil {
         Map<String, Boolean> result = new LinkedHashMap<>();
         UUID entityUUID = entity.getUUID();
 
-        /*
-         * 重入防护：若当前线程栈里已有针对该 UUID 的 reviveAllContainersDirect 调用，
-         * 直接返回最新容器快照，避免再次执行 addNewEntity 而二次派发 EntityJoinLevelEvent —
-         * 这正是第三方 mod 在该事件监听器里调用 EcaAPI.setInvulnerable/revive 时的死循环根因。
-         */
+     //重入防护：若当前线程栈里已有针对该 UUID 的 reviveAllContainersDirect 调用，直接返回最新容器快照，避免再次执行 addNewEntity
         Set<UUID> inFlight = REVIVE_IN_PROGRESS.get();
         if (!inFlight.add(entityUUID)) {
             return checkEntityInServerContainers(level, entityUUID);
@@ -673,6 +672,9 @@ public class EntityUtil {
         try {
             float beforeHealth = getHealth(entity);
 
+            //逐级升级：先跑开销小的阶段，每级用 verify 检验，达标即止；不达标才升级到更重的阶段。
+            //不做"失败跳过"——每次调用都按需重新走流程，多个同类实例互不影响。
+
             //Phase 1：写 vanilla DATA_HEALTH_ID
             setBasicHealth(entity, expectedHealth);
 
@@ -684,20 +686,32 @@ public class EntityUtil {
 
             //Phase 2：尝试调用实体自带的 setHealth/setHp/modifyHealth 等方法
             setHealthViaPhase2(entity, expectedHealth);
+            if (verifyHealthChange(entity, expectedHealth)) {
+                syncHealthToClients(entity, expectedHealth, beforeHealth);
+                return true;
+            }
 
-            //Phase 3：ASM dataflow 分析 + 写入真实血量存储
+            //Phase 3：ASM 静态 dataflow 分析 + 写入真实血量存储
             setHealthViaPhase3(entity, expectedHealth);
+            if (verifyHealthChange(entity, expectedHealth)) {
+                syncHealthToClients(entity, expectedHealth, beforeHealth);
+                return true;
+            }
 
-            //只在最后 verify 一次
+            //Phase 4：运行时插桩动态分析（最重，且会 retransform 其他 mod 的类，仅在激进攻击逻辑开启时启用）
+            if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
+                HealthAnalyzerManager.dynamicResolve(entity, expectedHealth);
+            }
+
             boolean ok = verifyHealthChange(entity, expectedHealth);
             syncHealthToClients(entity, expectedHealth, beforeHealth);
-            if (!ok) {
-                EcaLogger.warn("setHealth verify 失败 entity={} expected={} actual={} (上方 writeAll 诊断给出 Phase3 详情)",
+            if (!ok && VERIFY_WARNED.add(entity.getClass().getName())) {
+                EcaLogger.warn("setHealth verify failed entity={} expected={} actual={} (further failures for this class are suppressed; see diagnostics above)",
                     entity.getClass().getName(), expectedHealth, safeGet(entity));
             }
             return ok;
         } catch (Exception e) {
-            EcaLogger.warn("setHealth 抛异常 entity={} expected={} msg={}",
+            EcaLogger.warn("setHealth threw exception entity={} expected={} msg={}",
                 entity == null ? "null" : entity.getClass().getName(), expectedHealth, e.getMessage());
             return false;
         }
@@ -789,8 +803,10 @@ public class EntityUtil {
         Class<?> pt = m.getParameterTypes()[0];
         if (pt != float.class && pt != double.class && pt != int.class && pt != long.class) return false;
         String name = m.getName().toLowerCase();
+        //动词用 contains 而非 startsWith：兼容带前缀的 setter(如 ssSetHealth)。
+        //误伤由"必须含 health/hp + 不含 max + 单数字参"三重约束兜底
         boolean hasVerb = false;
-        for (String v : HEALTH_SETTER_VERBS) if (name.startsWith(v)) { hasVerb = true; break; }
+        for (String v : HEALTH_SETTER_VERBS) if (name.contains(v)) { hasVerb = true; break; }
         if (!hasVerb) return false;
         boolean hasNoun = false;
         for (String n : HEALTH_SETTER_NOUNS) if (name.contains(n)) { hasNoun = true; break; }
