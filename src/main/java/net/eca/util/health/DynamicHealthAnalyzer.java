@@ -44,19 +44,21 @@ public final class DynamicHealthAnalyzer {
     //入口：先零开销静态种子求解；不行再运行期插桩取证 + 轨迹反演。返回是否成功改血
     public static boolean probeAndResolve(LivingEntity entity, float target, boolean verbose) {
         if (entity == null || IN_PROGRESS.get()) return false;
+        EcaLogger.warn("[DynamicAnalysis] enter probeAndResolve entity={} target={}", entity.getClass().getName(), target);
 
         //路径1：纯静态种子分析(不插桩、不 retransform)。存储静态可见的实体到此即可解决
         if (DynamicHealthSolver.solveBySeededTree(entity, target)) return true;
+        EcaLogger.warn("[DynamicAnalysis] path1 (seeded) did not resolve, trying path2 (instrument)");
 
         //路径2：静态够不着(MethodHandle/不透明容器遮挡) → 运行期插桩取证后反演
         Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) return false;
+        if (inst == null) { EcaLogger.warn("[DynamicAnalysis] no Instrumentation"); return false; }
 
         Set<String> targetNames = resolveTargetClasses(entity.getClass());
-        if (targetNames.isEmpty()) return false;
+        if (targetNames.isEmpty()) { EcaLogger.warn("[DynamicAnalysis] resolveTargetClasses empty"); return false; }
 
         Class<?>[] targets = resolveLoadedModifiable(inst, targetNames);
-        if (targets.length == 0) return false;
+        if (targets.length == 0) { EcaLogger.warn("[DynamicAnalysis] no loaded modifiable target classes (count names={})", targetNames.size()); return false; }
 
         AccessProbeTransformer.ensureRegistered();
         List<AccessTrace.Entry> reads;

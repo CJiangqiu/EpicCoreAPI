@@ -1242,11 +1242,22 @@ public final class HealthAnalyzer {
         }
     }
 
-    //类内部名：剥去隐藏类的运行期后缀(Foo/0x000... → Foo)，以便按磁盘模板类定位字节码
+    //类内部名：剥去隐藏类的运行期后缀(Foo/0x000... → Foo)，以便按磁盘模板类定位字节码。
+    //隐藏类 getName() 可能不含包路径(只剩 SimpleName)，此时用其超类的包补全(隐藏类与模板同包)。
     private static String internalName(Class<?> clazz) {
         String n = clazz.getName().replace('.', '/');
         int hidden = n.indexOf("/0x");
-        return hidden >= 0 ? n.substring(0, hidden) : n;
+        if (hidden < 0) return n;
+        String stripped = n.substring(0, hidden);
+        if (stripped.indexOf('/') < 0) {                 // 丢了包路径，用超类包补全
+            Class<?> sup = clazz.getSuperclass();
+            if (sup != null) {
+                String supInternal = sup.getName().replace('.', '/');
+                int lastSlash = supInternal.lastIndexOf('/');
+                if (lastSlash > 0) stripped = supInternal.substring(0, lastSlash + 1) + stripped;
+            }
+        }
+        return stripped;
     }
 
     private static final class AnalysisCtx {

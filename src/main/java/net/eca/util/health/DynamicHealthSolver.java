@@ -40,14 +40,16 @@ public final class DynamicHealthSolver {
     static boolean solveBySeededTree(LivingEntity entity, float target) {
         try {
         Class<?> owner = findGetHealthOwner(entity.getClass());
-        if (owner == null) return false;
+        if (owner == null) { EcaLogger.warn("[DynamicSolve] (seeded) no getHealth owner"); return false; }
         String name = hasMethod(owner, GETHEALTH) ? GETHEALTH : GETHEALTH_ALT;
+        EcaLogger.warn("[DynamicSolve] (seeded) owner={} method={} internal={}", owner.getName(), name, ownerInternal(owner));
 
         Expr tree = HealthAnalyzer.analyzeSeeded(owner, name, "()F",
             new Expr[]{ new Reference(entity, ownerInternal(owner)) });
-        if (tree == null) return false;
+        if (tree == null) { EcaLogger.warn("[DynamicSolve] (seeded) analyzeSeeded returned null (bytecode unreadable?)"); return false; }
 
         Set<Source> sources = HealthAnalyzer.collectSources(tree);
+        EcaLogger.warn("[DynamicSolve] (seeded) tree ok, sources={}", sources.size());
         if (sources.isEmpty()) return false;
 
         EvalContext ctx = new Ctx(entity);
@@ -302,10 +304,21 @@ public final class DynamicHealthSolver {
         return false;
     }
 
+    //隐藏类 Foo/0x... → 模板内部名；getName() 丢包路径时用超类包补全
     private static String ownerInternal(Class<?> clazz) {
         String n = clazz.getName().replace('.', '/');
         int hidden = n.indexOf("/0x");
-        return hidden >= 0 ? n.substring(0, hidden) : n;
+        if (hidden < 0) return n;
+        String stripped = n.substring(0, hidden);
+        if (stripped.indexOf('/') < 0) {
+            Class<?> sup = clazz.getSuperclass();
+            if (sup != null) {
+                String supInternal = sup.getName().replace('.', '/');
+                int lastSlash = supInternal.lastIndexOf('/');
+                if (lastSlash > 0) stripped = supInternal.substring(0, lastSlash + 1) + stripped;
+            }
+        }
+        return stripped;
     }
 
     private static String[] splitSite(String site) {
