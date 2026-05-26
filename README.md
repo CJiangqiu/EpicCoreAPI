@@ -132,6 +132,10 @@ side="BOTH"
 - `isAllReturnWhitelisted(className)` - Check if a class is protected from AllReturn
 - `isTransformWhitelisted(className)` - Check if a class is protected from all ECA transformations
 - `getAllWhitelistedPackages()` - Get all whitelist prefixes (both levels, built-in + custom)
+- `addProtectedPackage(prefix)` - Add a package prefix to the system-protected list (never transformed by ECA)
+- `removeProtectedPackage(prefix)` - Remove a package prefix from the protected list (built-in entries cannot be removed)
+- `isPackageProtected(className)` - Check if a class is system-protected
+- `getAllProtectedPackages()` - Get all protected package prefixes (built-in + custom)
 - `restoreEntity(entity)` - DANGER! Requires Attack Radical Logic config. Retransform the entity's custom class chain so this instance delegates getHealth/getMaxHealth/setHealth/hurt/die and other core lifecycle methods to vanilla LivingEntity behaviour (per-instance, reversible)
 - `unrestoreEntity(entity)` - Cancel the class-restore, returning the entity to its custom implementation
 - `getEntityExtensionRegistry()` - Get all registered entity extensions (Map<EntityType, EntityExtension>)
@@ -145,10 +149,15 @@ side="BOTH"
 - `setGlobalMusic(level, musicData)` - Set global combat music effect override for a dimension (does not change effect priority)
 - `clearGlobalMusic(level)` - Clear global combat music effect override
 - `clearAllGlobalEffects(level)` - Clear all global effect overrides (fog, skybox, music) for a dimension
-- `enableFilter(player, filterType)` - Apply a screen filter to a player (FilterType: SKETCH, SPOTLIGHT, MATRIX, RAIN, DESERT, SNOW, TOXIC)
+- `enableFilter(player, filterType)` - Apply a screen filter to a player (FilterType: SKETCH, SPOTLIGHT, MATRIX, RAIN, DESERT, SNOW, TOXIC, COSMOS)
 - `disableFilter(player, filterType)` - Remove a screen filter from a player
 - `isFilterEnabled(player, filterType)` - Check whether a filter is active on a player
 - `getActiveFilters(player)` - Get a player's active filters (unmodifiable Set<FilterType>)
+- `playBossShow(viewer, target, cutsceneId)` - Force-play a BossShow cutscene for a viewer (ignores watch history)
+- `playBossShowIfNew(viewer, target, cutsceneId)` - Play a BossShow cutscene only if the viewer hasn't seen it before
+- `stopBossShow(viewer)` - Stop the viewer's current BossShow cutscene
+- `isBossShowPlaying(viewer)` - Check whether the viewer is currently in a BossShow cutscene
+- `launchBossShowEvent(eventName, viewer, target)` - Trigger all Custom-trigger BossShows matching the event name (returns count launched)
 - `banSpawn(level, entityType, seconds)` - Ban entity type from spawning for specified duration
 - `isSpawnBanned(level, entityType)` - Check if entity type is banned from spawning
 - `getSpawnBanTime(level, entityType)` - Get remaining spawn ban time in seconds
@@ -890,6 +899,10 @@ side="BOTH"
 - `isAllReturnWhitelisted(className)` - 检查类是否在 AllReturn 白名单中
 - `isTransformWhitelisted(className)` - 检查类是否在转换白名单中（跳过全部转换）
 - `getAllWhitelistedPackages()` - 获取所有白名单前缀（两级合并，内置 + 自定义）
+- `addProtectedPackage(prefix)` - 添加包前缀到系统保护列表（永不被 ECA 转换）
+- `removeProtectedPackage(prefix)` - 从保护列表移除包前缀（内置项不可移除）
+- `isPackageProtected(className)` - 检查类是否被系统保护
+- `getAllProtectedPackages()` - 获取所有受保护的包前缀（内置 + 自定义）
 - `restoreEntity(entity)` - 危险！需要开启激进攻击逻辑配置，重转换实体的自定义类链，使该实例将 getHealth/getMaxHealth/setHealth/hurt/die 等核心生命周期方法委托给原版 LivingEntity 行为（按实例生效，可逆）
 - `unrestoreEntity(entity)` - 取消类还原，使实体恢复其自定义实现
 - `getEntityExtensionRegistry()` - 获取所有已注册的实体扩展（Map<EntityType, EntityExtension>）
@@ -903,10 +916,15 @@ side="BOTH"
 - `setGlobalMusic(level, musicData)` - 设置维度全局战斗音乐效果覆盖（不改变效果优先级）
 - `clearGlobalMusic(level)` - 清除全局战斗音乐效果覆盖
 - `clearAllGlobalEffects(level)` - 清除维度所有全局效果覆盖（雾气、天空盒、音乐）
-- `enableFilter(player, filterType)` - 为玩家施加屏幕滤镜（FilterType：SKETCH、SPOTLIGHT、MATRIX、RAIN、DESERT、SNOW、TOXIC）
+- `enableFilter(player, filterType)` - 为玩家施加屏幕滤镜（FilterType：SKETCH、SPOTLIGHT、MATRIX、RAIN、DESERT、SNOW、TOXIC、COSMOS）
 - `disableFilter(player, filterType)` - 移除玩家的某个屏幕滤镜
 - `isFilterEnabled(player, filterType)` - 检查玩家是否激活了某个滤镜
 - `getActiveFilters(player)` - 获取玩家激活的滤镜（不可变 Set<FilterType>）
+- `playBossShow(viewer, target, cutsceneId)` - 强制为观看者播放 BossShow 演出（无视观看历史）
+- `playBossShowIfNew(viewer, target, cutsceneId)` - 仅在观看者未看过时播放 BossShow 演出
+- `stopBossShow(viewer)` - 停止观看者当前的 BossShow 演出
+- `isBossShowPlaying(viewer)` - 检查观看者是否正在 BossShow 演出中
+- `launchBossShowEvent(eventName, viewer, target)` - 触发所有匹配该事件名的自定义触发 BossShow（返回启动数量）
 - `banSpawn(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
 - `isSpawnBanned(level, entityType)` - 检查实体类型是否被禁生成
 - `getSpawnBanTime(level, entityType)` - 获取禁生成剩余秒数
