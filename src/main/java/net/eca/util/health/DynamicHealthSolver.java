@@ -40,16 +40,14 @@ public final class DynamicHealthSolver {
     static boolean solveBySeededTree(LivingEntity entity, float target) {
         try {
         Class<?> owner = findGetHealthOwner(entity.getClass());
-        if (owner == null) { EcaLogger.warn("[DynamicSolve] (seeded) no getHealth owner"); return false; }
+        if (owner == null) return false;
         String name = hasMethod(owner, GETHEALTH) ? GETHEALTH : GETHEALTH_ALT;
-        EcaLogger.warn("[DynamicSolve] (seeded) owner={} method={} internal={}", owner.getName(), name, ownerInternal(owner));
 
         Expr tree = HealthAnalyzer.analyzeSeeded(owner, name, "()F",
             new Expr[]{ new Reference(entity, ownerInternal(owner)) });
-        if (tree == null) { EcaLogger.warn("[DynamicSolve] (seeded) analyzeSeeded returned null (bytecode unreadable?)"); return false; }
+        if (tree == null) return false;
 
         Set<Source> sources = HealthAnalyzer.collectSources(tree);
-        EcaLogger.warn("[DynamicSolve] (seeded) tree ok, sources={}", sources.size());
         if (sources.isEmpty()) return false;
 
         EvalContext ctx = new Ctx(entity);
@@ -59,7 +57,6 @@ public final class DynamicHealthSolver {
             if (value == null) continue;
             if (sink.write(entity, value)) {
                 anyWrote = true;
-                EcaLogger.warn("[DynamicSolve] (seeded) wrote Source [{}] = {}", sink.label, value);
             }
         }
         if (!anyWrote) return false;
@@ -84,7 +81,6 @@ public final class DynamicHealthSolver {
             EcaLogger.warn("[DynamicSolve] (A) outer getHealth inversion failed");
             return false;
         }
-        EcaLogger.warn("[DynamicSolve] (A) target {} -> inner read must return {}", target, requiredInner);
 
         // (B) 选解码方法 + 定位可写 cell + 反演
         Decoder dec = pickDecoder(reads, methods);
@@ -114,11 +110,10 @@ public final class DynamicHealthSolver {
         if (comp == long.class) Array.setLong(dec.cellArray, dec.cellIndex, num.longValue());
         else if (comp == int.class) Array.setInt(dec.cellArray, dec.cellIndex, num.intValue());
         else Array.set(dec.cellArray, dec.cellIndex, num);
-        EcaLogger.warn("[DynamicSolve] (C) wrote cell {}[{}] = {}", brief(dec.cellArray), dec.cellIndex, num);
 
         float after = entity.getHealth();
         boolean ok = Math.abs(after - target) < 1.0f;
-        EcaLogger.warn("[DynamicSolve] after write getHealth={} target={} -> {}", after, target, ok ? "SUCCESS" : "NOT REACHED");
+        if (!ok) EcaLogger.warn("[DynamicSolve] (trace) wrote cell but getHealth={} != target={}", after, target);
         return ok;
       } catch (Throwable t) {
         if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;

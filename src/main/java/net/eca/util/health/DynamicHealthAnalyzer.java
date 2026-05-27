@@ -94,10 +94,12 @@ public final class DynamicHealthAnalyzer {
             IN_PROGRESS.set(false);
         }
 
-        if (verbose) dump(entity, targetNames, reads, methods);
-
         //轨迹反演(路径1 已在插桩前尝试过，这里只走轨迹解码路径)
-        return DynamicHealthSolver.solveByTraceDecoder(entity, target, reads, methods);
+        boolean ok = DynamicHealthSolver.solveByTraceDecoder(entity, target, reads, methods);
+
+        //仅当反演失败、且该类首次失败时，打印一次轨迹用于诊断(成功路径完全静默)
+        if (!ok && verbose) dump(entity, targetNames, reads, methods);
+        return ok;
     }
 
     private static void dump(LivingEntity entity, Set<String> targets,
@@ -105,15 +107,18 @@ public final class DynamicHealthAnalyzer {
         EcaLogger.warn("[DynamicAnalysis] entity={} instrumentedClasses={} methodEntries={} reads={}:",
             entity.getClass().getName(), targets.size(), methods.size(), reads.size());
 
+        final int CAP = 40;   //限量，避免宽存储实体(数百字段)刷屏
         EcaLogger.warn("[DynamicAnalysis] === Method entries (receiver + args) ===");
         int m = 0;
         for (AccessTrace.MethodEntry e : methods) {
+            if (m >= CAP) { EcaLogger.warn("  ... ({} more)", methods.size() - CAP); break; }
             EcaLogger.warn("  M#{} {} | recv={} | args={}", m++, e.site, brief(e.receiver), briefArgs(e.args));
         }
 
         EcaLogger.warn("[DynamicAnalysis] === Field/array reads ===");
         int i = 0;
         for (AccessTrace.Entry e : reads) {
+            if (i >= CAP) { EcaLogger.warn("  ... ({} more)", reads.size() - CAP); break; }
             String idx = e.index >= 0 ? ("[" + e.index + "]") : "";
             EcaLogger.warn("  #{} {} | container={}{} | value={}", i++, e.site, brief(e.container), idx, String.valueOf(e.value));
         }
