@@ -15,10 +15,9 @@ import java.util.Deque;
 import java.util.List;
 
 /*
- * Oculus 兼容：物品扩展着色层延迟队列。光影开启时世界内的物品（掉落物/展示框/手持等）渲染目标是 G-buffer，着色器输出在延迟合成中丢失，
- * 故把顶点数据缓存到队列，在 Oculus 管线合成后（主帧缓冲区活跃时）统一绘制；BufferBuilder 池化避免每帧分配 native 内存。
- * 与 EntityLayerRenderQueue 的本质差别：ColorKey/LocalUvBounds 是逐物品的静态共享状态，而 shader 在 setupRenderState() 里才读它们，
- * 入队与 flush 时机错开，故必须随每个 entry 快照、绘制前重设、绘制后清除，否则多物品会串色。
+ * Item extension layers use a queue for world contexts because vanilla may flush item/entity buffers
+ * after ItemRenderer returns. The queue snapshots matrices, ColorKey, and UV bounds so the shader
+ * state is restored when the buffered vertices are actually drawn.
  */
 @OnlyIn(Dist.CLIENT)
 public class ItemLayerRenderQueue {
@@ -49,37 +48,50 @@ public class ItemLayerRenderQueue {
             return;
         }
 
+        List<QueuedItemLayer> entries = new ArrayList<>(queue);
+        queue.clear();
+        Runnable flushWork = () -> flushEntries(entries);
+        if (RenderSystem.isOnRenderThread()) {
+            flushWork.run();
+        } else {
+            RenderSystem.recordRenderCall(flushWork::run);
+        }
+    }
+
+    private static void flushEntries(List<QueuedItemLayer> entries) {
         Matrix4f savedProj = new Matrix4f(RenderSystem.getProjectionMatrix());
-
         try {
-            for (QueuedItemLayer entry : queue) {
-                RenderSystem.getModelViewStack().pushPose();
-                RenderSystem.getModelViewStack().setIdentity();
-                RenderSystem.getModelViewStack().mulPoseMatrix(entry.modelViewMat);
-                RenderSystem.applyModelViewMatrix();
-                RenderSystem.setProjectionMatrix(entry.projMat, com.mojang.blaze3d.vertex.VertexSorting.DISTANCE_TO_ORIGIN);
-
-                // 在 setupRenderState() 触发 shader 读取 uniform 之前，恢复本 entry 的 ColorKey/UvBounds 快照
-                EcaShaderInstance.setColorKey(entry.colorKeyR, entry.colorKeyG, entry.colorKeyB, entry.colorKeyTolerance);
-                EcaShaderInstance.setLocalUvBounds(entry.uvMinU, entry.uvMinV, entry.uvScaleU, entry.uvScaleV);
-
-                entry.renderType.setupRenderState();
-                BufferUploader.drawWithShader(entry.renderedBuffer);
-                entry.renderType.clearRenderState();
-
-                EcaShaderInstance.clearColorKey();
-                EcaShaderInstance.clearLocalUvBounds();
-
-                RenderSystem.getModelViewStack().popPose();
-                RenderSystem.applyModelViewMatrix();
-
-                if (builderPool.size() < MAX_POOL_SIZE) {
-                    builderPool.addLast(entry.builder);
-                }
+            for (QueuedItemLayer entry : entries) {
+                drawEntry(entry);
             }
         } finally {
             RenderSystem.setProjectionMatrix(savedProj, com.mojang.blaze3d.vertex.VertexSorting.DISTANCE_TO_ORIGIN);
-            queue.clear();
+        }
+    }
+
+    private static void drawEntry(QueuedItemLayer entry) {
+        RenderSystem.getModelViewStack().pushPose();
+        try {
+            RenderSystem.getModelViewStack().setIdentity();
+            RenderSystem.getModelViewStack().mulPoseMatrix(entry.modelViewMat);
+            RenderSystem.applyModelViewMatrix();
+            RenderSystem.setProjectionMatrix(entry.projMat, com.mojang.blaze3d.vertex.VertexSorting.DISTANCE_TO_ORIGIN);
+
+            EcaShaderInstance.setColorKey(entry.colorKeyR, entry.colorKeyG, entry.colorKeyB, entry.colorKeyTolerance);
+            EcaShaderInstance.setLocalUvBounds(entry.uvMinU, entry.uvMinV, entry.uvScaleU, entry.uvScaleV);
+
+            entry.renderType.setupRenderState();
+            BufferUploader.drawWithShader(entry.renderedBuffer);
+            entry.renderType.clearRenderState();
+        } finally {
+            RenderSystem.getModelViewStack().popPose();
+            RenderSystem.applyModelViewMatrix();
+            EcaShaderInstance.clearColorKey();
+            EcaShaderInstance.clearLocalUvBounds();
+
+            if (builderPool.size() < MAX_POOL_SIZE) {
+                builderPool.addLast(entry.builder);
+            }
         }
     }
 

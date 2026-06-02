@@ -61,6 +61,16 @@ public class GameRendererPostLevelMixin {
         ItemLayerRenderQueue.flush();
     }
 
+    @Inject(method = "renderLevel",
+            at = @At(value = "INVOKE",
+                     target = "Lnet/minecraft/client/renderer/LevelRenderer;renderLevel(Lcom/mojang/blaze3d/vertex/PoseStack;FJZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;Lnet/minecraft/client/renderer/LightTexture;Lorg/joml/Matrix4f;)V",
+                     shift = At.Shift.AFTER))
+    private void eca$flushItemLayersAfterWorld(float partialTick, long nanoTime, PoseStack poseStack, CallbackInfo ci) {
+        if (!EcaShaderInstance.isOculusShadersActive()) {
+            ItemLayerRenderQueue.flush();
+        }
+    }
+
     private void renderPostSkybox(PoseStack poseStack) {
         GlobalSkyboxExtension skybox = getGlobalSkyboxExtension(minecraft.level.dimension().location());
         if (skybox == null || !skybox.enabled()) {

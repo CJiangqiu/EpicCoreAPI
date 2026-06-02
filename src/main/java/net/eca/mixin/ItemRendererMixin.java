@@ -84,11 +84,12 @@ public abstract class ItemRendererMixin {
         }
 
         ItemRenderer itemRenderer = (ItemRenderer) (Object) this;
+        boolean worldContext = eca$isWorldContext(displayContext);
 
-        if (EcaShaderInstance.isOculusShadersActive() && eca$isWorldContext(displayContext)) {
+        if (worldContext) {
             /*
-             * 光影激活且为世界 context：原位渲染会被 G-buffer 延迟合成吞掉，故捕获顶点入队列，连同矩阵与 ColorKey/UvBounds 快照，
-             * 延迟到 GameRendererPostLevelMixin 在管线合成后统一绘制。GUI/NONE 不进光影管线，走下面的原位渲染分支。
+             * 世界 context 的物品批次会在 ItemRenderer 返回后才提交；ColorKey 是共享状态，必须随顶点数据一起入队，
+             * 在真正绘制前恢复，避免掉落物/FIXED/手持物品拿到已清空的 ColorKey。
              */
             BufferBuilder builder = ItemLayerRenderQueue.acquireBuilder();
             builder.begin(VertexFormat.Mode.QUADS, extType.format());
