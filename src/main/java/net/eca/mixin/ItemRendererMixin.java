@@ -1,7 +1,10 @@
 package net.eca.mixin;
 
+import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexFormat;
+import net.eca.client.render.ItemLayerRenderQueue;
 import net.eca.client.render.shader.EcaShaderInstance;
 import net.eca.util.item_extension.ItemExtension;
 import net.eca.util.item_extension.ItemExtensionManager;
@@ -59,22 +62,46 @@ public abstract class ItemRendererMixin {
             bs.endBatch();
         }
 
-        // 计算该 BakedModel 的 UV 包围盒并注入共享状态
+        // 计算该 BakedModel 的 UV 包围盒
         float[] bounds = eca$computeUvBounds(model);
-        EcaShaderInstance.setLocalUvBounds(bounds[0], bounds[1], bounds[2], bounds[3]);
 
-        // 设置 ColorKey，shader 将据此 discard 非目标色的片段
+        /*
+         * 计算本物品生效的 ColorKey：指定了就按目标色 + 容差做颜色过滤；未指定时仍按物品贴图 alpha 做蒙版，使叠加效果贴合物品形状而非铺满整个 quad，
+         * 取颜色黑、容差 2.0（> 最大 RGB 距离 √3≈1.73），因此 shader 只会 discard 透明像素，不做颜色过滤。
+         */
+        float ckR, ckG, ckB, ckTolerance;
         float[] colorKey = extension.getColorKey();
         if (colorKey != null && colorKey.length >= 3) {
-            EcaShaderInstance.setColorKey(colorKey[0], colorKey[1], colorKey[2], extension.getColorKeyTolerance());
+            ckR = colorKey[0];
+            ckG = colorKey[1];
+            ckB = colorKey[2];
+            ckTolerance = extension.getColorKeyTolerance();
         } else {
-            // 未指定 ColorKey：仍按物品贴图 alpha 做蒙版，使叠加效果贴合物品形状而非铺满整个 quad。
-            // 颜色取黑、容差 2.0（> 最大 RGB 距离 √3≈1.73），因此 shader 只会 discard 透明像素，不做颜色过滤。
-            EcaShaderInstance.setColorKey(0.0f, 0.0f, 0.0f, 2.0f);
+            ckR = 0.0f;
+            ckG = 0.0f;
+            ckB = 0.0f;
+            ckTolerance = 2.0f;
         }
 
-        // 用扩展 RenderType 手动再绘制一次同一个 BakedModel 的 quad 列表
         ItemRenderer itemRenderer = (ItemRenderer) (Object) this;
+
+        if (EcaShaderInstance.isOculusShadersActive() && eca$isWorldContext(displayContext)) {
+            /*
+             * 光影激活且为世界 context：原位渲染会被 G-buffer 延迟合成吞掉，故捕获顶点入队列，连同矩阵与 ColorKey/UvBounds 快照，
+             * 延迟到 GameRendererPostLevelMixin 在管线合成后统一绘制。GUI/NONE 不进光影管线，走下面的原位渲染分支。
+             */
+            BufferBuilder builder = ItemLayerRenderQueue.acquireBuilder();
+            builder.begin(VertexFormat.Mode.QUADS, extType.format());
+            itemRenderer.renderModelLists(model, stack, combinedLight, combinedOverlay, poseStack, builder);
+            ItemLayerRenderQueue.enqueue(extType, builder, builder.end(),
+                ckR, ckG, ckB, ckTolerance, bounds[0], bounds[1], bounds[2], bounds[3]);
+            return;
+        }
+
+        // 无光影或 GUI：注入共享状态后原位再绘制一次同一个 BakedModel 的 quad 列表
+        EcaShaderInstance.setLocalUvBounds(bounds[0], bounds[1], bounds[2], bounds[3]);
+        EcaShaderInstance.setColorKey(ckR, ckG, ckB, ckTolerance);
+
         itemRenderer.renderModelLists(model, stack, combinedLight, combinedOverlay,
                                        poseStack, bufferSource.getBuffer(extType));
 
@@ -85,6 +112,16 @@ public abstract class ItemRendererMixin {
 
         EcaShaderInstance.clearColorKey();
         EcaShaderInstance.clearLocalUvBounds();
+    }
+
+    // 判定该展示 context 是否在世界中渲染（走光影 G-buffer），GUI/NONE 不算
+    private static boolean eca$isWorldContext(ItemDisplayContext ctx) {
+        return switch (ctx) {
+            case GROUND, FIXED, HEAD,
+                 FIRST_PERSON_LEFT_HAND, FIRST_PERSON_RIGHT_HAND,
+                 THIRD_PERSON_LEFT_HAND, THIRD_PERSON_RIGHT_HAND -> true;
+            default -> false;
+        };
     }
 
     // 遍历 BakedModel 所有 quad 的 UV0，求得图集内该物品贴图的最小/最大 UV
