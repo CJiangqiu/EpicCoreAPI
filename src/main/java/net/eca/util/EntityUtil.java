@@ -856,8 +856,8 @@ public class EntityUtil {
             //触发击杀成就
             triggerKillAdvancement(entity, damageSource);
             entity.dropAllDeathLoot(damageSource);
-            if (entity.isAlive()){
-                //保底清除实体
+            //激进攻击逻辑开启时无条件强清，否则仅在实体仍存活时兜底
+            if (EcaConfiguration.getAttackEnableRadicalLogicSafely() || entity.isAlive()){
                 remove(entity, Entity.RemovalReason.KILLED);
             }
 

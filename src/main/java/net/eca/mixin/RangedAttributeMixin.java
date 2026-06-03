@@ -13,18 +13,17 @@ public class RangedAttributeMixin {
     @Inject(method = "sanitizeValue", at = @At("HEAD"), cancellable = true)
     private void unlockLimits(double value, CallbackInfoReturnable<Double> cir) {
         if (EcaConfiguration.getAttributeUnlockLimitsSafely()) {
-            // Handle NaN
+            // 解开属性上限的同时保留各属性自身的下限，避免 MAX_HEALTH 等被削减到 0 或负数
+            double min = ((RangedAttribute) (Object) this).getMinValue();
             if (Double.isNaN(value)) {
-                cir.setReturnValue(0.0);
+                cir.setReturnValue(min);
                 return;
             }
-            // Handle Infinity
             if (Double.isInfinite(value)) {
-                cir.setReturnValue(value > 0 ? Double.MAX_VALUE : -Double.MAX_VALUE);
+                cir.setReturnValue(value > 0 ? Double.MAX_VALUE : min);
                 return;
             }
-            // Direct return without clamping
-            cir.setReturnValue(value);
+            cir.setReturnValue(Math.max(value, min));
         }
     }
 }
