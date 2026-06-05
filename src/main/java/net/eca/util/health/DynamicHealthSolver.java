@@ -43,8 +43,10 @@ public final class DynamicHealthSolver {
         if (owner == null) return false;
         String name = hasMethod(owner, GETHEALTH) ? GETHEALTH : GETHEALTH_ALT;
 
+        //以 this 占位符（而非 Reference(entity)）做种子：让 super.getHealth()→DATA_HEALTH_ID、this 字段链、SynchedData、Map-key 等
+        //依赖 this 的识别全部生效；leaves 仍可 concrete 求值（evaluate 把占位符解析回真实 entity）
         Expr tree = HealthAnalyzer.analyzeSeeded(owner, name, "()F",
-            new Expr[]{ new Reference(entity, ownerInternal(owner)) });
+            new Expr[]{ HealthAnalyzer.thisMarker() });
         if (tree == null) return false;
 
         Set<Source> sources = HealthAnalyzer.collectSources(tree);

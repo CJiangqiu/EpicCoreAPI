@@ -8,6 +8,7 @@ import net.eca.network.NetworkHandler;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.health.HealthAnalyzerManager;
+import net.eca.util.health.HealthSetterProber;
 import net.minecraft.network.syncher.EntityDataSerializer;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
@@ -666,7 +667,7 @@ public class EntityUtil {
         }
     }
 
-    //设置实体生命值（Phase 1 + 2 + 3 顺序全部跑一遍，最后 verify）
+    //设置实体生命值：先走已确认的快路径，否则逐级升级（Phase 1→2→3→行为探针→动态插桩），每级 verify 通过即确认并缓存该路径
     public static boolean setHealth(LivingEntity entity, float expectedHealth) {
         if (entity == null) return false;
         try {
@@ -684,18 +685,47 @@ public class EntityUtil {
                 return true;
             }
 
+            //快路径：直接走该实体类此前已确认有效的写入路径，命中则跳过整条级联。失效则回落重新确认（不删缓存、不记失败）
+            HealthAnalyzerManager.WriteStrategy confirmed = HealthAnalyzerManager.getConfirmedPath(entity.getClass());
+            if (confirmed != null) {
+                applyStrategy(entity, expectedHealth, confirmed);
+                if (verifyHealthChange(entity, beforeHealth, expectedHealth)) {
+                    syncHealthToClients(entity, expectedHealth, beforeHealth);
+                    return true;
+                }
+            }
+
+            //Phase 1 自身是否已达标（原版血量实体）
+            if (verifyHealthChange(entity, beforeHealth, expectedHealth)) {
+                HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.VANILLA);
+                syncHealthToClients(entity, expectedHealth, beforeHealth);
+                return true;
+            }
+
             //Phase 2：尝试调用实体自带的 setHealth/setHp/modifyHealth 等方法
             setHealthViaPhase2(entity, expectedHealth);
-            if (verifyHealthChange(entity, expectedHealth)) {
+            if (verifyHealthChange(entity, beforeHealth, expectedHealth)) {
+                HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.ENTITY_SETTER);
                 syncHealthToClients(entity, expectedHealth, beforeHealth);
                 return true;
             }
 
             //Phase 3：ASM 静态 dataflow 分析 + 写入真实血量存储
             setHealthViaPhase3(entity, expectedHealth);
-            if (verifyHealthChange(entity, expectedHealth)) {
+            if (verifyHealthChange(entity, beforeHealth, expectedHealth)) {
+                HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.SYMBOLIC);
                 syncHealthToClients(entity, expectedHealth, beforeHealth);
                 return true;
+            }
+
+            //Phase 3.5：行为探针——施加测试值观测 getHealth 跟随，定位不含关键词/私有/带守卫的真实写入方法（仅激进攻击逻辑开启时启用）
+            if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
+                HealthSetterProber.resolveAndWrite(entity, expectedHealth);
+                if (verifyHealthChange(entity, beforeHealth, expectedHealth)) {
+                    HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.PROBE);
+                    syncHealthToClients(entity, expectedHealth, beforeHealth);
+                    return true;
+                }
             }
 
             //Phase 4：运行时插桩动态分析（最重，且会 retransform 其他 mod 的类，仅在激进攻击逻辑开启时启用）
@@ -703,7 +733,8 @@ public class EntityUtil {
                 HealthAnalyzerManager.dynamicResolve(entity, expectedHealth);
             }
 
-            boolean ok = verifyHealthChange(entity, expectedHealth);
+            boolean ok = verifyHealthChange(entity, beforeHealth, expectedHealth);
+            if (ok) HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.DYNAMIC);
             syncHealthToClients(entity, expectedHealth, beforeHealth);
             if (!ok && VERIFY_WARNED.add(entity.getClass().getName())) {
                 EcaLogger.warn("setHealth verify failed entity={} expected={} actual={} (further failures for this class are suppressed; see diagnostics above)",
@@ -714,6 +745,21 @@ public class EntityUtil {
             EcaLogger.warn("setHealth threw exception entity={} expected={} msg={}",
                 entity == null ? "null" : entity.getClass().getName(), expectedHealth, e.getMessage());
             return false;
+        }
+    }
+
+    //按已确认策略直接写入（快路径）。PROBE/DYNAMIC 属激进手段，仅在激进逻辑开启时执行
+    private static void applyStrategy(LivingEntity entity, float expectedHealth, HealthAnalyzerManager.WriteStrategy strategy) {
+        switch (strategy) {
+            case VANILLA -> { /* Phase 1 已写入 DATA_HEALTH_ID */ }
+            case ENTITY_SETTER -> setHealthViaPhase2(entity, expectedHealth);
+            case SYMBOLIC -> setHealthViaPhase3(entity, expectedHealth);
+            case PROBE -> {
+                if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) HealthSetterProber.resolveAndWrite(entity, expectedHealth);
+            }
+            case DYNAMIC -> {
+                if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) HealthAnalyzerManager.dynamicResolve(entity, expectedHealth);
+            }
         }
     }
 
@@ -745,11 +791,19 @@ public class EntityUtil {
         } catch (Exception ignored) {}
     }
 
-    //验证血量修改是否成功（必须用实体自身的 getHealth()，不能读 DATA_HEALTH_ID）
-    private static boolean verifyHealthChange(LivingEntity entity, float expectedHealth) {
+    /* 验证血量修改是否成功（必须用实体自身的 getHealth()，不能读 DATA_HEALTH_ID）。
+       两道判据：1) getHealth 落在目标值的相对容差内；2) 若本意是改变血量（目标与改前显著不同），
+       getHealth 必须真的从改前值移动了——否则属于"写没生效、读取回退到诱饵/fallback 值"的假成功，判失败。 */
+    private static boolean verifyHealthChange(LivingEntity entity, float beforeHealth, float expectedHealth) {
         try {
             float actualHealth = entity.getHealth();
-            return Math.abs(actualHealth - expectedHealth) <= 10.0f;
+            if (!Float.isFinite(actualHealth)) return false;
+            float tolerance = Math.max(1.0f, Math.abs(expectedHealth) * 0.02f);
+            if (Math.abs(actualHealth - expectedHealth) > tolerance) return false;
+            if (Math.abs(expectedHealth - beforeHealth) > tolerance && Math.abs(actualHealth - beforeHealth) <= 0.001f) {
+                return false;
+            }
+            return true;
         } catch (Exception e) {
             return false;
         }

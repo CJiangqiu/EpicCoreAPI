@@ -31,6 +31,23 @@ public final class HealthAnalyzerManager {
 
     private static final Map<Class<?>, AnalysisResult> CACHE = new ConcurrentHashMap<>();
 
+    //已确认有效的写入路径：每个实体类记录"哪一级策略真正改动了血量"，供后续调用走快路径直达。
+    //仅在某策略 verify 通过后写入——绝不缓存失败，避免一次误判把实体永久判死
+    private static final Map<Class<?>, WriteStrategy> CONFIRMED_PATH = new ConcurrentHashMap<>();
+
+    //血量写入策略，按开销从小到大
+    public enum WriteStrategy { VANILLA, ENTITY_SETTER, SYMBOLIC, PROBE, DYNAMIC }
+
+    //获取该实体类已确认有效的写入路径，无则返回 null
+    public static WriteStrategy getConfirmedPath(Class<?> entityClass) {
+        return entityClass == null ? null : CONFIRMED_PATH.get(entityClass);
+    }
+
+    //记录已确认有效的写入路径。调用前必须确保该策略刚刚使 getHealth 达到目标值
+    public static void confirmPath(Class<?> entityClass, WriteStrategy strategy) {
+        if (entityClass != null && strategy != null) CONFIRMED_PATH.put(entityClass, strategy);
+    }
+
     //已完整记录过写入失败的实体类，去重用：每类只告警一次（含失败原因），之后永久静默，避免每-tick 改血的实体刷屏
     private static final Set<String> WARNED_FAILURES = ConcurrentHashMap.newKeySet();
 

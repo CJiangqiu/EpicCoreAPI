@@ -594,6 +594,8 @@ public final class HealthAnalyzer {
     public static Object evaluate(Expr e, EvalContext ctx) {
         if (e instanceof Primitive p) return p.value();
         if (e instanceof Reference r) return r.value();
+        //this 占位符解析为接收者实体，使 getHealth = f(this.method(), this.field) 中的 this 方法调用可被 concrete 求值
+        if (e == EntityParamMarker.I) return ctx.entity();
         if (e instanceof Source s) return s.read(ctx.entity());
         if (e instanceof Choice c) {
             for (Expr alt : c.alternatives()) {
@@ -1202,6 +1204,9 @@ public final class HealthAnalyzer {
             return null;
         }
     }
+
+    //分析期 this 占位符：代表 getHealth 接收者实体，供 seeded 分析把根植于 this 的存储正确识别为源（super.getHealth/字段链/SynchedData/Map-key）
+    public static Expr thisMarker() { return EntityParamMarker.I; }
 
     private record ClassAndMethod(Class<?> owner, String name) {}
 

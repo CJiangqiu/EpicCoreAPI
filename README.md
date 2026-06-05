@@ -321,12 +321,12 @@ This mod provides a dedicated daemon thread outside the Forge event bus and MC t
 **Related API** (these APIs are not yet exposed through `EcaAPI`; you need to additionally `import net.eca.util.ResurrectionManager`):
 
 ```java
-ResurrectionManager.start();                          // start daemon (idempotent)
-ResurrectionManager.add(entity);                      // begin tracking
-ResurrectionManager.remove(entity);                   // stop tracking
+ResurrectionManager.start(); // start daemon (idempotent)
+ResurrectionManager.add(entity); // begin tracking
+ResurrectionManager.remove(entity); // stop tracking
 boolean tracked = ResurrectionManager.isTracked(uuid);
-ResurrectionManager.setPollIntervalMs(50);            // adjust poll frequency
-ResurrectionManager.stop();                           // stop daemon
+ResurrectionManager.setPollIntervalMs(50); // adjust poll frequency
+ResurrectionManager.stop(); // stop daemon
 ```
 
 > Note: The daemon thread runs at slightly below normal priority. Default poll interval is 25 ms, meaning a tracked entity is revived within ~25 ms of death. Do not use on entities that spawn in large numbers!
@@ -694,11 +694,11 @@ public class WardenIntroShow extends BossShow {
 Triggering from code:
 
 ```java
-EcaAPI.playBossShow(viewer, target, cutsceneId);           // force play (ignores history)
-EcaAPI.playBossShowIfNew(viewer, target, cutsceneId);      // only if viewer hasn't seen it
-EcaAPI.launchBossShowEvent("phase2", viewer, target);      // match all Custom triggers with this event name
-EcaAPI.stopBossShow(viewer);                               // stop current cutscene
-EcaAPI.isBossShowPlaying(viewer);                          // check if viewer is in a cutscene
+EcaAPI.playBossShow(viewer, target, cutsceneId); // force play (ignores history)
+EcaAPI.playBossShowIfNew(viewer, target, cutsceneId); // only if viewer hasn't seen it
+EcaAPI.launchBossShowEvent("phase2", viewer, target); // match all Custom triggers with this event name
+EcaAPI.stopBossShow(viewer); // stop current cutscene
+EcaAPI.isBossShowPlaying(viewer); // check if viewer is in a cutscene
 ```
 
 > If a `@RegisterBossShow` class has no matching JSON on first launch, an empty template JSON is auto-generated at `config/eca/bossshow/<namespace>/<path>.json`.
@@ -769,12 +769,12 @@ Any `.json` filename works, and you can have multiple files.
  - `/eca banHealing <目标> false` - 解除禁疗
  - `/eca kill <目标>` - 击杀实体
 - `/eca remove <目标> [原因]` - 从世界中移除实体
-- `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
+- `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 内部通道清除实体
 - `/eca teleport <目标> <x> <y> <z>` - 传送实体
 - `/eca lockLocation <目标> <true|false> [x y z]` - 锁定/解除实体位置
 - `/eca cleanBossBar <目标>` - 清理 Boss 血条
-- `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体的所属mod的全部布尔和void方法的return transformation
-- `/eca allReturn global <true|false>` - 危险！启用/禁用全局AllReturn，影响所有非白名单mod
+- `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体的所属 mod 的全部布尔和 void 方法的 return transformation
+- `/eca allReturn global <true|false>` - 危险！启用/禁用全局 AllReturn，影响所有非白名单 mod
 - `/eca restore <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，还原/取消还原实体：强制指定实例将核心生命周期方法（getHealth、setHealth、hurt、die 等）委托给原版 LivingEntity 行为
 - `/eca banSpawn <目标> <秒数>` - 禁止选中实体的类型生成指定时长
 - `/eca banSpawn clear` - 解除当前维度所有禁生成
@@ -875,14 +875,14 @@ side="BOTH"
 - `isLocationLocked(entity)` - 检查实体位置是否锁定
 - `getLockedLocation(entity)` - 获取锁定位置（未锁定返回 null）
 - `remove(entity, reason)` - 完整移除（AI、Boss 血条、容器、乘客等）
-- `memoryRemove(entity, reason)` - 危险！需要开启激进攻击逻辑配置，通过LWJGL内部通道清除实体
+- `memoryRemove(entity, reason)` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 内部通道清除实体
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
-- `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活、锁血、阻断伤害、每tick清除有害效果、阻止怪物锁定、保护玩家物品栏；关闭：清除所有保护）
-- `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
-- `setGlobalAllReturn(enable)` - 危险！需要开启激进攻击逻辑配置，启用/禁用全局AllReturn，影响所有非白名单mod
-- `disableAllReturn()` - 关闭AllReturn并清除目标
-- `isAllReturnEnabled()` - 检查AllReturn是否启用
+- `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活、锁血、阻断伤害、每 tick 清除有害效果、阻止怪物锁定、保护玩家物品栏；关闭：清除所有保护）
+- `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属 mod 的全部布尔和 void 方法进行 return transformation
+- `setGlobalAllReturn(enable)` - 危险！需要开启激进攻击逻辑配置，启用/禁用全局 AllReturn，影响所有非白名单 mod
+- `disableAllReturn()` - 关闭 AllReturn 并清除目标
+- `isAllReturnEnabled()` - 检查 AllReturn 是否启用
 - `addAllReturnWhitelist(prefix)` - 添加 AllReturn 白名单前缀（跳过 AllReturn 转换，防御性 Hook 仍然生效）
 - `removeAllReturnWhitelist(prefix)` - 移除 AllReturn 白名单前缀（内置条目不能移除）
 - `addTransformWhitelist(prefix)` - 添加转换白名单前缀（跳过全部 ECA 转换，包括防御性 Hook）
@@ -999,7 +999,7 @@ boolean locationLocked = EcaAPI.isLocationLocked(entity);
 Vec3 lockedPos = EcaAPI.getLockedLocation(entity);
 EcaAPI.unlockLocation(entity);
 EcaAPI.remove(entity, Entity.RemovalReason.KILLED);
-EcaAPI.memoryRemove(entity, Entity.RemovalReason.CHANGED_DIMENSION);  // 提供使用LWJGL内部Unsafe实例进行清除
+EcaAPI.memoryRemove(entity, Entity.RemovalReason.CHANGED_DIMENSION);  // 提供使用 LWJGL 内部 Unsafe 实例进行清除
 EcaAPI.cleanupBossBar(entity);
 
 // ECA 实体选择 API
@@ -1017,10 +1017,10 @@ boolean isInv = EcaAPI.isInvulnerable(entity);
 EcaAPI.setInvulnerable(entity, false);
 
 // AllReturn（危险！需开启激进攻击配置）
-EcaAPI.enableAllReturn(entity);  // 对实体所属mod启用
-EcaAPI.setGlobalAllReturn(true);  // 对所有非白名单mod启用
+EcaAPI.enableAllReturn(entity);  // 对实体所属 mod 启用
+EcaAPI.setGlobalAllReturn(true);  // 对所有非白名单 mod 启用
 boolean enabled = EcaAPI.isAllReturnEnabled();
-EcaAPI.disableAllReturn();  // 关闭并清除全部AllReturn
+EcaAPI.disableAllReturn();  // 关闭并清除全部 AllReturn
 
 // 白名单 — AllReturn 级别（跳过 AllReturn，防御性 Hook 仍生效）
 EcaAPI.addAllReturnWhitelist("com.yourmod.");
@@ -1065,17 +1065,17 @@ EcaAPI.clearAllGlobalEffects(serverLevel);
 
 ### 线程复活
 
-本Mod提供了一个在 Forge 事件总线和 MC tick 循环之外的一个独立守护线程，开启后将会持续监控被追踪的实体，一旦死亡或原版底层容器中的对应实体实例丢失就自动复活。
+本 Mod 提供了一个在 Forge 事件总线和 MC tick 循环之外的一个独立守护线程，开启后将会持续监控被追踪的实体，一旦死亡或原版底层容器中的对应实体实例丢失就自动复活。
 
 **相关 API**（目前这些 API 还未通过 `EcaAPI` 暴露，需要你额外 `import net.eca.util.ResurrectionManager`）：
 
 ```java
-ResurrectionManager.start();                          // 启动守护线程（幂等）
-ResurrectionManager.add(entity);                      // 开始追踪
-ResurrectionManager.remove(entity);                   // 停止追踪
+ResurrectionManager.start(); // 启动守护线程（幂等）
+ResurrectionManager.add(entity); // 开始追踪
+ResurrectionManager.remove(entity); // 停止追踪
 boolean tracked = ResurrectionManager.isTracked(uuid);
-ResurrectionManager.setPollIntervalMs(50);            // 调整轮询频率
-ResurrectionManager.stop();                           // 停止守护线程
+ResurrectionManager.setPollIntervalMs(50); // 调整轮询频率
+ResurrectionManager.stop(); // 停止守护线程
 ```
 
 > 注意：守护线程以略低于正常的优先级运行，默认轮询间隔 25 ms，即被追踪实体在死亡后约 25 ms 内即被复活，请勿用于会大量生成的实体！
@@ -1118,7 +1118,7 @@ public class MyBossExtension extends EntityExtension {
 
     @Override
     public boolean enableCustomHealthOverride() {
-        return true;  // 若为 true，ECA自定义血条当前血量将从 getCustomHealthValue() 读取，而非原版 getHealth()
+        return true;  // 若为 true，ECA 自定义血条当前血量将从 getCustomHealthValue() 读取，而非原版 getHealth()
     }
 
     @Override
@@ -1128,7 +1128,7 @@ public class MyBossExtension extends EntityExtension {
 
     @Override
     public boolean enableCustomMaxHealthOverride() {
-        return true;  // 若为 true，ECA自定义血条最大血量将从 getCustomMaxHealthValue() 读取，而非原版 getMaxHealth()
+        return true;  // 若为 true，ECA 自定义血条最大血量将从 getCustomMaxHealthValue() 读取，而非原版 getMaxHealth()
     }
 
     @Override
@@ -1329,7 +1329,7 @@ public class DiamondSwordExtension extends ItemExtension {
 
 ### 屏幕滤镜
 
-本Mod 提供了一组全屏后处理滤镜预设，可由服务端按玩家施加，通过命令或 API 均可。滤镜会同步到客户端，作为一道着色器 pass 叠加在世界画面上。每个玩家同一时刻只能激活一个滤镜——施加新滤镜会替换当前滤镜。
+本 Mod 提供了一组全屏后处理滤镜预设，可由服务端按玩家施加，通过命令或 API 均可。滤镜会同步到客户端，作为一道着色器 pass 叠加在世界画面上。每个玩家同一时刻只能激活一个滤镜——施加新滤镜会替换当前滤镜。
 
 滤镜预设：
 - `SKETCH` — 素描
@@ -1442,11 +1442,11 @@ public class WardenIntroShow extends BossShow {
 代码触发方式：
 
 ```java
-EcaAPI.playBossShow(viewer, target, cutsceneId);           // 强制播放（无视历史记录）
-EcaAPI.playBossShowIfNew(viewer, target, cutsceneId);      // 仅在未看过时播放
-EcaAPI.launchBossShowEvent("phase2", viewer, target);      // 匹配所有自定义触发的同名演出
-EcaAPI.stopBossShow(viewer);                               // 停止当前演出
-EcaAPI.isBossShowPlaying(viewer);                          // 检查是否在演出中
+EcaAPI.playBossShow(viewer, target, cutsceneId); // 强制播放（无视历史记录）
+EcaAPI.playBossShowIfNew(viewer, target, cutsceneId); // 仅在未看过时播放
+EcaAPI.launchBossShowEvent("phase2", viewer, target); // 匹配所有自定义触发的同名演出
+EcaAPI.stopBossShow(viewer); // 停止当前演出
+EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 ```
 
 > 如果 `@RegisterBossShow` 类在首次启动时还没有对应 JSON，会在 `config/eca/bossshow/` 下自动生成只含 `target_type` 的空壳文件作为兜底。
@@ -1465,7 +1465,7 @@ EcaAPI.isBossShowPlaying(viewer);                          // 检查是否在演
 
 ### ECA Transformer 白名单
 
-尽管我尽可能的添加了常见的库和 Mod 作为 ECA Transformer 的白名单，但是仍然不排除有 mod 因为被 ECA 转换导致崩溃的问题，所以我准备了一个可供整合包开发者使用的 JSON 配置文件来添加包名白名单给 ECA Transformer。您可以在 `config/eca/` 文件夹下添加 JSON 文件来添加白名单，首次启动时如果文件夹为空会自动生成示例文件。
+尽管我尽可能的添加了常见的库和 Mod 作为 ECA Transformer 的白名单，但是仍然不排除有 mod 因为被 ECA 转换导致崩溃的问题，所以我准备了一个可供整合包开发者使用的 JSON 配置文件来添加包名白名单给 ECA Transformer。你可以在 `config/eca/` 文件夹下添加 JSON 文件来添加白名单，首次启动时如果文件夹为空会自动生成示例文件。
 
 只有 `type` 和 `packages` 字段是必须的，其他字段会被忽略：
 
