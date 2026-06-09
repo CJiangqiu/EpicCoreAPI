@@ -1,5 +1,7 @@
 package net.eca.util.health;
 
+import net.eca.coremod.AccessTrace;
+
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -159,5 +161,78 @@ public final class PhysicalLocations {
             return array.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(array))
                 + "[" + index + "]";
         }
+    }
+
+    /* ==================== 轨迹 → 物理位置解析 ==================== */
+
+    //把一条取证读/写记录解析成可写物理位置：数组下标走数组元素，否则按 site 解析字段
+    static PhysicalLocation fromTrace(AccessTrace.Entry entry) {
+        if (entry == null) return null;
+        return fromTrace(entry.site, entry.container, entry.index);
+    }
+
+    static PhysicalLocation fromTrace(AccessTrace.WriteEntry entry) {
+        if (entry == null) return null;
+        return fromTrace(entry.site, entry.container, entry.index);
+    }
+
+    private static PhysicalLocation fromTrace(String site, Object container, long index) {
+        if (index >= 0) return arrayElement(container, (int) index);
+        Field field = resolveField(site, container);
+        if (field == null) return null;
+        return Modifier.isStatic(field.getModifiers()) ? staticField(field) : field(container, field);
+    }
+
+    private static Field resolveField(String site, Object container) {
+        FieldRef ref = parseFieldRef(site);
+        if (ref == null) return null;
+        try {
+            Class<?> owner = Class.forName(ref.owner.replace('/', '.'), false,
+                Thread.currentThread().getContextClassLoader());
+            Field field = owner.getDeclaredField(ref.name);
+            if (!Modifier.isStatic(field.getModifiers()) && container == null) return null;
+            field.setAccessible(true);
+            return field;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
+    //site 形如 "owner#method owner.field:desc"，取末段的 owner.field
+    private static FieldRef parseFieldRef(String site) {
+        if (site == null) return null;
+        int space = site.lastIndexOf(' ');
+        int colon = site.lastIndexOf(':');
+        int dot = colon < 0 ? site.lastIndexOf('.') : site.lastIndexOf('.', colon);
+        if (space < 0 || dot <= space) return null;
+        String owner = site.substring(space + 1, dot);
+        String name = site.substring(dot + 1, colon < 0 ? site.length() : colon);
+        return owner.isEmpty() || name.isEmpty() ? null : new FieldRef(owner, name);
+    }
+
+    private record FieldRef(String owner, String name) {}
+}
+
+/**
+ * A bound writable JVM heap location. Implementations are limited to storage
+ * primitives exposed by JVM bytecode rather than application container types.
+ */
+interface PhysicalLocation {
+
+    Object read();
+
+    boolean write(Object value);
+
+    Class<?> valueType();
+
+    String describe();
+
+    default Object snapshot() {
+        return read();
+    }
+
+    default boolean restore(Object snapshot) {
+        return write(snapshot);
     }
 }

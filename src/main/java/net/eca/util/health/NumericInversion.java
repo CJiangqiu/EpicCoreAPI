@@ -123,7 +123,7 @@ public final class NumericInversion {
         for (AccessTrace.Entry read : reads) {
             if (cells.size() >= MAX_CELLS) break;
             if (!(read.value instanceof Number number)) continue;
-            PhysicalLocation location = TraceLocationResolver.resolve(read);
+            PhysicalLocation location = PhysicalLocations.fromTrace(read);
             if (location == null || !seen.add(location.describe())) continue;
             Class<?> type = numericType(location.valueType(), read.value.getClass());
             if (type != null) cells.add(new Cell(location, type, number.doubleValue()));
