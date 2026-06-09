@@ -688,8 +688,8 @@ public class EntityUtil {
             //快路径：直接走该实体类此前已确认有效的写入路径，命中则跳过整条级联。失效则回落重新确认（不删缓存、不记失败）
             HealthAnalyzerManager.WriteStrategy confirmed = HealthAnalyzerManager.getConfirmedPath(entity.getClass());
             if (confirmed != null) {
-                applyStrategy(entity, expectedHealth, confirmed);
-                if (verifyHealthChange(entity, beforeHealth, expectedHealth)) {
+                boolean applied = applyStrategy(entity, expectedHealth, confirmed);
+                if (applied || verifyHealthChange(entity, beforeHealth, expectedHealth)) {
                     syncHealthToClients(entity, expectedHealth, beforeHealth);
                     return true;
                 }
@@ -720,8 +720,8 @@ public class EntityUtil {
 
             //Phase 3.5：行为探针——施加测试值观测 getHealth 跟随，定位不含关键词/私有/带守卫的真实写入方法（仅激进攻击逻辑开启时启用）
             if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
-                HealthSetterProber.resolveAndWrite(entity, expectedHealth);
-                if (verifyHealthChange(entity, beforeHealth, expectedHealth)) {
+                boolean probed = HealthSetterProber.resolveAndWrite(entity, expectedHealth);
+                if (probed || verifyHealthChange(entity, beforeHealth, expectedHealth)) {
                     HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.PROBE);
                     syncHealthToClients(entity, expectedHealth, beforeHealth);
                     return true;
@@ -729,11 +729,13 @@ public class EntityUtil {
             }
 
             //Phase 4：运行时插桩动态分析（最重，且会 retransform 其他 mod 的类，仅在激进攻击逻辑开启时启用）
+            boolean dyn = false;
             if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
-                HealthAnalyzerManager.dynamicResolve(entity, expectedHealth);
+                dyn = HealthAnalyzerManager.dynamicResolve(entity, expectedHealth);
             }
 
-            boolean ok = verifyHealthChange(entity, beforeHealth, expectedHealth);
+            //策略自身已用 getHealth==target 确认成功的直接采信，避免昂贵/带副作用的 getHealth 二次复读抖动导致假阴性
+            boolean ok = dyn || verifyHealthChange(entity, beforeHealth, expectedHealth);
             if (ok) HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.DYNAMIC);
             syncHealthToClients(entity, expectedHealth, beforeHealth);
             if (!ok && VERIFY_WARNED.add(entity.getClass().getName())) {
@@ -748,19 +750,21 @@ public class EntityUtil {
         }
     }
 
-    //按已确认策略直接写入（快路径）。PROBE/DYNAMIC 属激进手段，仅在激进逻辑开启时执行
-    private static void applyStrategy(LivingEntity entity, float expectedHealth, HealthAnalyzerManager.WriteStrategy strategy) {
+    //按已确认策略直接写入（快路径）。返回 true 表示策略自身已用 getHealth==target 确认成功；
+    //VANILLA/ENTITY_SETTER/SYMBOLIC 不自证，返回 false 交由 verify 兜底。PROBE/DYNAMIC 属激进手段，仅在激进逻辑开启时执行
+    private static boolean applyStrategy(LivingEntity entity, float expectedHealth, HealthAnalyzerManager.WriteStrategy strategy) {
         switch (strategy) {
             case VANILLA -> { /* Phase 1 已写入 DATA_HEALTH_ID */ }
             case ENTITY_SETTER -> setHealthViaPhase2(entity, expectedHealth);
             case SYMBOLIC -> setHealthViaPhase3(entity, expectedHealth);
             case PROBE -> {
-                if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) HealthSetterProber.resolveAndWrite(entity, expectedHealth);
+                if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) return HealthSetterProber.resolveAndWrite(entity, expectedHealth);
             }
             case DYNAMIC -> {
-                if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) HealthAnalyzerManager.dynamicResolve(entity, expectedHealth);
+                if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) return HealthAnalyzerManager.dynamicResolve(entity, expectedHealth);
             }
         }
+        return false;
     }
 
     private static float safeGet(LivingEntity entity) {

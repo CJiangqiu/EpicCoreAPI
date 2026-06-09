@@ -26,6 +26,7 @@ import net.eca.client.render.shader.StarlightShader;
 import net.eca.client.render.shader.StormShader;
 import net.eca.client.render.shader.TheLastEndShader;
 import net.eca.client.render.shader.VolcanoShader;
+import net.eca.client.render.preset.ShaderPresetRegistry;
 import net.eca.util.entity_extension.GlobalEffectRegistry;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.api.distmarker.Dist;
@@ -56,6 +57,9 @@ public class ModRenderTypes {
         FilterRenderer.registerShaders(event);
 
         registerSkyboxPresets();
+
+        //重建所有第三方自定义预设的 ShaderInstance（首帧加载与每次资源重载都会触发）
+        ShaderPresetRegistry.onRegisterShaders(event);
     }
 
     private static void registerSkyboxPresets() {

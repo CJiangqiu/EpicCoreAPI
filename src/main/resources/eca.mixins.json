@@ -46,7 +46,6 @@
     "TransientEntitySectionManagerMixin",
     "TransientEntitySectionManagerMixin$CallbackMixin",
     "TrackedEntityMixin"
-
   ],
   "injectors": {
     "defaultRequire": 1

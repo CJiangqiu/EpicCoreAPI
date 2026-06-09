@@ -3,6 +3,7 @@ package net.eca.event;
 import net.eca.EcaMod;
 import net.eca.agent.AgentLogWriter;
 import net.eca.agent.EcaAgent;
+import net.eca.client.render.preset.ShaderPresetRegistry;
 import net.eca.coremod.EcaClassTransformer;
 
 import net.eca.config.EcaConfiguration;
@@ -60,6 +61,8 @@ public final class LoadCompleteHandler {
         // 在专用服务端形成该方法引用会触发 RuntimeDistCleaner 崩溃
         if (FMLEnvironment.dist.isClient()) {
             event.enqueueWork(ItemExtensionManager::scanAndRegisterAll);
+            // 着色器预设系统纯客户端：扫描入口同样受 dist 门控，避免在专用服务端形成客户端类引用
+            event.enqueueWork(ShaderPresetRegistry::scanAndRegisterAll);
         }
         event.enqueueWork(BossShowManager::scanAndRegisterAll);
 

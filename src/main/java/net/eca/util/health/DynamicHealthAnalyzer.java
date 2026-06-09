@@ -97,7 +97,10 @@ public final class DynamicHealthAnalyzer {
         //轨迹反演(路径1 已在插桩前尝试过，这里只走轨迹解码路径)
         boolean ok = DynamicHealthSolver.solveByTraceDecoder(entity, target, reads, methods);
 
-        //仅当反演失败、且该类首次失败时，打印一次轨迹用于诊断(成功路径完全静默)
+        //数据流逆向够不着时(自定义大数/装箱链表/不可符号化解码)，复用同一次取证的 reads 数值反演兜底，零额外插桩
+        if (!ok) ok = NumericInversion.solve(entity, target, reads, verbose);
+
+        //仅当全部失败、且该类首次失败时，打印一次轨迹用于诊断(成功路径完全静默)
         if (!ok && verbose) dump(entity, targetNames, reads, methods);
         return ok;
     }

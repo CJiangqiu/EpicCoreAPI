@@ -25,6 +25,10 @@ import net.eca.util.bossshow.Trigger;
 import net.eca.util.filter.FilterManager;
 import net.eca.util.filter.FilterType;
 import net.eca.util.spawn_ban.SpawnBanManager;
+import net.eca.client.render.preset.ShaderPreset;
+import net.eca.client.render.preset.ShaderPresetRegistry;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -1444,6 +1448,24 @@ public final class EcaAPI {
     public static boolean isForceLoaded(LivingEntity entity) {
         if (entity == null) return false;
         return ForceLoadingManager.shouldForceLoad(entity);
+    }
+
+    // ==================== 着色器预设 API ====================
+
+    // 获取自定义着色器预设（仅客户端）
+    /**
+     * Get a registered custom shader preset by its resource id (client only).
+     * A preset is registered via {@link net.eca.api.RegisterShaderPreset} + a static call to
+     * {@code ShaderPresetRegistry.register(id)}, backed by a standard core shader three-file set at
+     * {@code assets/<namespace>/shaders/core/<path>.vsh/.fsh/.json}. The returned object exposes five
+     * ready-made RenderTypes ({@code skybox()}, {@code bossBar()}, {@code bossLayer()}, {@code item()},
+     * {@code entityEffect(texture)}) for use in Entity/Item extensions.
+     * @param id the preset resource id
+     * @return the shader preset, or null if no preset is registered for the id
+     */
+    @OnlyIn(Dist.CLIENT)
+    public static ShaderPreset shaderPreset(ResourceLocation id) {
+        return ShaderPresetRegistry.getPreset(id);
     }
 
     private EcaAPI() {}
