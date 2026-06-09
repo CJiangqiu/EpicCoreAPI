@@ -22,12 +22,14 @@ import java.util.Map;
 import java.util.Set;
 
 /*
- * 动态数据流分析(P1：取证阶段)。当静态 HealthAnalyzer 对某实体返回 EMPTY/Unknown 时(getHealth被 MethodHandle/不透明容器/反射过滤藏住),
- * 用 Agent 给相关 mod 类插读取探针，真实执行一次getHealth，把它实际读取的 (容器对象, 槽位, 值) 收集打印——为后续(P2)重建+求解+写入做准备。
+ * Dynamic 阶段的运行时取证驱动器：与静态 HealthAnalyzer 互补——后者读字节码推公式，本类则把实体跑起来抓现场。
+ * 当静态 HealthAnalyzer 对某实体返回 EMPTY/Unknown 时(getHealth 被 MethodHandle/不透明容器/反射过滤藏住),
+ * 用 Agent 给相关 mod 类插读取探针，真实执行一次 getHealth，捕获它实际读取的 (容器对象, 槽位, 值),
+ * 再转交 DynamicHealthSolver/NumericInversion 重建求解写回。
  */
-public final class DynamicHealthAnalyzer {
+public final class DynamicHealthTracer {
 
-    private DynamicHealthAnalyzer() {}
+    private DynamicHealthTracer() {}
 
     private static final int MAX_TARGET_CLASSES = 48;
 
@@ -60,7 +62,9 @@ public final class DynamicHealthAnalyzer {
 
         AccessProbeTransformer.ensureRegistered();
         List<AccessTrace.Entry> reads;
+        List<AccessTrace.WriteEntry> writes;
         List<AccessTrace.MethodEntry> methods;
+        List<AccessTrace.ExitEntry> exits;
         IN_PROGRESS.set(true);
         try {
             AccessProbeTransformer.setTargets(targetNames);
@@ -83,7 +87,9 @@ public final class DynamicHealthAnalyzer {
                 entity.getHealth();                           // 真实执行一次
             } catch (Throwable ignored) {}
             reads = AccessTrace.reads();
+            writes = AccessTrace.writes();
             methods = AccessTrace.methods();
+            exits = AccessTrace.exits();
             AccessTrace.finish();
         } catch (Throwable t) {
             AccessTrace.finish();
@@ -101,14 +107,15 @@ public final class DynamicHealthAnalyzer {
         if (!ok) ok = NumericInversion.solve(entity, target, reads, verbose);
 
         //仅当全部失败、且该类首次失败时，打印一次轨迹用于诊断(成功路径完全静默)
-        if (!ok && verbose) dump(entity, targetNames, reads, methods);
+        if (!ok && verbose) dump(entity, targetNames, reads, writes, methods, exits);
         return ok;
     }
 
     private static void dump(LivingEntity entity, Set<String> targets,
-                             List<AccessTrace.Entry> reads, List<AccessTrace.MethodEntry> methods) {
-        EcaLogger.warn("[DynamicAnalysis] entity={} instrumentedClasses={} methodEntries={} reads={}:",
-            entity.getClass().getName(), targets.size(), methods.size(), reads.size());
+                             List<AccessTrace.Entry> reads, List<AccessTrace.WriteEntry> writes,
+                             List<AccessTrace.MethodEntry> methods, List<AccessTrace.ExitEntry> exits) {
+        EcaLogger.warn("[DynamicAnalysis] entity={} instrumentedClasses={} methodEntries={} exits={} reads={} writes={}:",
+            entity.getClass().getName(), targets.size(), methods.size(), exits.size(), reads.size(), writes.size());
 
         final int CAP = 40;   //限量，避免宽存储实体(数百字段)刷屏
         EcaLogger.warn("[DynamicAnalysis] === Method entries (receiver + args) ===");
@@ -118,10 +125,25 @@ public final class DynamicHealthAnalyzer {
             EcaLogger.warn("  M#{} {} | recv={} | args={}", m++, e.site, brief(e.receiver), briefArgs(e.args));
         }
 
+        EcaLogger.warn("[DynamicAnalysis] === Method exits ===");
+        m = 0;
+        for (AccessTrace.ExitEntry e : exits) {
+            if (m >= CAP) { EcaLogger.warn("  ... ({} more)", exits.size() - CAP); break; }
+            EcaLogger.warn("  X#{} {} | value={}", m++, e.site, String.valueOf(e.value));
+        }
+
         EcaLogger.warn("[DynamicAnalysis] === Field/array reads ===");
         int i = 0;
         for (AccessTrace.Entry e : reads) {
             if (i >= CAP) { EcaLogger.warn("  ... ({} more)", reads.size() - CAP); break; }
+            String idx = e.index >= 0 ? ("[" + e.index + "]") : "";
+            EcaLogger.warn("  #{} {} | container={}{} | value={}", i++, e.site, brief(e.container), idx, String.valueOf(e.value));
+        }
+
+        EcaLogger.warn("[DynamicAnalysis] === Field/array writes ===");
+        i = 0;
+        for (AccessTrace.WriteEntry e : writes) {
+            if (i >= CAP) { EcaLogger.warn("  ... ({} more)", writes.size() - CAP); break; }
             String idx = e.index >= 0 ? ("[" + e.index + "]") : "";
             EcaLogger.warn("  #{} {} | container={}{} | value={}", i++, e.site, brief(e.container), idx, String.valueOf(e.value));
         }
@@ -171,7 +193,7 @@ public final class DynamicHealthAnalyzer {
                 queue.add(ref);
             }
         }
-        result.removeIf(DynamicHealthAnalyzer::isSkipped);
+        result.removeIf(DynamicHealthTracer::isSkipped);
         return result;
     }
 

@@ -4,8 +4,11 @@ import net.minecraft.world.entity.LivingEntity;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -14,185 +17,319 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /*
- * 行为探针：通过观测真实写入效果来定位血量写入方法，而非靠方法名关键词或字节码反推。
- * 自定义存储常把真正的写入入口藏在不含关键词、私有、或带额外守卫的方法里，名字搜不到、符号也逆不出；
- * 但只要血量可变，就一定存在一个"喂入数值 → getHealth 随之改变"的写入点。
- * 这里对候选方法施加两个测试值，若 getHealth 都如实跟随到该值，则判定它是表现为恒等映射的血量写入方法，
- * 再以目标值调用它落地。只缓存已确认的方法，绝不记录"找不到"——失效判定本身可能误判，缓存失败会把实体永久判死。
+ * 行为探针只依赖“输入数值后 getHealth 达到同一数值”这一可观察事实。
+ * 候选可以是普通方法或任意单抽象方法对象，具体类名、接口名和字段名都不参与判定。
  */
 public final class HealthSetterProber {
 
     private HealthSetterProber() {}
 
-    //仅缓存已确认的写入方法；永不缓存失败结果
-    private static final Map<Class<?>, Method> CONFIRMED = new ConcurrentHashMap<>();
-
-    //防止探针调用的方法内部回环再次触发本流程
+    private static final Map<Class<?>, Writer> CONFIRMED = new ConcurrentHashMap<>();
     private static final ThreadLocal<Boolean> PROBING = ThreadLocal.withInitial(() -> false);
-
     private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
 
-    //识别并写入目标血量，命中返回 true。每次调用都现场重试，不因历史失败而跳过
     public static boolean resolveAndWrite(LivingEntity entity, float expected) {
         if (entity == null || PROBING.get()) return false;
         PROBING.set(true);
         try {
-            Method cached = CONFIRMED.get(entity.getClass());
+            Writer cached = CONFIRMED.get(entity.getClass());
             if (cached != null && tryApply(entity, cached, expected)) return true;
-            Method found = probe(entity, expected);
-            if (found != null) {
-                CONFIRMED.put(entity.getClass(), found);
-                return matches(entity, expected);
-            }
-            return false;
+            Writer found = probe(entity, expected);
+            if (found == null) return false;
+            CONFIRMED.put(entity.getClass(), found);
+            HealthAnalyzerManager.confirmPlan(entity.getClass(), plan(found));
+            return HealthVerify.matches(entity, expected);
         } catch (Throwable t) {
-            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+            if (t instanceof VirtualMachineError e) throw e;
             return false;
         } finally {
             PROBING.set(false);
         }
     }
 
-    /* 两点探针：表现为"输入即新血量"的恒等写入方法判定命中，随后以目标值落地。
-       对不影响血量的候选不做基线回写，避免把它控制的无关字段设成血量基线值。 */
-    private static Method probe(LivingEntity entity, float expected) {
-        float baseline = safeGetHealth(entity);
+    private static Writer probe(LivingEntity entity, float expected) {
+        float baseline = HealthVerify.safeGetHealth(entity);
         if (!Float.isFinite(baseline) || baseline <= 1.0f) return null;
         float maxBaseline = safeGetMaxHealth(entity);
-
         float probeA = baseline * 0.5f;
         float probeB = baseline * 0.25f;
         if (tooClose(probeA, probeB) || tooClose(probeA, baseline) || tooClose(probeB, baseline)) return null;
 
-        //会连带改最大血量的候选（上限/钳制类）：先收集，探测后用原始最大血量逐个还原，避免误伤上限；仅当没有纯当前血量 setter 时才兜底使用
-        List<Method> ceilingCandidates = new ArrayList<>();
-        Method pure = null;
-        for (Method m : candidateSetters(entity.getClass())) {
+        List<Writer> ceilingCandidates = new ArrayList<>();
+        Writer pure = null;
+        for (Writer writer : candidateWriters(entity)) {
             try {
-                invoke(entity, m, probeA);
-                float hA = safeGetHealth(entity);
-                if (!Float.isFinite(hA) || Math.abs(hA - probeA) > tolerance(probeA)) {
-                    //血量被动了但不是恒等写入：还原基线；完全没动则不再触碰该方法
-                    if (Float.isFinite(hA) && Math.abs(hA - baseline) > 1.0f) restore(entity, m, baseline);
+                float a = writer.representable(probeA);
+                float b = writer.representable(probeB);
+                if (tooClose(a, b) || tooClose(a, baseline) || tooClose(b, baseline)) continue;
+
+                writer.invoke(entity, a);
+                float hA = HealthVerify.safeGetHealth(entity);
+                if (!matches(hA, a)) {
+                    if (Float.isFinite(hA) && Math.abs(hA - baseline) > 1.0f) restore(entity, writer, baseline);
                     continue;
                 }
-                invoke(entity, m, probeB);
-                float hB = safeGetHealth(entity);
-                if (!Float.isFinite(hB) || Math.abs(hB - probeB) > tolerance(probeB)) {
-                    restore(entity, m, baseline);
+
+                writer.invoke(entity, b);
+                float hB = HealthVerify.safeGetHealth(entity);
+                if (!matches(hB, b)) {
+                    restore(entity, writer, baseline);
                     continue;
                 }
-                //恒等写入已确认。设回基线后血量能回升的才是纯当前血量 setter；否则归为连带改上限的候选
-                invoke(entity, m, baseline);
-                if (matches(entity, baseline)) {
-                    pure = m;
+
+                writer.invoke(entity, baseline);
+                if (HealthVerify.matches(entity, baseline)) {
+                    pure = writer;
                     break;
                 }
-                ceilingCandidates.add(m);
+                ceilingCandidates.add(writer);
             } catch (Throwable t) {
-                if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
-                restore(entity, m, baseline);
+                if (t instanceof VirtualMachineError e) throw e;
+                restore(entity, writer, baseline);
             }
         }
 
-        //用原始最大血量还原所有连带改上限的候选，撤销探测对最大血量的误伤
         if (Float.isFinite(maxBaseline) && maxBaseline > 0.0f) {
-            for (Method c : ceilingCandidates) restore(entity, c, maxBaseline);
+            for (Writer writer : ceilingCandidates) restore(entity, writer, maxBaseline);
         }
 
-        Method chosen = pure != null ? pure : (ceilingCandidates.isEmpty() ? null : ceilingCandidates.get(0));
-        if (chosen != null) {
-            try {
-                invoke(entity, chosen, expected);
-                if (matches(entity, expected)) return chosen;
-            } catch (Throwable t) {
-                if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+        Writer chosen = pure != null ? pure : (ceilingCandidates.isEmpty() ? null : ceilingCandidates.get(0));
+        if (chosen == null) return null;
+        try {
+            chosen.invoke(entity, expected);
+            return HealthVerify.matches(entity, expected) ? chosen : null;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
+    private static List<Writer> candidateWriters(LivingEntity entity) {
+        List<Writer> out = new ArrayList<>();
+        List<Writer> methods = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (Class<?> c = entity.getClass(); c != null && c != LivingEntity.class && c != Object.class; c = c.getSuperclass()) {
+            for (Method method : c.getDeclaredMethods()) {
+                if (Modifier.isStatic(method.getModifiers()) || method.getParameterCount() != 1) continue;
+                Class<?> input = method.getParameterTypes()[0];
+                if (!isMethodInput(input)) continue;
+                String key = "M:" + method.getName() + ":" + input.getName();
+                if (!seen.add(key)) continue;
+                try {
+                    method.setAccessible(true);
+                    methods.add(new MethodWriter(method));
+                } catch (Throwable ignored) {
+                    if (ignored instanceof VirtualMachineError e) throw e;
+                }
             }
+            for (Field field : c.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers())) continue;
+                SamBinding binding = singleNumericSam(field);
+                if (binding == null || !seen.add("F:" + c.getName() + ":" + field.getName())) continue;
+                try {
+                    field.setAccessible(true);
+                    if (field.get(entity) != null) out.add(new FunctionalWriter(field, binding));
+                } catch (Throwable ignored) {
+                    if (ignored instanceof VirtualMachineError e) throw e;
+                }
+            }
+        }
+        out.addAll(methods);
+        return out;
+    }
+
+    private static SamBinding singleNumericSam(Field field) {
+        Class<?> type = field.getType();
+        if (type == null || !type.isInterface()) return null;
+        Method found = null;
+        for (Method method : type.getMethods()) {
+            int mods = method.getModifiers();
+            if (!Modifier.isAbstract(mods) || Modifier.isStatic(mods) || method.getParameterCount() != 1) continue;
+            if (found != null && !sameSignature(found, method)) return null;
+            found = method;
+        }
+        if (found == null) return null;
+        Class<?> input = found.getParameterTypes()[0];
+        if (!isNumericInput(input)) input = genericNumericInput(field);
+        return isNumericInput(input) ? new SamBinding(found, input) : null;
+    }
+
+    static boolean supportsFunctionalField(Field field) {
+        return singleNumericSam(field) != null;
+    }
+
+    private static Class<?> genericNumericInput(Field field) {
+        Type generic = field.getGenericType();
+        if (!(generic instanceof ParameterizedType parameterized)) return null;
+        for (Type argument : parameterized.getActualTypeArguments()) {
+            if (argument instanceof Class<?> clazz && isNumericInput(clazz)) return clazz;
         }
         return null;
     }
 
-    private static boolean tryApply(LivingEntity entity, Method m, float expected) {
+    private static boolean sameSignature(Method a, Method b) {
+        return a.getName().equals(b.getName())
+            && a.getReturnType() == b.getReturnType()
+            && a.getParameterTypes()[0] == b.getParameterTypes()[0];
+    }
+
+    private static boolean isNumericInput(Class<?> type) {
+        return type == float.class || type == double.class || type == int.class || type == long.class
+            || type == short.class || type == byte.class || type == Float.class || type == Double.class
+            || type == Integer.class || type == Long.class || type == Short.class || type == Byte.class
+            || type == Number.class;
+    }
+
+    private static boolean isMethodInput(Class<?> type) {
+        return type == float.class || type == double.class || type == Float.class
+            || type == Double.class || type == Number.class;
+    }
+
+    private static Object coerce(float value, Class<?> type) {
+        if (type == float.class || type == Float.class || type == Number.class) return value;
+        if (type == double.class || type == Double.class) return (double) value;
+        if (type == int.class || type == Integer.class) return Math.round(value);
+        if (type == long.class || type == Long.class) return (long) Math.round(value);
+        if (type == short.class || type == Short.class) return (short) Math.round(value);
+        if (type == byte.class || type == Byte.class) return (byte) Math.round(value);
+        return value;
+    }
+
+    private static float representable(float value, Class<?> type) {
+        Object converted = coerce(value, type);
+        return converted instanceof Number number ? number.floatValue() : value;
+    }
+
+    private static boolean tryApply(LivingEntity entity, Writer writer, float expected) {
         try {
-            invoke(entity, m, expected);
-            return matches(entity, expected);
+            writer.invoke(entity, expected);
+            return HealthVerify.matches(entity, expected);
         } catch (Throwable t) {
-            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+            if (t instanceof VirtualMachineError e) throw e;
             return false;
         }
     }
 
-    private static void restore(LivingEntity entity, Method m, float baseline) {
+    private static void restore(LivingEntity entity, Writer writer, float baseline) {
         try {
-            invoke(entity, m, baseline);
+            writer.invoke(entity, baseline);
         } catch (Throwable t) {
-            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+            if (t instanceof VirtualMachineError e) throw e;
         }
     }
 
-    /* 用 MethodHandle 而非 Method.invoke：部分实体会用 Unsafe 改写对象 klass 指针把自己伪装成子类，
-       反射的原生 accessor 会因"分配时真实类 != 当前 klass"统一抛 argument type mismatch；
-       MethodHandle 走真实 invokevirtual/invokespecial 语义（与正常方法调用同路），可绕过该校验。 */
-    private static void invoke(LivingEntity entity, Method m, float value) throws Throwable {
-        MethodHandle mh = LOOKUP.unreflect(m);
-        if (m.getParameterTypes()[0] == double.class) {
-            mh.invoke(entity, (double) value);
-        } else {
-            mh.invoke(entity, value);
-        }
-    }
-
-    //候选：实体自定义层级（不含原版 LivingEntity）上单个浮点参数的实例方法。浮点参数排除了多数整型的 AI/状态 setter
-    private static List<Method> candidateSetters(Class<?> entityClass) {
-        List<Method> out = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (Class<?> c = entityClass; c != null && c != LivingEntity.class && c != Object.class; c = c.getSuperclass()) {
-            for (Method m : c.getDeclaredMethods()) {
-                if (Modifier.isStatic(m.getModifiers())) continue;
-                Class<?>[] params = m.getParameterTypes();
-                if (params.length != 1) continue;
-                if (params[0] != float.class && params[0] != double.class) continue;
-                if (!seen.add(m.getName() + ":" + params[0].getName())) continue;
-                try {
-                    m.setAccessible(true);
-                } catch (Throwable ignored) {
-                    continue;
-                }
-                out.add(m);
-            }
-        }
-        return out;
-    }
-
-    private static boolean matches(LivingEntity entity, float expected) {
-        float h = safeGetHealth(entity);
-        return Float.isFinite(h) && Math.abs(h - expected) <= tolerance(expected);
-    }
-
-    //相对容差：低血量也不至于因绝对阈值过宽而误判
-    private static float tolerance(float value) {
-        return Math.max(1.0f, Math.abs(value) * 0.02f);
+    private static boolean matches(float actual, float expected) {
+        return Float.isFinite(actual) && Math.abs(actual - expected) <= HealthVerify.tolerance(expected);
     }
 
     private static boolean tooClose(float a, float b) {
         return Math.abs(a - b) < 1.0f;
     }
 
-    private static float safeGetHealth(LivingEntity entity) {
-        try {
-            return entity.getHealth();
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
-            return Float.NaN;
-        }
-    }
-
     private static float safeGetMaxHealth(LivingEntity entity) {
         try {
             return entity.getMaxHealth();
         } catch (Throwable t) {
-            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+            if (t instanceof VirtualMachineError e) throw e;
             return Float.NaN;
+        }
+    }
+
+    private static HealthWritePlan plan(Writer writer) {
+        HealthWritePlan.Mutation mutation = new HealthWritePlan.Mutation() {
+            @Override
+            public Object snapshot(LivingEntity entity) {
+                return HealthVerify.safeGetHealth(entity);
+            }
+
+            @Override
+            public boolean apply(LivingEntity entity, float target) {
+                return tryApply(entity, writer, target);
+            }
+
+            @Override
+            public boolean restore(LivingEntity entity, Object snapshot) {
+                if (!(snapshot instanceof Number number)) return false;
+                try {
+                    writer.invoke(entity, number.floatValue());
+                    return true;
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                    return false;
+                }
+            }
+
+            @Override
+            public String describe() {
+                return writer.describe();
+            }
+        };
+        return new HealthWritePlan("behavioral-writer", List.of(mutation));
+    }
+
+    private interface Writer {
+        void invoke(LivingEntity entity, float value) throws Throwable;
+
+        float representable(float value);
+
+        String describe();
+    }
+
+    private record SamBinding(Method method, Class<?> inputType) {}
+
+    private static final class MethodWriter implements Writer {
+        private final Method method;
+        private final Class<?> inputType;
+
+        private MethodWriter(Method method) {
+            this.method = method;
+            this.inputType = method.getParameterTypes()[0];
+        }
+
+        @Override
+        public void invoke(LivingEntity entity, float value) throws Throwable {
+            MethodHandle handle = LOOKUP.unreflect(method);
+            handle.invokeWithArguments(entity, coerce(value, inputType));
+        }
+
+        @Override
+        public float representable(float value) {
+            return HealthSetterProber.representable(value, inputType);
+        }
+
+        @Override
+        public String describe() {
+            return method.getDeclaringClass().getName() + "#" + method.getName();
+        }
+    }
+
+    private static final class FunctionalWriter implements Writer {
+        private final Field field;
+        private final Method sam;
+        private final Class<?> inputType;
+
+        private FunctionalWriter(Field field, SamBinding binding) {
+            this.field = field;
+            this.sam = binding.method();
+            this.inputType = binding.inputType();
+        }
+
+        @Override
+        public void invoke(LivingEntity entity, float value) throws Throwable {
+            Object function = field.get(entity);
+            if (function == null) throw new IllegalStateException("functional writer is null");
+            MethodHandle handle = LOOKUP.unreflect(sam);
+            handle.invokeWithArguments(function, coerce(value, inputType));
+        }
+
+        @Override
+        public float representable(float value) {
+            return HealthSetterProber.representable(value, inputType);
+        }
+
+        @Override
+        public String describe() {
+            return field.getDeclaringClass().getName() + "#" + field.getName() + "::" + sam.getName();
         }
     }
 }

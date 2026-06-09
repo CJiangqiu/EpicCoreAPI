@@ -52,6 +52,7 @@ dependencies {
     implementation 'org.ow2.asm:asm-tree:9.7.1'
     implementation 'org.ow2.asm:asm-analysis:9.7.1'
     implementation fg.deobf("curse.maven:geckolib-388172:7553267")
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
 }
 
 mixin {
@@ -75,6 +76,10 @@ java {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     it.options.release = 17
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
 }
 
 tasks.jar {

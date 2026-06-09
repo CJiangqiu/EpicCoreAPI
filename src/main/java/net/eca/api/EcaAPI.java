@@ -191,15 +191,18 @@ public final class EcaAPI {
         return EntityUtil.getHealth(entity);
     }
 
-    // 设置实体血量（三阶段）
+    // 设置实体血量（分阶段升级：Vanilla→Symbolic→Probe→Dynamic）
     /**
-     * Set entity health using multi-phase modification.
-     * Phase 1: Directly write vanilla DATA_HEALTH_ID (bypasses any setHealth override).
-     * Phase 2: Reflectively scan the entity class hierarchy for methods named set/modify/update + health/hp
-     *          (single numeric parameter, no "max" in name) and invoke the first match.
-     * Phase 3: Bytecode dataflow analysis via HealthAnalyzerManager to locate and write the real health storage.
-     * Players only undergo Phase 1. All phases run unconditionally in order; a verify step at the end
-     * checks entity.getHealth() within ±10.0 of the target.
+     * Set entity health using a staged pipeline that escalates only when a verify step fails.
+     * Vanilla: directly write vanilla DATA_HEALTH_ID (bypasses any setHealth override).
+     * Symbolic: bytecode dataflow analysis of getHealth() to locate the real storage and invert the
+     *           formula; when a located storage cannot be inverted, fall back to numeric solving on it.
+     * Probe: behavioral probing — feed test values to candidate numeric setters and keep the one whose
+     *        effect getHealth() faithfully follows (name-agnostic, finds private/obfuscated setters).
+     * Dynamic: runtime bytecode instrumentation to trace the storage getHealth() actually reads
+     *          (heaviest; requires "Enable Radical Logic" in the Attack config).
+     * Players only undergo the Vanilla stage. Each stage is verified against entity.getHealth() with a
+     * tolerance of max(1.0, abs(target) * 2%); the first stage to pass wins and is cached per entity class.
      * @param entity the living entity
      * @param health the target health value
      * @return true if the post-modification verify passed

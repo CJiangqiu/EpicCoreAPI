@@ -8,6 +8,7 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.objectweb.asm.commons.LocalVariablesSorter;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
@@ -109,13 +110,13 @@ public final class AccessProbeTransformer implements ClassFileTransformer {
         }
     }
 
-    private static final class ProbeMethodVisitor extends MethodVisitor {
+    private static final class ProbeMethodVisitor extends LocalVariablesSorter {
         private final String where;
         private final int access;
         private final String methodDesc;
 
         ProbeMethodVisitor(MethodVisitor mv, String where, int access, String methodDesc) {
-            super(Opcodes.ASM9, mv);
+            super(Opcodes.ASM9, access, methodDesc, mv);
             this.where = where;
             this.access = access;
             this.methodDesc = methodDesc;
@@ -180,26 +181,48 @@ public final class AccessProbeTransformer implements ClassFileTransformer {
             String site = where + " " + fo + "." + fn + ":" + fd;
 
             if (op == Opcodes.GETFIELD) {
-                // [c] -> DUP [c,c] -> GETFIELD [c,v] -> DUPx [v,c,v] -> LDC -> record -> [v]
                 super.visitInsn(Opcodes.DUP);
                 super.visitFieldInsn(op, fo, fn, fd);
                 super.visitInsn(cat2 ? Opcodes.DUP2_X1 : Opcodes.DUP_X1);
                 super.visitLdcInsn(site);
                 super.visitMethodInsn(Opcodes.INVOKESTATIC, TRACE, "field" + vt, fieldDesc(vt), false);
-            } else if (op == Opcodes.GETSTATIC) {
-                // [] -> GETSTATIC [v] -> DUPx [v,v] -> LDC -> record -> [v]
+                return;
+            }
+            if (op == Opcodes.GETSTATIC) {
                 super.visitFieldInsn(op, fo, fn, fd);
                 super.visitInsn(cat2 ? Opcodes.DUP2 : Opcodes.DUP);
                 super.visitLdcInsn(site);
                 super.visitMethodInsn(Opcodes.INVOKESTATIC, TRACE, "static" + vt, staticDesc(vt), false);
-            } else {
-                // PUTFIELD / PUTSTATIC：不追踪
-                super.visitFieldInsn(op, fo, fn, fd);
+                return;
             }
+
+            Type type = Type.getType(fd);
+            int valueLocal = newLocal(type);
+            super.visitVarInsn(type.getOpcode(Opcodes.ISTORE), valueLocal);
+            if (op == Opcodes.PUTFIELD) {
+                int ownerLocal = newLocal(Type.getType(Object.class));
+                super.visitVarInsn(Opcodes.ASTORE, ownerLocal);
+                super.visitVarInsn(Opcodes.ALOAD, ownerLocal);
+                super.visitVarInsn(type.getOpcode(Opcodes.ILOAD), valueLocal);
+                super.visitLdcInsn(site);
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, TRACE, "writeField" + vt, fieldDesc(vt), false);
+                super.visitVarInsn(Opcodes.ALOAD, ownerLocal);
+            } else {
+                super.visitVarInsn(type.getOpcode(Opcodes.ILOAD), valueLocal);
+                super.visitLdcInsn(site);
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, TRACE, "writeStatic" + vt, staticDesc(vt), false);
+            }
+            super.visitVarInsn(type.getOpcode(Opcodes.ILOAD), valueLocal);
+            super.visitFieldInsn(op, fo, fn, fd);
         }
 
         @Override
         public void visitInsn(int op) {
+            if (isReturn(op)) {
+                traceReturn(op);
+                super.visitInsn(op);
+                return;
+            }
             char vt;
             switch (op) {
                 case Opcodes.IALOAD, Opcodes.BALOAD, Opcodes.CALOAD, Opcodes.SALOAD -> vt = 'I';
@@ -208,17 +231,99 @@ public final class AccessProbeTransformer implements ClassFileTransformer {
                 case Opcodes.LALOAD -> vt = 'J';
                 case Opcodes.DALOAD -> vt = 'D';
                 default -> {
+                    if (isArrayStore(op)) {
+                        traceArrayStore(op);
+                        return;
+                    }
                     super.visitInsn(op);
                     return;
                 }
             }
             boolean cat2 = vt == 'J' || vt == 'D';
-            // [arr,idx] -> DUP2 [arr,idx,arr,idx] -> xALOAD [arr,idx,v] -> DUPx [v,arr,idx,v] -> LDC -> record -> [v]
             super.visitInsn(Opcodes.DUP2);
             super.visitInsn(op);
             super.visitInsn(cat2 ? Opcodes.DUP2_X2 : Opcodes.DUP_X2);
             super.visitLdcInsn(where + " []");
             super.visitMethodInsn(Opcodes.INVOKESTATIC, TRACE, "arr" + vt, arrDesc(vt), false);
+        }
+
+        private void traceArrayStore(int op) {
+            Type valueType = arrayStoreType(op);
+            char vt = valType(valueType.getDescriptor());
+            int valueLocal = newLocal(valueType);
+            int indexLocal = newLocal(Type.INT_TYPE);
+            int arrayLocal = newLocal(Type.getType(Object.class));
+            super.visitVarInsn(valueType.getOpcode(Opcodes.ISTORE), valueLocal);
+            super.visitVarInsn(Opcodes.ISTORE, indexLocal);
+            super.visitVarInsn(Opcodes.ASTORE, arrayLocal);
+            super.visitVarInsn(Opcodes.ALOAD, arrayLocal);
+            super.visitVarInsn(Opcodes.ILOAD, indexLocal);
+            super.visitVarInsn(valueType.getOpcode(Opcodes.ILOAD), valueLocal);
+            super.visitLdcInsn(where + " []");
+            super.visitMethodInsn(Opcodes.INVOKESTATIC, TRACE, "writeArr" + vt, arrDesc(vt), false);
+            super.visitVarInsn(Opcodes.ALOAD, arrayLocal);
+            super.visitVarInsn(Opcodes.ILOAD, indexLocal);
+            super.visitVarInsn(valueType.getOpcode(Opcodes.ILOAD), valueLocal);
+            super.visitInsn(op);
+        }
+
+        private static boolean isArrayStore(int op) {
+            return op == Opcodes.IASTORE || op == Opcodes.LASTORE || op == Opcodes.FASTORE
+                || op == Opcodes.DASTORE || op == Opcodes.AASTORE || op == Opcodes.BASTORE
+                || op == Opcodes.CASTORE || op == Opcodes.SASTORE;
+        }
+
+        private static Type arrayStoreType(int op) {
+            return switch (op) {
+                case Opcodes.LASTORE -> Type.LONG_TYPE;
+                case Opcodes.FASTORE -> Type.FLOAT_TYPE;
+                case Opcodes.DASTORE -> Type.DOUBLE_TYPE;
+                case Opcodes.AASTORE -> Type.getType(Object.class);
+                default -> Type.INT_TYPE;
+            };
+        }
+
+        private void traceReturn(int op) {
+            if (op == Opcodes.RETURN) {
+                super.visitInsn(Opcodes.ACONST_NULL);
+            } else {
+                Type type = returnType(op);
+                super.visitInsn(type.getSize() == 2 ? Opcodes.DUP2 : Opcodes.DUP);
+                boxTop(type);
+            }
+            super.visitLdcInsn(where);
+            super.visitMethodInsn(Opcodes.INVOKESTATIC, TRACE, "exit",
+                "(Ljava/lang/Object;Ljava/lang/String;)V", false);
+        }
+
+        private void boxTop(Type type) {
+            switch (type.getSort()) {
+                case Type.INT -> super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf",
+                    "(I)Ljava/lang/Integer;", false);
+                case Type.LONG -> super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf",
+                    "(J)Ljava/lang/Long;", false);
+                case Type.FLOAT -> super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Float", "valueOf",
+                    "(F)Ljava/lang/Float;", false);
+                case Type.DOUBLE -> super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Double", "valueOf",
+                    "(D)Ljava/lang/Double;", false);
+                default -> {
+                }
+            }
+        }
+
+        private static boolean isReturn(int op) {
+            return op == Opcodes.RETURN || op == Opcodes.IRETURN || op == Opcodes.LRETURN
+                || op == Opcodes.FRETURN || op == Opcodes.DRETURN || op == Opcodes.ARETURN;
+        }
+
+        private static Type returnType(int op) {
+            return switch (op) {
+                case Opcodes.IRETURN -> Type.INT_TYPE;
+                case Opcodes.LRETURN -> Type.LONG_TYPE;
+                case Opcodes.FRETURN -> Type.FLOAT_TYPE;
+                case Opcodes.DRETURN -> Type.DOUBLE_TYPE;
+                default -> Type.getType(Object.class);
+            };
         }
     }
 

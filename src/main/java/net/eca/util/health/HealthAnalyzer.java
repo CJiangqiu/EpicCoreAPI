@@ -7,6 +7,7 @@ import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.LivingEntity;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -36,7 +37,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /*
  * 字节码反向数据流分析 + 对偶表求逆
  * 从 getHealth 的 FRETURN 反向遍历指令序列构造 Expr 树,然后按 DualityTable 反推 sink 应写值
- * Expr 节点只有 6 种(Primitive/Reference/Op/Call/Source/Choice),所有"类型差异"和"运算差异"
+ * Expr 节点覆盖常量、运算、调用、闭包、存储位置与控制流汇合，所有类型和运算差异
  * 全部交给 DualityTable 的方法对偶对处理,不再按 leaf 类型展开
  */
 public final class HealthAnalyzer {
@@ -75,6 +76,8 @@ public final class HealthAnalyzer {
 
     //任意方法调用,args 含 receiver(若非 static)
     public record Call(String owner, String name, String desc, List<Expr> args) implements Expr {}
+
+    public record Closure(Handle implementation, String samName, String samDesc, List<Expr> captured) implements Expr {}
 
     //控制流汇合 / 多 return 路径的并集
     public record Choice(List<Expr> alternatives) implements Expr {}
@@ -186,6 +189,42 @@ public final class HealthAnalyzer {
             StringBuilder sb = new StringBuilder("FC:");
             for (FieldStep s : chain) sb.append(s.ownerInternal()).append('.').append(s.name()).append(';');
             return sb.toString();
+        }
+    }
+
+    public static final class StaticFieldSource extends Source {
+        private final Field field;
+
+        public StaticFieldSource(Field field) {
+            super(field.getType(), "SF:" + field.getDeclaringClass().getName() + "." + field.getName());
+            this.field = field;
+            this.field.setAccessible(true);
+        }
+
+        @Override
+        public Object read(LivingEntity entity) {
+            try {
+                return field.get(null);
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                return null;
+            }
+        }
+
+        @Override
+        public boolean write(LivingEntity entity, Object value) {
+            try {
+                field.set(null, coerceForType(value, valueType));
+                return true;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                return false;
+            }
+        }
+
+        @Override
+        protected String canonicalKey() {
+            return "SF:" + field.getDeclaringClass().getName() + "." + field.getName();
         }
     }
 
@@ -519,34 +558,54 @@ public final class HealthAnalyzer {
     /* ==================== Solve / Evaluate ==================== */
 
     public static Object solveFor(Expr root, Source sink, Object target, EvalContext ctx) {
-        if (sameSource(root, sink)) return coerceForType(target, sink.valueType);
+        return solveDetailed(root, sink, target, ctx).value();
+    }
+
+    public static HealthSolveResult solveDetailed(Expr root, Source sink, Object target, EvalContext ctx) {
+        if (root == null || sink == null) {
+            return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "root or sink is null");
+        }
+        if (sameSource(root, sink)) {
+            Object value = coerceForType(target, sink.valueType);
+            return value == null
+                ? HealthSolveResult.failure(HealthSolveFailure.VALUE_NOT_REPRESENTABLE, sink.valueType.getName())
+                : HealthSolveResult.success(value);
+        }
         if (root instanceof Choice c) {
+            HealthSolveResult last = HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "sink is absent from all branches");
             for (Expr alt : c.alternatives()) {
                 if (!containsSink(alt, sink)) continue;
-                Object v = solveFor(alt, sink, target, ctx);
-                if (v != null) return v;
+                HealthSolveResult result = solveDetailed(alt, sink, target, ctx);
+                if (result.solved()) return result;
+                last = result;
             }
-            return null;
+            return last;
         }
         if (root instanceof Op op) {
-            int idx = findArgWithSink(op.args(), sink);
-            if (idx < 0) return null;
+            int idx = findArgWithSinkDetailed(op.args(), sink);
+            if (idx == -2) return HealthSolveResult.failure(HealthSolveFailure.MULTI_LOCATION_UNSUPPORTED, "sink occurs in multiple operands");
+            if (idx < 0) return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "sink is absent from operation");
             Inverter inv = TABLE.lookupOp(op.opcode());
-            if (inv == null) return null;
+            if (inv == null) return HealthSolveResult.failure(HealthSolveFailure.INVERTER_MISSING, "opcode=" + op.opcode());
             Object newT = inv.invert(target, op.args(), idx, ctx);
-            if (newT == null) return null;
-            return solveFor(op.args().get(idx), sink, newT, ctx);
+            if (newT == null) return HealthSolveResult.failure(HealthSolveFailure.VALUE_NOT_REPRESENTABLE, "operation inverse rejected target");
+            return solveDetailed(op.args().get(idx), sink, newT, ctx);
         }
         if (root instanceof Call call) {
-            int idx = findArgWithSink(call.args(), sink);
-            if (idx < 0) return null;
+            int idx = findArgWithSinkDetailed(call.args(), sink);
+            if (idx == -2) return HealthSolveResult.failure(HealthSolveFailure.MULTI_LOCATION_UNSUPPORTED, "sink occurs in multiple call operands");
+            if (idx < 0) return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "sink is absent from call");
             Inverter inv = TABLE.lookupCall(call.owner(), call.name(), call.desc());
-            if (inv == null) return null;
+            if (inv == null) {
+                HealthSolveFailure failure = call.owner().startsWith("java/util/function/")
+                    ? HealthSolveFailure.CALL_NOT_RESOLVED : HealthSolveFailure.INVERTER_MISSING;
+                return HealthSolveResult.failure(failure, call.owner() + "#" + call.name() + call.desc());
+            }
             Object newT = inv.invert(target, call.args(), idx, ctx);
-            if (newT == null) return null;
-            return solveFor(call.args().get(idx), sink, newT, ctx);
+            if (newT == null) return HealthSolveResult.failure(HealthSolveFailure.VALUE_NOT_REPRESENTABLE, "call inverse rejected target");
+            return solveDetailed(call.args().get(idx), sink, newT, ctx);
         }
-        return null;
+        return HealthSolveResult.failure(HealthSolveFailure.CALL_NOT_RESOLVED, root.getClass().getSimpleName());
     }
 
     private static boolean sameSource(Expr a, Source sink) {
@@ -561,6 +620,9 @@ public final class HealthAnalyzer {
         if (e instanceof Call call) {
             for (Expr a : call.args()) if (containsSink(a, sink)) return true;
         }
+        if (e instanceof Closure closure) {
+            for (Expr a : closure.captured()) if (containsSink(a, sink)) return true;
+        }
         if (e instanceof Choice c) {
             for (Expr a : c.alternatives()) if (containsSink(a, sink)) return true;
         }
@@ -568,10 +630,15 @@ public final class HealthAnalyzer {
     }
 
     private static int findArgWithSink(List<Expr> args, Source sink) {
+        int detailed = findArgWithSinkDetailed(args, sink);
+        return detailed < 0 ? -1 : detailed;
+    }
+
+    private static int findArgWithSinkDetailed(List<Expr> args, Source sink) {
         int found = -1;
         for (int i = 0; i < args.size(); i++) {
             if (containsSink(args.get(i), sink)) {
-                if (found >= 0) return -1;
+                if (found >= 0) return -2;
                 found = i;
             }
         }
@@ -588,6 +655,7 @@ public final class HealthAnalyzer {
         if (e instanceof Source s) out.add(s);
         else if (e instanceof Op op) for (Expr a : op.args()) collect(a, out);
         else if (e instanceof Call call) for (Expr a : call.args()) collect(a, out);
+        else if (e instanceof Closure closure) for (Expr a : closure.captured()) collect(a, out);
         else if (e instanceof Choice c) for (Expr a : c.alternatives()) collect(a, out);
     }
 
@@ -616,6 +684,7 @@ public final class HealthAnalyzer {
         if (e instanceof Call call) {
             return invokeCall(call, ctx);
         }
+        if (e instanceof Closure) return null;
         return null;
     }
 
@@ -805,8 +874,8 @@ public final class HealthAnalyzer {
             (t, args, idx, ctx) -> Double.valueOf(Math.log(((Number) t).doubleValue())));
         TABLE.registerCall("java/lang/Math", "log10", "(D)D",
             (t, args, idx, ctx) -> Double.valueOf(Math.pow(10.0, ((Number) t).doubleValue())));
-        //Math.max/min 双源防御 (如 ModularGolems: max(vanillaHp, shadowHp))
-        //无条件返回 target,依赖 Phase 1 同步写另一边,把双源防御打穿
+        //Math.max/min 双源防御 (形如 max(vanillaHp, shadowHp) 的两源取最大值)
+        //无条件返回 target,依赖 Vanilla 阶段同步写另一边,把双源防御打穿
         TABLE.registerCall("java/lang/Math", "max", "(FF)F",
             (t, args, idx, ctx) -> Float.valueOf(((Number) t).floatValue()));
         TABLE.registerCall("java/lang/Math", "min", "(FF)F",
@@ -1402,8 +1471,8 @@ public final class HealthAnalyzer {
                 case Opcodes.GETSTATIC -> {
                     FieldInsnNode f = (FieldInsnNode) insn;
                     Type t = Type.getType(f.desc);
-                    Object resolved = resolveStaticField(f.owner, f.name);
-                    if (resolved != null) yield new TaintValue(t.getSize(), new Reference(resolved, f.owner));
+                    Expr resolved = resolveStaticField(f.owner, f.name);
+                    if (resolved != null) yield new TaintValue(t.getSize(), resolved);
                     yield new TaintValue(t.getSize(), UnknownExpr.UNKNOWN);
                 }
                 default -> new TaintValue(1, UnknownExpr.UNKNOWN);
@@ -1471,8 +1540,11 @@ public final class HealthAnalyzer {
         @Override public TaintValue naryOperation(AbstractInsnNode insn, List<? extends TaintValue> values) {
             if (insn.getOpcode() == Opcodes.MULTIANEWARRAY) return new TaintValue(1, UnknownExpr.UNKNOWN);
             if (insn.getOpcode() == Opcodes.INVOKEDYNAMIC) {
-                Type ret = Type.getReturnType(((InvokeDynamicInsnNode) insn).desc);
-                return ret == Type.VOID_TYPE ? null : new TaintValue(ret.getSize(), UnknownExpr.UNKNOWN);
+                InvokeDynamicInsnNode dynamic = (InvokeDynamicInsnNode) insn;
+                Type ret = Type.getReturnType(dynamic.desc);
+                Closure closure = closureFrom(dynamic, values);
+                return ret == Type.VOID_TYPE ? null
+                    : new TaintValue(ret.getSize(), closure == null ? UnknownExpr.UNKNOWN : closure);
             }
             MethodInsnNode m = (MethodInsnNode) insn;
             Type retType = Type.getReturnType(m.desc);
@@ -1480,6 +1552,11 @@ public final class HealthAnalyzer {
             if (retType == Type.VOID_TYPE) return null;
             //节点预算耗尽：停止展开调用/内联，坍缩 Unknown，防止表达式树爆炸
             if (--ctx.nodeBudget <= 0) return new TaintValue(sz, UnknownExpr.UNKNOWN);
+
+            Expr functional = tryInlineFunctionalCall(m, values);
+            if (functional != null && !(functional instanceof UnknownExpr)) {
+                return new TaintValue(sz, functional);
+            }
 
             // super.getHealth() / 父类 INVOKESPECIAL on getHealth → 沿继承链最终读 DATA_HEALTH_ID
             // 假设链路上没有再 override (绝大多数 mod 满足),把 super 调用直接识别为 DATA_HEALTH_ID 的 Source
@@ -1534,9 +1611,116 @@ public final class HealthAnalyzer {
             return new TaintValue(sz, new Call(m.owner, m.name, m.desc, argExprs));
         }
 
-        /* 反射常量化：把 Class.getDeclaredMethod(name,..).invoke(recv,..) / getDeclaredField(name).get(recv)
-           在「类与名字均为分析期常量」时，重写为对真实方法的内联或真实字段的 FieldChainSource。
-           无法常量化(名字是变量等)时返回 null，退回原有流程(动态分析兜底)。 */
+        //闭包节点保留实现句柄与捕获值，使 SAM 调用可以按真实实现继续分析。
+        private Closure closureFrom(InvokeDynamicInsnNode dynamic, List<? extends TaintValue> values) {
+            List<Expr> captured = new ArrayList<>(values.size());
+            for (TaintValue value : values) captured.add(value.expr);
+            return closureFromExprs(dynamic, captured);
+        }
+
+        private Closure closureFromExprs(InvokeDynamicInsnNode dynamic, List<Expr> captured) {
+            if (!dynamic.bsm.getOwner().equals("java/lang/invoke/LambdaMetafactory")) return null;
+            Handle implementation = null;
+            String samDesc = null;
+            for (Object arg : dynamic.bsmArgs) {
+                if (arg instanceof Handle handle) implementation = handle;
+                else if (samDesc == null && arg instanceof Type type) samDesc = type.getDescriptor();
+            }
+            return implementation == null ? null
+                : new Closure(implementation, dynamic.name, samDesc == null ? "" : samDesc, List.copyOf(captured));
+        }
+
+        private Expr tryInlineFunctionalCall(MethodInsnNode method, List<? extends TaintValue> values) {
+            if (values.isEmpty()) return null;
+            Expr receiver = values.get(0).expr;
+            Closure closure = receiver instanceof Closure direct ? direct : resolveFunctionalField(receiver);
+            if (closure == null || !closure.samName().equals(method.name)) return null;
+
+            List<Expr> invocationArgs = new ArrayList<>();
+            for (int i = 1; i < values.size(); i++) invocationArgs.add(values.get(i).expr);
+            return inlineClosure(closure, invocationArgs);
+        }
+
+        private Closure resolveFunctionalField(Expr receiver) {
+            if (!(receiver instanceof FieldChainSource source) || source.chain.isEmpty()) return null;
+            FieldStep field = source.chain.get(source.chain.size() - 1);
+            Class<?> fieldOwner = loadClass(field.ownerInternal());
+            if (fieldOwner == null) return null;
+            Expr captureRoot = source.chain.size() == 1
+                ? EntityParamMarker.I : makeFieldChain(source.chain.subList(0, source.chain.size() - 1));
+            for (Class<?> scan = fieldOwner; scan != null && scan != Object.class; scan = scan.getSuperclass()) {
+                try {
+                    byte[] bytes = classBytes(scan);
+                    if (bytes == null) continue;
+                    ClassNode node = new ClassNode();
+                    new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
+                    for (MethodNode method : node.methods) {
+                        if (!method.name.equals("<init>")) continue;
+                        InvokeDynamicInsnNode nearest = null;
+                        int distance = 0;
+                        for (AbstractInsnNode instruction : method.instructions) {
+                            if (instruction instanceof InvokeDynamicInsnNode dynamic) {
+                                nearest = dynamic;
+                                distance = 0;
+                                continue;
+                            }
+                            if (nearest != null && ++distance > 16) nearest = null;
+                            if (!(instruction instanceof FieldInsnNode put) || put.getOpcode() != Opcodes.PUTFIELD) continue;
+                            if (!put.name.equals(field.name()) || !put.desc.equals(field.desc()) || nearest == null) continue;
+                            if (!put.owner.equals(scan.getName().replace('.', '/'))) continue;
+
+                            Type[] capturedTypes = Type.getArgumentTypes(nearest.desc);
+                            List<Expr> captured = new ArrayList<>(capturedTypes.length);
+                            for (int i = 0; i < capturedTypes.length; i++) {
+                                captured.add(i == 0 ? captureRoot : new UnknownExpr("lambda-capture"));
+                            }
+                            Closure closure = closureFromExprs(nearest, captured);
+                            if (closure != null) return closure;
+                        }
+                    }
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                }
+            }
+            return null;
+        }
+
+        private Expr inlineClosure(Closure closure, List<Expr> invocationArgs) {
+            Handle implementation = closure.implementation();
+            Class<?> owner = loadClass(implementation.getOwner());
+            if (owner == null || ctx.inlineBudget <= 0) return null;
+
+            boolean isStatic = implementation.getTag() == Opcodes.H_INVOKESTATIC;
+            List<Expr> seeds = new ArrayList<>();
+            if (isStatic) {
+                seeds.addAll(closure.captured());
+            } else {
+                if (closure.captured().isEmpty()) return null;
+                seeds.add(closure.captured().get(0));
+                seeds.addAll(closure.captured().subList(1, closure.captured().size()));
+            }
+            seeds.addAll(invocationArgs);
+
+            Type[] argTypes = Type.getArgumentTypes(implementation.getDesc());
+            int expectedSeeds = argTypes.length + (isStatic ? 0 : 1);
+            if (seeds.size() != expectedSeeds) return null;
+
+            int localCount = isStatic ? 0 : 1;
+            for (Type type : argTypes) localCount += type.getSize();
+            TaintValue[] locals = new TaintValue[localCount + 8];
+            int local = 0;
+            int seed = 0;
+            if (!isStatic) locals[local++] = new TaintValue(1, seeds.get(seed++));
+            for (Type type : argTypes) {
+                locals[local] = new TaintValue(type.getSize(), seeds.get(seed++));
+                local += type.getSize();
+            }
+            ctx.inlineBudget--;
+            return analyzeMethod(owner, implementation.getName(), implementation.getDesc(), locals, ctx, depth + 1);
+        }
+
+        /* 反射常量化只处理类与成员名均可确定的调用；无法确定时保留普通 Call，
+           交给动态轨迹继续解析。 */
         private TaintValue tryReflection(MethodInsnNode m, List<? extends TaintValue> values, int sz) {
             if (!m.owner.equals("java/lang/reflect/Method") && !m.owner.equals("java/lang/reflect/Field")) return null;
 
@@ -1561,8 +1745,9 @@ public final class HealthAnalyzer {
                 // 反射读字段 → 当作字段链 Source(仅支持 this 上的字段，可写回)
                 if (!onEntity) return null;
                 try {
-                    Field f = targetClass.getDeclaredField(memberName);
-                    FieldStep step = new FieldStep(targetClass.getName().replace('.', '/'), memberName,
+                    Field f = findReflectedField(targetClass, acc.name(), memberName);
+                    if (f == null) return null;
+                    FieldStep step = new FieldStep(f.getDeclaringClass().getName().replace('.', '/'), memberName,
                         Type.getDescriptor(f.getType()));
                     Expr src = makeFieldChain(List.of(step));
                     return src instanceof UnknownExpr ? null : new TaintValue(sz, src);
@@ -1574,13 +1759,12 @@ public final class HealthAnalyzer {
 
             // isInvoke：无参实例方法 + 目标是 this → 内联该真实方法
             if (!onEntity || depth + 1 >= ctx.maxDepth) return null;
-            Method jm = findZeroArgMethod(targetClass, memberName);
+            Method jm = findReflectedZeroArgMethod(targetClass, acc.name(), memberName);
             if (jm == null || ctx.inlineBudget <= 0) return null;
             ctx.inlineBudget--;
-            String ownerInternal = targetClass.getName().replace('.', '/');
             TaintValue[] seed = new TaintValue[8];
             seed[0] = new TaintValue(1, EntityParamMarker.I);   // this
-            Expr inlined = analyzeMethod(targetClass, jm.getName(), Type.getMethodDescriptor(jm), seed, ctx, depth + 1);
+            Expr inlined = analyzeMethod(jm.getDeclaringClass(), jm.getName(), Type.getMethodDescriptor(jm), seed, ctx, depth + 1);
             return (inlined == null || inlined instanceof UnknownExpr) ? null : new TaintValue(sz, inlined);
         }
 
@@ -1598,6 +1782,51 @@ public final class HealthAnalyzer {
                 if (a instanceof Reference r && r.value() instanceof String s) return s;
             }
             return null;
+        }
+
+        private static Field findReflectedField(Class<?> owner, String accessorName, String fieldName) {
+            try {
+                Field field = switch (accessorName) {
+                    case "getField" -> owner.getField(fieldName);
+                    case "getDeclaredField" -> owner.getDeclaredField(fieldName);
+                    default -> null;
+                };
+                if (field != null) field.setAccessible(true);
+                return field;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+                return null;
+            }
+        }
+
+        private static Method findReflectedZeroArgMethod(Class<?> owner, String accessorName, String name) {
+            return switch (accessorName) {
+                case "getMethod" -> findZeroArgPublicMethod(owner, name);
+                case "getDeclaredMethod" -> findDeclaredZeroArgMethod(owner, name);
+                default -> findZeroArgMethod(owner, name);
+            };
+        }
+
+        private static Method findDeclaredZeroArgMethod(Class<?> owner, String name) {
+            try {
+                Method method = owner.getDeclaredMethod(name);
+                method.setAccessible(true);
+                return method;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+                return null;
+            }
+        }
+
+        private static Method findZeroArgPublicMethod(Class<?> owner, String name) {
+            try {
+                Method method = owner.getMethod(name);
+                method.setAccessible(true);
+                return method;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+                return null;
+            }
         }
 
         private static Method findZeroArgMethod(Class<?> owner, String name) {
@@ -1701,13 +1930,15 @@ public final class HealthAnalyzer {
             }
         }
 
-        private Object resolveStaticField(String ownerInternal, String name) {
+        private Expr resolveStaticField(String ownerInternal, String name) {
             try {
                 Class<?> owner = loadClass(ownerInternal);
                 if (owner == null) return null;
                 Field f = owner.getDeclaredField(name);
                 f.setAccessible(true);
-                return f.get(null);
+                if (!Modifier.isFinal(f.getModifiers())) return new StaticFieldSource(f);
+                Object value = f.get(null);
+                return value == null ? null : new Reference(value, ownerInternal);
             } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
     }

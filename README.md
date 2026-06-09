@@ -102,7 +102,7 @@ side="BOTH"
 - `getHealBanValue(entity)` - Get current heal ban value (null if not banned)
 - `isHealingBanned(entity)` - Check if entity has healing banned
 - `getHealth(entity)` - Get vanilla health via VarHandle
-- `setHealth(entity, health)` - Three-phase health modification: (1) write vanilla DATA_HEALTH_ID directly; (2) reflectively invoke the entity's own setter (set/modify/update + health/hp); (3) ASM bytecode dataflow analysis to locate and write the real health storage. Players skip phases 2–3.
+- `setHealth(entity, health)` - Staged health modification that escalates only when a verify step fails: **Vanilla** (write vanilla DATA_HEALTH_ID directly) → **Symbolic** (ASM bytecode dataflow analysis of getHealth() to locate and invert the real storage, with numeric fallback on a located storage) → **Probe** (behavioral probing of candidate numeric setters, name-agnostic) → **Dynamic** (runtime bytecode instrumentation, requires Attack Radical Logic config). Players only run the Vanilla stage. Each stage is verified against `getHealth()` within `max(1.0, abs(target) * 2%)`; the first to pass is cached per entity class.
 - `setMaxHealth(entity, maxHealth)` - Set max health by reverse-calculating attribute base value from current modifiers
 - `lockMaxHealth(entity, value)` - Lock entity max health at specific value (enforced every tick)
 - `unlockMaxHealth(entity)` - Unlock entity max health
@@ -851,7 +851,7 @@ side="BOTH"
 - `getHealBanValue(entity)` - 获取当前禁疗值（未禁疗返回 null）
 - `isHealingBanned(entity)` - 检查是否被禁疗
 - `getHealth(entity)` - 使用 VarHandle 获取原版血量值
-- `setHealth(entity, health)` - 三阶段血量修改：①直接写 vanilla DATA_HEALTH_ID；②反射调用实体自身的 setter（set/modify/update + health/hp）；③ASM 字节码数据流分析定位并写入真实血量存储。玩家仅执行阶段①。
+- `setHealth(entity, health)` - 分阶段血量修改，仅在 verify 失败时逐级升级：**Vanilla**（直接写 vanilla DATA_HEALTH_ID）→ **Symbolic**（ASM 字节码数据流分析 getHealth() 定位并反演真实存储，无法反演时对已定位存储做数值求解）→ **Probe**（对候选数值 setter 做行为探测，不依赖方法名）→ **Dynamic**（运行时字节码插桩，需开启激进攻击逻辑配置）。玩家仅执行 Vanilla 阶段。每阶段以 `getHealth()` 在 `max(1.0, abs(目标) * 2%)` 容差内验证，第一个通过的阶段按实体类缓存。
 - `setMaxHealth(entity, maxHealth)` - 通过反算属性基础值设置最大生命值
 - `lockMaxHealth(entity, value)` - 锁定实体最大生命值（每 tick 强制维持）
 - `unlockMaxHealth(entity)` - 解锁最大生命值

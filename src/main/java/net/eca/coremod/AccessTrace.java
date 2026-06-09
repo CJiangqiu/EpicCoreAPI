@@ -39,13 +39,41 @@ public final class AccessTrace {
         }
     }
 
+    public static final class WriteEntry {
+        public final String site;
+        public final Object container;
+        public final long index;
+        public final Object value;
+
+        WriteEntry(String site, Object container, long index, Object value) {
+            this.site = site;
+            this.container = container;
+            this.index = index;
+            this.value = value;
+        }
+    }
+
+    public static final class ExitEntry {
+        public final String site;
+        public final Object value;
+
+        ExitEntry(String site, Object value) {
+            this.site = site;
+            this.value = value;
+        }
+    }
+
     private static final ThreadLocal<List<Entry>> READS = new ThreadLocal<>();
+    private static final ThreadLocal<List<WriteEntry>> WRITES = new ThreadLocal<>();
     private static final ThreadLocal<List<MethodEntry>> METHODS = new ThreadLocal<>();
+    private static final ThreadLocal<List<ExitEntry>> EXITS = new ThreadLocal<>();
 
     //开始记录（本线程）
     public static void begin() {
         READS.set(new ArrayList<>());
+        WRITES.set(new ArrayList<>());
         METHODS.set(new ArrayList<>());
+        EXITS.set(new ArrayList<>());
     }
 
     public static boolean isActive() {
@@ -64,10 +92,22 @@ public final class AccessTrace {
         return m == null ? new ArrayList<>() : m;
     }
 
+    public static List<WriteEntry> writes() {
+        List<WriteEntry> w = WRITES.get();
+        return w == null ? new ArrayList<>() : w;
+    }
+
+    public static List<ExitEntry> exits() {
+        List<ExitEntry> e = EXITS.get();
+        return e == null ? new ArrayList<>() : e;
+    }
+
     //结束记录，清空本线程缓冲
     public static void finish() {
         READS.remove();
+        WRITES.remove();
         METHODS.remove();
+        EXITS.remove();
     }
 
     //被注入字节码调用：方法入口
@@ -78,10 +118,24 @@ public final class AccessTrace {
         }
     }
 
+    public static void exit(Object value, String site) {
+        List<ExitEntry> e = EXITS.get();
+        if (e != null) {
+            e.add(new ExitEntry(site, value));
+        }
+    }
+
     private static void add(String site, Object container, long index, Object value) {
         List<Entry> b = READS.get();
         if (b != null) {
             b.add(new Entry(site, container, index, value));
+        }
+    }
+
+    private static void addWrite(String site, Object container, long index, Object value) {
+        List<WriteEntry> w = WRITES.get();
+        if (w != null) {
+            w.add(new WriteEntry(site, container, index, value));
         }
     }
 
@@ -105,4 +159,22 @@ public final class AccessTrace {
     public static void arrJ(Object a, int i, long v, String s)   { add(s, a, i, v); }
     public static void arrF(Object a, int i, float v, String s)  { add(s, a, i, v); }
     public static void arrD(Object a, int i, double v, String s) { add(s, a, i, v); }
+
+    public static void writeFieldO(Object c, Object v, String s) { addWrite(s, c, -1, v); }
+    public static void writeFieldI(Object c, int v, String s)    { addWrite(s, c, -1, v); }
+    public static void writeFieldJ(Object c, long v, String s)   { addWrite(s, c, -1, v); }
+    public static void writeFieldF(Object c, float v, String s)  { addWrite(s, c, -1, v); }
+    public static void writeFieldD(Object c, double v, String s) { addWrite(s, c, -1, v); }
+
+    public static void writeStaticO(Object v, String s) { addWrite(s, null, -1, v); }
+    public static void writeStaticI(int v, String s)    { addWrite(s, null, -1, v); }
+    public static void writeStaticJ(long v, String s)   { addWrite(s, null, -1, v); }
+    public static void writeStaticF(float v, String s)  { addWrite(s, null, -1, v); }
+    public static void writeStaticD(double v, String s) { addWrite(s, null, -1, v); }
+
+    public static void writeArrO(Object a, int i, Object v, String s) { addWrite(s, a, i, v); }
+    public static void writeArrI(Object a, int i, int v, String s)    { addWrite(s, a, i, v); }
+    public static void writeArrJ(Object a, int i, long v, String s)   { addWrite(s, a, i, v); }
+    public static void writeArrF(Object a, int i, float v, String s)  { addWrite(s, a, i, v); }
+    public static void writeArrD(Object a, int i, double v, String s) { addWrite(s, a, i, v); }
 }

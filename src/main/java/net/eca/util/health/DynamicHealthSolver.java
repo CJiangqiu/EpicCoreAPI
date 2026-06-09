@@ -20,10 +20,10 @@ import java.util.List;
 import java.util.Set;
 
 /*
- * 动态求解(P2)。两条路径，优先级从通用到特化：
+ * Dynamic 阶段的求解器（消费 DynamicHealthTracer 的取证轨迹）。两条路径，优先级从通用到特化：
  *   路径1 直接种子分析：以真实 entity 为 this 种子分析整条 getHealth，若能解出叶子为具体 Source 的表达式树，
  *         逐个 solveFor + Source.write 写回。适用于存储静态可见的情况(字段链 / Map / 数组 / SynchedData)。
- *   路径2 轨迹解码反演：getHealth 经 MethodHandle/不透明容器遮挡导致路径1 无 Source 时，借 P1 运行期轨迹
+ *   路径2 轨迹解码反演：getHealth 经 MethodHandle/不透明容器遮挡导致路径1 无 Source 时，借取证阶段的运行期轨迹
  *         (A)反演外层包装得到内部应返回值，(B)以轨迹捕获的真实 receiver/实参为种子分析"解码方法"、
  *         定位与捕获 cell 匹配的 sink，solveFor 反演，(C)写回捕获的真实数组 cell。
  * 不认识任何 mod：只依赖"getHealth = f(可写存储)"且 f 由可逆运算构成。
