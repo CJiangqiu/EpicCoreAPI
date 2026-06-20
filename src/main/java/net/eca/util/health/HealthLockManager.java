@@ -1,7 +1,9 @@
 package net.eca.util.health;
 
+import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.world.entity.LivingEntity;
 
 //血量锁定管理器
@@ -14,6 +16,26 @@ public class HealthLockManager {
     private static final String NBT_HEALTH_LOCK_VALUE = "ecaHealthLockValue";
     private static final String NBT_HEAL_BAN_VALUE = "ecaHealBanValue";
     private static final String NBT_MAX_HEALTH_LOCK_VALUE = "ecaMaxHealthLockValue";
+
+    //SynchedEntityData 读取失败日志的一次性开关，避免构造期对每个实体刷屏
+    private static volatile boolean synchedReadFailureLogged = false;
+
+    /*
+     getHealth/getMaxHealth 的 HEAD hook 会在 LivingEntity 构造函数里就触发本类的读取，此时实体尚未构造完成。
+     若其它 mod 在 SynchedEntityData.get 上挂了 mixin（如读取 gameMode、isCreative），就可能在这一刻抛异常导致玩家无法进入世界。
+     这里把读取兜住，任何 Throwable 都退化为"无锁定"（返回 null）放行回原版，绝不缓存失败结果，每次仍真实重读。
+    */
+    private static String readSynchedSafely(LivingEntity entity, EntityDataAccessor<String> accessor) {
+        try {
+            return entity.getEntityData().get(accessor);
+        } catch (Throwable t) {
+            if (!synchedReadFailureLogged) {
+                synchedReadFailureLogged = true;
+                EcaLogger.info("Skipped health-lock SynchedEntityData read (entity likely under construction or third-party mixin conflict): " + t);
+            }
+            return null;
+        }
+    }
 
     //设置血量锁定
     public static void setLock(LivingEntity entity, float value) {
@@ -43,7 +65,7 @@ public class HealthLockManager {
         if (entity == null) return null;
         String encrypted;
         if (EntityUtil.HEALTH_LOCK_VALUE != null) {
-            encrypted = entity.getEntityData().get(EntityUtil.HEALTH_LOCK_VALUE);
+            encrypted = readSynchedSafely(entity, EntityUtil.HEALTH_LOCK_VALUE);
         } else {
             CompoundTag data = entity.getPersistentData();
             encrypted = data.getString(NBT_HEALTH_LOCK_VALUE);
@@ -82,7 +104,7 @@ public class HealthLockManager {
         if (entity == null) return null;
         String encrypted;
         if (EntityUtil.HEAL_BAN_VALUE != null) {
-            encrypted = entity.getEntityData().get(EntityUtil.HEAL_BAN_VALUE);
+            encrypted = readSynchedSafely(entity, EntityUtil.HEAL_BAN_VALUE);
         } else {
             CompoundTag data = entity.getPersistentData();
             encrypted = data.getString(NBT_HEAL_BAN_VALUE);
@@ -120,7 +142,7 @@ public class HealthLockManager {
         if (entity == null) return null;
         String encrypted;
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
-            encrypted = entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_VALUE);
+            encrypted = readSynchedSafely(entity, EntityUtil.MAX_HEALTH_LOCK_VALUE);
         } else {
             encrypted = entity.getPersistentData().getString(NBT_MAX_HEALTH_LOCK_VALUE);
         }

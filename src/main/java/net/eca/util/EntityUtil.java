@@ -6,10 +6,8 @@ import net.eca.network.EntityHealthSyncPacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.health.HealthLockManager;
-import net.eca.util.health.HealthAnalyzerManager;
-import net.eca.util.health.HealthSetterProber;
-import net.eca.util.health.HealthWritePlan;
 import net.minecraft.network.syncher.EntityDataSerializer;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
@@ -66,12 +64,6 @@ public class EntityUtil {
 
     //标记当前调用来自同步包，防止重复发包
     private static final ThreadLocal<Boolean> IS_FROM_SYNC = ThreadLocal.withInitial(() -> false);
-
-    //标记是否正在执行 Symbolic 阶段：反射/ASM 写入若绕经其他 mod 钩子后再次重入改血，由此闸门短路，防止无限递归爆栈
-    private static final ThreadLocal<Boolean> IS_IN_SYMBOLIC = ThreadLocal.withInitial(() -> false);
-
-    //已记录过 verify 失败的实体类，去重用：每类只告警一次，之后永久静默，避免每-tick 改血的实体刷屏
-    private static final Set<String> VERIFY_WARNED = ConcurrentHashMap.newKeySet();
 
     //正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
@@ -664,103 +656,24 @@ public class EntityUtil {
         }
     }
 
-    //设置实体生命值：先走已确认的快路径，否则逐级升级（Vanilla→Symbolic→Probe→Dynamic），每级 verify 通过即确认并缓存该路径
+    //设置实体生命值
     public static boolean setHealth(LivingEntity entity, float expectedHealth) {
         if (entity == null) return false;
         try {
+            //第一阶段，改原版实体血量数据
             float beforeHealth = getHealth(entity);
-
-            //逐级升级：先跑开销小的阶段，每级用 verify 检验，达标即止；不达标才升级到更重的阶段。
-            //不做"失败跳过"——每次调用都按需重新走流程，多个同类实例互不影响。
-
-            //Vanilla 阶段：写 vanilla DATA_HEALTH_ID
             setBasicHealth(entity, expectedHealth);
-
-            //玩家只执行 Vanilla 阶段
-            if (entity instanceof Player) {
-                syncHealthToClients(entity, expectedHealth, beforeHealth);
-                return true;
+            if (!(entity instanceof Player)) {
+                //第二阶段，数据流逆向分析
+                EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
             }
-
-            //快路径：直接走该实体类此前已确认有效的写入路径，命中则跳过整条级联。失效则回落重新确认（不删缓存、不记失败）
-            HealthWritePlan plan = HealthAnalyzerManager.getConfirmedPlan(entity.getClass());
-            if (plan != null && plan.execute(entity, expectedHealth)) {
-                syncHealthToClients(entity, expectedHealth, beforeHealth);
-                return true;
-            }
-
-            HealthAnalyzerManager.WriteStrategy confirmed = HealthAnalyzerManager.getConfirmedPath(entity.getClass());
-            if (confirmed != null) {
-                boolean applied = applyStrategy(entity, expectedHealth, confirmed);
-                if (applied || verifyHealthChange(entity, beforeHealth, expectedHealth)) {
-                    syncHealthToClients(entity, expectedHealth, beforeHealth);
-                    return true;
-                }
-            }
-
-            //Vanilla 阶段自身是否已达标（原版血量实体）
-            if (verifyHealthChange(entity, beforeHealth, expectedHealth)) {
-                HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.VANILLA);
-                syncHealthToClients(entity, expectedHealth, beforeHealth);
-                return true;
-            }
-
-            //Symbolic 阶段：精确符号分析，沿 getHealth 数据流反演并写入真实血量存储
-            writeSymbolic(entity, expectedHealth);
-            if (verifyHealthChange(entity, beforeHealth, expectedHealth)) {
-                HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.SYMBOLIC);
-                syncHealthToClients(entity, expectedHealth, beforeHealth);
-                return true;
-            }
-
-            //行为 Writer：以双点验证定位可重放写入能力，不依赖方法名
-            boolean probed = HealthSetterProber.resolveAndWrite(entity, expectedHealth);
-            if (probed || verifyHealthChange(entity, beforeHealth, expectedHealth)) {
-                HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.PROBE);
-                syncHealthToClients(entity, expectedHealth, beforeHealth);
-                return true;
-            }
-
-            //Dynamic 阶段：运行时插桩动态分析（最重，且会 retransform 其他 mod 的类，仅在激进攻击逻辑开启时启用）
-            boolean dyn = false;
-            if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
-                dyn = HealthAnalyzerManager.dynamicResolve(entity, expectedHealth);
-            }
-
-            //策略自身已用 getHealth==target 确认成功的直接采信，避免昂贵/带副作用的 getHealth 二次复读抖动导致假阴性
-            boolean ok = dyn || verifyHealthChange(entity, beforeHealth, expectedHealth);
-            if (ok) HealthAnalyzerManager.confirmPath(entity.getClass(), HealthAnalyzerManager.WriteStrategy.DYNAMIC);
             syncHealthToClients(entity, expectedHealth, beforeHealth);
-            if (!ok && VERIFY_WARNED.add(entity.getClass().getName())) {
-                EcaLogger.warn("setHealth verify failed entity={} expected={} actual={} (further failures for this class are suppressed; see diagnostics above)",
-                    entity.getClass().getName(), expectedHealth, safeGet(entity));
-            }
-            return ok;
+            return EcaSetHealthManager.verify(entity, expectedHealth);
         } catch (Exception e) {
             EcaLogger.warn("setHealth threw exception entity={} expected={} msg={}",
-                entity == null ? "null" : entity.getClass().getName(), expectedHealth, e.getMessage());
+                entity.getClass().getName(), expectedHealth, e.getMessage());
             return false;
         }
-    }
-
-    //按已确认策略直接写入（快路径）。返回 true 表示策略自身已用 getHealth==target 确认成功；
-    //VANILLA/SYMBOLIC 由统一 verify 兜底，PROBE 与 DYNAMIC 自身完成验证
-    private static boolean applyStrategy(LivingEntity entity, float expectedHealth, HealthAnalyzerManager.WriteStrategy strategy) {
-        switch (strategy) {
-            case VANILLA -> { /* Vanilla 阶段已写入 DATA_HEALTH_ID */ }
-            case SYMBOLIC -> writeSymbolic(entity, expectedHealth);
-            case PROBE -> {
-                return HealthSetterProber.resolveAndWrite(entity, expectedHealth);
-            }
-            case DYNAMIC -> {
-                if (EcaConfiguration.getAttackEnableRadicalLogicSafely()) return HealthAnalyzerManager.dynamicResolve(entity, expectedHealth);
-            }
-        }
-        return false;
-    }
-
-    private static float safeGet(LivingEntity entity) {
-        try { return entity.getHealth(); } catch (Throwable t) { return Float.NaN; }
     }
 
     //从同步包调用，在客户端执行改血（不再发包）
@@ -787,48 +700,17 @@ public class EntityUtil {
         } catch (Exception ignored) {}
     }
 
-    /* 验证血量修改是否成功（必须用实体自身的 getHealth()，不能读 DATA_HEALTH_ID）。
-       两道判据：1) getHealth 落在目标值的相对容差内；2) 若本意是改变血量（目标与改前显著不同），
-       getHealth 必须真的从改前值移动了——否则属于"写没生效、读取回退到诱饵/fallback 值"的假成功，判失败。 */
-    private static boolean verifyHealthChange(LivingEntity entity, float beforeHealth, float expectedHealth) {
-        try {
-            float actualHealth = entity.getHealth();
-            if (!Float.isFinite(actualHealth)) return false;
-            float tolerance = Math.max(1.0f, Math.abs(expectedHealth) * 0.02f);
-            if (Math.abs(actualHealth - expectedHealth) > tolerance) return false;
-            if (Math.abs(expectedHealth - beforeHealth) > tolerance && Math.abs(actualHealth - beforeHealth) <= 0.001f) {
-                return false;
-            }
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    //Vanilla 阶段：设置原版血量
+    //设置原版血量数据（DATA_HEALTH_ID）
     public static void setBasicHealth(LivingEntity entity, float expectedHealth) {
         try {
             SynchedEntityData entityData = entity.getEntityData();
             SynchedEntityData.DataItem dataItem = getDataItem(entityData, LivingEntity.DATA_HEALTH_ID.getId());
             if (dataItem == null) return;
-
             dataItem.value = expectedHealth;
             entity.onSyncedDataUpdated(LivingEntity.DATA_HEALTH_ID);
             dataItem.dirty = true;
             entityData.isDirty = true;
         } catch (Exception ignored) {}
-    }
-
-    //Symbolic 阶段：ASM dataflow 分析器追踪真实血量存储并写入
-    private static void writeSymbolic(LivingEntity entity, float expectedHealth) {
-        if (IS_IN_SYMBOLIC.get()) return;
-        IS_IN_SYMBOLIC.set(true);
-        try {
-            HealthAnalyzerManager.writeAll(entity, expectedHealth);
-        } catch (Exception ignored) {
-        } finally {
-            IS_IN_SYMBOLIC.set(false);
-        }
     }
 
     // ==================== 实体死亡模块 ====================

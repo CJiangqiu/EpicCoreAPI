@@ -2,10 +2,18 @@ package net.eca.util.health;
 
 import net.eca.util.EcaLogger;
 import net.eca.util.health.HealthAnalyzer.AnalysisResult;
+import net.eca.util.health.HealthAnalyzer.Call;
+import net.eca.util.health.HealthAnalyzer.Choice;
+import net.eca.util.health.HealthAnalyzer.Closure;
 import net.eca.util.health.HealthAnalyzer.EvalContext;
 import net.eca.util.health.HealthAnalyzer.Expr;
+import net.eca.util.health.HealthAnalyzer.Op;
+import net.eca.util.health.HealthAnalyzer.Primitive;
+import net.eca.util.health.HealthAnalyzer.Reference;
 import net.eca.util.health.HealthAnalyzer.Source;
+import net.eca.util.health.HealthAnalyzer.UnknownExpr;
 import net.minecraft.world.entity.LivingEntity;
+import org.objectweb.asm.Opcodes;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -174,12 +182,95 @@ public final class HealthAnalyzerManager {
 
     private static AnalysisResult safeAnalyze(Class<?> c) {
         try {
-            return HealthAnalyzer.analyze(c);
+            AnalysisResult ar = HealthAnalyzer.analyze(c);
+            dumpAnalysis(c, ar);
+            return ar;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
             EcaLogger.info("[HealthAnalyzerManager] analyze {} failed: {}", c.getName(), t.toString());
             return AnalysisResult.EMPTY;
         }
+    }
+
+    /* 每个实体类首次符号分析后打印完整结果（表达式树 + 定位到的 Source），便于排查改血路径。
+       safeAnalyze 经 CACHE.computeIfAbsent 调用，故每类只触发一次。 */
+    private static void dumpAnalysis(Class<?> c, AnalysisResult ar) {
+        EcaLogger.info("[HealthAnalysis] === first analysis: {} ===", c.getName());
+        if (ar.isEmpty()) {
+            EcaLogger.info("[HealthAnalysis]   AnalysisResult.EMPTY — getHealth not overridden or bytecode not symbolizable");
+            return;
+        }
+        EcaLogger.info("[HealthAnalysis]   sources={}", ar.sources.size());
+        EcaLogger.info("[HealthAnalysis]   returnExpr:");
+        List<String> tree = new ArrayList<>();
+        appendExpr(tree, ar.returnExpr, "    ");
+        for (String line : tree) EcaLogger.info("[HealthAnalysis] {}", line);
+        EcaLogger.info("[HealthAnalysis]   source list:");
+        int i = 0;
+        for (Source s : ar.sources) {
+            EcaLogger.info("[HealthAnalysis]     #{} {}  type={}", i++, s.label, s.valueType.getName());
+        }
+    }
+
+    //把 Expr 树递归展开成缩进文本行，覆盖全部节点类型，无行数上限
+    private static void appendExpr(List<String> out, Expr e, String indent) {
+        if (e == null) { out.add(indent + "<null>"); return; }
+        if (e == HealthAnalyzer.thisMarker()) { out.add(indent + "this"); return; }
+        if (e instanceof Source s) {
+            out.add(indent + "Source " + s.label + " (type=" + s.valueType.getName() + ")");
+            return;
+        }
+        if (e instanceof Primitive p) { out.add(indent + "Primitive " + p.value() + " (" + p.jvmType() + ")"); return; }
+        if (e instanceof Reference r) { out.add(indent + "Reference " + r.className()); return; }
+        if (e instanceof Op op) {
+            out.add(indent + "Op " + opcodeName(op.opcode()));
+            for (Expr a : op.args()) appendExpr(out, a, indent + "  ");
+            return;
+        }
+        if (e instanceof Call call) {
+            out.add(indent + "Call " + call.owner() + "#" + call.name() + call.desc());
+            for (Expr a : call.args()) appendExpr(out, a, indent + "  ");
+            return;
+        }
+        if (e instanceof Closure cl) {
+            out.add(indent + "Closure " + cl.samName() + cl.samDesc());
+            for (Expr a : cl.captured()) appendExpr(out, a, indent + "  ");
+            return;
+        }
+        if (e instanceof Choice ch) {
+            out.add(indent + "Choice (" + ch.alternatives().size() + " alternatives)");
+            for (Expr a : ch.alternatives()) appendExpr(out, a, indent + "  ");
+            return;
+        }
+        if (e instanceof UnknownExpr u) {
+            out.add(indent + "Unknown" + (u.provenance().isEmpty() ? "" : " [" + u.provenance() + "]"));
+            return;
+        }
+        out.add(indent + e.getClass().getSimpleName());
+    }
+
+    //JVM 算术/位/类型转换 opcode 转可读名，未知回退为 op#<n>
+    private static String opcodeName(int op) {
+        return switch (op) {
+            case Opcodes.IADD -> "IADD"; case Opcodes.LADD -> "LADD"; case Opcodes.FADD -> "FADD"; case Opcodes.DADD -> "DADD";
+            case Opcodes.ISUB -> "ISUB"; case Opcodes.LSUB -> "LSUB"; case Opcodes.FSUB -> "FSUB"; case Opcodes.DSUB -> "DSUB";
+            case Opcodes.IMUL -> "IMUL"; case Opcodes.LMUL -> "LMUL"; case Opcodes.FMUL -> "FMUL"; case Opcodes.DMUL -> "DMUL";
+            case Opcodes.IDIV -> "IDIV"; case Opcodes.LDIV -> "LDIV"; case Opcodes.FDIV -> "FDIV"; case Opcodes.DDIV -> "DDIV";
+            case Opcodes.IREM -> "IREM"; case Opcodes.LREM -> "LREM"; case Opcodes.FREM -> "FREM"; case Opcodes.DREM -> "DREM";
+            case Opcodes.INEG -> "INEG"; case Opcodes.LNEG -> "LNEG"; case Opcodes.FNEG -> "FNEG"; case Opcodes.DNEG -> "DNEG";
+            case Opcodes.ISHL -> "ISHL"; case Opcodes.LSHL -> "LSHL"; case Opcodes.ISHR -> "ISHR"; case Opcodes.LSHR -> "LSHR";
+            case Opcodes.IUSHR -> "IUSHR"; case Opcodes.LUSHR -> "LUSHR";
+            case Opcodes.IAND -> "IAND"; case Opcodes.LAND -> "LAND"; case Opcodes.IOR -> "IOR"; case Opcodes.LOR -> "LOR";
+            case Opcodes.IXOR -> "IXOR"; case Opcodes.LXOR -> "LXOR";
+            case Opcodes.I2L -> "I2L"; case Opcodes.I2F -> "I2F"; case Opcodes.I2D -> "I2D";
+            case Opcodes.L2I -> "L2I"; case Opcodes.L2F -> "L2F"; case Opcodes.L2D -> "L2D";
+            case Opcodes.F2I -> "F2I"; case Opcodes.F2L -> "F2L"; case Opcodes.F2D -> "F2D";
+            case Opcodes.D2I -> "D2I"; case Opcodes.D2L -> "D2L"; case Opcodes.D2F -> "D2F";
+            case Opcodes.I2B -> "I2B"; case Opcodes.I2C -> "I2C"; case Opcodes.I2S -> "I2S";
+            case Opcodes.LCMP -> "LCMP"; case Opcodes.FCMPL -> "FCMPL"; case Opcodes.FCMPG -> "FCMPG";
+            case Opcodes.DCMPL -> "DCMPL"; case Opcodes.DCMPG -> "DCMPG";
+            default -> "op#" + op;
+        };
     }
 
     private record EvalCtx(LivingEntity entity) implements EvalContext {

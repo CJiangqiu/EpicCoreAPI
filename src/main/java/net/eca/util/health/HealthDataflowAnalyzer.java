@@ -37,10 +37,9 @@ import java.util.concurrent.ConcurrentHashMap;
 /*
  * 字节码反向数据流分析 + 对偶表求逆
  * 从 getHealth 的 FRETURN 反向遍历指令序列构造 Expr 树,然后按 DualityTable 反推 sink 应写值
- * Expr 节点覆盖常量、运算、调用、闭包、存储位置与控制流汇合，所有类型和运算差异
- * 全部交给 DualityTable 的方法对偶对处理,不再按 leaf 类型展开
+ * Expr 节点覆盖常量、运算、调用、闭包、存储位置与控制流汇合，所有类型和运算差异，全部交给 DualityTable 的方法对偶对处理,不再按 leaf 类型展开
  */
-public final class HealthAnalyzer {
+public final class HealthDataflowAnalyzer {
 
     private static final String GETHEALTH_NAME = "m_21223_";
     private static final String GETHEALTH_NAME_ALT = "getHealth";
@@ -52,7 +51,172 @@ public final class HealthAnalyzer {
     //控制流汇合处 Choice 分支上限，超出即加宽为 Unknown，保证格有限高、数据流分析收敛
     private static final int MAX_CHOICE_ALTS = 8;
 
-    private HealthAnalyzer() {}
+    private HealthDataflowAnalyzer() {}
+
+    /* ==================== 对外：产出可重放改血路径 ==================== */
+
+    //每个实体类只打印一次首次分析树 / 一次失败结果，避免每-tick 改血刷屏
+    private static final Set<String> TREE_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> FAIL_DUMPED = ConcurrentHashMap.newKeySet();
+
+    //分析实体类 getHealth，符号反演定位真实血量存储，产出可重放 HealthPath；无法识别返回 null
+    public static EcaSetHealthManager.HealthPath resolvePath(Class<?> entityClass) {
+        if (entityClass == null) return null;
+        AnalysisResult ar;
+        try {
+            ar = analyze(entityClass);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+        if (TREE_DUMPED.add(entityClass.getName())) dumpTree(entityClass, ar);   // 首次分析打印完整逆向树
+        if (ar == null || ar.isEmpty()) return null;
+        return new EcaSetHealthManager.HealthPath(EcaSetHealthManager.WriteMethod.DATAFLOW,
+                (entity, target) -> writeViaSources(entityClass, ar, entity, target));
+    }
+
+    //逐个验证候选 Source，单点均未命中时再联合写入；失败尝试恢复原值
+    private static boolean writeViaSources(Class<?> cls, AnalysisResult ar, LivingEntity entity, float expected) {
+        EvalContext ctx = new EvalCtx(entity);
+        List<String> diag = new ArrayList<>();
+        List<PreparedSourceWrite> solvedWrites = new ArrayList<>();
+        for (Source sink : ar.sources) {
+            HealthSolveResult solved = solveDetailed(ar.returnExpr, sink, Float.valueOf(expected), ctx);
+            if (!solved.solved() || solved.value() == null) {
+                diag.add("    [" + sink.label + "] solve=FAIL " + solved.failure() + " (" + solved.detail() + ")");
+                continue;
+            }
+
+            Object snapshot = sink.read(entity);
+            solvedWrites.add(new PreparedSourceWrite(sink, snapshot, solved.value()));   // 留给联合写入复用，免重算
+            if (!sink.write(entity, solved.value())) {
+                boolean restored = sink.write(entity, snapshot);
+                diag.add("    [" + sink.label + "] solved=" + solved.value()
+                        + " write=FAIL restore=" + (restored ? "OK" : "FAIL"));
+                continue;
+            }
+            if (EcaSetHealthManager.verify(entity, expected)) return true;
+
+            boolean restored = sink.write(entity, snapshot);
+            diag.add("    [" + sink.label + "] solved=" + solved.value()
+                    + " verify=FAIL restore=" + (restored ? "OK" : "FAIL"));
+        }
+
+        if (writeAllSources(solvedWrites, entity, expected, diag)) return true;
+
+        if (FAIL_DUMPED.add(cls.getName())) {
+            EcaLogger.warn("[HealthDataflow] setHealth failed entity={} expected={} sink results:", cls.getName(), expected);
+            for (String line : diag) EcaLogger.warn("[HealthDataflow] {}", line);
+        }
+        return false;
+    }
+
+    /* ≥2 个可解 Source 时联合写入（应对双源防御等需同时写多处的形态），失败逆序回滚。
+       writes 由单源循环收集，其 snapshot 均为原值（循环对每次尝试都已回滚），故回滚即复原。 */
+    private static boolean writeAllSources(List<PreparedSourceWrite> writes, LivingEntity entity, float expected, List<String> diag) {
+        if (writes.size() < 2) return false;
+
+        boolean wroteAll = true;
+        for (PreparedSourceWrite write : writes) {
+            if (!write.sink().write(entity, write.value())) {
+                wroteAll = false;
+                break;
+            }
+        }
+        if (wroteAll && EcaSetHealthManager.verify(entity, expected)) return true;
+
+        boolean restoredAll = true;
+        for (int i = writes.size() - 1; i >= 0; i--) {
+            PreparedSourceWrite write = writes.get(i);
+            if (!write.sink().write(entity, write.snapshot())) restoredAll = false;
+        }
+        diag.add("    [all sources] write=" + (wroteAll ? "OK" : "FAIL")
+                + " verify=FAIL restore=" + (restoredAll ? "OK" : "FAIL"));
+        return false;
+    }
+
+    private record PreparedSourceWrite(Source sink, Object snapshot, Object value) {}
+
+    private record EvalCtx(LivingEntity entity) implements EvalContext {
+        @Override public Object eval(Expr e) { return evaluate(e, this); }
+    }
+
+    //每个实体类首次分析后打印完整 Expr 逆向树 + 定位到的 Source（无行数上限）
+    private static void dumpTree(Class<?> cls, AnalysisResult ar) {
+        EcaLogger.info("[HealthDataflow] === first analysis: {} ===", cls.getName());
+        if (ar == null || ar.isEmpty()) {
+            EcaLogger.info("[HealthDataflow]   EMPTY — getHealth 未覆写或字节码无法符号化");
+            return;
+        }
+        EcaLogger.info("[HealthDataflow]   sources={}", ar.sources.size());
+        EcaLogger.info("[HealthDataflow]   returnExpr:");
+        List<String> tree = new ArrayList<>();
+        appendExpr(tree, ar.returnExpr, "    ");
+        for (String line : tree) EcaLogger.info("[HealthDataflow] {}", line);
+        EcaLogger.info("[HealthDataflow]   source list:");
+        int i = 0;
+        for (Source s : ar.sources) {
+            EcaLogger.info("[HealthDataflow]     #{} {}  type={}", i++, s.label, s.valueType.getName());
+        }
+    }
+
+    //递归把 Expr 树缩进展开，覆盖全部节点类型，无行数上限
+    private static void appendExpr(List<String> out, Expr e, String indent) {
+        if (e == null) { out.add(indent + "<null>"); return; }
+        if (e == thisMarker()) { out.add(indent + "this"); return; }
+        if (e instanceof Source s) { out.add(indent + "Source " + s.label + " (type=" + s.valueType.getName() + ")"); return; }
+        if (e instanceof Primitive p) { out.add(indent + "Primitive " + p.value() + " (" + p.jvmType() + ")"); return; }
+        if (e instanceof Reference r) { out.add(indent + "Reference " + r.className()); return; }
+        if (e instanceof Op op) {
+            out.add(indent + "Op " + opcodeName(op.opcode()));
+            for (Expr a : op.args()) appendExpr(out, a, indent + "  ");
+            return;
+        }
+        if (e instanceof Call call) {
+            out.add(indent + "Call " + call.owner() + "#" + call.name() + call.desc());
+            for (Expr a : call.args()) appendExpr(out, a, indent + "  ");
+            return;
+        }
+        if (e instanceof Closure cl) {
+            out.add(indent + "Closure " + cl.samName() + cl.samDesc());
+            for (Expr a : cl.captured()) appendExpr(out, a, indent + "  ");
+            return;
+        }
+        if (e instanceof Choice ch) {
+            out.add(indent + "Choice (" + ch.alternatives().size() + " alternatives)");
+            for (Expr a : ch.alternatives()) appendExpr(out, a, indent + "  ");
+            return;
+        }
+        if (e instanceof UnknownExpr u) {
+            out.add(indent + "Unknown" + (u.provenance().isEmpty() ? "" : " [" + u.provenance() + "]"));
+            return;
+        }
+        out.add(indent + e.getClass().getSimpleName());
+    }
+
+    //JVM 算术/位/类型转换 opcode 转可读名，未知回退 op#<n>
+    private static String opcodeName(int op) {
+        return switch (op) {
+            case Opcodes.IADD -> "IADD"; case Opcodes.LADD -> "LADD"; case Opcodes.FADD -> "FADD"; case Opcodes.DADD -> "DADD";
+            case Opcodes.ISUB -> "ISUB"; case Opcodes.LSUB -> "LSUB"; case Opcodes.FSUB -> "FSUB"; case Opcodes.DSUB -> "DSUB";
+            case Opcodes.IMUL -> "IMUL"; case Opcodes.LMUL -> "LMUL"; case Opcodes.FMUL -> "FMUL"; case Opcodes.DMUL -> "DMUL";
+            case Opcodes.IDIV -> "IDIV"; case Opcodes.LDIV -> "LDIV"; case Opcodes.FDIV -> "FDIV"; case Opcodes.DDIV -> "DDIV";
+            case Opcodes.IREM -> "IREM"; case Opcodes.LREM -> "LREM"; case Opcodes.FREM -> "FREM"; case Opcodes.DREM -> "DREM";
+            case Opcodes.INEG -> "INEG"; case Opcodes.LNEG -> "LNEG"; case Opcodes.FNEG -> "FNEG"; case Opcodes.DNEG -> "DNEG";
+            case Opcodes.ISHL -> "ISHL"; case Opcodes.LSHL -> "LSHL"; case Opcodes.ISHR -> "ISHR"; case Opcodes.LSHR -> "LSHR";
+            case Opcodes.IUSHR -> "IUSHR"; case Opcodes.LUSHR -> "LUSHR";
+            case Opcodes.IAND -> "IAND"; case Opcodes.LAND -> "LAND"; case Opcodes.IOR -> "IOR"; case Opcodes.LOR -> "LOR";
+            case Opcodes.IXOR -> "IXOR"; case Opcodes.LXOR -> "LXOR";
+            case Opcodes.I2L -> "I2L"; case Opcodes.I2F -> "I2F"; case Opcodes.I2D -> "I2D";
+            case Opcodes.L2I -> "L2I"; case Opcodes.L2F -> "L2F"; case Opcodes.L2D -> "L2D";
+            case Opcodes.F2I -> "F2I"; case Opcodes.F2L -> "F2L"; case Opcodes.F2D -> "F2D";
+            case Opcodes.D2I -> "D2I"; case Opcodes.D2L -> "D2L"; case Opcodes.D2F -> "D2F";
+            case Opcodes.I2B -> "I2B"; case Opcodes.I2C -> "I2C"; case Opcodes.I2S -> "I2S";
+            case Opcodes.LCMP -> "LCMP"; case Opcodes.FCMPL -> "FCMPL"; case Opcodes.FCMPG -> "FCMPG";
+            case Opcodes.DCMPL -> "DCMPL"; case Opcodes.DCMPG -> "DCMPG";
+            default -> "op#" + op;
+        };
+    }
 
     private static final Map<Class<?>, Long> ENTRY_VALUE_OFFSET_CACHE = new ConcurrentHashMap<>();
 
@@ -1249,7 +1413,7 @@ public final class HealthAnalyzer {
             return AnalysisResult.of(ret);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
-            EcaLogger.info("[HealthAnalyzer] analyze {} failed: {}", entityClass.getName(), t.toString());
+            EcaLogger.info("[HealthDataflow] analyze {} failed: {}", entityClass.getName(), t.toString());
             return AnalysisResult.EMPTY;
         }
     }
@@ -1397,7 +1561,7 @@ public final class HealthAnalyzer {
             return result;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
-            EcaLogger.info("[HealthAnalyzer] analyzeMethod {}.{} failed: {}", owner.getName(), name, t.toString());
+            EcaLogger.info("[HealthDataflow] analyzeMethod {}.{} failed: {}", owner.getName(), name, t.toString());
             return null;
         } finally {
             ctx.inflight.remove(cacheKey);
