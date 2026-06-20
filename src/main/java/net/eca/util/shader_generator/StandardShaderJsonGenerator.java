@@ -20,7 +20,6 @@ public final class StandardShaderJsonGenerator {
         0.0F, 0.0F, 0.0F, 1.0F
     };
 
-    @Override
     public String generate(
         ShaderProject project,
         ShaderExportMode exportMode,

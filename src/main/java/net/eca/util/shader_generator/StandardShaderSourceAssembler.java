@@ -6,7 +6,6 @@ public final class StandardShaderSourceAssembler {
 
     private static final String VERSION = "#version 150\n\n";
 
-    @Override
     public String assembleVertex(
         ShaderProject project,
         ShaderExportMode exportMode,
@@ -41,7 +40,6 @@ public final class StandardShaderSourceAssembler {
         return source.toString();
     }
 
-    @Override
     public String assembleFragment(ShaderProject project, ShaderExportMode exportMode) {
         if (project == null || exportMode == null) {
             throw new IllegalArgumentException("Shader fragment generation arguments must not be null");
