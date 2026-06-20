@@ -127,7 +127,7 @@ public abstract class EntityExtension {
             return null;
         }
         String normalized = path.startsWith("textures/") ? path : "textures/" + path;
-        return new ResourceLocation(getModId(), normalized);
+        return ResourceLocation.fromNamespaceAndPath(getModId(), normalized);
     }
 
     @OnlyIn(Dist.CLIENT)
@@ -135,7 +135,7 @@ public abstract class EntityExtension {
         if (path == null || path.isBlank()) {
             return null;
         }
-        return new ResourceLocation(getModId(), path);
+        return ResourceLocation.fromNamespaceAndPath(getModId(), path);
     }
 
     @Override

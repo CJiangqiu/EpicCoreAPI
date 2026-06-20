@@ -24,7 +24,7 @@ public class CosmosShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance cosmosShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            new ResourceLocation("eca", "cosmos"),
+            ResourceLocation.fromNamespaceAndPath("eca", "cosmos"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(cosmosShader, instance -> {

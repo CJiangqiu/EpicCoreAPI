@@ -24,7 +24,7 @@ public class AuroraShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance auroraShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            new ResourceLocation("eca", "aurora"),
+            ResourceLocation.fromNamespaceAndPath("eca", "aurora"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(auroraShader, instance -> {

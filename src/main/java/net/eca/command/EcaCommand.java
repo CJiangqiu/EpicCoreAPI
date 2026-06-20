@@ -28,6 +28,7 @@ public class EcaCommand {
                 .then(ForceLoadingCommand.registerSubCommand())
                 .then(EntityExtensionCommand.registerSubCommand())
                 .then(BossShowCommand.registerSubCommand())
+                .then(ShaderGeneratorCommand.registerSubCommand())
                 .then(FilterCommand.registerSubCommand())
                 .then(ResurrectionCommand.registerSubCommand())
         );

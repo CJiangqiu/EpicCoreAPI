@@ -13,7 +13,7 @@ import net.eca.client.render.shader.OceanShader;
 @OnlyIn(Dist.CLIENT)
 public class OceanRenderTypes {
 
-    private static final ResourceLocation BUBBLE_TEXTURE = new ResourceLocation("eca", "textures/shader/ocean_bubble.png");
+    private static final ResourceLocation BUBBLE_TEXTURE = ResourceLocation.fromNamespaceAndPath("eca", "textures/shader/ocean_bubble.png");
 
     private static final RenderStateShard.ShaderStateShard SHADER_STATE = new RenderStateShard.ShaderStateShard(OceanShader::getShader) {
         @Override

@@ -13,6 +13,7 @@ import net.minecraftforge.fml.ModList;
 import net.minecraftforge.forgespi.language.IModInfo;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /* 自定义着色器预设注册表（消费端"开箱即用加载器"）。第三方 mod 把标准三件套（vsh/fsh/json）放进
@@ -80,6 +81,10 @@ public final class ShaderPresetRegistry {
      */
     public static ShaderPreset getPreset(ResourceLocation id) {
         return id == null ? null : PRESETS.get(id);
+    }
+
+    public static Set<ResourceLocation> getPresetIds() {
+        return Set.copyOf(PRESETS.keySet());
     }
 
     //在 RegisterShadersEvent 中调用（首帧加载与每次资源重载）：重建所有已登记预设的 ShaderInstance

@@ -24,7 +24,7 @@ public class ForestShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance forestShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            new ResourceLocation("eca", "forest"),
+            ResourceLocation.fromNamespaceAndPath("eca", "forest"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(forestShader, instance -> {

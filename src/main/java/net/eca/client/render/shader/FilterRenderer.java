@@ -56,7 +56,7 @@ public class FilterRenderer {
     private static long toxicStartNanos;
     private static long cosmosStartNanos;
     private static final Set<FilterType> activeFilters = EnumSet.noneOf(FilterType.class);
-    private static final ResourceLocation COSMOS_TEXTURE = new ResourceLocation(EcaMod.MOD_ID, "textures/shader/cosmos.png");
+    private static final ResourceLocation COSMOS_TEXTURE = ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "textures/shader/cosmos.png");
 
     private static int copyFbo = -1;
     private static int depthCopyTexture = -1;
@@ -81,7 +81,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        new ResourceLocation(EcaMod.MOD_ID, "eca_sketch"),
+                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_sketch"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> sketchShader = instance
@@ -89,7 +89,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        new ResourceLocation(EcaMod.MOD_ID, "eca_spotlight"),
+                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_spotlight"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> spotlightShader = instance
@@ -97,7 +97,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        new ResourceLocation(EcaMod.MOD_ID, "eca_matrix"),
+                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_matrix"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> matrixShader = instance
@@ -105,7 +105,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        new ResourceLocation(EcaMod.MOD_ID, "eca_rain"),
+                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_rain"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> rainShader = instance
@@ -113,7 +113,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        new ResourceLocation(EcaMod.MOD_ID, "eca_desert"),
+                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_desert"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> desertShader = instance
@@ -121,7 +121,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        new ResourceLocation(EcaMod.MOD_ID, "eca_snow"),
+                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_snow"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> snowShader = instance
@@ -129,7 +129,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        new ResourceLocation(EcaMod.MOD_ID, "eca_toxic"),
+                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_toxic"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> toxicShader = instance
@@ -137,7 +137,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        new ResourceLocation(EcaMod.MOD_ID, "eca_cosmos"),
+                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_cosmos"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> cosmosShader = instance

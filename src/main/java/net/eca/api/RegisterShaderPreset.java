@@ -22,7 +22,7 @@ import java.lang.annotation.Target;
  * <ol>
  *   <li>Annotate a class with {@code @RegisterShaderPreset}</li>
  *   <li>In a static initializer block, call
- *       {@code ShaderPresetRegistry.register(new ResourceLocation("your_mod", "my_nebula"))}</li>
+ *       {@code ShaderPresetRegistry.register(ResourceLocation.fromNamespaceAndPath("your_mod", "my_nebula"))}</li>
  *   <li>ECA scans all mods during {@code FMLLoadCompleteEvent} (client only) and triggers static initialization</li>
  *   <li>Reference it from an extension via {@code EcaAPI.shaderPreset(id).skybox()} (or {@code bossBar()},
  *       {@code bossLayer()}, {@code item()}, {@code entityEffect(texture)})</li>
@@ -41,7 +41,7 @@ import java.lang.annotation.Target;
  * @RegisterShaderPreset
  * public class MyShaders {
  *     static {
- *         ShaderPresetRegistry.register(new ResourceLocation("your_mod", "my_nebula"));
+ *         ShaderPresetRegistry.register(ResourceLocation.fromNamespaceAndPath("your_mod", "my_nebula"));
  *     }
  * }
  * }</pre>

@@ -24,7 +24,7 @@ public class VolcanoShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance volcanoShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            new ResourceLocation("eca", "volcano"),
+            ResourceLocation.fromNamespaceAndPath("eca", "volcano"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(volcanoShader, instance -> {

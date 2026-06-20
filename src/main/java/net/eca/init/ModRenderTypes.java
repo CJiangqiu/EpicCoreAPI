@@ -63,18 +63,18 @@ public class ModRenderTypes {
     }
 
     private static void registerSkyboxPresets() {
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "the_last_end"), TheLastEndRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "dream_sakura"), DreamSakuraRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "forest"), ForestRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "ocean"), OceanRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "storm"), StormRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "volcano"), VolcanoRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "arcane"), ArcaneRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "aurora"), AuroraRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "hacker"), HackerRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "starlight"), StarlightRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "cosmos"), CosmosRenderTypes.SKYBOX);
-        GlobalEffectRegistry.registerSkyboxPreset(new ResourceLocation(EcaMod.MOD_ID, "black_hole"), BlackHoleRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "the_last_end"), TheLastEndRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "dream_sakura"), DreamSakuraRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "forest"), ForestRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "ocean"), OceanRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "storm"), StormRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "volcano"), VolcanoRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "arcane"), ArcaneRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "aurora"), AuroraRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "hacker"), HackerRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "starlight"), StarlightRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "cosmos"), CosmosRenderTypes.SKYBOX);
+        GlobalEffectRegistry.registerSkyboxPreset(ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "black_hole"), BlackHoleRenderTypes.SKYBOX);
     }
 
     private ModRenderTypes() {}

@@ -24,7 +24,7 @@ public class BlackHoleShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance blackHoleShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            new ResourceLocation("eca", "black_hole"),
+            ResourceLocation.fromNamespaceAndPath("eca", "black_hole"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(blackHoleShader, instance -> {

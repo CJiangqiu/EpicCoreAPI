@@ -23,7 +23,7 @@ public class ArcaneShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance arcaneShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            new ResourceLocation("eca", "arcane"),
+            ResourceLocation.fromNamespaceAndPath("eca", "arcane"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(arcaneShader, instance -> {

@@ -72,7 +72,7 @@ public abstract class ItemExtension {
             return null;
         }
         String normalized = path.startsWith("textures/") ? path : "textures/" + path;
-        return new ResourceLocation(getModId(), normalized);
+        return ResourceLocation.fromNamespaceAndPath(getModId(), normalized);
     }
 
     @Override

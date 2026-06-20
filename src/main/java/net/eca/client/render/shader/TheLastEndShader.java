@@ -24,7 +24,7 @@ public class TheLastEndShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance theLastEndShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            new ResourceLocation("eca", "the_last_end"),
+            ResourceLocation.fromNamespaceAndPath("eca", "the_last_end"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(theLastEndShader, instance -> {

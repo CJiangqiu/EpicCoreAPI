@@ -20,7 +20,7 @@ public class NetworkHandler {
     private static final String PROTOCOL_VERSION = "1";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
-            new ResourceLocation(EcaMod.MOD_ID, "main"),
+            ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "main"),
             () -> PROTOCOL_VERSION,
             PROTOCOL_VERSION::equals,
             PROTOCOL_VERSION::equals
@@ -131,6 +131,12 @@ public class NetworkHandler {
                 .encoder(BossShowSubtitlePacket::encode)
                 .decoder(BossShowSubtitlePacket::decode)
                 .consumerMainThread(BossShowSubtitlePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(ShaderGeneratorOpenPacket.class, id(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(ShaderGeneratorOpenPacket::encode)
+                .decoder(ShaderGeneratorOpenPacket::decode)
+                .consumerMainThread(ShaderGeneratorOpenPacket::handle)
                 .add();
 
         CHANNEL.messageBuilder(FilterSyncPacket.class, id(), NetworkDirection.PLAY_TO_CLIENT)

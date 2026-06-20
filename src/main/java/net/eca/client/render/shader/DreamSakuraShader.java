@@ -24,7 +24,7 @@ public class DreamSakuraShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance dreamSakuraShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            new ResourceLocation("eca", "dream_sakura"),
+            ResourceLocation.fromNamespaceAndPath("eca", "dream_sakura"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(dreamSakuraShader, instance -> {
