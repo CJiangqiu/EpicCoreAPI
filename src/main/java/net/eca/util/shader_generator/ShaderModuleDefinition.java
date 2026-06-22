@@ -5,6 +5,7 @@ import java.util.List;
 public record ShaderModuleDefinition(
     String id,
     String displayName,
+    Category category,
     List<Parameter> parameters,
     Emitter emitter
 ) {
@@ -15,6 +16,9 @@ public record ShaderModuleDefinition(
         }
         if (displayName == null || displayName.isBlank()) {
             throw new IllegalArgumentException("Shader module display name must not be blank");
+        }
+        if (category == null) {
+            throw new IllegalArgumentException("Shader module category must not be null");
         }
         parameters = parameters == null ? List.of() : List.copyOf(parameters);
         if (emitter == null) {
@@ -29,6 +33,24 @@ public record ShaderModuleDefinition(
     @FunctionalInterface
     public interface Emitter {
         String emit(ShaderModuleInstance module, int moduleIndex);
+    }
+
+    public enum Category {
+        BASIC("gui.eca.shader_generator.effects.category.basic"),
+        STARRY_SKY("gui.eca.shader_generator.effects.category.starry_sky"),
+        MAGIC("gui.eca.shader_generator.effects.category.magic"),
+        /* IMAGE 不在效果下拉中作为分类按钮展示，image_element 作为直接条目出现 */
+        IMAGE("gui.eca.shader_generator.effects.category.image");
+
+        private final String translationKey;
+
+        Category(String translationKey) {
+            this.translationKey = translationKey;
+        }
+
+        public String translationKey() {
+            return translationKey;
+        }
     }
 
     public record Parameter(

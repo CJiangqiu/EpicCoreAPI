@@ -76,6 +76,9 @@ public final class StandardShaderSourceAssembler {
             source.append("uniform vec2 LocalUvMin;\n")
                 .append("uniform vec2 LocalUvScale;\n");
         }
+        for (ShaderProject.TextureBinding texture : project.textures()) {
+            source.append("uniform sampler2D ").append(texture.samplerName()).append(";\n");
+        }
 
         source.append("\nin vec4 vertexColor;\n")
             .append("in vec2 texCoord0;\n")

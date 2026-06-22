@@ -12,10 +12,12 @@ public final class ShaderModuleRegistry {
     private static final Map<String, ShaderModuleDefinition> MODULES = new LinkedHashMap<>();
 
     static {
-        registerGradient();
-        registerRings();
-        registerNoise();
-        registerPulse();
+        registerBasicCircle();
+        registerBasicRing();
+        registerBasicLine();
+        registerBasicRectangle();
+        registerBasicPolygon();
+        registerImageElement();
     }
 
     public static ShaderModuleDefinition get(String id) {
@@ -26,76 +28,240 @@ public final class ShaderModuleRegistry {
         return Collections.unmodifiableList(new ArrayList<>(MODULES.values()));
     }
 
+    public static List<ShaderModuleDefinition> byCategory(ShaderModuleDefinition.Category category) {
+        return MODULES.values().stream()
+            .filter(definition -> definition.category() == category)
+            .toList();
+    }
+
     private static void register(ShaderModuleDefinition definition) {
         MODULES.put(definition.id(), definition);
     }
 
-    private static void registerGradient() {
-        register(new ShaderModuleDefinition(
-            "gradient",
-            "gui.eca.shader_generator.module.gradient",
-            List.of(
-                parameter("top_r", "gui.eca.shader_generator.parameter.top_r", 0.0F, 1.0F, 0.05F, 0.45F),
-                parameter("top_g", "gui.eca.shader_generator.parameter.top_g", 0.0F, 1.0F, 0.05F, 0.15F),
-                parameter("top_b", "gui.eca.shader_generator.parameter.top_b", 0.0F, 1.0F, 0.05F, 0.85F),
-                parameter("bottom_r", "gui.eca.shader_generator.parameter.bottom_r", 0.0F, 1.0F, 0.05F, 0.02F),
-                parameter("bottom_g", "gui.eca.shader_generator.parameter.bottom_g", 0.0F, 1.0F, 0.05F, 0.08F),
-                parameter("bottom_b", "gui.eca.shader_generator.parameter.bottom_b", 0.0F, 1.0F, 0.05F, 0.20F)
-            ),
-            (module, index) -> String.format(Locale.ROOT,
-                "    color = mix(vec3(%.4f, %.4f, %.4f), vec3(%.4f, %.4f, %.4f), clamp(effectUv.y, 0.0, 1.0));\n",
-                module.value("bottom_r"), module.value("bottom_g"), module.value("bottom_b"),
-                module.value("top_r"), module.value("top_g"), module.value("top_b"))
+    private static void registerBasicCircle() {
+        register(basic(
+            "basic_circle",
+            "gui.eca.shader_generator.module.basic_circle",
+            List.of(),
+            (module, index, point, size) -> String.format(Locale.ROOT,
+                "smoothstep(%.4f, %.4f, length(%s))",
+                size,
+                size * 0.82F,
+                point)
         ));
     }
 
-    private static void registerRings() {
-        register(new ShaderModuleDefinition(
-            "rings",
-            "gui.eca.shader_generator.module.rings",
-            List.of(
-                parameter("frequency", "gui.eca.shader_generator.parameter.frequency", 1.0F, 30.0F, 1.0F, 9.0F),
-                parameter("speed", "gui.eca.shader_generator.parameter.speed", -8.0F, 8.0F, 0.25F, 1.5F),
-                parameter("strength", "gui.eca.shader_generator.parameter.strength", 0.0F, 2.0F, 0.05F, 0.75F)
-            ),
-            (module, index) -> String.format(Locale.ROOT,
-                "    float ring%d = 0.5 + 0.5 * cos(length(effectUv - vec2(0.5)) * %.4f - gameTime * 6.2831853 * %.4f);\n"
-                    + "    color += vec3(0.25, 0.55, 1.0) * pow(ring%d, 8.0) * %.4f;\n",
-                index, module.value("frequency"), module.value("speed"),
-                index, module.value("strength"))
+    private static void registerBasicRing() {
+        register(basic(
+            "basic_ring",
+            "gui.eca.shader_generator.module.basic_ring",
+            List.of(parameter(
+                "thickness",
+                "gui.eca.shader_generator.parameter.thickness",
+                0.01F,
+                0.5F,
+                0.01F,
+                0.12F
+            )),
+            (module, index, point, size) -> {
+                float thickness = size * module.value("thickness");
+                return String.format(Locale.ROOT,
+                    "smoothstep(%.4f, 0.0, abs(length(%s) - %.4f))",
+                    thickness,
+                    point,
+                    size
+                );
+            }
         ));
     }
 
-    private static void registerNoise() {
-        register(new ShaderModuleDefinition(
-            "noise",
-            "gui.eca.shader_generator.module.noise",
+    private static void registerBasicLine() {
+        register(basic(
+            "basic_line",
+            "gui.eca.shader_generator.module.basic_line",
             List.of(
-                parameter("scale", "gui.eca.shader_generator.parameter.scale", 1.0F, 80.0F, 1.0F, 24.0F),
-                parameter("speed", "gui.eca.shader_generator.parameter.speed", -8.0F, 8.0F, 0.25F, 0.75F),
-                parameter("strength", "gui.eca.shader_generator.parameter.strength", 0.0F, 1.0F, 0.05F, 0.18F)
+                parameter("length", "gui.eca.shader_generator.parameter.length", 0.1F, 2.0F, 0.05F, 0.8F),
+                parameter("thickness", "gui.eca.shader_generator.parameter.thickness", 0.01F, 0.5F, 0.01F, 0.08F),
+                parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F)
             ),
-            (module, index) -> String.format(Locale.ROOT,
-                "    float noise%d = ecaNoise(effectUv * %.4f + vec2(gameTime * %.4f));\n"
-                    + "    color += vec3(noise%d) * %.4f;\n",
-                index, module.value("scale"), module.value("speed"),
-                index, module.value("strength"))
+            (module, index, point, size) -> {
+                float halfLength = size * module.value("length") * 0.5F;
+                float thickness = size * module.value("thickness");
+                float radians = (float) Math.toRadians(module.value("rotation"));
+                String rotated = String.format(Locale.ROOT,
+                    "ecaRotate(%s, %.6f)",
+                    point,
+                    -radians
+                );
+                return String.format(Locale.ROOT,
+                    "smoothstep(%.4f, 0.0, ecaSegmentDistance(%s, vec2(-%.4f, 0.0), vec2(%.4f, 0.0)))",
+                    thickness,
+                    rotated,
+                    halfLength,
+                    halfLength
+                );
+            }
         ));
     }
 
-    private static void registerPulse() {
-        register(new ShaderModuleDefinition(
-            "pulse",
-            "gui.eca.shader_generator.module.pulse",
+    private static void registerBasicRectangle() {
+        register(basic(
+            "basic_rectangle",
+            "gui.eca.shader_generator.module.basic_rectangle",
             List.of(
-                parameter("speed", "gui.eca.shader_generator.parameter.speed", 0.0F, 12.0F, 0.25F, 2.0F),
-                parameter("depth", "gui.eca.shader_generator.parameter.depth", 0.0F, 1.0F, 0.05F, 0.25F)
+                parameter("width", "gui.eca.shader_generator.parameter.width", 0.1F, 2.0F, 0.05F, 1.0F),
+                parameter("height", "gui.eca.shader_generator.parameter.height", 0.1F, 2.0F, 0.05F, 0.65F),
+                parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F)
             ),
-            (module, index) -> String.format(Locale.ROOT,
-                "    float pulse%d = 1.0 - %.4f + %.4f * (0.5 + 0.5 * sin(gameTime * 6.2831853 * %.4f));\n"
-                    + "    color *= pulse%d;\n",
-                index, module.value("depth"), module.value("depth"), module.value("speed"), index)
+            (module, index, point, size) -> {
+                float radians = (float) Math.toRadians(module.value("rotation"));
+                String rotated = String.format(Locale.ROOT,
+                    "ecaRotate(%s, %.6f)",
+                    point,
+                    -radians
+                );
+                return String.format(Locale.ROOT,
+                    "smoothstep(%.4f, 0.0, ecaBoxDistance(%s, vec2(%.4f, %.4f)))",
+                    size * 0.08F,
+                    rotated,
+                    size * module.value("width") * 0.5F,
+                    size * module.value("height") * 0.5F
+                );
+            }
         ));
+    }
+
+    private static void registerBasicPolygon() {
+        register(basic(
+            "basic_polygon",
+            "gui.eca.shader_generator.module.basic_polygon",
+            List.of(
+                parameter("sides", "gui.eca.shader_generator.parameter.sides", 3.0F, 12.0F, 1.0F, 6.0F),
+                parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F)
+            ),
+            (module, index, point, size) -> String.format(Locale.ROOT,
+                "smoothstep(%.4f, 0.0, ecaPolygonDistance(%s, %.4f, %.1f, %.6f))",
+                size * 0.08F,
+                point,
+                size,
+                module.value("sides"),
+                Math.toRadians(module.value("rotation"))
+            )
+        ));
+    }
+
+    private static void registerImageElement() {
+        register(new ShaderModuleDefinition(
+            "image_element",
+            "gui.eca.shader_generator.module.image_element",
+            ShaderModuleDefinition.Category.IMAGE,
+            commonParameters(),
+            (module, moduleIndex) -> ""
+        ));
+    }
+
+    private static ShaderModuleDefinition basic(
+        String id,
+        String displayName,
+        List<ShaderModuleDefinition.Parameter> specificParameters,
+        ShapeEmitter shapeEmitter
+    ) {
+        List<ShaderModuleDefinition.Parameter> parameters = new ArrayList<>(commonParameters());
+        parameters.addAll(specificParameters);
+        return new ShaderModuleDefinition(
+            id,
+            displayName,
+            ShaderModuleDefinition.Category.BASIC,
+            parameters,
+            (module, moduleIndex) -> emitInstances(module, moduleIndex, shapeEmitter)
+        );
+    }
+
+    private static String emitInstances(
+        ShaderModuleInstance module,
+        int moduleIndex,
+        ShapeEmitter shapeEmitter
+    ) {
+        int count = Math.max(1, Math.round(module.value("count")));
+        float size = module.value("size");
+        float centerX = module.value("center_x");
+        float centerY = module.value("center_y");
+        float spreadX = module.value("spread_x");
+        float spreadY = module.value("spread_y");
+        float seed = module.value("seed");
+        float duration = module.value("duration");
+        boolean repeat = module.value("repeat") >= 0.5F;
+        StringBuilder source = new StringBuilder();
+        source.append(String.format(Locale.ROOT,
+            "        float effectProgress%d = ecaEffectProgress(gameTime, %.4f, %s);\n",
+            moduleIndex,
+            duration,
+            repeat ? "true" : "false"
+        ));
+        for (int instance = 0; instance < count; instance++) {
+            float randomX = signedRandom(seed, instance, 17.13F);
+            float randomY = signedRandom(seed, instance, 71.91F);
+            float randomSize = 0.75F + unitRandom(seed, instance, 41.37F) * 0.5F;
+            float instanceSize = size * randomSize;
+            String point = "point" + moduleIndex + "_" + instance;
+            String mask = "mask" + moduleIndex + "_" + instance;
+            source.append(String.format(Locale.ROOT,
+                "        vec2 %s = effectUv - vec2(%.4f, %.4f);\n",
+                point,
+                centerX + randomX * spreadX,
+                centerY + randomY * spreadY
+            ));
+            source.append("        float ").append(mask).append(" = ")
+                .append(shapeEmitter.emit(module, moduleIndex, point, instanceSize))
+                .append(";\n");
+            source.append(String.format(Locale.ROOT,
+                "        %s *= %.4f + %.4f * effectProgress%d;\n",
+                mask,
+                module.value("start_alpha"),
+                module.value("end_alpha") - module.value("start_alpha"),
+                moduleIndex
+            ));
+            source.append(String.format(Locale.ROOT,
+                "        color += vec3(%.4f, %.4f, %.4f) * %s;\n"
+                    + "        alpha = max(alpha, %.4f * %s);\n",
+                module.value("color_r"),
+                module.value("color_g"),
+                module.value("color_b"),
+                mask,
+                module.value("color_a"),
+                mask
+            ));
+        }
+        return source.toString();
+    }
+
+    private static List<ShaderModuleDefinition.Parameter> commonParameters() {
+        return List.of(
+            parameter("color_r", "gui.eca.shader_generator.parameter.color_r", 0.0F, 1.0F, 0.05F, 0.35F),
+            parameter("color_g", "gui.eca.shader_generator.parameter.color_g", 0.0F, 1.0F, 0.05F, 0.65F),
+            parameter("color_b", "gui.eca.shader_generator.parameter.color_b", 0.0F, 1.0F, 0.05F, 1.0F),
+            parameter("color_a", "gui.eca.shader_generator.parameter.color_a", 0.0F, 1.0F, 0.05F, 1.0F),
+            parameter("size", "gui.eca.shader_generator.parameter.size", 0.02F, 1.5F, 0.02F, 0.2F),
+            parameter("count", "gui.eca.shader_generator.parameter.count", 1.0F, 32.0F, 1.0F, 1.0F),
+            parameter("center_x", "gui.eca.shader_generator.parameter.center_x", 0.0F, 1.0F, 0.02F, 0.5F),
+            parameter("center_y", "gui.eca.shader_generator.parameter.center_y", 0.0F, 1.0F, 0.02F, 0.5F),
+            parameter("spread_x", "gui.eca.shader_generator.parameter.spread_x", 0.0F, 1.0F, 0.02F, 0.0F),
+            parameter("spread_y", "gui.eca.shader_generator.parameter.spread_y", 0.0F, 1.0F, 0.02F, 0.0F),
+            parameter("seed", "gui.eca.shader_generator.parameter.seed", 0.0F, 1000.0F, 1.0F, 1.0F),
+            parameter("duration", "gui.eca.shader_generator.parameter.duration", 0.0F, 60.0F, 0.25F, 0.0F),
+            parameter("repeat", "gui.eca.shader_generator.parameter.repeat", 0.0F, 1.0F, 1.0F, 1.0F),
+            parameter("start_alpha", "gui.eca.shader_generator.parameter.start_alpha", 0.0F, 1.0F, 0.05F, 1.0F),
+            parameter("end_alpha", "gui.eca.shader_generator.parameter.end_alpha", 0.0F, 1.0F, 0.05F, 1.0F)
+        );
+    }
+
+    private static float unitRandom(float seed, int index, float salt) {
+        double value = Math.sin(seed * 12.9898 + index * 78.233 + salt) * 43758.5453;
+        return (float) (value - Math.floor(value));
+    }
+
+    private static float signedRandom(float seed, int index, float salt) {
+        return unitRandom(seed, index, salt) * 2.0F - 1.0F;
     }
 
     private static ShaderModuleDefinition.Parameter parameter(
@@ -107,6 +273,11 @@ public final class ShaderModuleRegistry {
         float defaultValue
     ) {
         return new ShaderModuleDefinition.Parameter(key, displayName, minimum, maximum, step, defaultValue);
+    }
+
+    @FunctionalInterface
+    private interface ShapeEmitter {
+        String emit(ShaderModuleInstance module, int moduleIndex, String point, float size);
     }
 
     private ShaderModuleRegistry() {}

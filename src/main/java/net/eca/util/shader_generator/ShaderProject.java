@@ -3,13 +3,15 @@ package net.eca.util.shader_generator;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Set;
+import java.util.List;
 import java.util.regex.Pattern;
 
 public record ShaderProject(
     String namespace,
     String path,
     String fragmentBody,
-    Set<Capability> capabilities
+    Set<Capability> capabilities,
+    List<TextureBinding> textures
 ) {
 
     private static final Pattern NAMESPACE_PATTERN = Pattern.compile("[a-z0-9_.-]+");
@@ -26,6 +28,7 @@ public record ShaderProject(
             throw new IllegalArgumentException("Shader fragment body must not be blank");
         }
         capabilities = immutableCapabilities(capabilities);
+        textures = textures == null ? List.of() : List.copyOf(textures);
     }
 
     public String resourceId() {
@@ -43,5 +46,17 @@ public record ShaderProject(
         CAMERA_ORIENTATION,
         COLOR_KEY,
         LOCAL_UV_BOUNDS
+    }
+
+    public record TextureBinding(String samplerName, String projectPath) {
+
+        public TextureBinding {
+            if (samplerName == null || samplerName.isBlank()) {
+                throw new IllegalArgumentException("Texture sampler name must not be blank");
+            }
+            if (projectPath == null || projectPath.isBlank()) {
+                throw new IllegalArgumentException("Texture project path must not be blank");
+            }
+        }
     }
 }

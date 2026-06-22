@@ -9,6 +9,7 @@ public final class ShaderModuleInstance {
     private final ShaderModuleDefinition definition;
     private final Map<String, Float> values = new LinkedHashMap<>();
     private boolean enabled = true;
+    private String imagePath;
 
     public ShaderModuleInstance(ShaderModuleDefinition definition) {
         if (definition == null) {
@@ -49,12 +50,21 @@ public final class ShaderModuleInstance {
         return Collections.unmodifiableMap(values);
     }
 
+    public String imagePath() {
+        return imagePath;
+    }
+
+    public void setImagePath(String imagePath) {
+        this.imagePath = imagePath == null || imagePath.isBlank() ? null : imagePath;
+    }
+
     /* 深拷贝：definition 为不可变 record 共享引用，values 和 enabled 需独立拷贝 */
     public ShaderModuleInstance copy() {
         ShaderModuleInstance copy = new ShaderModuleInstance(definition);
         copy.values.clear();
         copy.values.putAll(this.values);
         copy.enabled = this.enabled;
+        copy.imagePath = this.imagePath;
         return copy;
     }
 

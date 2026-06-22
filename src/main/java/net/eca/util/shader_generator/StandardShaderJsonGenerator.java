@@ -42,7 +42,7 @@ public final class StandardShaderJsonGenerator {
         root.addProperty("vertex", vertexProgram);
         root.addProperty("fragment", fragmentProgram);
         root.add("attributes", createAttributes(targetProfile));
-        root.add("samplers", createSamplers());
+        root.add("samplers", createSamplers(project));
         root.add("uniforms", createUniforms(project, exportMode));
         return GSON.toJson(root) + "\n";
     }
@@ -63,10 +63,13 @@ public final class StandardShaderJsonGenerator {
         return attributes;
     }
 
-    private static JsonArray createSamplers() {
+    private static JsonArray createSamplers(ShaderProject project) {
         JsonArray samplers = new JsonArray();
         samplers.add(namedObject("Sampler0"));
         samplers.add(namedObject("Sampler2"));
+        for (ShaderProject.TextureBinding texture : project.textures()) {
+            samplers.add(namedObject(texture.samplerName()));
+        }
         return samplers;
     }
 

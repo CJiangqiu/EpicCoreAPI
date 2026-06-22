@@ -59,8 +59,32 @@ public final class ShaderCompositionProject {
             namespace,
             path,
             ShaderLayerComposer.compose(layers),
-            EnumSet.allOf(ShaderProject.Capability.class)
+            EnumSet.allOf(ShaderProject.Capability.class),
+            collectTextures()
         );
+    }
+
+    private List<ShaderProject.TextureBinding> collectTextures() {
+        List<ShaderProject.TextureBinding> textures = new ArrayList<>();
+        for (int layerIndex = 0; layerIndex < layers.size(); layerIndex++) {
+            ShaderLayer layer = layers.get(layerIndex);
+            if (layer.backgroundImagePath() != null) {
+                textures.add(new ShaderProject.TextureBinding(
+                    ShaderLayerComposer.layerSamplerName(layerIndex),
+                    layer.backgroundImagePath()
+                ));
+            }
+            for (int elementIndex = 0; elementIndex < layer.elements().size(); elementIndex++) {
+                ShaderModuleInstance element = layer.elements().get(elementIndex);
+                if (element.imagePath() != null) {
+                    textures.add(new ShaderProject.TextureBinding(
+                        ShaderLayerComposer.elementSamplerName(layerIndex, elementIndex),
+                        element.imagePath()
+                    ));
+                }
+            }
+        }
+        return textures;
     }
 
     /* 深拷贝，用于撤销系统保存工程快照 */

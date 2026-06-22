@@ -12,6 +12,11 @@ public final class ShaderLayer {
     private boolean visible = true;
     private ShaderLayerBlendMode blendMode = ShaderLayerBlendMode.NORMAL;
     private float opacity = 1.0F;
+    private float baseRed;
+    private float baseGreen;
+    private float baseBlue;
+    private float baseAlpha;
+    private String backgroundImagePath;
     private final List<ShaderModuleInstance> elements = new ArrayList<>();
 
     public ShaderLayer(String name) {
@@ -76,6 +81,39 @@ public final class ShaderLayer {
         this.opacity = Mth.clamp(opacity, 0.0F, 1.0F);
     }
 
+    public float baseRed() {
+        return baseRed;
+    }
+
+    public float baseGreen() {
+        return baseGreen;
+    }
+
+    public float baseBlue() {
+        return baseBlue;
+    }
+
+    public float baseAlpha() {
+        return baseAlpha;
+    }
+
+    public void setBaseColor(float red, float green, float blue, float alpha) {
+        this.baseRed = Mth.clamp(red, 0.0F, 1.0F);
+        this.baseGreen = Mth.clamp(green, 0.0F, 1.0F);
+        this.baseBlue = Mth.clamp(blue, 0.0F, 1.0F);
+        this.baseAlpha = Mth.clamp(alpha, 0.0F, 1.0F);
+    }
+
+    public String backgroundImagePath() {
+        return backgroundImagePath;
+    }
+
+    public void setBackgroundImagePath(String backgroundImagePath) {
+        this.backgroundImagePath = backgroundImagePath == null || backgroundImagePath.isBlank()
+            ? null
+            : backgroundImagePath;
+    }
+
     /** 仅 ShaderProjectCodec 反序列化时使用 */
     List<ShaderModuleInstance> getElementsInternal() {
         return elements;
@@ -89,6 +127,13 @@ public final class ShaderLayer {
         ShaderModuleInstance element = definition.createInstance();
         elements.add(element);
         return element;
+    }
+
+    public void addElement(ShaderModuleInstance element) {
+        if (element == null) {
+            throw new IllegalArgumentException("Shader module instance must not be null");
+        }
+        elements.add(element);
     }
 
     public void removeElement(int index) {
@@ -107,15 +152,14 @@ public final class ShaderLayer {
     }
 
     public static ShaderLayer createDefault() {
-        ShaderLayer layer = new ShaderLayer("Layer 1");
-        layer.addElement(ShaderModuleRegistry.get("gradient"));
-        layer.addElement(ShaderModuleRegistry.get("rings"));
-        return layer;
+        return new ShaderLayer("Layer 1");
     }
 
     /* 深拷贝，用于撤销/重做系统 */
     public ShaderLayer copy() {
         ShaderLayer copy = new ShaderLayer(name, visible, blendMode, opacity);
+        copy.setBaseColor(baseRed, baseGreen, baseBlue, baseAlpha);
+        copy.backgroundImagePath = backgroundImagePath;
         for (ShaderModuleInstance element : elements) {
             copy.elements.add(element.copy());
         }
