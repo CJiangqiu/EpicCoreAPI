@@ -2,7 +2,6 @@
 
 uniform sampler2D Sampler0;
 uniform sampler2D Sampler1;
-uniform sampler2D Sampler2;
 uniform sampler2D Sampler3;
 uniform mat4 InvViewProjMat;
 uniform vec3 CameraPos;
@@ -18,18 +17,11 @@ float luminance(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
 }
 
-// 世界空间方向 → 等距圆柱 UV（天空用）
+// 世界空间方向 → 等距圆柱 UV（天空用，不再用于贴图采样，仅供星场坐标）
 vec2 equirectUV(vec3 dir) {
     float u = atan(dir.z, dir.x) * (1.0 / (2.0 * PI)) + 0.5;
     float v = asin(clamp(dir.y, -1.0, 1.0)) * (1.0 / PI) + 0.5;
     return vec2(u, v);
-}
-
-// 从贴图颜色还原：暗区压成纯黑，星点增亮，紫味交给星云负责
-vec3 enhanceCosmos(vec3 tex) {
-    float lum = luminance(tex);
-    vec3 boosted = tex * 3.0;
-    return mix(vec3(0.0), boosted, smoothstep(0.015, 0.12, lum));
 }
 
 // Dave Hoskins hash：无轴向相关，避免 fract(x*y) 那种网格状方块伪影
@@ -124,31 +116,56 @@ vec3 nebulaSphere(vec3 dir, float t) {
     return col * density * 0.35;
 }
 
-/* 程序化网格星：每格至多一颗，位置/亮度/相位各自哈希；
-   sin(Time*1.8+相位) 周期约 3.5 秒，整颗缓慢明灭，避免逐像素抖动 */
+/* 星星颜色按视觉偏好分布（白星为主，模拟夜空中肉眼可见的恒星比例）：
+   A 型（白）    ~35%  — 纯白亮星，最普遍
+   G 型（黄白）  ~25%  — 太阳型暖黄白
+   F 型（黄白亮）~15%  — 偏冷的亮黄白
+   K 型（橙）    ~12%  — 橙色
+   B 型（蓝白）  ~8%   — 蓝白亮星
+   M 型（橙红）  ~5%   — 暖橙红矮星，少量点缀
+   各型内部再按 hash 子段微调，避免同型千星一色 */
+vec3 stellarColor(float h) {
+    if (h < 0.35) {
+        // A 型白色，最普遍
+        float v = h / 0.35;
+        return mix(vec3(0.80, 0.85, 1.0), vec3(0.95, 0.97, 1.0), v);
+    } else if (h < 0.60) {
+        // G 型黄白（太阳型）
+        float v = (h - 0.35) / 0.25;
+        return mix(vec3(0.95, 0.88, 0.65), vec3(1.0, 0.97, 0.85), v);
+    } else if (h < 0.75) {
+        // F 型黄白亮星，偏冷
+        float v = (h - 0.60) / 0.15;
+        return mix(vec3(0.90, 0.92, 0.95), vec3(1.0, 1.0, 1.0), v);
+    } else if (h < 0.87) {
+        // K 型橙色
+        float v = (h - 0.75) / 0.12;
+        return mix(vec3(0.95, 0.70, 0.35), vec3(1.0, 0.85, 0.55), v);
+    } else if (h < 0.95) {
+        // B 型蓝白亮星
+        float v = (h - 0.87) / 0.08;
+        return mix(vec3(0.60, 0.70, 1.0), vec3(0.78, 0.85, 1.0), v);
+    } else {
+        // M 型橙红矮星，少量点缀
+        float v = (h - 0.95) / 0.05;
+        return mix(vec3(0.85, 0.40, 0.18), vec3(1.0, 0.60, 0.30), v);
+    }
+}
+
+/* 程序化多彩星星：每格至多一颗，位置/颜色/相位各自哈希；
+   sin(Time*1.8+相位) 周期约 3.5 秒，整颗缓慢明灭，避免逐像素抖动。
+   颜色按真实恒星光谱分布概率随机选取 */
 vec3 twinkleStars(vec2 uv, float t) {
     vec2 cell = floor(uv);
     vec2 local = fract(uv);
     float present = step(0.80, hash21(cell + 7.3));
     vec2 starPos = vec2(hash21(cell + 1.7), hash21(cell + 4.9));
-    float star = smoothstep(0.13, 0.0, length(local - starPos)) * present;
+    float star = smoothstep(0.091, 0.0, length(local - starPos)) * present;
     float phase = hash21(cell + 3.1);
     float twinkle = 0.5 + 0.5 * sin(t * 1.8 + phase * 6.2831);
     float bright = 0.7 + 0.3 * hash21(cell + 11.7);
-    return vec3(star * twinkle * bright);
-}
-
-/* 三平面投影（triplanar）：用世界坐标直接 UV 平铺贴图，
-   比 normalize 方向采样分辨率均匀，消除近处极度放大问题 */
-vec3 triplanar(vec3 worldPos, vec3 nrm, float scale) {
-    vec3 blend = abs(nrm);
-    blend = pow(blend, vec3(6.0));
-    blend /= blend.x + blend.y + blend.z + 0.0001;
-
-    vec3 colX = enhanceCosmos(texture(Sampler2, worldPos.yz * scale).rgb);
-    vec3 colY = enhanceCosmos(texture(Sampler2, worldPos.xz * scale).rgb);
-    vec3 colZ = enhanceCosmos(texture(Sampler2, worldPos.xy * scale).rgb);
-    return colX * blend.x + colY * blend.y + colZ * blend.z;
+    vec3 col = stellarColor(hash21(cell + 19.3));
+    return col * star * twinkle * bright;
 }
 
 void main() {
@@ -169,32 +186,21 @@ void main() {
     vec3 worldPos = worldRel + CameraPos;
 
     if (depth >= 0.9999) {
-        // 天空/云朵：视线方向查全景图打底，叠球面星云薄雾与缓慢闪烁星
+        // 天空：纯黑底色 + 多彩星星（等距圆柱投影保持天球稳定）+ 球面星云薄雾
         vec3 dir = normalize(worldRel);
         vec2 skyUV = equirectUV(dir);
-        vec3 sky = enhanceCosmos(texture(Sampler2, skyUV).rgb);
-        sky += nebulaSphere(dir, Time);
+        vec3 sky = vec3(0.0);
         sky += twinkleStars(skyUV * 60.0, Time);
+        sky += nebulaSphere(dir, Time);
         fragColor = vec4(sky, 1.0);
         return;
     }
 
-    // 几何/实体表面：triplanar worldPos 平铺，法线由深度梯度估算
-    vec3 dpdx = dFdx(worldPos);
-    vec3 dpdy = dFdy(worldPos);
-    vec3 crossP = cross(dpdx, dpdy);
-    float crossLen = length(crossP);
-    // 深度不连续处（边缘）crossLen 过大说明法线无效，回退到朝上
-    vec3 nrm = (crossLen > 0.001 && crossLen < 50.0)
-        ? crossP / crossLen
-        : vec3(0.0, 1.0, 0.0);
-
-    // 每 40 格重复一次贴图（scale = 1/40 = 0.025）
-    vec3 cosmic = triplanar(worldPos, nrm, 0.025);
-    cosmic += nebula(worldPos.xz * 0.03, Time);
-
-    // 用原始明暗调制，保留形状立体感
-    float lum   = luminance(scene);
-    float shade = 0.5 + 0.5 * lum;
-    fragColor = vec4(cosmic * shade, 1.0);
+    // 几何/实体表面：暗色基底 + 星点 + 星云，用原始明暗调制保留立体感
+    vec3 surfaceCosmic = vec3(0.0);
+    surfaceCosmic += twinkleStars(worldPos.xz * 0.15, Time);
+    surfaceCosmic += nebula(worldPos.xz * 0.03, Time);
+    float lum = luminance(scene);
+    float shade = 0.3 + 0.7 * lum;
+    fragColor = vec4(surfaceCosmic * shade, 1.0);
 }

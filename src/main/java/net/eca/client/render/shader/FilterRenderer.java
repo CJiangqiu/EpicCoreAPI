@@ -56,7 +56,6 @@ public class FilterRenderer {
     private static long toxicStartNanos;
     private static long cosmosStartNanos;
     private static final Set<FilterType> activeFilters = EnumSet.noneOf(FilterType.class);
-    private static final ResourceLocation COSMOS_TEXTURE = ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "textures/shader/cosmos.png");
 
     private static int copyFbo = -1;
     private static int depthCopyTexture = -1;
@@ -662,7 +661,6 @@ public class FilterRenderer {
         float time = (System.nanoTime() - cosmosStartNanos) / 1_000_000_000.0f;
         renderWorldFilterPass(event, cosmosShader, shader -> {
             Minecraft mc = Minecraft.getInstance();
-            RenderSystem.setShaderTexture(2, COSMOS_TEXTURE);
             RenderSystem.setShaderTexture(3, cosmosTerrainDepthTexture);
             if (shader.getUniform("ScreenSize") != null) {
                 shader.getUniform("ScreenSize").set((float) mc.getMainRenderTarget().width, (float) mc.getMainRenderTarget().height);
