@@ -747,7 +747,18 @@ public final class HealthDataflowAnalyzer {
         }
         if (root instanceof Op op) {
             int idx = findArgWithSinkDetailed(op.args(), sink);
-            if (idx == -2) return HealthSolveResult.failure(HealthSolveFailure.MULTI_LOCATION_UNSUPPORTED, "sink occurs in multiple operands");
+            if (idx == -2) {
+                Inverter inv = TABLE.lookupOp(op.opcode());
+                if (inv == null) return HealthSolveResult.failure(HealthSolveFailure.INVERTER_MISSING, "opcode=" + op.opcode());
+                for (int i = 0; i < op.args().size(); i++) {
+                    if (!containsSink(op.args().get(i), sink)) continue;
+                    Object newT = inv.invert(target, op.args(), i, ctx);
+                    if (newT == null) continue;
+                    HealthSolveResult result = solveDetailed(op.args().get(i), sink, newT, ctx);
+                    if (result.solved()) return result;
+                }
+                return HealthSolveResult.failure(HealthSolveFailure.MULTI_LOCATION_UNSUPPORTED, "sink occurs in multiple operands");
+            }
             if (idx < 0) return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "sink is absent from operation");
             Inverter inv = TABLE.lookupOp(op.opcode());
             if (inv == null) return HealthSolveResult.failure(HealthSolveFailure.INVERTER_MISSING, "opcode=" + op.opcode());
@@ -757,7 +768,22 @@ public final class HealthDataflowAnalyzer {
         }
         if (root instanceof Call call) {
             int idx = findArgWithSinkDetailed(call.args(), sink);
-            if (idx == -2) return HealthSolveResult.failure(HealthSolveFailure.MULTI_LOCATION_UNSUPPORTED, "sink occurs in multiple call operands");
+            if (idx == -2) {
+                Inverter inv = TABLE.lookupCall(call.owner(), call.name(), call.desc());
+                if (inv == null) {
+                    HealthSolveFailure failure = call.owner().startsWith("java/util/function/")
+                        ? HealthSolveFailure.CALL_NOT_RESOLVED : HealthSolveFailure.INVERTER_MISSING;
+                    return HealthSolveResult.failure(failure, call.owner() + "#" + call.name() + call.desc());
+                }
+                for (int i = 0; i < call.args().size(); i++) {
+                    if (!containsSink(call.args().get(i), sink)) continue;
+                    Object newT = inv.invert(target, call.args(), i, ctx);
+                    if (newT == null) continue;
+                    HealthSolveResult result = solveDetailed(call.args().get(i), sink, newT, ctx);
+                    if (result.solved()) return result;
+                }
+                return HealthSolveResult.failure(HealthSolveFailure.MULTI_LOCATION_UNSUPPORTED, "sink occurs in multiple call operands");
+            }
             if (idx < 0) return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "sink is absent from call");
             Inverter inv = TABLE.lookupCall(call.owner(), call.name(), call.desc());
             if (inv == null) {
@@ -1149,6 +1175,23 @@ public final class HealthDataflowAnalyzer {
         registerIdentityCall("net/minecraft/nbt/CompoundTag", "getInt", "(Ljava/lang/String;)I");
         registerIdentityCall("net/minecraft/nbt/CompoundTag", "getLong", "(Ljava/lang/String;)J");
         registerIdentityCall("net/minecraft/nbt/CompoundTag", "getDouble", "(Ljava/lang/String;)D");
+
+        // String.substring(str, begin, end)：sink 在 arg[0] 时，从当前值取前缀/后缀还原完整字符串
+        TABLE.registerCall("java/lang/String", "substring", "(II)Ljava/lang/String;",
+            (t, args, idx, ctx) -> {
+                if (idx != 0 || !(t instanceof String target)) return null;
+                int begin = ((Number) ctx.eval(args.get(1))).intValue();
+                Object endObj = ctx.eval(args.get(2));
+                int end = endObj instanceof Number n ? n.intValue() : -1;
+                if (!(args.get(0) instanceof Source src)) return null;
+                Object cur = src.read(ctx.entity());
+                if (!(cur instanceof String s)) return null;
+                if (end >= 0 && s.length() >= end)
+                    return s.substring(0, begin) + target + s.substring(end);
+                if (end < 0 && s.length() >= begin)
+                    return s.substring(0, begin) + target;
+                return null;
+            });
     }
 
     private static void registerArith(int op, char domain) {

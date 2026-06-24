@@ -70,6 +70,9 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             registered = true;
         }
 
+        //注册永久捕获器排在链尾，之后所有类加载/retransform 自动缓存最终字节码
+        RuntimeBytecodeProvider.registerPermanentCapture(inst);
+
         retransformLoadedClasses(inst);
     }
 
