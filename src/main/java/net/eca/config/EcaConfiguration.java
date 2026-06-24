@@ -7,6 +7,9 @@ public class EcaConfiguration {
     public static final ForgeConfigSpec SPEC;
 
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_ENABLE_RADICAL_LOGIC;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_METHOD_PROBE;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_WRITE_SITE_BRIDGE;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_NUMERIC_INVERSION;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_ENABLE_RADICAL_LOGIC;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
     public static ForgeConfigSpec.ConfigValue<Boolean> ENABLE_CUSTOM_LOADING_BACKGROUND;
@@ -22,6 +25,25 @@ public class EcaConfiguration {
         ATTACK_ENABLE_RADICAL_LOGIC = BUILDER
             .comment("Enable radical attack logic: memoryRemove, AllReturn, aggressive setHealth, etc. WARNING: This may cause game instability!")
             .define("Enable Radical Logic", false);
+
+        BUILDER.push("setHealth");
+
+        ATTACK_SET_HEALTH_ENABLE_METHOD_PROBE = BUILDER
+            .comment("启动 setHealth 方法探针：数据流逆向失败后尝试调用实体自身的数值写入方法。需要 Attack.Enable Radical Logic。",
+                     "Enable method probe for setHealth after dataflow analysis fails. Requires Attack.Enable Radical Logic.")
+            .define("Enable Method Probe", false);
+
+        ATTACK_SET_HEALTH_ENABLE_WRITE_SITE_BRIDGE = BUILDER
+            .comment("启动 setHealth 写入点桥接：方法探针失败后尝试桥接候选方法内部已有的真实写入点。需要 Attack.Enable Radical Logic。",
+                     "Enable write site bridge for setHealth after method probe fails. Requires Attack.Enable Radical Logic.")
+            .define("Enable Write Site Bridge", false);
+
+        ATTACK_SET_HEALTH_ENABLE_NUMERIC_INVERSION = BUILDER
+            .comment("启动 setHealth 数值反演：数据流逆向和方法探针失败后尝试通过数值扰动定位真实血量。需要 Attack.Enable Radical Logic。",
+                     "Enable numeric inversion for setHealth after dataflow analysis fails. Requires Attack.Enable Radical Logic.")
+            .define("Enable Numeric Inversion", false);
+
+        BUILDER.pop();
 
         BUILDER.pop();
 
@@ -80,6 +102,18 @@ public class EcaConfiguration {
 
     public static boolean getAttackEnableRadicalLogicSafely() {
         return safeGet(ATTACK_ENABLE_RADICAL_LOGIC, false);
+    }
+
+    public static boolean getAttackSetHealthEnableMethodProbeSafely() {
+        return safeGet(ATTACK_SET_HEALTH_ENABLE_METHOD_PROBE, false);
+    }
+
+    public static boolean getAttackSetHealthEnableWriteSiteBridgeSafely() {
+        return safeGet(ATTACK_SET_HEALTH_ENABLE_WRITE_SITE_BRIDGE, false);
+    }
+
+    public static boolean getAttackSetHealthEnableNumericInversionSafely() {
+        return safeGet(ATTACK_SET_HEALTH_ENABLE_NUMERIC_INVERSION, false);
     }
 
     public static boolean getDefenceEnableRadicalLogicSafely() {

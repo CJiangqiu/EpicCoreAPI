@@ -182,6 +182,15 @@ public final class HealthDataflowAnalyzer {
             for (Expr a : cl.captured()) appendExpr(out, a, indent + "  ");
             return;
         }
+        if (e instanceof ArrayAllocExpr a) {
+            out.add(indent + "ArrayAlloc #" + a.id());
+            return;
+        }
+        if (e instanceof OptionalContentExpr o) {
+            out.add(indent + "OptionalContent");
+            appendExpr(out, o.optionalExpr(), indent + "  ");
+            return;
+        }
         if (e instanceof Choice ch) {
             out.add(indent + "Choice (" + ch.alternatives().size() + " alternatives)");
             for (Expr a : ch.alternatives()) appendExpr(out, a, indent + "  ");
@@ -242,6 +251,10 @@ public final class HealthDataflowAnalyzer {
     public record Call(String owner, String name, String desc, List<Expr> args) implements Expr {}
 
     public record Closure(Handle implementation, String samName, String samDesc, List<Expr> captured) implements Expr {}
+
+    public record ArrayAllocExpr(int id) implements Expr {}
+
+    public record OptionalContentExpr(Expr optionalExpr) implements Expr {}
 
     //控制流汇合 / 多 return 路径的并集
     public record Choice(List<Expr> alternatives) implements Expr {}
@@ -397,7 +410,8 @@ public final class HealthDataflowAnalyzer {
         try {
             Class<?> owner = loadClass(step.ownerInternal());
             if (owner == null) return null;
-            Field f = owner.getDeclaredField(step.name());
+            Field f = findFieldInHierarchy(owner, step.name());
+            if (f == null) return null;
             f.setAccessible(true);
             return f;
         } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
@@ -475,6 +489,91 @@ public final class HealthDataflowAnalyzer {
     }
 
     //SynchedEntityData.get(accessor) - 读写 DataItem.value
+    public static final class CapabilityDataSource extends Source {
+        public final Expr containerExpr;
+        public final Expr keyExpr;
+        public final List<FieldStep> chain;
+
+        public CapabilityDataSource(Expr containerExpr, Expr keyExpr, List<FieldStep> chain, Class<?> valueType) {
+            super(valueType, "CAP:" + (chain.isEmpty() ? "value" : describeCapabilityChain(chain)));
+            this.containerExpr = containerExpr;
+            this.keyExpr = keyExpr;
+            this.chain = chain;
+        }
+
+        private static String describeCapabilityChain(List<FieldStep> chain) {
+            StringBuilder sb = new StringBuilder();
+            for (FieldStep step : chain) {
+                if (sb.length() > 0) sb.append('.');
+                sb.append(step.name());
+            }
+            return sb.toString();
+        }
+
+        @Override public Object read(LivingEntity entity) {
+            try {
+                EvalContext ctx = new SimpleEvalContext(entity);
+                Object slot = readCapabilitySlot(ctx);
+                for (FieldStep step : chain) {
+                    if (slot == null) return null;
+                    slot = readField(slot, step);
+                }
+                return slot;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+                return null;
+            }
+        }
+
+        @Override public boolean write(LivingEntity entity, Object value) {
+            try {
+                EvalContext ctx = new SimpleEvalContext(entity);
+                Object container = evaluate(containerExpr, ctx);
+                Object key = evaluate(keyExpr, ctx);
+                if (container == null || key == null) return false;
+                if (chain.isEmpty()) return writeCapabilitySlot(container, key, value);
+
+                Object slot = readCapabilitySlot(container, key);
+                if (slot == null) return false;
+                Object cur = slot;
+                for (int i = 0; i < chain.size() - 1; i++) {
+                    cur = readField(cur, chain.get(i));
+                    if (cur == null) return false;
+                }
+                FieldStep leaf = chain.get(chain.size() - 1);
+                if (!writeFieldViaSetter(cur, leaf, value) && !writeField(cur, leaf, value)) return false;
+                writeCapabilitySlot(container, key, slot);
+                return true;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+                return false;
+            }
+        }
+
+        private Object readCapabilitySlot(EvalContext ctx) {
+            Object container = evaluate(containerExpr, ctx);
+            Object key = evaluate(keyExpr, ctx);
+            return container == null || key == null ? null : readCapabilitySlot(container, key);
+        }
+
+        private static Object readCapabilitySlot(Object container, Object key) {
+            Object value = invokeCompatible(container, "getValue", key);
+            return value == InvokeFailed.INSTANCE ? null : value;
+        }
+
+        private static boolean writeCapabilitySlot(Object container, Object key, Object value) {
+            return invokeCompatible(container, "setValue", key, value) != InvokeFailed.INSTANCE;
+        }
+
+        @Override protected String canonicalKey() {
+            StringBuilder sb = new StringBuilder("CAP:")
+                    .append(System.identityHashCode(containerExpr)).append(':')
+                    .append(System.identityHashCode(keyExpr)).append(':');
+            for (FieldStep step : chain) sb.append(step.ownerInternal()).append('.').append(step.name()).append(';');
+            return sb.toString();
+        }
+    }
+
     public static final class SynchedDataSource extends Source {
         public final EntityDataAccessor<?> accessor;
 
@@ -846,6 +945,7 @@ public final class HealthDataflowAnalyzer {
         else if (e instanceof Op op) for (Expr a : op.args()) collect(a, out);
         else if (e instanceof Call call) for (Expr a : call.args()) collect(a, out);
         else if (e instanceof Closure closure) for (Expr a : closure.captured()) collect(a, out);
+        else if (e instanceof OptionalContentExpr optional) collect(optional.optionalExpr(), out);
         else if (e instanceof Choice c) for (Expr a : c.alternatives()) collect(a, out);
     }
 
@@ -855,6 +955,10 @@ public final class HealthDataflowAnalyzer {
         //this 占位符解析为接收者实体，使 getHealth = f(this.method(), this.field) 中的 this 方法调用可被 concrete 求值
         if (e == EntityParamMarker.I) return ctx.entity();
         if (e instanceof Source s) return s.read(ctx.entity());
+        if (e instanceof OptionalContentExpr optional) {
+            Object container = evaluate(optional.optionalExpr(), ctx);
+            return unwrapOptionalContent(container);
+        }
         if (e instanceof Choice c) {
             for (Expr alt : c.alternatives()) {
                 Object v = evaluate(alt, ctx);
@@ -1420,13 +1524,55 @@ public final class HealthDataflowAnalyzer {
                 pts[i] = asmTypeToClass(argTypes[i]);
                 if (pts[i] == null) return null;
                 Object v = evaluate(call.args().get(start + i), ctx);
-                pvs[i] = coerceArg(v, pts[i]);
+                pvs[i] = v;
             }
-            Method m = findMethod(owner, call.name(), pts);
+            Class<?> dispatchOwner = recv == null ? owner : recv.getClass();
+            Method m = findMethod(dispatchOwner, call.name(), pts, pvs);
+            if (m == null && dispatchOwner != owner) m = findMethod(owner, call.name(), pts, pvs);
             if (m == null) return null;
             m.setAccessible(true);
+            Class<?>[] actualTypes = m.getParameterTypes();
+            for (int i = 0; i < pvs.length; i++) pvs[i] = coerceArg(pvs[i], actualTypes[i]);
             return m.invoke(recv, pvs);
         } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
+    }
+
+    private enum InvokeFailed { INSTANCE }
+
+    private static Object invokeCompatible(Object receiver, String name, Object... args) {
+        if (receiver == null) return InvokeFailed.INSTANCE;
+        try {
+            Method method = findMethodByRuntimeArgs(receiver.getClass(), name, args);
+            if (method == null) return InvokeFailed.INSTANCE;
+            method.setAccessible(true);
+            Class<?>[] types = method.getParameterTypes();
+            Object[] coerced = new Object[args.length];
+            for (int i = 0; i < args.length; i++) coerced[i] = coerceArg(args[i], types[i]);
+            return method.invoke(receiver, coerced);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return InvokeFailed.INSTANCE;
+        }
+    }
+
+    private static Object unwrapOptionalContent(Object container) {
+        if (container == null) return null;
+        try {
+            if (container instanceof Optional<?> optional) return optional.orElse(null);
+            try {
+                Method resolve = container.getClass().getMethod("resolve");
+                Object resolved = resolve.invoke(container);
+                if (resolved instanceof Optional<?> optional) return optional.orElse(null);
+            } catch (NoSuchMethodException ignored) {}
+            try {
+                Method orElse = container.getClass().getMethod("orElse", Object.class);
+                return orElse.invoke(container, new Object[] { null });
+            } catch (NoSuchMethodException ignored) {}
+            return null;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
     }
 
     /* ==================== AnalysisResult + 入口 ==================== */
@@ -1593,6 +1739,8 @@ public final class HealthDataflowAnalyzer {
                     Frame<TaintValue> f = frames[idx];
                     if (f != null && f.getStackSize() > 0) {
                         Expr e = f.getStack(f.getStackSize() - 1).expr;
+                        Expr expanded = expandArrayReturn(mn, frames, idx, e, ctx, depth);
+                        if (expanded != null && !collectSources(expanded).isEmpty()) e = expanded;
                         if (e != null && !(e instanceof UnknownExpr)) returns.add(e);
                     }
                 }
@@ -1615,6 +1763,162 @@ public final class HealthDataflowAnalyzer {
         List<Expr> out = new ArrayList<>();
         for (Expr e : in) if (!out.contains(e)) out.add(e);
         return out;
+    }
+
+    private static Expr expandArrayReturn(MethodNode mn, Frame<TaintValue>[] frames, int returnIndex,
+                                          Expr returnExpr, AnalysisCtx ctx, int depth) {
+        if (!(returnExpr instanceof ArrayElementSource array)
+                || !(array.arrayExpr instanceof ArrayAllocExpr targetArray)) {
+            return null;
+        }
+        Expr targetIndex = array.indexExpr;
+        List<Expr> writes = new ArrayList<>();
+        int i = 0;
+        for (AbstractInsnNode insn : mn.instructions) {
+            if (i >= returnIndex) break;
+            Frame<TaintValue> frame = frames[i];
+            Expr direct = directArrayStore(frame, insn, targetArray, targetIndex);
+            if (direct != null && !(direct instanceof UnknownExpr) && !writes.contains(direct)) {
+                writes.add(direct);
+            }
+            if (insn instanceof MethodInsnNode call && isIfPresentCall(call)) {
+                Expr fromLambda = ifPresentArrayStore(frame, call, targetArray, targetIndex, ctx, depth);
+                if (fromLambda != null && !(fromLambda instanceof UnknownExpr) && !writes.contains(fromLambda)) {
+                    writes.add(fromLambda);
+                }
+            }
+            i++;
+        }
+        if (writes.isEmpty()) return null;
+        return writes.size() == 1 ? writes.get(0) : new Choice(writes);
+    }
+
+    private static Expr directArrayStore(Frame<TaintValue> frame, AbstractInsnNode insn,
+                                         ArrayAllocExpr targetArray, Expr targetIndex) {
+        if (frame == null || !isArrayStoreOpcode(insn.getOpcode()) || frame.getStackSize() < 3) return null;
+        Expr array = frame.getStack(frame.getStackSize() - 3).expr;
+        Expr index = frame.getStack(frame.getStackSize() - 2).expr;
+        Expr value = frame.getStack(frame.getStackSize() - 1).expr;
+        return targetArray.equals(array) && sameIndex(targetIndex, index) ? value : null;
+    }
+
+    private static Expr ifPresentArrayStore(Frame<TaintValue> frame, MethodInsnNode call,
+                                           ArrayAllocExpr targetArray, Expr targetIndex,
+                                           AnalysisCtx ctx, int depth) {
+        if (frame == null) return null;
+        List<Expr> args = invokeValueExprs(call, frame);
+        if (args.size() < 2 || !(args.get(args.size() - 1) instanceof Closure closure)) return null;
+        Expr optional = args.get(0);
+        return analyzeClosureArrayStore(closure, List.of(new OptionalContentExpr(optional)),
+                targetArray, targetIndex, ctx, depth + 1);
+    }
+
+    private static boolean isIfPresentCall(MethodInsnNode call) {
+        if (!call.name.equals("ifPresent")) return false;
+        Type[] args = Type.getArgumentTypes(call.desc);
+        if (args.length != 1 || Type.getReturnType(call.desc) != Type.VOID_TYPE) return false;
+        return args[0].getSort() == Type.OBJECT;
+    }
+
+    private static List<Expr> invokeValueExprs(MethodInsnNode call, Frame<TaintValue> frame) {
+        Type[] args = Type.getArgumentTypes(call.desc);
+        boolean isStatic = call.getOpcode() == Opcodes.INVOKESTATIC;
+        int count = args.length + (isStatic ? 0 : 1);
+        if (frame.getStackSize() < count) return List.of();
+        int start = frame.getStackSize() - count;
+        List<Expr> values = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) values.add(frame.getStack(start + i).expr);
+        return values;
+    }
+
+    private static Expr analyzeClosureArrayStore(Closure closure, List<Expr> invocationArgs,
+                                                 ArrayAllocExpr targetArray, Expr targetIndex,
+                                                 AnalysisCtx ctx, int depth) {
+        Handle implementation = closure.implementation();
+        Class<?> owner = loadClass(implementation.getOwner());
+        if (owner == null || ctx.inlineBudget <= 0) return null;
+
+        boolean isStatic = implementation.getTag() == Opcodes.H_INVOKESTATIC;
+        List<Expr> seeds = new ArrayList<>();
+        if (isStatic) {
+            seeds.addAll(closure.captured());
+        } else {
+            if (closure.captured().isEmpty()) return null;
+            seeds.add(closure.captured().get(0));
+            seeds.addAll(closure.captured().subList(1, closure.captured().size()));
+        }
+        seeds.addAll(invocationArgs);
+
+        Type[] argTypes = Type.getArgumentTypes(implementation.getDesc());
+        int expectedSeeds = argTypes.length + (isStatic ? 0 : 1);
+        if (seeds.size() != expectedSeeds) return null;
+
+        int localCount = isStatic ? 0 : 1;
+        for (Type type : argTypes) localCount += type.getSize();
+        TaintValue[] locals = new TaintValue[localCount + 8];
+        int local = 0;
+        int seed = 0;
+        if (!isStatic) locals[local++] = new TaintValue(1, seeds.get(seed++));
+        for (Type type : argTypes) {
+            locals[local] = new TaintValue(type.getSize(), seeds.get(seed++));
+            local += type.getSize();
+        }
+        ctx.inlineBudget--;
+        return analyzeArrayStore(owner, implementation.getName(), implementation.getDesc(),
+                locals, targetArray, targetIndex, ctx, depth + 1);
+    }
+
+    private static Expr analyzeArrayStore(Class<?> owner, String name, String desc, TaintValue[] seedLocals,
+                                          ArrayAllocExpr targetArray, Expr targetIndex,
+                                          AnalysisCtx ctx, int depth) {
+        String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc + "#arrayStore";
+        if (!ctx.inflight.add(cacheKey)) return UnknownExpr.UNKNOWN;
+        try {
+            byte[] bytes = classBytes(owner);
+            if (bytes == null) return null;
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
+            MethodNode mn = null;
+            for (MethodNode m : cn.methods) {
+                if (m.name.equals(name) && m.desc.equals(desc)) { mn = m; break; }
+            }
+            if (mn == null || mn.instructions.size() == 0) return null;
+
+            String ownerInternal = internalName(owner);
+            TaintInterpreter interp = new TaintInterpreter(ctx, depth, ownerInternal, seedLocals);
+            Analyzer<TaintValue> analyzer = new Analyzer<>(interp);
+            Frame<TaintValue>[] frames = analyzer.analyze(ownerInternal, mn);
+            List<Expr> writes = new ArrayList<>();
+            int i = 0;
+            for (AbstractInsnNode insn : mn.instructions) {
+                Expr direct = directArrayStore(frames[i], insn, targetArray, targetIndex);
+                if (direct != null && !(direct instanceof UnknownExpr) && !writes.contains(direct)) {
+                    writes.add(direct);
+                }
+                i++;
+            }
+            if (writes.isEmpty()) return null;
+            return writes.size() == 1 ? writes.get(0) : new Choice(writes);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        } finally {
+            ctx.inflight.remove(cacheKey);
+        }
+    }
+
+    private static boolean isArrayStoreOpcode(int opcode) {
+        return opcode == Opcodes.IASTORE || opcode == Opcodes.LASTORE || opcode == Opcodes.FASTORE
+                || opcode == Opcodes.DASTORE || opcode == Opcodes.AASTORE || opcode == Opcodes.BASTORE
+                || opcode == Opcodes.CASTORE || opcode == Opcodes.SASTORE;
+    }
+
+    private static boolean sameIndex(Expr a, Expr b) {
+        if (Objects.equals(a, b)) return true;
+        if (a instanceof Primitive pa && b instanceof Primitive pb) {
+            return pa.value().intValue() == pb.value().intValue();
+        }
+        return false;
     }
 
     private static final class TaintValue implements Value {
@@ -1708,7 +2012,7 @@ public final class HealthDataflowAnalyzer {
                 case Opcodes.CHECKCAST -> value;
                 case Opcodes.INSTANCEOF -> new TaintValue(1, UnknownExpr.UNKNOWN);
                 case Opcodes.ARRAYLENGTH -> new TaintValue(1, UnknownExpr.UNKNOWN);
-                case Opcodes.NEWARRAY, Opcodes.ANEWARRAY -> new TaintValue(1, UnknownExpr.UNKNOWN);
+                case Opcodes.NEWARRAY, Opcodes.ANEWARRAY -> new TaintValue(1, new ArrayAllocExpr(System.identityHashCode(insn)));
                 case Opcodes.IFEQ, Opcodes.IFNE, Opcodes.IFLT, Opcodes.IFGE,
                      Opcodes.IFGT, Opcodes.IFLE, Opcodes.IFNULL, Opcodes.IFNONNULL,
                      Opcodes.TABLESWITCH, Opcodes.LOOKUPSWITCH,
@@ -1787,6 +2091,11 @@ public final class HealthDataflowAnalyzer {
             }
 
             // Map.get / getOrDefault (任意 owner,运行时反射检测)
+            if (isCapabilityValueGet(m) && values.size() >= 2) {
+                return new TaintValue(sz, new CapabilityDataSource(values.get(0).expr, values.get(1).expr,
+                        List.of(), Object.class));
+            }
+
             if ((m.name.equals("get") || m.name.equals("getOrDefault"))
                 && values.size() >= 2
                 && isMapClassByName(m.owner)) {
@@ -1805,6 +2114,11 @@ public final class HealthDataflowAnalyzer {
             }
 
             // 递归内联
+            Expr getter = tryInlineSimpleGetter(m, values);
+            if (getter != null && !(getter instanceof UnknownExpr)) {
+                return new TaintValue(sz, getter);
+            }
+
             if (depth + 1 < ctx.maxDepth && !m.name.startsWith("<")) {
                 Expr inlined = tryInline(m, values);
                 if (inlined != null && !(inlined instanceof UnknownExpr)) {
@@ -2045,6 +2359,57 @@ public final class HealthDataflowAnalyzer {
             return null;
         }
 
+        private Expr tryInlineSimpleGetter(MethodInsnNode m, List<? extends TaintValue> values) {
+            if (m.getOpcode() == Opcodes.INVOKESTATIC || m.name.startsWith("<")) return null;
+            if (m.owner.startsWith("java/") || m.owner.startsWith("javax/") || m.owner.startsWith("jdk/")) return null;
+            if (TABLE.lookupCall(m.owner, m.name, m.desc) != null) return null;
+            if (Type.getArgumentTypes(m.desc).length != 0 || values.isEmpty()) return null;
+            Expr receiver = values.get(0).expr;
+            if (receiver == null || receiver instanceof UnknownExpr) return null;
+            try {
+                Class<?> owner = loadClass(m.owner);
+                if (owner == null) return null;
+                byte[] bytes = classBytes(owner);
+                if (bytes == null) return null;
+                ClassNode cn = new ClassNode();
+                new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
+                for (MethodNode method : cn.methods) {
+                    if (!method.name.equals(m.name) || !method.desc.equals(m.desc)) continue;
+                    FieldInsnNode field = simpleGetterField(method);
+                    if (field == null) return null;
+                    return buildGetFieldSource(field, receiver);
+                }
+                return null;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                return null;
+            }
+        }
+
+        private FieldInsnNode simpleGetterField(MethodNode method) {
+            List<AbstractInsnNode> ops = meaningfulInstructions(method);
+            if (ops.size() != 3) return null;
+            if (ops.get(0).getOpcode() != Opcodes.ALOAD) return null;
+            if (!(ops.get(1) instanceof FieldInsnNode field) || field.getOpcode() != Opcodes.GETFIELD) return null;
+            if (!isReturnOpcode(ops.get(2).getOpcode())) return null;
+            Type returnType = Type.getReturnType(method.desc);
+            if (!field.desc.equals(returnType.getDescriptor())) return null;
+            return field;
+        }
+
+        private static List<AbstractInsnNode> meaningfulInstructions(MethodNode method) {
+            List<AbstractInsnNode> ops = new ArrayList<>();
+            for (AbstractInsnNode insn : method.instructions) {
+                if (insn.getOpcode() >= 0) ops.add(insn);
+            }
+            return ops;
+        }
+
+        private static boolean isReturnOpcode(int opcode) {
+            return opcode == Opcodes.IRETURN || opcode == Opcodes.LRETURN || opcode == Opcodes.FRETURN
+                    || opcode == Opcodes.DRETURN || opcode == Opcodes.ARETURN;
+        }
+
         private Expr tryInline(MethodInsnNode m, List<? extends TaintValue> values) {
             Class<?> owner = loadClass(m.owner);
             if (owner == null) return null;
@@ -2108,6 +2473,13 @@ public final class HealthDataflowAnalyzer {
                 Class<?> vt = descriptorToClass(step.desc());
                 return new ChainedFieldSource(cfs.root, ext, vt == null ? Object.class : vt);
             }
+            if (receiver instanceof CapabilityDataSource capability) {
+                List<FieldStep> ext = new ArrayList<>(capability.chain);
+                ext.add(step);
+                Class<?> vt = descriptorToClass(step.desc());
+                return new CapabilityDataSource(capability.containerExpr, capability.keyExpr, ext,
+                        vt == null ? Object.class : vt);
+            }
             if (receiver instanceof UnknownExpr || receiver == null) {
                 return UnknownExpr.UNKNOWN;
             }
@@ -2126,8 +2498,11 @@ public final class HealthDataflowAnalyzer {
                     if (owner == null) return UnknownExpr.UNKNOWN;
                     Class<?> ft = descriptorToClass(s.desc());
                     if (ft == null) return UnknownExpr.UNKNOWN;
-                    MethodHandles.Lookup lk = MethodHandles.privateLookupIn(owner, MethodHandles.lookup());
-                    handles[i] = lk.findVarHandle(owner, s.name(), ft);
+                    Field field = findFieldInHierarchy(owner, s.name());
+                    if (field == null) return UnknownExpr.UNKNOWN;
+                    Class<?> declaring = field.getDeclaringClass();
+                    MethodHandles.Lookup lk = MethodHandles.privateLookupIn(declaring, MethodHandles.lookup());
+                    handles[i] = lk.findVarHandle(declaring, s.name(), ft);
                     lastType = ft;
                 }
                 return new FieldChainSource(chain, handles, lastType);
@@ -2141,7 +2516,8 @@ public final class HealthDataflowAnalyzer {
             try {
                 Class<?> owner = loadClass(ownerInternal);
                 if (owner == null) return null;
-                Field f = owner.getDeclaredField(name);
+                Field f = findFieldInHierarchy(owner, name);
+                if (f == null) return null;
                 f.setAccessible(true);
                 if (!Modifier.isFinal(f.getModifiers())) return new StaticFieldSource(f);
                 Object value = f.get(null);
@@ -2190,6 +2566,27 @@ public final class HealthDataflowAnalyzer {
         return c != null && Map.class.isAssignableFrom(c);
     }
 
+    private static boolean isCapabilityValueGet(MethodInsnNode method) {
+        if (!method.name.equals("getValue")) return false;
+        Type[] args = Type.getArgumentTypes(method.desc);
+        if (args.length != 1 || Type.getReturnType(method.desc) == Type.VOID_TYPE) return false;
+        Class<?> owner = loadClass(method.owner);
+        Class<?> keyType = asmTypeToClass(args[0]);
+        if (owner == null || keyType == null) return false;
+        for (Class<?> c = owner; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Method candidate : c.getDeclaredMethods()) {
+                if (!candidate.getName().equals("setValue")) continue;
+                Class<?>[] params = candidate.getParameterTypes();
+                if (params.length != 2) continue;
+                if (boxedType(params[0]).isAssignableFrom(boxedType(keyType))
+                        || boxedType(keyType).isAssignableFrom(boxedType(params[0]))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static MapEntrySource.KeyKind detectKeyKind(Expr key) {
         if (key == EntityParamMarker.I) return MapEntrySource.KeyKind.ENTITY;
         if (key instanceof Call call && call.args().size() == 1 && call.args().get(0) == EntityParamMarker.I) {
@@ -2226,7 +2623,7 @@ public final class HealthDataflowAnalyzer {
         return null;
     }
 
-    private static Method findMethod(Class<?> owner, String name, Class<?>[] paramTypes) {
+    private static Method findMethod(Class<?> owner, String name, Class<?>[] paramTypes, Object[] argValues) {
         for (Class<?> c = owner; c != null && c != Object.class; c = c.getSuperclass()) {
             for (Method m : c.getDeclaredMethods()) {
                 if (!m.getName().equals(name)) continue;
@@ -2234,12 +2631,117 @@ public final class HealthDataflowAnalyzer {
                 if (mp.length != paramTypes.length) continue;
                 boolean match = true;
                 for (int i = 0; i < mp.length; i++) {
-                    if (!mp[i].equals(paramTypes[i]) && !mp[i].isAssignableFrom(paramTypes[i])) { match = false; break; }
+                    if (!methodArgMatches(mp[i], paramTypes[i], argValues == null ? null : argValues[i])) {
+                        match = false;
+                        break;
+                    }
                 }
                 if (match) return m;
             }
         }
+        return findInterfaceMethod(owner, name, paramTypes, argValues);
+    }
+
+    private static Method findInterfaceMethod(Class<?> owner, String name, Class<?>[] paramTypes, Object[] argValues) {
+        for (Class<?> iface : allInterfaces(owner)) {
+            for (Method method : iface.getMethods()) {
+                if (!method.getName().equals(name)) continue;
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != paramTypes.length) continue;
+                boolean match = true;
+                for (int i = 0; i < params.length; i++) {
+                    if (!methodArgMatches(params[i], paramTypes[i], argValues == null ? null : argValues[i])) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return method;
+            }
+        }
         return null;
+    }
+
+    private static Method findMethodByRuntimeArgs(Class<?> owner, String name, Object[] argValues) {
+        for (Class<?> c = owner; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Method method : c.getDeclaredMethods()) {
+                if (!method.getName().equals(name)) continue;
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != argValues.length) continue;
+                boolean match = true;
+                for (int i = 0; i < params.length; i++) {
+                    Object arg = argValues[i];
+                    if (arg == null) {
+                        if (params[i].isPrimitive()) {
+                            match = false;
+                            break;
+                        }
+                        continue;
+                    }
+                    Class<?> boxedParam = boxedType(params[i]);
+                    if (!boxedParam.isAssignableFrom(arg.getClass()) && coerceArg(arg, params[i]) == arg) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return method;
+            }
+        }
+        for (Class<?> iface : allInterfaces(owner)) {
+            for (Method method : iface.getMethods()) {
+                if (!method.getName().equals(name)) continue;
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != argValues.length) continue;
+                boolean match = true;
+                for (int i = 0; i < params.length; i++) {
+                    if (!runtimeArgMatches(params[i], argValues[i])) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return method;
+            }
+        }
+        return null;
+    }
+
+    private static Set<Class<?>> allInterfaces(Class<?> type) {
+        Set<Class<?>> result = new LinkedHashSet<>();
+        for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) collectInterfaces(c, result);
+        return result;
+    }
+
+    private static void collectInterfaces(Class<?> type, Set<Class<?>> result) {
+        for (Class<?> iface : type.getInterfaces()) {
+            if (result.add(iface)) collectInterfaces(iface, result);
+        }
+    }
+
+    private static boolean runtimeArgMatches(Class<?> param, Object arg) {
+        if (arg == null) return !param.isPrimitive();
+        Class<?> boxedParam = boxedType(param);
+        return boxedParam.isAssignableFrom(arg.getClass()) || coerceArg(arg, param) != arg;
+    }
+
+    private static boolean methodArgMatches(Class<?> methodParam, Class<?> descriptorParam, Object value) {
+        Class<?> boxedMethod = boxedType(methodParam);
+        Class<?> boxedDescriptor = boxedType(descriptorParam);
+        if (boxedMethod.equals(boxedDescriptor) || boxedMethod.isAssignableFrom(boxedDescriptor)) return true;
+        if (value == null) return !methodParam.isPrimitive();
+        return boxedMethod.isAssignableFrom(value.getClass()) || coerceArg(value, methodParam) != value;
+    }
+
+    private static Class<?> boxedType(Class<?> type) {
+        if (type == null || !type.isPrimitive()) return type;
+        if (type == boolean.class) return Boolean.class;
+        if (type == char.class) return Character.class;
+        if (type == byte.class) return Byte.class;
+        if (type == short.class) return Short.class;
+        if (type == int.class) return Integer.class;
+        if (type == long.class) return Long.class;
+        if (type == float.class) return Float.class;
+        if (type == double.class) return Double.class;
+        if (type == void.class) return Void.class;
+        return type;
     }
 
     static Class<?> asmTypeToClass(Type t) {
@@ -2339,10 +2841,55 @@ public final class HealthDataflowAnalyzer {
         try {
             Class<?> owner = loadClass(step.ownerInternal());
             if (owner == null) return null;
-            Field f = owner.getDeclaredField(step.name());
+            Field f = findFieldInHierarchy(owner, step.name());
+            if (f == null) return null;
             f.setAccessible(true);
             return f.get(target);
         } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
+    }
+
+    private static Field findFieldInHierarchy(Class<?> owner, String name) {
+        for (Class<?> c = owner; c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                return c.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static boolean writeFieldViaSetter(Object target, FieldStep step, Object value) {
+        if (target == null) return false;
+        Class<?> fieldType = descriptorToClass(step.desc());
+        if (fieldType == null) return false;
+        String suffix = step.name().isEmpty()
+                ? ""
+                : Character.toUpperCase(step.name().charAt(0)) + step.name().substring(1);
+        String[] names = suffix.isEmpty() ? new String[] {"set"} : new String[] {"set" + suffix, "setValue"};
+        for (String name : names) {
+            Method method = findSetter(target.getClass(), name, fieldType, value);
+            if (method == null) continue;
+            try {
+                method.setAccessible(true);
+                method.invoke(target, coerceArg(value, method.getParameterTypes()[0]));
+                return true;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+            }
+        }
+        return false;
+    }
+
+    private static Method findSetter(Class<?> owner, String name, Class<?> fieldType, Object value) {
+        for (Class<?> c = owner; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Method method : c.getDeclaredMethods()) {
+                if (!method.getName().equals(name)) continue;
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 1) continue;
+                if (methodArgMatches(params[0], fieldType, value)) return method;
+            }
+        }
+        return null;
     }
 
     private static boolean writeField(Object target, FieldStep step, Object value) {
@@ -2351,7 +2898,8 @@ public final class HealthDataflowAnalyzer {
         try {
             Class<?> owner = loadClass(step.ownerInternal());
             if (owner == null) return false;
-            f = owner.getDeclaredField(step.name());
+            f = findFieldInHierarchy(owner, step.name());
+            if (f == null) return false;
             f.setAccessible(true);
             ft = f.getType();
         } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return false; }

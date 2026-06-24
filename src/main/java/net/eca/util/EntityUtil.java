@@ -660,12 +660,33 @@ public class EntityUtil {
     public static boolean setHealth(LivingEntity entity, float expectedHealth) {
         if (entity == null) return false;
         try {
+            if (entity.level() != null && entity.level().isClientSide) {
+                if (!IS_FROM_SYNC.get()) return false;
+                setBasicHealth(entity, expectedHealth);
+                if (!(entity instanceof Player)) {
+                    EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
+                }
+                return EcaSetHealthManager.verify(entity, expectedHealth);
+            }
             //第一阶段，改原版实体血量数据
             float beforeHealth = getHealth(entity);
             setBasicHealth(entity, expectedHealth);
             if (!(entity instanceof Player)) {
                 //第二阶段，数据流逆向分析
-                EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
+                boolean dataflowOk = EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
+                if (!dataflowOk && EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
+                    boolean methodProbeOk = false;
+                    if (EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) {
+                        methodProbeOk = EcaSetHealthManager.setHealthByMethodProbe(entity, expectedHealth);
+                    }
+                    boolean bridgeOk = false;
+                    if (!methodProbeOk && EcaConfiguration.getAttackSetHealthEnableWriteSiteBridgeSafely()) {
+                        bridgeOk = EcaSetHealthManager.setHealthByWriteSiteBridge(entity, expectedHealth);
+                    }
+                    if (!methodProbeOk && !bridgeOk && EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely()) {
+                        EcaSetHealthManager.setHealthByNumericInversion(entity, expectedHealth);
+                    }
+                }
             }
             syncHealthToClients(entity, expectedHealth, beforeHealth);
             return EcaSetHealthManager.verify(entity, expectedHealth);

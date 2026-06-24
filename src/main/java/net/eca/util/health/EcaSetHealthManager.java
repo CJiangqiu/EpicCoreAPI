@@ -23,7 +23,10 @@ public final class EcaSetHealthManager {
     // 改血方法类型，后续会扩充更多 method
     public enum WriteMethod {
         VANILLA,    // 原版同步数据(DATA_HEALTH_ID)
-        DATAFLOW    // getHealth 字节码数据流逆向定位的存储
+        DATAFLOW,   // getHealth 字节码数据流逆向定位的存储
+        METHOD_PROBE,
+        WRITE_SITE_BRIDGE,
+        NUMERIC_INVERSION
     }
 
     // 改血写入器：把目标血量写进实体真实存储，成功返回 true
@@ -72,11 +75,71 @@ public final class EcaSetHealthManager {
         Class<?> cls = entity.getClass();
 
         HealthPath cached = PATHS.get(cls);
+        if (cached != null && cached.method() != WriteMethod.DATAFLOW) {
+            cached = null;
+        }
         if (cached != null && cached.write(entity, target) && verify(entity, target)) {
             return true;
         }
 
         HealthPath resolved = HealthDataflowAnalyzer.resolvePath(cls);
+        if (resolved == null) return false;
+        if (resolved.write(entity, target) && verify(entity, target)) {
+            PATHS.put(cls, resolved);
+            return true;
+        }
+        return false;
+    }
+
+    public static boolean setHealthByMethodProbe(LivingEntity entity, float target) {
+        if (entity == null) return false;
+        Class<?> cls = entity.getClass();
+
+        HealthPath cached = PATHS.get(cls);
+        if (cached != null && cached.method() == WriteMethod.METHOD_PROBE
+                && cached.write(entity, target) && verify(entity, target)) {
+            return true;
+        }
+
+        HealthPath resolved = HealthMethodProbe.resolvePath(entity, target);
+        if (resolved == null) return false;
+        if (resolved.write(entity, target) && verify(entity, target)) {
+            PATHS.put(cls, resolved);
+            return true;
+        }
+        return false;
+    }
+
+    public static boolean setHealthByNumericInversion(LivingEntity entity, float target) {
+        if (entity == null) return false;
+        Class<?> cls = entity.getClass();
+
+        HealthPath cached = PATHS.get(cls);
+        if (cached != null && cached.method() == WriteMethod.NUMERIC_INVERSION
+                && cached.write(entity, target) && verify(entity, target)) {
+            return true;
+        }
+
+        HealthPath resolved = HealthNumericInverter.resolvePath(entity, target);
+        if (resolved == null) return false;
+        if (resolved.write(entity, target) && verify(entity, target)) {
+            PATHS.put(cls, resolved);
+            return true;
+        }
+        return false;
+    }
+
+    public static boolean setHealthByWriteSiteBridge(LivingEntity entity, float target) {
+        if (entity == null) return false;
+        Class<?> cls = entity.getClass();
+
+        HealthPath cached = PATHS.get(cls);
+        if (cached != null && cached.method() == WriteMethod.WRITE_SITE_BRIDGE
+                && cached.write(entity, target) && verify(entity, target)) {
+            return true;
+        }
+
+        HealthPath resolved = HealthWriteSiteBridge.resolvePath(entity, target);
         if (resolved == null) return false;
         if (resolved.write(entity, target) && verify(entity, target)) {
             PATHS.put(cls, resolved);
