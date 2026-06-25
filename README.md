@@ -26,7 +26,6 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
 - `/eca cleanBossBar <targets>` - Clean up boss bars
 - `/eca allReturn <targets> <true|false>` - DANGER! Requires Attack Radical Logic config. Enable/disable return transformation on all boolean and void methods of the target entity's mod
 - `/eca allReturn global <true|false>` - DANGER! Enable/disable global AllReturn for all non-whitelisted mods
-- `/eca restore <targets> <true|false>` - DANGER! Requires Attack Radical Logic config. Force/cancel an entity instance delegating its core lifecycle methods (getHealth, setHealth, hurt, die, etc.) to vanilla LivingEntity behaviour
 - `/eca banSpawn <targets> <seconds>` - Ban spawning of selected entities' types for specified duration
 - `/eca banSpawn clear` - Unban all spawns in current dimension
 - `/eca setForceLoading <targets> <true|false>` - Enable/disable force chunk loading for entities
@@ -145,8 +144,6 @@ side="BOTH"
 - `removeProtectedPackage(prefix)` - Remove a package prefix from the protected list (built-in entries cannot be removed)
 - `isPackageProtected(className)` - Check if a class is system-protected
 - `getAllProtectedPackages()` - Get all protected package prefixes (built-in + custom)
-- `restoreEntity(entity)` - DANGER! Requires Attack Radical Logic config. Retransform the entity's custom class chain so this instance delegates getHealth/getMaxHealth/setHealth/hurt/die and other core lifecycle methods to vanilla LivingEntity behaviour (per-instance, reversible)
-- `unrestoreEntity(entity)` - Cancel the class-restore, returning the entity to its custom implementation
 - `getEntityExtensionRegistry()` - Get all registered entity extensions (Map<EntityType, EntityExtension>)
 - `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
 - `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
@@ -775,7 +772,6 @@ Any `.json` filename works, and you can have multiple files.
 - `/eca cleanBossBar <目标>` - 清理 Boss 血条
 - `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体的所属 mod 的全部布尔和 void 方法的 return transformation
 - `/eca allReturn global <true|false>` - 危险！启用/禁用全局 AllReturn，影响所有非白名单 mod
-- `/eca restore <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，还原/取消还原实体：强制指定实例将核心生命周期方法（getHealth、setHealth、hurt、die 等）委托给原版 LivingEntity 行为
 - `/eca banSpawn <目标> <秒数>` - 禁止选中实体的类型生成指定时长
 - `/eca banSpawn clear` - 解除当前维度所有禁生成
 - `/eca setForceLoading <目标> <true|false>` - 启用/禁用实体强加载
@@ -894,8 +890,6 @@ side="BOTH"
 - `removeProtectedPackage(prefix)` - 从保护列表移除包前缀（内置项不可移除）
 - `isPackageProtected(className)` - 检查类是否被系统保护
 - `getAllProtectedPackages()` - 获取所有受保护的包前缀（内置 + 自定义）
-- `restoreEntity(entity)` - 危险！需要开启激进攻击逻辑配置，重转换实体的自定义类链，使该实例将 getHealth/getMaxHealth/setHealth/hurt/die 等核心生命周期方法委托给原版 LivingEntity 行为（按实例生效，可逆）
-- `unrestoreEntity(entity)` - 取消类还原，使实体恢复其自定义实现
 - `getEntityExtensionRegistry()` - 获取所有已注册的实体扩展（Map<EntityType, EntityExtension>）
 - `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
 - `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）

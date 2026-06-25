@@ -7,11 +7,11 @@ public class EcaConfiguration {
     public static final ForgeConfigSpec SPEC;
 
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_ENABLE_RADICAL_LOGIC;
-    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_CLASS_RESTORE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_METHOD_PROBE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_WRITE_SITE_BRIDGE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_NUMERIC_INVERSION;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_ENABLE_RADICAL_LOGIC;
+    public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_INVULNERABLE_UNTARGETABLE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
     public static ForgeConfigSpec.ConfigValue<Boolean> ENABLE_CUSTOM_LOADING_BACKGROUND;
     public static ForgeConfigSpec.IntValue FORCE_LOADING_MAX_RENDER_DISTANCE;
@@ -28,11 +28,6 @@ public class EcaConfiguration {
             .define("Enable Radical Logic", false);
 
         BUILDER.push("setHealth");
-
-        ATTACK_SET_HEALTH_ENABLE_CLASS_RESTORE = BUILDER
-            .comment("Enable class restore fallback for setHealth. Requires Attack.Enable Radical Logic.",
-                     "Enable class restore fallback for setHealth after other health writers fail. Requires Attack.Enable Radical Logic.")
-            .define("Enable Class Restore", false);
 
         ATTACK_SET_HEALTH_ENABLE_METHOD_PROBE = BUILDER
             .comment("启动 setHealth 方法探针：数据流逆向失败后尝试调用实体自身的数值写入方法。需要 Attack.Enable Radical Logic。",
@@ -59,6 +54,11 @@ public class EcaConfiguration {
         DEFENCE_ENABLE_RADICAL_LOGIC = BUILDER
             .comment("Enable radical defence logic: ReTransformer after all mods loaded, etc.")
             .define("Enable Radical Logic", false);
+
+        DEFENCE_INVULNERABLE_UNTARGETABLE = BUILDER
+            .comment("启用后无敌实体不可被其他实体通过 setTarget 锁定为目标，",
+                     "Prevent mobs from targeting invulnerable entities via setTarget.")
+            .define("Invulnerable Entity Untargetable", true);
 
         BUILDER.pop();
 
@@ -110,10 +110,6 @@ public class EcaConfiguration {
         return safeGet(ATTACK_ENABLE_RADICAL_LOGIC, false);
     }
 
-    public static boolean getAttackSetHealthEnableClassRestoreSafely() {
-        return safeGet(ATTACK_SET_HEALTH_ENABLE_CLASS_RESTORE, false);
-    }
-
     public static boolean getAttackSetHealthEnableMethodProbeSafely() {
         return safeGet(ATTACK_SET_HEALTH_ENABLE_METHOD_PROBE, false);
     }
@@ -128,6 +124,10 @@ public class EcaConfiguration {
 
     public static boolean getDefenceEnableRadicalLogicSafely() {
         return safeGet(DEFENCE_ENABLE_RADICAL_LOGIC, false);
+    }
+
+    public static boolean getDefenceInvulnerableUntargetableSafely() {
+        return safeGet(DEFENCE_INVULNERABLE_UNTARGETABLE, true);
     }
 
     public static boolean getAttributeUnlockLimitsSafely() {

@@ -1,7 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
-
+import net.eca.config.EcaConfiguration;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
@@ -13,9 +13,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(Mob.class)
 public class MobMixin {
 
+    // 阻止其他实体将无敌实体锁定为目标
     @Inject(method = "setTarget", at = @At("HEAD"), cancellable = true)
     private void onSetTarget(LivingEntity target, CallbackInfo ci) {
-        if (EcaAPI.isInvulnerable(target)) {
+        if (EcaConfiguration.getDefenceInvulnerableUntargetableSafely() && EcaAPI.isInvulnerable(target)) {
             ci.cancel();
         }
     }

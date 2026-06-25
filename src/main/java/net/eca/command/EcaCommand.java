@@ -23,7 +23,6 @@ public class EcaCommand {
                 .then(LocationLockCommand.registerSubCommand())
                 .then(CleanupBossBarCommand.registerSubCommand())
                 .then(AllReturnCommand.registerSubCommand())
-                .then(RestoreCommand.registerSubCommand())
                 .then(SpawnBanCommand.registerSubCommand())
                 .then(ForceLoadingCommand.registerSubCommand())
                 .then(EntityExtensionCommand.registerSubCommand())

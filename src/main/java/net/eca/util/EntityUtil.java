@@ -668,11 +668,11 @@ public class EntityUtil {
                 }
                 return EcaSetHealthManager.verify(entity, expectedHealth);
             }
-            //第一阶段，改原版实体血量数据
+            // 记录同步前血量，只有最终成功时才向客户端广播。
             float beforeHealth = getHealth(entity);
             setBasicHealth(entity, expectedHealth);
             if (!(entity instanceof Player)) {
-                //第二阶段，数据流逆向分析
+                // 非原版血量返回路径需要逐级升级写入方式。
                 boolean dataflowOk = EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
                 if (!dataflowOk && EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
                     boolean methodProbeOk = false;
@@ -683,13 +683,8 @@ public class EntityUtil {
                     if (!methodProbeOk && EcaConfiguration.getAttackSetHealthEnableWriteSiteBridgeSafely()) {
                         bridgeOk = EcaSetHealthManager.setHealthByWriteSiteBridge(entity, expectedHealth);
                     }
-                    boolean numericOk = false;
                     if (!methodProbeOk && !bridgeOk && EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely()) {
-                        numericOk = EcaSetHealthManager.setHealthByNumericInversion(entity, expectedHealth);
-                    }
-                    if (!methodProbeOk && !bridgeOk && !numericOk
-                            && EcaConfiguration.getAttackSetHealthEnableClassRestoreSafely()) {
-                        EcaSetHealthManager.setHealthByClassRestore(entity, expectedHealth);
+                        EcaSetHealthManager.setHealthByNumericInversion(entity, expectedHealth);
                     }
                 }
             }
