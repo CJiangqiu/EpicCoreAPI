@@ -683,13 +683,21 @@ public class EntityUtil {
                     if (!methodProbeOk && EcaConfiguration.getAttackSetHealthEnableWriteSiteBridgeSafely()) {
                         bridgeOk = EcaSetHealthManager.setHealthByWriteSiteBridge(entity, expectedHealth);
                     }
+                    boolean numericOk = false;
                     if (!methodProbeOk && !bridgeOk && EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely()) {
-                        EcaSetHealthManager.setHealthByNumericInversion(entity, expectedHealth);
+                        numericOk = EcaSetHealthManager.setHealthByNumericInversion(entity, expectedHealth);
+                    }
+                    if (!methodProbeOk && !bridgeOk && !numericOk
+                            && EcaConfiguration.getAttackSetHealthEnableClassRestoreSafely()) {
+                        EcaSetHealthManager.setHealthByClassRestore(entity, expectedHealth);
                     }
                 }
             }
-            syncHealthToClients(entity, expectedHealth, beforeHealth);
-            return EcaSetHealthManager.verify(entity, expectedHealth);
+            boolean ok = EcaSetHealthManager.verify(entity, expectedHealth);
+            if (ok) {
+                syncHealthToClients(entity, expectedHealth, beforeHealth);
+            }
+            return ok;
         } catch (Exception e) {
             EcaLogger.warn("setHealth threw exception entity={} expected={} msg={}",
                 entity.getClass().getName(), expectedHealth, e.getMessage());
@@ -701,7 +709,11 @@ public class EntityUtil {
     public static void setHealthFromSync(LivingEntity entity, float expectedHealth) {
         IS_FROM_SYNC.set(true);
         try {
-            setHealth(entity, expectedHealth);
+            if (entity == null) return;
+            setBasicHealth(entity, expectedHealth);
+            if (!(entity instanceof Player)) {
+                EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
+            }
         } finally {
             IS_FROM_SYNC.set(false);
         }

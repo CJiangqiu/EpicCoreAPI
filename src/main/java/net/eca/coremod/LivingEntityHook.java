@@ -30,6 +30,10 @@ public final class LivingEntityHook {
      * @return locked/banned health value, or NaN for passthrough
      */
     public static float processGetHealth(LivingEntity entity) {
+        if (RestoreManager.isRestored(entity)) {
+            return Float.NaN;
+        }
+
         // 锁血：直接返回锁定值
         Float locked = HealthLockManager.getLock(entity);
         if (locked != null) {
@@ -59,6 +63,9 @@ public final class LivingEntityHook {
         if (entity == null) {
             return Float.NaN;
         }
+        if (RestoreManager.isRestored(entity)) {
+            return Float.NaN;
+        }
         Float locked = HealthLockManager.getMaxHealthLock(entity);
         if (locked != null) {
             return locked;
@@ -78,6 +85,9 @@ public final class LivingEntityHook {
      */
     public static int processIsDeadOrDying(LivingEntity entity) {
         if (entity == null) {
+            return -1;
+        }
+        if (RestoreManager.isRestored(entity)) {
             return -1;
         }
         if (EcaAPI.isInvulnerable(entity)) {
@@ -102,6 +112,9 @@ public final class LivingEntityHook {
      */
     public static int processIsAlive(LivingEntity entity) {
         if (entity == null) {
+            return -1;
+        }
+        if (RestoreManager.isRestored(entity)) {
             return -1;
         }
         if (EcaAPI.isInvulnerable(entity)) {

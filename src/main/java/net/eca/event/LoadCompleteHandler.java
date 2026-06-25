@@ -30,6 +30,8 @@ import org.objectweb.asm.tree.VarInsnNode;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Method;
+import java.security.ProtectionDomain;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -146,14 +148,14 @@ public final class LoadCompleteHandler {
         return new ClassFileTransformer() {
             @Override
             public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
-                                    java.security.ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+                                    ProtectionDomain protectionDomain, byte[] classfileBuffer) {
                 captureClassBytes(out, className, classfileBuffer);
                 return null;
             }
 
             @Override
             public byte[] transform(Module module, ClassLoader loader, String className, Class<?> classBeingRedefined,
-                                    java.security.ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+                                    ProtectionDomain protectionDomain, byte[] classfileBuffer) {
                 captureClassBytes(out, className, classfileBuffer);
                 return null;
             }
@@ -263,7 +265,7 @@ public final class LoadCompleteHandler {
     }
 
     private static boolean hasDeclaredMethod(Class<?> clazz, String methodName, String descriptor) {
-        for (java.lang.reflect.Method method : clazz.getDeclaredMethods()) {
+        for (Method method : clazz.getDeclaredMethods()) {
             if (!method.getName().equals(methodName)) {
                 continue;
             }
@@ -274,7 +276,7 @@ public final class LoadCompleteHandler {
         return false;
     }
 
-    private static String getMethodDescriptor(java.lang.reflect.Method method) {
+    private static String getMethodDescriptor(Method method) {
         StringBuilder sb = new StringBuilder("(");
         for (Class<?> paramType : method.getParameterTypes()) {
             sb.append(getTypeDescriptor(paramType));

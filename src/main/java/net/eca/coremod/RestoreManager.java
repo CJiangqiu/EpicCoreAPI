@@ -38,11 +38,7 @@ public final class RestoreManager {
             return false;
         }
 
-        List<Class<?>> chain = new ArrayList<>();
-        for (Class<?> c = entity.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
-            if (isBoundary(c.getName())) break;
-            chain.add(c);
-        }
+        List<Class<?>> chain = collectClassChain(entity);
 
         //标记 UUID 后即生效；vanilla 实体无自定义链,直接返回
         EcaRestoreHook.mark(entity.getUUID());
@@ -75,6 +71,48 @@ public final class RestoreManager {
         }
     }
 
+    public static boolean forceRetransform(LivingEntity entity) {
+        if (entity == null) return false;
+
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst == null) {
+            AgentLogWriter.warn("[RestoreManager] No Instrumentation available");
+            return false;
+        }
+
+        List<Class<?>> chain = collectClassChain(entity);
+        EcaRestoreHook.mark(entity.getUUID());
+        if (chain.isEmpty()) return true;
+
+        List<Class<?>> toRetransform = new ArrayList<>();
+        for (Class<?> c : chain) {
+            String internal = c.getName().replace('.', '/');
+            TARGET_CLASSES.add(internal);
+            if (inst.isModifiableClass(c)) {
+                toRetransform.add(c);
+            }
+        }
+        if (toRetransform.isEmpty()) return true;
+
+        try {
+            inst.retransformClasses(toRetransform.toArray(new Class<?>[0]));
+            AgentLogWriter.info("[RestoreManager] Force retransformed " + toRetransform.size()
+                    + " classes for " + entity.getClass().getName());
+            return true;
+        } catch (Throwable t) {
+            boolean anySuccess = false;
+            for (Class<?> c : toRetransform) {
+                try {
+                    inst.retransformClasses(c);
+                    anySuccess = true;
+                } catch (Throwable t2) {
+                    AgentLogWriter.error("[RestoreManager] Failed to force retransform: " + c.getName(), t2);
+                }
+            }
+            return anySuccess;
+        }
+    }
+
     //取消还原：仅清除该实例的 UUID 标记,已注入的 guard 对其余实例保持休眠
     public static void unrestore(LivingEntity entity) {
         if (entity != null) EcaRestoreHook.unmark(entity.getUUID());
@@ -91,6 +129,16 @@ public final class RestoreManager {
     }
 
     //继承链边界：第一个 vanilla / Forge / JDK 类
+    private static List<Class<?>> collectClassChain(LivingEntity entity) {
+        List<Class<?>> chain = new ArrayList<>();
+        if (entity == null) return chain;
+        for (Class<?> c = entity.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            if (isBoundary(c.getName())) break;
+            chain.add(c);
+        }
+        return chain;
+    }
+
     private static boolean isBoundary(String className) {
         return className.startsWith("net.minecraft.")
             || className.startsWith("net.minecraftforge.")

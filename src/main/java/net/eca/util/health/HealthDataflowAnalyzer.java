@@ -1,6 +1,7 @@
 package net.eca.util.health;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.util.EcaLogger;
 import net.eca.util.reflect.UnsafeUtil;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -26,6 +27,7 @@ import org.objectweb.asm.tree.analysis.Value;
 import java.io.InputStream;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -50,6 +52,8 @@ public final class HealthDataflowAnalyzer {
     private static final int DEFAULT_NODE_BUDGET = 20000;
     //控制流汇合处 Choice 分支上限，超出即加宽为 Unknown，保证格有限高、数据流分析收敛
     private static final int MAX_CHOICE_ALTS = 8;
+    private static final String ECA_LIVING_HOOK = "net/eca/coremod/LivingEntityHook";
+    private static final String ECA_LOCK_MANAGER = "net/eca/util/health/HealthLockManager";
 
     private HealthDataflowAnalyzer() {}
 
@@ -695,7 +699,7 @@ public final class HealthDataflowAnalyzer {
                 Object arr = evaluate(arrayExpr, ctx);
                 Object idx = evaluate(indexExpr, ctx);
                 if (arr == null || !(idx instanceof Number n)) return null;
-                return java.lang.reflect.Array.get(arr, n.intValue());
+                return Array.get(arr, n.intValue());
             } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
 
@@ -707,13 +711,13 @@ public final class HealthDataflowAnalyzer {
                 if (arr == null || !(idx instanceof Number n) || !(value instanceof Number v)) return false;
                 int i = n.intValue();
                 Class<?> ct = arr.getClass().getComponentType();
-                if (ct == int.class) java.lang.reflect.Array.setInt(arr, i, v.intValue());
-                else if (ct == long.class) java.lang.reflect.Array.setLong(arr, i, v.longValue());
-                else if (ct == float.class) java.lang.reflect.Array.setFloat(arr, i, v.floatValue());
-                else if (ct == double.class) java.lang.reflect.Array.setDouble(arr, i, v.doubleValue());
-                else if (ct == short.class) java.lang.reflect.Array.setShort(arr, i, v.shortValue());
-                else if (ct == byte.class) java.lang.reflect.Array.setByte(arr, i, v.byteValue());
-                else java.lang.reflect.Array.set(arr, i, value);
+                if (ct == int.class) Array.setInt(arr, i, v.intValue());
+                else if (ct == long.class) Array.setLong(arr, i, v.longValue());
+                else if (ct == float.class) Array.setFloat(arr, i, v.floatValue());
+                else if (ct == double.class) Array.setDouble(arr, i, v.doubleValue());
+                else if (ct == short.class) Array.setShort(arr, i, v.shortValue());
+                else if (ct == byte.class) Array.setByte(arr, i, v.byteValue());
+                else Array.set(arr, i, value);
                 return true;
             } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return false; }
         }
@@ -1582,7 +1586,9 @@ public final class HealthDataflowAnalyzer {
         public final Expr returnExpr;
         public final List<Source> sources;
         private AnalysisResult(Expr e, List<Source> s) { this.returnExpr = e; this.sources = s; }
-        public boolean isEmpty() { return sources.isEmpty(); }
+        public boolean isEmpty() {
+            return returnExpr == null || returnExpr instanceof UnknownExpr;
+        }
         public static AnalysisResult of(Expr e) {
             return new AnalysisResult(e, List.copyOf(collectSources(e)));
         }
@@ -1598,6 +1604,7 @@ public final class HealthDataflowAnalyzer {
             if (target == null) return AnalysisResult.EMPTY;
             AnalysisCtx ctx = new AnalysisCtx(maxDepth);
             Expr ret = analyzeMethod(target.owner(), target.name(), GETHEALTH_DESC, null, ctx, 0);
+            ret = stripEcaHealthWrappers(ret);
             if (ret == null || ret instanceof UnknownExpr) return AnalysisResult.EMPTY;
             return AnalysisResult.of(ret);
         } catch (Throwable t) {
@@ -1610,6 +1617,78 @@ public final class HealthDataflowAnalyzer {
     /* 动态求解用：以具体种子分析任意方法的返回表达式。seedExprs[i] 对应方法第 i 个局部槽
        (实例方法 0=this)；通常 this 传 Reference(真实对象)，参数传 Primitive(真实值)，
        于是树中所有字段/数组叶子都根植于具体对象，可被 evaluate/solveFor 直接 concrete 求值。 */
+    private static Expr stripEcaHealthWrappers(Expr expr) {
+        Expr stripped = stripEcaHealthWrappers(expr, false);
+        return stripped == null ? UnknownExpr.UNKNOWN : stripped;
+    }
+
+    private static Expr stripEcaHealthWrappers(Expr expr, boolean discardWrapper) {
+        if (expr == null) return null;
+        if (expr instanceof Source source) {
+            if (isEcaHealthWrapperSource(source)) return discardWrapper ? null : UnknownExpr.UNKNOWN;
+            return expr;
+        }
+        if (expr instanceof Call call) {
+            if (isEcaHealthWrapperCall(call)) return discardWrapper ? null : UnknownExpr.UNKNOWN;
+            List<Expr> args = new ArrayList<>(call.args().size());
+            for (Expr arg : call.args()) {
+                Expr stripped = stripEcaHealthWrappers(arg, true);
+                if (stripped == null) return discardWrapper ? null : UnknownExpr.UNKNOWN;
+                args.add(stripped);
+            }
+            return args.equals(call.args()) ? expr : new Call(call.owner(), call.name(), call.desc(), List.copyOf(args));
+        }
+        if (expr instanceof Op op) {
+            List<Expr> args = new ArrayList<>(op.args().size());
+            for (Expr arg : op.args()) {
+                Expr stripped = stripEcaHealthWrappers(arg, true);
+                if (stripped == null) return discardWrapper ? null : UnknownExpr.UNKNOWN;
+                args.add(stripped);
+            }
+            return args.equals(op.args()) ? expr : new Op(op.opcode(), List.copyOf(args));
+        }
+        if (expr instanceof Choice choice) {
+            List<Expr> alternatives = new ArrayList<>();
+            for (Expr alternative : choice.alternatives()) {
+                Expr stripped = stripEcaHealthWrappers(alternative, true);
+                if (stripped != null && !(stripped instanceof UnknownExpr) && !alternatives.contains(stripped)) {
+                    alternatives.add(stripped);
+                }
+            }
+            if (alternatives.isEmpty()) return discardWrapper ? null : UnknownExpr.UNKNOWN;
+            return alternatives.size() == 1 ? alternatives.get(0) : new Choice(List.copyOf(alternatives));
+        }
+        if (expr instanceof Closure closure) {
+            List<Expr> captured = new ArrayList<>(closure.captured().size());
+            for (Expr arg : closure.captured()) {
+                Expr stripped = stripEcaHealthWrappers(arg, true);
+                if (stripped == null) return discardWrapper ? null : UnknownExpr.UNKNOWN;
+                captured.add(stripped);
+            }
+            return captured.equals(closure.captured()) ? expr
+                    : new Closure(closure.implementation(), closure.samName(), closure.samDesc(), List.copyOf(captured));
+        }
+        if (expr instanceof OptionalContentExpr optional) {
+            Expr stripped = stripEcaHealthWrappers(optional.optionalExpr(), true);
+            if (stripped == null) return discardWrapper ? null : UnknownExpr.UNKNOWN;
+            return stripped == optional.optionalExpr() ? expr : new OptionalContentExpr(stripped);
+        }
+        return expr;
+    }
+
+    private static boolean isEcaHealthWrapperCall(Call call) {
+        return ECA_LIVING_HOOK.equals(call.owner())
+                || ECA_LOCK_MANAGER.equals(call.owner());
+    }
+
+    private static boolean isEcaHealthWrapperSource(Source source) {
+        if (source.label.startsWith("SF:net.eca.util.EntityUtil.HEALTH_LOCK_VALUE")
+                || source.label.startsWith("SF:net.eca.util.EntityUtil.HEAL_BAN_VALUE")) {
+            return true;
+        }
+        return false;
+    }
+
     public static Expr analyzeSeeded(Class<?> owner, String methodName, String desc, Expr[] seedExprs) {
         try {
             TaintValue[] seed = new TaintValue[seedExprs.length];
@@ -1656,7 +1735,7 @@ public final class HealthDataflowAnalyzer {
     private static byte[] classBytes(Class<?> clazz) {
         if (clazz == null) return null;
         try {
-            byte[] runtime = net.eca.coremod.RuntimeBytecodeProvider.get(clazz);
+            byte[] runtime = RuntimeBytecodeProvider.get(clazz);
             if (runtime != null) return runtime;
         } catch (Throwable ignored) {}
         ClassLoader cl = clazz.getClassLoader();

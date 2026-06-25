@@ -25,6 +25,7 @@ public final class EcaSetHealthManager {
         VANILLA,    // 原版同步数据(DATA_HEALTH_ID)
         DATAFLOW,   // getHealth 字节码数据流逆向定位的存储
         METHOD_PROBE,
+        CLASS_RESTORE,
         WRITE_SITE_BRIDGE,
         NUMERIC_INVERSION
     }
@@ -64,6 +65,13 @@ public final class EcaSetHealthManager {
 
     public static void clear() {
         PATHS.clear();
+    }
+
+    public static boolean replayCachedPath(LivingEntity entity, float target) {
+        if (entity == null) return false;
+        HealthPath cached = PATHS.get(entity.getClass());
+        if (cached == null) return false;
+        return cached.write(entity, target) && verify(entity, target);
     }
 
     /* ==================== 对外编排入口 ==================== */
@@ -108,6 +116,11 @@ public final class EcaSetHealthManager {
             return true;
         }
         return false;
+    }
+
+    public static boolean setHealthByClassRestore(LivingEntity entity, float target) {
+        if (entity == null) return false;
+        return HealthClassRestore.write(entity, target);
     }
 
     public static boolean setHealthByNumericInversion(LivingEntity entity, float target) {
