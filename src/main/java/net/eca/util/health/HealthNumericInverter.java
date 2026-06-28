@@ -143,6 +143,11 @@ public final class HealthNumericInverter {
         if (targets.length == 0) return false;
 
         ProbeTransformer.ensureRegistered();
+        // JVM TI 原生通道：注册 transform 函数 + 原生 retransform
+        if (net.eca.coremod.JvmTiChannel.isActive()) {
+            ProbeTransformer.ensureJvmTiRegistered();
+            net.eca.coremod.JvmTiChannel.retransformClasses(targets);
+        }
         boolean verbose = DYNAMIC_DUMPED.add(entity.getClass().getName());
         TraceSnapshot baseline;
         TraceSnapshot perturbed = TraceSnapshot.EMPTY;
@@ -1249,6 +1254,8 @@ public final class HealthNumericInverter {
         private static final Set<String> RESTORING = ConcurrentHashMap.newKeySet();
         private static final Map<String, byte[]> ORIGINAL_BYTES = new ConcurrentHashMap<>();
 
+        private static volatile boolean jvmTiRegistered;
+
         private static void ensureRegistered() {
             if (registered) return;
             Instrumentation inst = EcaAgent.getInstrumentation();
@@ -1261,6 +1268,35 @@ public final class HealthNumericInverter {
             AgentLogWriter.info("[HealthNumericInverter] Registered numeric trace transformer");
         }
 
+        /* 确保 ProbeTransformer 的变换逻辑已在 JVM TI 回调注册表中 */
+        private static void ensureJvmTiRegistered() {
+            if (jvmTiRegistered) return;
+            jvmTiRegistered = true;
+            net.eca.coremod.JvmTiChannel.addTransformFunction(ProbeTransformer::transformStatic);
+        }
+
+        /* 供 JVM TI 回调调用的静态版本——逻辑与 ProbeTransformer.transform 一致 */
+        static byte[] transformStatic(String className, byte[] classfileBuffer) {
+            if (RESTORING.contains(className)) {
+                byte[] original = ORIGINAL_BYTES.get(className);
+                return original != null ? original : classfileBuffer;
+            }
+            if (!TARGETS.contains(className)) return null;
+            // JVM TI 回调上下文无 ClassLoader，跳过 canLoadTrace 检查
+            try {
+                ORIGINAL_BYTES.putIfAbsent(className, classfileBuffer.clone());
+                ClassReader reader = new ClassReader(classfileBuffer);
+                ClassWriter writer = new SafeClassWriter(reader, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+                reader.accept(new ProbeClassVisitor(writer, className), ClassReader.EXPAND_FRAMES);
+                INSTRUMENTED.add(className);
+                AgentLogWriter.info("[HealthNumericInverter] JVMTI Instrumented: " + className);
+                return writer.toByteArray();
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                return null;
+            }
+        }
+
         private static void setTargets(Set<String> internalNames) {
             TARGETS.clear();
             TARGETS.addAll(internalNames);
@@ -1268,7 +1304,7 @@ public final class HealthNumericInverter {
 
         private static void restoreAll(Instrumentation inst) {
             TARGETS.clear();
-            if (inst == null || INSTRUMENTED.isEmpty()) {
+            if (INSTRUMENTED.isEmpty()) {
                 ORIGINAL_BYTES.clear();
                 RESTORING.clear();
                 INSTRUMENTED.clear();
@@ -1276,7 +1312,18 @@ public final class HealthNumericInverter {
             }
             Set<String> pending = new HashSet<>(INSTRUMENTED);
             RESTORING.addAll(pending);
-            try {
+            // JVM TI 原生通道：恢复已插桩的类
+            if (net.eca.coremod.JvmTiChannel.isActive()) {
+                for (Class<?> clazz : inst.getAllLoadedClasses()) {
+                    String internal = clazz.getName().replace('.', '/');
+                    if (!pending.contains(internal)) continue;
+                    net.eca.coremod.JvmTiChannel.retransformClasses(clazz);
+                    INSTRUMENTED.remove(internal);
+                    ORIGINAL_BYTES.remove(internal);
+                }
+            }
+            // Instrumentation 常规通道
+            if (inst != null) {
                 for (Class<?> clazz : inst.getAllLoadedClasses()) {
                     String internal = clazz.getName().replace('.', '/');
                     if (!pending.contains(internal)) continue;
@@ -1288,9 +1335,8 @@ public final class HealthNumericInverter {
                         AgentLogWriter.error("[HealthNumericInverter] Failed to restore: " + internal, t);
                     }
                 }
-            } finally {
-                RESTORING.removeAll(pending);
             }
+            RESTORING.removeAll(pending);
         }
 
         @Override

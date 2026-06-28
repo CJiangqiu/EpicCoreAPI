@@ -2,7 +2,10 @@ package net.eca;
 
 import net.eca.agent.EcaAgent;
 import net.eca.compat.GeckoLibCompat;
+import net.eca.config.EcaConfiguration;
 import net.eca.coremod.EcaClassTransformer;
+import net.eca.coremod.JvmTiChannel;
+import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.event.EcaEventHandler;
 import net.eca.event.LoadCompleteHandler;
 import net.eca.init.ModConfigs;
@@ -35,10 +38,17 @@ public final class EcaMod {
 
         // 从 CoreMod ClassLoader 桥接 Instrumentation 到 GAME layer
         bridgeInstrumentationFromCoremod();
-        // 注册 ClassFileTransformer
-        EcaClassTransformer.init();
+        // 仅注册 ClassFileTransformer；全量 retransform 推迟到 LoadComplete（避免与并发构造的 mod 死锁）
+        EcaClassTransformer.register();
         // 注册配置
         ModConfigs.register();
+        // 激进防御开启时激活 JVM TI 原生变换通道
+        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+            // 按调用链顺序注册：EcaClassTransformer 先，健康模块后注册，捕获器最后
+            JvmTiChannel.addTransformFunction(EcaClassTransformer::transformStatic);
+            RuntimeBytecodeProvider.registerJvmTiCapture();
+            JvmTiChannel.activate();
+        }
         // 注册网络处理器
         NetworkHandler.register();
         // 注册事件处理器

@@ -1,13 +1,16 @@
 package net.eca.util.health;
 
+import net.eca.config.EcaConfiguration;
 import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.util.reflect.VarHandleUtil;
 import net.minecraft.world.entity.LivingEntity;
 
 import java.io.InputStream;
 import java.lang.reflect.Field;
+import java.security.CodeSource;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.jar.JarFile;
 
 /*
  * 改血总管理器：持有"路径表"——每个实体类用什么改血方法(method, 后续扩充)、以及已确定的修改路径(writer)，
@@ -24,6 +27,8 @@ public final class EcaSetHealthManager {
     public enum WriteMethod {
         VANILLA,    // 原版同步数据(DATA_HEALTH_ID)
         DATAFLOW,   // getHealth 字节码数据流逆向定位的存储
+        CONST_OVERRIDE,   // getHealth 返回不可变常数时，劫持其返回值
+        EXTERNAL_SCAN,    // CONST_OVERRIDE 失败时，逆向分析 isAlive/isDeadOrDying 定位真实存储
         METHOD_PROBE,
         WRITE_SITE_BRIDGE,
         NUMERIC_INVERSION
@@ -49,6 +54,9 @@ public final class EcaSetHealthManager {
 
     // 实体类 → 已确定改血路径。仅缓存验证通过的路径，绝不缓存失败(避免一次误判把该类永久判死)
     private static final Map<Class<?>, HealthPath> PATHS = new ConcurrentHashMap<>();
+
+    // 实体类 → 完整分析结果，供各降级手段独立判断，避免重复 analyze
+    private static final Map<Class<?>, HealthDataflowAnalyzer.AnalysisResult> ANALYSIS_CACHE = new ConcurrentHashMap<>();
 
     public static HealthPath getPath(Class<?> entityClass) {
         return entityClass == null ? null : PATHS.get(entityClass);
@@ -76,7 +84,7 @@ public final class EcaSetHealthManager {
     /* ==================== 对外编排入口 ==================== */
 
     /* 用数据流路径给实体改血：先重放该类已确定的路径，未命中或失效再走逆向分析重新定位。
-       仅在写入并校验通过后才缓存路径。不处理原版(DATA_HEALTH_ID)写入——那是上层 Vanilla 阶段的职责。 */
+       仅在写入并校验通过后才缓存路径。仅处理 SOLVABLE 实体——CONSTANT/HAS_CONSTANT 由 setHealthByConstOverride 独立接管。 */
     public static boolean setHealthByDataflow(LivingEntity entity, float target) {
         if (entity == null) return false;
         Class<?> cls = entity.getClass();
@@ -115,6 +123,65 @@ public final class EcaSetHealthManager {
             return true;
         }
         return false;
+    }
+
+    //外部扫描路径：const override 失败后，逆向 isAlive/isDeadOrDying 定位真实存储
+    public static boolean setHealthByExternalScan(LivingEntity entity, float target) {
+        if (entity == null) return false;
+        Class<?> cls = entity.getClass();
+
+        HealthPath cached = PATHS.get(cls);
+        if (cached != null && cached.method() == WriteMethod.EXTERNAL_SCAN
+                && cached.write(entity, target) && verifyExternalScan(entity, target)) {
+            return true;
+        }
+
+        HealthPath resolved = HealthDataflowAnalyzer.resolveExternalScan(cls);
+        if (resolved != null && resolved.write(entity, target) && verifyExternalScan(entity, target)) {
+            PATHS.put(cls, resolved);
+            return true;
+        }
+        return false;
+    }
+
+    //外部扫描验证：kill 时检查 isAlive / isDeadOrDying，非 kill 时读 getHealth
+    private static boolean verifyExternalScan(LivingEntity entity, float target) {
+        if (target <= 0.0f) {
+            return !entity.isAlive() || entity.isDeadOrDying();
+        }
+        float actual = safeGetHealth(entity);
+        if (Float.isFinite(actual)) {
+            float tolerance = Math.max(0.5f, Math.abs(target) * 0.02f);
+            if (Math.abs(actual - target) <= tolerance) return true;
+        }
+        return entity.isAlive() && !entity.isDeadOrDying();
+    }
+
+    /* 常数覆盖：仅对 getHealth 存在常数分支的实体生效(CONSTANT / HAS_CONSTANT)。
+       不写实体存储，只登记覆盖表，由 getHealth 内联的 resolveHealth 读取返回。
+       首次命中时触发 retransform 打 FRETURN patch，后续调用直接走覆盖表。 */
+    public static boolean setHealthByConstOverride(LivingEntity entity, float target) {
+        if (entity == null) return false;
+        Class<?> cls = entity.getClass();
+        HealthDataflowAnalyzer.AnalysisResult ar =
+                ANALYSIS_CACHE.computeIfAbsent(cls, c -> HealthDataflowAnalyzer.analyze(c));
+        HealthDataflowAnalyzer.AnalysisResult.Kind kind = ar.classify();
+        if (kind != HealthDataflowAnalyzer.AnalysisResult.Kind.CONSTANT
+                && kind != HealthDataflowAnalyzer.AnalysisResult.Kind.HAS_CONSTANT) return false;
+
+        /* retransform 必须针对定义 getHealth()F 的类（可能是父类），
+           否则 EcaClassTransformer 找不到该方法而跳过 FRETURN patch */
+        if (EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                && EcaConfiguration.getAttackSetHealthEnableConstOverrideSafely()) {
+            Class<?> defCls = ar.definingClass != null ? ar.definingClass : cls;
+            String internalName = internalName(defCls);
+            if (ConstOverrideManager.PATCHED_CLASSES.add(internalName)) {
+                HealthDataflowAnalyzer.retransformClass(defCls);
+            }
+        }
+
+        ConstOverrideManager.setOverride(entity, target);
+        return verify(entity, target);
     }
 
     public static boolean setHealthByNumericInversion(LivingEntity entity, float target) {
@@ -157,7 +224,7 @@ public final class EcaSetHealthManager {
 
     /* ==================== 改血复用 API ==================== */
 
-    // 取类的运行期字节码(含 mixin/coremod 转换后)，取不到回退磁盘原始 .class
+    // 取类的运行期字节码(含 mixin/coremod 转换后)，取不到回退磁盘原始 .class，再取不到回退 CodeSource JAR
     public static byte[] classBytes(Class<?> clazz) {
         if (clazz == null) return null;
         try {
@@ -166,12 +233,25 @@ public final class EcaSetHealthManager {
         } catch (Throwable ignored) {}
         ClassLoader cl = clazz.getClassLoader();
         if (cl == null) cl = ClassLoader.getSystemClassLoader();
-        try (InputStream is = cl.getResourceAsStream(internalName(clazz) + ".class")) {
-            return is == null ? null : is.readAllBytes();
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            return null;
-        }
+        String path = internalName(clazz) + ".class";
+        try (InputStream is = cl.getResourceAsStream(path)) {
+            if (is != null) return is.readAllBytes();
+        } catch (Throwable ignored) {}
+        // CodeSource 回退：从 ProtectionDomain 的 JAR 中直接读取 .class 条目
+        try {
+            CodeSource cs = clazz.getProtectionDomain().getCodeSource();
+            if (cs != null && cs.getLocation() != null) {
+                try (JarFile jar = new JarFile(cs.getLocation().getPath())) {
+                    java.util.jar.JarEntry entry = jar.getJarEntry(path);
+                    if (entry != null) {
+                        try (InputStream jis = jar.getInputStream(entry)) {
+                            return jis.readAllBytes();
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     /* 类内部名：剥去隐藏类运行期后缀(Foo/0x000... → Foo)，按磁盘模板类定位字节码。

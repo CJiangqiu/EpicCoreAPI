@@ -42,6 +42,11 @@ public class EcaTransformationService implements ITransformationService {
         AgentLoader.loadAgent();
         enableEcaDualLoading();
         initLoadingScreenTransformer();
+        try {
+            JvmTiChannel.prepare();
+        } catch (Throwable t) {
+            log("[CoreMod] JvmTiChannel prepare skipped: " + t.getMessage());
+        }
     }
 
     private static Class<?>[] preloadAll(String... names) {

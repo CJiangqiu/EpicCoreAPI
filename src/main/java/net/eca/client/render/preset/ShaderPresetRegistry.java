@@ -16,8 +16,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-/* 自定义着色器预设注册表（消费端"开箱即用加载器"）。第三方 mod 把标准三件套（vsh/fsh/json）放进
-   assets/<ns>/shaders/core/，用 @RegisterShaderPreset + 静态块调用 register(id) 登记即可，无需任何渲染样板。
+/* 自定义着色器预设注册表（消费端"开箱即用加载器"）。第三方 mod 把标准五文件（共享 fsh + block/entity 两套 vsh/json）
+   放进 assets/<ns>/shaders/core/，用 @RegisterShaderPreset + 静态块调用 register(id) 登记即可，无需任何渲染样板。
    纯客户端：着色器子系统不存在于专用服务端，扫描入口在 LoadCompleteHandler 中受 dist.isClient() 门控。 */
 @OnlyIn(Dist.CLIENT)
 public final class ShaderPresetRegistry {
@@ -50,10 +50,13 @@ public final class ShaderPresetRegistry {
 
     // 注册一个自定义着色器预设
     /**
-     * Register a custom shader preset by its resource id.
-     * The id resolves to a standard core shader three-file set at {@code assets/<namespace>/shaders/core/<path>.vsh/.fsh/.json}.
+     * Register a custom shader preset by its logical resource id.
+     * The id resolves to a standard core shader five-file set under {@code assets/<namespace>/shaders/core/}: a shared
+     * {@code <path>.fsh}, plus two profiles {@code <path>_block.vsh/.json} (DefaultVertexFormat.BLOCK) and
+     * {@code <path>_entity.vsh/.json} (DefaultVertexFormat.NEW_ENTITY). The BLOCK profile drives the skybox and boss bar
+     * RenderTypes; the NEW_ENTITY profile drives the boss layer, item and entity effect RenderTypes.
      * Registration builds the five RenderTypes immediately and registers the skybox variant into the global effect registry;
-     * the underlying shader is compiled on the next {@code RegisterShadersEvent}, or right away if shaders are already loaded.
+     * both profile shaders are compiled on the next {@code RegisterShadersEvent}, or right away if shaders are already loaded.
      * Calling twice with the same id is a no-op.
      * @param id the preset resource id
      */

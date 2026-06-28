@@ -1,7 +1,8 @@
 package net.eca.util.health;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
-import net.eca.coremod.RuntimeBytecodeProvider;
+import net.eca.agent.EcaAgent;
+import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.reflect.UnsafeUtil;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -11,20 +12,15 @@ import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
-import org.objectweb.asm.tree.AbstractInsnNode;
-import org.objectweb.asm.tree.ClassNode;
-import org.objectweb.asm.tree.FieldInsnNode;
-import org.objectweb.asm.tree.IntInsnNode;
-import org.objectweb.asm.tree.InvokeDynamicInsnNode;
-import org.objectweb.asm.tree.LdcInsnNode;
-import org.objectweb.asm.tree.MethodInsnNode;
-import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.*;
 import org.objectweb.asm.tree.analysis.Analyzer;
 import org.objectweb.asm.tree.analysis.Frame;
 import org.objectweb.asm.tree.analysis.Interpreter;
 import org.objectweb.asm.tree.analysis.Value;
 
-import java.io.InputStream;
+import java.lang.instrument.Instrumentation;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandleInfo;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Array;
@@ -47,21 +43,47 @@ public final class HealthDataflowAnalyzer {
     private static final String GETHEALTH_NAME_ALT = "getHealth";
     private static final String GETHEALTH_DESC = "()F";
     private static final int DEFAULT_MAX_DEPTH = 6;
-    private static final int DEFAULT_INLINE_BUDGET = 200;
+    private static final int DEFAULT_INLINE_BUDGET = 500;
     //表达式节点总预算：构造组合表达式时递减，耗尽即坍缩为 Unknown，防止复杂/互递归 getHealth 把表达式树撑爆导致分析卡死
-    private static final int DEFAULT_NODE_BUDGET = 20000;
+    private static final int DEFAULT_NODE_BUDGET = 500_000;
     //控制流汇合处 Choice 分支上限，超出即加宽为 Unknown，保证格有限高、数据流分析收敛
-    private static final int MAX_CHOICE_ALTS = 8;
+    private static final int MAX_CHOICE_ALTS = 16;
     private static final String ECA_LIVING_HOOK = "net/eca/coremod/LivingEntityHook";
     private static final String ECA_LOCK_MANAGER = "net/eca/util/health/HealthLockManager";
+    private static final String ISALIVE_NAME = "m_6084_";
+    private static final String ISALIVE_NAME_ALT = "isAlive";
+    private static final String ISDEAD_NAME = "m_21224_";
+    private static final String ISDEAD_NAME_ALT = "isDeadOrDying";
+    private static final String BOOL_DESC = "()Z";
+    private static final String HURT_NAME = "m_6469_";
+    private static final String HURT_NAME_ALT = "hurt";
+    private static final String ACTUALLY_HURT_NAME = "m_6475_";
+    private static final String ACTUALLY_HURT_NAME_ALT = "actuallyHurt";
+    private static final String DAMAGE_SOURCE_DESC = "Lnet/minecraft/world/damagesource/DamageSource;";
+    private static final String HURT_DESC = "(" + DAMAGE_SOURCE_DESC + "F)Z";
+    private static final String ACTUALLY_HURT_DESC = "(" + DAMAGE_SOURCE_DESC + "F)V";
+
+    /* ==================== 外部扫描：isAlive/isDeadOrDying 数据流逆向 ==================== */
+
+    private static final Map<Class<?>, AnalysisResult> EXTERNAL_SCAN_CACHE = new ConcurrentHashMap<>();
+    private static final Set<String> EXTERNAL_SCAN_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> EXTERNAL_WRITE_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> STORE_WRITE_DUMPED = ConcurrentHashMap.newKeySet();
 
     private HealthDataflowAnalyzer() {}
+
+    @FunctionalInterface
+    private interface HealthVerifier {
+        boolean verify(LivingEntity entity, float expected, Source sink);
+    }
 
     /* ==================== 对外：产出可重放改血路径 ==================== */
 
     //每个实体类只打印一次首次分析树 / 一次失败结果，避免每-tick 改血刷屏
     private static final Set<String> TREE_DUMPED = ConcurrentHashMap.newKeySet();
     private static final Set<String> FAIL_DUMPED = ConcurrentHashMap.newKeySet();
+    //每个方法只打印一次 totalReturns 诊断，避免同一 getHealth 反复分析刷屏
+    private static final Set<String> METHOD_DIAG_DUMPED = ConcurrentHashMap.newKeySet();
 
     //分析实体类 getHealth，符号反演定位真实血量存储，产出可重放 HealthPath；无法识别返回 null
     public static EcaSetHealthManager.HealthPath resolvePath(Class<?> entityClass) {
@@ -74,13 +96,49 @@ public final class HealthDataflowAnalyzer {
             return null;
         }
         if (TREE_DUMPED.add(entityClass.getName())) dumpTree(entityClass, ar);   // 首次分析打印完整逆向树
-        if (ar == null || ar.isEmpty()) return null;
+        if (ar == null) return null;
+        /* SOLVABLE 必走 dataflow 真写存储。HAS_CONSTANT 若同时含可写源(如 getHealth 带 try/catch 兜底常数、
+           真血却存在加密/SynchedData 源里)也产出 dataflow 路径，优先真写源——写不动或 verify 不过会回滚返回 false，
+           降级链再交给 setHealthByConstOverride。真写源能覆盖所有读取方(isAlive/isDeadOrDying 等)，
+           而常数覆盖只动 getHealth 返回值，对绕过 getHealth 的实体无效。CONSTANT/OPAQUE 不在此处理。 */
+        AnalysisResult.Kind kind = ar.classify();
+        boolean dataflowEligible = kind == AnalysisResult.Kind.SOLVABLE
+                || (kind == AnalysisResult.Kind.HAS_CONSTANT && !ar.sources.isEmpty());
+        if (!dataflowEligible) return null;
         return new EcaSetHealthManager.HealthPath(EcaSetHealthManager.WriteMethod.DATAFLOW,
-                (entity, target) -> writeViaSources(entityClass, ar, entity, target));
+                (entity, target) -> writeViaSources(entityClass, ar, entity, target,
+                        (verifiedEntity, verifiedTarget, sink) ->
+                                EcaSetHealthManager.verify(verifiedEntity, verifiedTarget)));
+    }
+
+    /* 对 CONSTANT 实体类触发同步 retransform，使 EcaClassTransformer 内联 resolveHealth 调用。
+       优先走 JVM TI 原生通道（激进防御时），回退到 Instrumentation（常规路径）。失败仅记日志。 */
+    static void retransformClass(Class<?> entityClass) {
+        // JVM TI 原生通道（激进防御开启时生效）
+        net.eca.coremod.JvmTiChannel.retransformClasses(entityClass);
+
+        // Instrumentation 常规通道
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst == null) {
+            EcaLogger.info("[HealthDataflow] retransform {} skipped: Instrumentation unavailable", entityClass.getName());
+            return;
+        }
+        if (!inst.isModifiableClass(entityClass)) {
+            EcaLogger.info("[HealthDataflow] retransform {} skipped: class not modifiable", entityClass.getName());
+            return;
+        }
+        try {
+            inst.retransformClasses(entityClass);
+            EcaLogger.info("[HealthDataflow] retransform {} completed", entityClass.getName());
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            EcaLogger.info("[HealthDataflow] retransform {} failed: {}", entityClass.getName(), t.toString());
+        }
     }
 
     //逐个验证候选 Source，单点均未命中时再联合写入；失败尝试恢复原值
-    private static boolean writeViaSources(Class<?> cls, AnalysisResult ar, LivingEntity entity, float expected) {
+    private static boolean writeViaSources(Class<?> cls, AnalysisResult ar, LivingEntity entity, float expected,
+                                           HealthVerifier verifier) {
         EvalContext ctx = new EvalCtx(entity);
         List<String> diag = new ArrayList<>();
         List<PreparedSourceWrite> solvedWrites = new ArrayList<>();
@@ -99,14 +157,18 @@ public final class HealthDataflowAnalyzer {
                         + " write=FAIL restore=" + (restored ? "OK" : "FAIL"));
                 continue;
             }
-            if (EcaSetHealthManager.verify(entity, expected)) return true;
+            if (verifier.verify(entity, expected, sink)) {
+                EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}",
+                        cls.getName(), sink.label, solved.value(), expected);
+                return true;
+            }
 
             boolean restored = sink.write(entity, snapshot);
             diag.add("    [" + sink.label + "] solved=" + solved.value()
                     + " verify=FAIL restore=" + (restored ? "OK" : "FAIL"));
         }
 
-        if (writeAllSources(solvedWrites, entity, expected, diag)) return true;
+        if (writeAllSources(solvedWrites, entity, expected, diag, verifier)) return true;
 
         if (FAIL_DUMPED.add(cls.getName())) {
             EcaLogger.warn("[HealthDataflow] setHealth failed entity={} expected={} sink results:", cls.getName(), expected);
@@ -117,7 +179,8 @@ public final class HealthDataflowAnalyzer {
 
     /* ≥2 个可解 Source 时联合写入（应对双源防御等需同时写多处的形态），失败逆序回滚。
        writes 由单源循环收集，其 snapshot 均为原值（循环对每次尝试都已回滚），故回滚即复原。 */
-    private static boolean writeAllSources(List<PreparedSourceWrite> writes, LivingEntity entity, float expected, List<String> diag) {
+    private static boolean writeAllSources(List<PreparedSourceWrite> writes, LivingEntity entity, float expected,
+                                           List<String> diag, HealthVerifier verifier) {
         if (writes.size() < 2) return false;
 
         boolean wroteAll = true;
@@ -127,7 +190,11 @@ public final class HealthDataflowAnalyzer {
                 break;
             }
         }
-        if (wroteAll && EcaSetHealthManager.verify(entity, expected)) return true;
+        if (wroteAll && verifier.verify(entity, expected, null)) {
+            EcaLogger.info("[HealthDataflow] setHealth success entity={} sink=all-sources expected={}",
+                    entity.getClass().getName(), expected);
+            return true;
+        }
 
         boolean restoredAll = true;
         for (int i = writes.size() - 1; i >= 0; i--) {
@@ -141,6 +208,49 @@ public final class HealthDataflowAnalyzer {
 
     private record PreparedSourceWrite(Source sink, Object snapshot, Object value) {}
 
+    private static boolean verifyExternalDataflow(Expr root, LivingEntity entity, float expected, Source sink) {
+        if (entity == null) return false;
+        boolean healthLikeSink = isExternalHealthLikeSink(sink);
+        if (expected <= 0.0f) {
+            return healthLikeSink && (!entity.isAlive() || entity.isDeadOrDying());
+        }
+        float actual = safeGetHealth(entity);
+        if (Float.isFinite(actual)) {
+            float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
+            if (Math.abs(actual - expected) <= tolerance) return true;
+        }
+        return healthLikeSink && verifiesExternalExpression(root, entity, expected, sink);
+    }
+
+    private static boolean isExternalHealthLikeSink(Source sink) {
+        return sink instanceof SynchedDataSource || sink instanceof MapEntrySource || sink instanceof CapabilityDataSource;
+    }
+
+    private static boolean verifiesExternalExpression(Expr expr, LivingEntity entity, float expected, Source sink) {
+        if (expr == null || sink == null || !containsSink(expr, sink)) return false;
+        if (expr instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) {
+                if (verifiesExternalExpression(alternative, entity, expected, sink)) return true;
+            }
+            return false;
+        }
+        Object value = evaluate(expr, new EvalCtx(entity));
+        if (!(value instanceof Number number)) return false;
+        float actual = number.floatValue();
+        if (!Float.isFinite(actual)) return false;
+        float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
+        return Math.abs(actual - expected) <= tolerance || Math.abs(Math.abs(actual) - expected) <= tolerance;
+    }
+
+    private static float safeGetHealth(LivingEntity entity) {
+        try {
+            return entity.getHealth();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return Float.NaN;
+        }
+    }
+
     private record EvalCtx(LivingEntity entity) implements EvalContext {
         @Override public Object eval(Expr e) { return evaluate(e, this); }
     }
@@ -149,10 +259,14 @@ public final class HealthDataflowAnalyzer {
     private static void dumpTree(Class<?> cls, AnalysisResult ar) {
         EcaLogger.info("[HealthDataflow] === first analysis: {} ===", cls.getName());
         if (ar == null || ar.isEmpty()) {
-            EcaLogger.info("[HealthDataflow]   EMPTY — getHealth 未覆写或字节码无法符号化");
+            EcaLogger.info("[HealthDataflow]   kind={} EMPTY — getHealth 未覆写或字节码无法符号化",
+                    ar == null ? "null" : ar.classify());
             return;
         }
-        EcaLogger.info("[HealthDataflow]   sources={}", ar.sources.size());
+        EcaLogger.info("[HealthDataflow]   kind={} sources={} definingClass={}", ar.classify(), ar.sources.size(),
+                ar.definingClass != null ? ar.definingClass.getName() : "null");
+        EcaLogger.info("[HealthDataflow]   hasConstantBranch={}", hasConstantBranch(ar.returnExpr));
+        logUnknownNodes(ar.returnExpr);
         EcaLogger.info("[HealthDataflow]   returnExpr:");
         List<String> tree = new ArrayList<>();
         appendExpr(tree, ar.returnExpr, "    ");
@@ -164,13 +278,37 @@ public final class HealthDataflowAnalyzer {
         }
     }
 
+    /* 收集所有 UnknownExpr 并打印其 provenance，使分析边界一目了然 */
+    private static void logUnknownNodes(Expr e) {
+        List<String> unknowns = new ArrayList<>();
+        collectUnknowns(e, unknowns);
+        if (!unknowns.isEmpty()) {
+            for (String u : unknowns) EcaLogger.info("[HealthDataflow]   Unknown: {}", u);
+        }
+    }
+    private static void collectUnknowns(Expr e, List<String> out) {
+        if (e instanceof UnknownExpr u) { out.add(u.provenance().isEmpty() ? "<empty>" : u.provenance()); return; }
+        if (e instanceof Op op) { for (Expr a : op.args()) collectUnknowns(a, out); }
+        else if (e instanceof Call call) { for (Expr a : call.args()) collectUnknowns(a, out); }
+        else if (e instanceof Closure cl) { for (Expr a : cl.captured()) collectUnknowns(a, out); }
+        else if (e instanceof StoreWrite sw) collectUnknowns(sw.valueExpr(), out);
+        else if (e instanceof Choice ch) { for (Expr a : ch.alternatives()) collectUnknowns(a, out); }
+        else if (e instanceof OptionalContentExpr o) collectUnknowns(o.optionalExpr(), out);
+    }
+
     //递归把 Expr 树缩进展开，覆盖全部节点类型，无行数上限
     private static void appendExpr(List<String> out, Expr e, String indent) {
         if (e == null) { out.add(indent + "<null>"); return; }
         if (e == thisMarker()) { out.add(indent + "this"); return; }
         if (e instanceof Source s) { out.add(indent + "Source " + s.label + " (type=" + s.valueType.getName() + ")"); return; }
-        if (e instanceof Primitive p) { out.add(indent + "Primitive " + p.value() + " (" + p.jvmType() + ")"); return; }
-        if (e instanceof Reference r) { out.add(indent + "Reference " + r.className()); return; }
+        if (e instanceof WriteInput input) { out.add(indent + "WriteInput #" + input.index() + " [" + input.jvmType() + "]"); return; }
+        if (e instanceof StoreWrite write) {
+            out.add(indent + "StoreWrite -> " + write.sink().label + " (type=" + write.sink().valueType.getName() + ")");
+            appendExpr(out, write.valueExpr(), indent + "  value ");
+            return;
+        }
+        if (e instanceof Primitive p) { out.add(indent + "Primitive " + p.value() + " [" + p.jvmType() + "]"); return; }
+        if (e instanceof Reference r) { out.add(indent + "Reference(" + r.className() + ")"); return; }
         if (e instanceof Op op) {
             out.add(indent + "Op " + opcodeName(op.opcode()));
             for (Expr a : op.args()) appendExpr(out, a, indent + "  ");
@@ -196,8 +334,14 @@ public final class HealthDataflowAnalyzer {
             return;
         }
         if (e instanceof Choice ch) {
-            out.add(indent + "Choice (" + ch.alternatives().size() + " alternatives)");
-            for (Expr a : ch.alternatives()) appendExpr(out, a, indent + "  ");
+            List<Expr> alts = ch.alternatives();
+            out.add(indent + "Choice (" + alts.size() + " alt" + (alts.size() > 1 ? "s" : "") + ")");
+            for (int i = 0; i < alts.size(); i++) {
+                Expr a = alts.get(i);
+                boolean isConst = hasConstantBranch(a);
+                out.add(indent + "  [" + i + "] constant=" + isConst);
+                appendExpr(out, a, indent + "    ");
+            }
             return;
         }
         if (e instanceof UnknownExpr u) {
@@ -255,6 +399,10 @@ public final class HealthDataflowAnalyzer {
     public record Call(String owner, String name, String desc, List<Expr> args) implements Expr {}
 
     public record Closure(Handle implementation, String samName, String samDesc, List<Expr> captured) implements Expr {}
+
+    public record StoreWrite(Source sink, Expr valueExpr) implements Expr {}
+
+    public record WriteInput(int index, char jvmType) implements Expr {}
 
     public record ArrayAllocExpr(int id) implements Expr {}
 
@@ -727,6 +875,64 @@ public final class HealthDataflowAnalyzer {
         }
     }
 
+    public static final class MethodCallSource extends Source {
+        public final String ownerInternal;
+        public final String name;
+        public final String desc;
+        public final List<Expr> args;
+        public final int valueArgIndex;
+
+        public MethodCallSource(String ownerInternal, String name, String desc, List<Expr> args, int valueArgIndex) {
+            super(float.class, "MC:" + ownerInternal + "#" + name + desc + "[" + valueArgIndex + "]");
+            this.ownerInternal = ownerInternal;
+            this.name = name;
+            this.desc = desc;
+            this.args = args;
+            this.valueArgIndex = valueArgIndex;
+        }
+
+        @Override public Object read(LivingEntity entity) {
+            return null;
+        }
+
+        @Override public boolean write(LivingEntity entity, Object value) {
+            try {
+                Class<?> owner = loadClass(ownerInternal);
+                if (owner == null) return false;
+                Type[] argTypes = Type.getArgumentTypes(desc);
+                boolean isStatic = args.size() == argTypes.length;
+                int start = isStatic ? 0 : 1;
+                Object receiver = null;
+                EvalContext ctx = new SimpleEvalContext(entity);
+                if (!isStatic) {
+                    receiver = evaluate(args.get(0), ctx);
+                    if (receiver == null) return false;
+                }
+                Object[] values = new Object[argTypes.length];
+                Class<?>[] paramTypes = new Class<?>[argTypes.length];
+                for (int i = 0; i < argTypes.length; i++) {
+                    paramTypes[i] = asmTypeToClass(argTypes[i]);
+                    if (paramTypes[i] == null) return false;
+                    Object argValue = i == valueArgIndex ? value : evaluate(args.get(start + i), ctx);
+                    values[i] = coerceArg(argValue, paramTypes[i]);
+                }
+                Method method = findMethod(isStatic ? owner : receiver.getClass(), name, paramTypes, values);
+                if (method == null && !isStatic) method = findMethod(owner, name, paramTypes, values);
+                if (method == null) return false;
+                method.setAccessible(true);
+                method.invoke(receiver, values);
+                return true;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                return false;
+            }
+        }
+
+        @Override protected String canonicalKey() {
+            return "MC:" + ownerInternal + "#" + name + "#" + desc + "#" + valueArgIndex;
+        }
+    }
+
     /* ==================== Map 写入：兄弟表 + entrySet 遍历 + Unsafe ==================== */
 
     private static Object matchKey(Map<?, ?> map, LivingEntity entity, MapEntrySource.KeyKind kind) {
@@ -832,6 +1038,15 @@ public final class HealthDataflowAnalyzer {
         if (root == null || sink == null) {
             return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "root or sink is null");
         }
+        if (root instanceof StoreWrite write) {
+            if (!sameSource(write.sink(), sink)) {
+                return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "sink is absent from store write");
+            }
+            Object value = solveStoreWriteValue(write.valueExpr(), target, ctx);
+            return value == null
+                ? HealthSolveResult.failure(HealthSolveFailure.VALUE_NOT_REPRESENTABLE, "store value expression could not be evaluated")
+                : HealthSolveResult.success(value);
+        }
         if (sameSource(root, sink)) {
             Object value = coerceForType(target, sink.valueType);
             return value == null
@@ -901,6 +1116,85 @@ public final class HealthDataflowAnalyzer {
         return HealthSolveResult.failure(HealthSolveFailure.CALL_NOT_RESOLVED, root.getClass().getSimpleName());
     }
 
+    private static Object solveStoreWriteValue(Expr valueExpr, Object target, EvalContext ctx) {
+        List<Object> candidates = writeInputCandidates(valueExpr, target);
+        for (Object candidate : candidates) {
+            Object value = evaluateWithWriteInput(valueExpr, ctx, candidate);
+            if (value instanceof String s && s.isEmpty()) dumpStoreWriteSolve(valueExpr, target, candidate, "empty-string");
+            if (value != null) return value;
+            dumpStoreWriteSolve(valueExpr, target, candidate, "null");
+        }
+        Object fallback = evaluate(valueExpr, ctx);
+        if (fallback instanceof String s && s.isEmpty()) dumpStoreWriteSolve(valueExpr, target, null, "fallback-empty-string");
+        return fallback;
+    }
+
+    private static void dumpStoreWriteSolve(Expr valueExpr, Object target, Object candidate, String reason) {
+        String key = reason + "#" + System.identityHashCode(valueExpr);
+        if (!STORE_WRITE_DUMPED.add(key)) return;
+        EcaLogger.info("[HealthDataflow] StoreWrite value evaluation {} target={} candidate={}", reason, target, candidate);
+        List<String> tree = new ArrayList<>();
+        appendExpr(tree, valueExpr, "    ");
+        for (String line : tree) EcaLogger.info("[HealthDataflow] {}", line);
+    }
+
+    private static List<Object> writeInputCandidates(Expr valueExpr, Object target) {
+        List<Object> candidates = new ArrayList<>();
+        if (target instanceof Number number && valueExprPrefersNegatedInput(valueExpr)) {
+            candidates.add(negateNumber(number));
+        }
+        candidates.add(target);
+        if (target instanceof Number number) {
+            Object negated = negateNumber(number);
+            if (!candidates.contains(negated)) candidates.add(negated);
+        }
+        return candidates;
+    }
+
+    private static Object negateNumber(Number number) {
+        if (number instanceof Double) return Double.valueOf(-number.doubleValue());
+        if (number instanceof Float) return Float.valueOf(-number.floatValue());
+        if (number instanceof Long) return Long.valueOf(-number.longValue());
+        if (number instanceof Integer || number instanceof Short || number instanceof Byte) {
+            return Integer.valueOf(-number.intValue());
+        }
+        return Float.valueOf(-number.floatValue());
+    }
+
+    private static boolean valueExprPrefersNegatedInput(Expr expr) {
+        if (expr instanceof Op op) {
+            if ((op.opcode() == Opcodes.FNEG || op.opcode() == Opcodes.DNEG
+                    || op.opcode() == Opcodes.INEG || op.opcode() == Opcodes.LNEG)
+                    && !op.args().isEmpty() && containsWriteInput(op.args().get(0))) {
+                return true;
+            }
+            for (Expr arg : op.args()) if (valueExprPrefersNegatedInput(arg)) return true;
+        } else if (expr instanceof Call call) {
+            for (Expr arg : call.args()) if (valueExprPrefersNegatedInput(arg)) return true;
+        } else if (expr instanceof Choice choice) {
+            for (Expr arg : choice.alternatives()) if (valueExprPrefersNegatedInput(arg)) return true;
+        } else if (expr instanceof OptionalContentExpr optional) {
+            return valueExprPrefersNegatedInput(optional.optionalExpr());
+        }
+        return false;
+    }
+
+    private static boolean containsWriteInput(Expr expr) {
+        if (expr instanceof WriteInput) return true;
+        if (expr instanceof Op op) {
+            for (Expr arg : op.args()) if (containsWriteInput(arg)) return true;
+        } else if (expr instanceof Call call) {
+            for (Expr arg : call.args()) if (containsWriteInput(arg)) return true;
+        } else if (expr instanceof Choice choice) {
+            for (Expr arg : choice.alternatives()) if (containsWriteInput(arg)) return true;
+        } else if (expr instanceof OptionalContentExpr optional) {
+            return containsWriteInput(optional.optionalExpr());
+        } else if (expr instanceof StoreWrite write) {
+            return containsWriteInput(write.valueExpr());
+        }
+        return false;
+    }
+
     private static boolean sameSource(Expr a, Source sink) {
         return a == sink || (a instanceof Source s && s.canonicalKey().equals(sink.canonicalKey()));
     }
@@ -916,8 +1210,51 @@ public final class HealthDataflowAnalyzer {
         if (e instanceof Closure closure) {
             for (Expr a : closure.captured()) if (containsSink(a, sink)) return true;
         }
+        if (e instanceof StoreWrite write) {
+            return sameSource(write.sink(), sink);
+        }
         if (e instanceof Choice c) {
             for (Expr a : c.alternatives()) if (containsSink(a, sink)) return true;
+        }
+        return false;
+    }
+
+    // 递归判断表达式树是否含 UnknownExpr，标记 getHealth 实现"过于复杂/无法符号化"
+    static boolean containsUnknown(Expr e) {
+        if (e instanceof UnknownExpr) return true;
+        if (e instanceof Op op) {
+            for (Expr a : op.args()) if (containsUnknown(a)) return true;
+        }
+        if (e instanceof Call call) {
+            for (Expr a : call.args()) if (containsUnknown(a)) return true;
+        }
+        if (e instanceof Closure closure) {
+            for (Expr a : closure.captured()) if (containsUnknown(a)) return true;
+        }
+        if (e instanceof Choice c) {
+            for (Expr a : c.alternatives()) if (containsUnknown(a)) return true;
+        }
+        if (e instanceof OptionalContentExpr o) return containsUnknown(o.optionalExpr());
+        return false;
+    }
+
+    /* 判断表达式树中是否存在至少一条纯字面常数分支。
+       对 Choice：只要任一条 alternative 是常数即返回 true（分支级判定）。
+       对 Op：所有 args 必须都是常数才算常数（保持语义正确性）。
+       其余节点类型不再放宽——Source/Call/Closure/Unknown 一律不是常数。 */
+    static boolean hasConstantBranch(Expr e) {
+        if (e instanceof Primitive) return true;
+        if (e instanceof Op op) {
+            for (Expr a : op.args()) if (!hasConstantBranch(a)) return false;
+            return true;
+        }
+        if (e instanceof Choice c) {
+            for (Expr a : c.alternatives()) if (hasConstantBranch(a)) return true;
+            return false;
+        }
+        if (e instanceof Call call) {
+            for (Expr a : call.args()) if (hasConstantBranch(a)) return true;
+            return false;
         }
         return false;
     }
@@ -950,6 +1287,7 @@ public final class HealthDataflowAnalyzer {
         else if (e instanceof Call call) for (Expr a : call.args()) collect(a, out);
         else if (e instanceof Closure closure) for (Expr a : closure.captured()) collect(a, out);
         else if (e instanceof OptionalContentExpr optional) collect(optional.optionalExpr(), out);
+        else if (e instanceof StoreWrite write) out.add(write.sink());
         else if (e instanceof Choice c) for (Expr a : c.alternatives()) collect(a, out);
     }
 
@@ -963,6 +1301,10 @@ public final class HealthDataflowAnalyzer {
             Object container = evaluate(optional.optionalExpr(), ctx);
             return unwrapOptionalContent(container);
         }
+        if (e instanceof StoreWrite write) {
+            return evaluate(write.valueExpr(), ctx);
+        }
+        if (e instanceof WriteInput) return null;
         if (e instanceof Choice c) {
             for (Expr alt : c.alternatives()) {
                 Object v = evaluate(alt, ctx);
@@ -980,10 +1322,105 @@ public final class HealthDataflowAnalyzer {
             return execOp(op.opcode(), ev);
         }
         if (e instanceof Call call) {
+            Object known = evaluateKnownCall(call, ctx, null, false);
+            if (known != UnknownEval.INSTANCE) return known;
             return invokeCall(call, ctx);
         }
         if (e instanceof Closure) return null;
         return null;
+    }
+
+    private static Object evaluateWithWriteInput(Expr e, EvalContext ctx, Object inputValue) {
+        if (e instanceof WriteInput) return inputValue;
+        if (e instanceof Primitive p) return p.value();
+        if (e instanceof Reference r) return r.value();
+        if (e == EntityParamMarker.I) return ctx.entity();
+        if (e instanceof Source s) return s.read(ctx.entity());
+        if (e instanceof OptionalContentExpr optional) {
+            Object container = evaluateWithWriteInput(optional.optionalExpr(), ctx, inputValue);
+            return unwrapOptionalContent(container);
+        }
+        if (e instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) {
+                Object value = evaluateWithWriteInput(alternative, ctx, inputValue);
+                if (value != null) return value;
+            }
+            return null;
+        }
+        if (e instanceof Op op) {
+            List<Object> values = new ArrayList<>(op.args().size());
+            for (Expr arg : op.args()) {
+                Object value = evaluateWithWriteInput(arg, ctx, inputValue);
+                if (value == null) return null;
+                values.add(value);
+            }
+            return execOp(op.opcode(), values);
+        }
+        if (e instanceof Call call) {
+            Object known = evaluateKnownCall(call, ctx, inputValue, true);
+            if (known != UnknownEval.INSTANCE) return known;
+            List<Expr> args = new ArrayList<>(call.args().size());
+            for (Expr arg : call.args()) {
+                Object value = evaluateWithWriteInput(arg, ctx, inputValue);
+                if (value == null) return null;
+                args.add(new Reference(value, value.getClass().getName().replace('.', '/')));
+            }
+            return invokeCall(new Call(call.owner(), call.name(), call.desc(), args), ctx);
+        }
+        if (e instanceof StoreWrite write) return evaluateWithWriteInput(write.valueExpr(), ctx, inputValue);
+        return null;
+    }
+
+    private enum UnknownEval { INSTANCE }
+
+    private static Object evaluateKnownCall(Call call, EvalContext ctx, Object inputValue, boolean hasInput) {
+        List<Object> values = new ArrayList<>(call.args().size());
+        for (Expr arg : call.args()) {
+            Object value = hasInput ? evaluateWithWriteInput(arg, ctx, inputValue) : evaluate(arg, ctx);
+            if (value == null) return UnknownEval.INSTANCE;
+            values.add(value);
+        }
+        try {
+            String owner = call.owner();
+            String name = call.name();
+            String desc = call.desc();
+            if (owner.equals("java/lang/Float") && name.equals("toString") && desc.equals("(F)Ljava/lang/String;")) {
+                return Float.toString(((Number) values.get(0)).floatValue());
+            }
+            if (owner.equals("java/lang/Double") && name.equals("toString") && desc.equals("(D)Ljava/lang/String;")) {
+                return Double.toString(((Number) values.get(0)).doubleValue());
+            }
+            if (owner.equals("java/lang/Integer") && name.equals("toString") && desc.equals("(I)Ljava/lang/String;")) {
+                return Integer.toString(((Number) values.get(0)).intValue());
+            }
+            if (owner.equals("java/lang/Long") && name.equals("toString") && desc.equals("(J)Ljava/lang/String;")) {
+                return Long.toString(((Number) values.get(0)).longValue());
+            }
+            if (owner.equals("java/lang/String") && name.equals("valueOf") && values.size() == 1) {
+                return String.valueOf(values.get(0));
+            }
+            if ((owner.equals("java/lang/Float") || owner.equals("java/lang/Double")
+                    || owner.equals("java/lang/Integer") || owner.equals("java/lang/Long"))
+                    && name.equals("valueOf") && values.size() == 1) {
+                return values.get(0);
+            }
+            if (name.equals("floatValue") && desc.equals("()F") && values.get(0) instanceof Number number) {
+                return number.floatValue();
+            }
+            if (name.equals("doubleValue") && desc.equals("()D") && values.get(0) instanceof Number number) {
+                return number.doubleValue();
+            }
+            if (name.equals("intValue") && desc.equals("()I") && values.get(0) instanceof Number number) {
+                return number.intValue();
+            }
+            if (name.equals("longValue") && desc.equals("()J") && values.get(0) instanceof Number number) {
+                return number.longValue();
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+        return UnknownEval.INSTANCE;
     }
 
     /* ==================== 预置对偶规则 ==================== */
@@ -1579,19 +2016,562 @@ public final class HealthDataflowAnalyzer {
         }
     }
 
+    /* ==================== 外部扫描：isAlive/isDeadOrDying 逆推真实血量 ==================== */
+
+    /*
+     * 通用数据流逆推骨架：从指定方法的指令帧提取血量表达式，统一"读字节码→跑 Analyzer→strip→封 AnalysisResult"。
+     * getHealth 与外部扫描各自只传入 extractor（从 MethodNode + 跑完的 Frame[] 中挑出 Expr），骨架完成其余公共部分。
+     */
+    private static AnalysisResult analyzeForHealthExpr(Class<?> owner, String name, String desc,
+                                                        java.util.function.BiFunction<MethodNode, Frame<TaintValue>[], Expr> extractor) {
+        if (owner == null || owner.getClassLoader() == null) return null;
+        try {
+            byte[] bytes = classBytes(owner);
+            if (bytes == null) return null;
+            String ownerInternal = EcaSetHealthManager.internalName(owner);
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
+            MethodNode mn = null;
+            for (MethodNode m : cn.methods) {
+                if (m.desc.equals(desc) && m.name.equals(name)) { mn = m; break; }
+            }
+            if (mn == null || mn.instructions.size() == 0) return null;
+
+            AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+            TaintInterpreter interp = new TaintInterpreter(ctx, 0, ownerInternal, null);
+            Analyzer<TaintValue> analyzer = new Analyzer<>(interp);
+            Frame<TaintValue>[] frames = analyzer.analyze(ownerInternal, mn);
+
+            Expr raw = extractor.apply(mn, frames);
+            if (raw == null || raw instanceof UnknownExpr) return null;
+            Expr stripped = stripEcaHealthWrappers(raw);
+            if (stripped == null || stripped instanceof UnknownExpr) return null;
+            return new AnalysisResult(stripped, List.copyOf(collectSources(stripped)), owner);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+        return null;
+    }
+
+    //对外入口：const override 失败后，对 isAlive/isDeadOrDying 跑完整数据流管线
+    public static EcaSetHealthManager.HealthPath resolveExternalScan(Class<?> entityClass) {
+        if (entityClass == null) return null;
+        AnalysisResult ar = EXTERNAL_SCAN_CACHE.computeIfAbsent(entityClass,
+                c -> analyzeUnifiedExternalScan(entityClass));
+        //纯数据流逆推：无结果或无可写 Source 即放弃，不再有方法对兜底
+        if (ar == null || ar.isEmpty() || ar.sources.isEmpty()) return null;
+        return new EcaSetHealthManager.HealthPath(EcaSetHealthManager.WriteMethod.EXTERNAL_SCAN,
+                (entity, target) -> writeViaSources(entityClass, ar, entity, target,
+                        (verifiedEntity, verifiedTarget, sink) ->
+                                verifyExternalDataflow(ar.returnExpr, verifiedEntity, verifiedTarget, sink)));
+    }
+
+    //同时分析 isAlive 和 isDeadOrDying，取 Sources 更多的结果
+    private static AnalysisResult analyzeUnifiedExternalScan(Class<?> entityClass) {
+        List<AnalysisResult> candidates = new ArrayList<>();
+        for (Class<?> c = entityClass; c != null && c != LivingEntity.class; c = c.getSuperclass()) {
+            for (String[] names : new String[][]{{ISALIVE_NAME, ISALIVE_NAME_ALT, "isAlive"},
+                                                  {ISDEAD_NAME, ISDEAD_NAME_ALT, "isDeadOrDying"}}) {
+                AnalysisResult ar = analyzeExternalScanMethod(c, names[0], names[1], names[2]);
+                if (ar != null && !ar.isEmpty() && !ar.sources.isEmpty()) {
+                    if (EXTERNAL_SCAN_DUMPED.add(entityClass.getName())) {
+                        EcaLogger.info("[HealthDataflow] EXTERNAL_SCAN entity={} via {} in {} sources={}",
+                                entityClass.getName(), names[2], c.getName(), ar.sources.size());
+                    }
+                    candidates.add(ar);
+                }
+            }
+            AnalysisResult writes = analyzeDamageWriteMethods(c, entityClass);
+            if (writes != null && !writes.isEmpty() && !writes.sources.isEmpty()) candidates.add(writes);
+        }
+        AnalysisResult result = combineExternalScanCandidates(entityClass, candidates);
+        if (result != null) {
+            EcaLogger.info("[HealthDataflow] EXTERNAL_SCAN entity={} mergedCandidates={} mergedSources={}",
+                    entityClass.getName(), candidates.size(), result.sources.size());
+        }
+        return result;
+    }
+
+    private static AnalysisResult combineExternalScanCandidates(Class<?> entityClass, List<AnalysisResult> candidates) {
+        List<Expr> alternatives = new ArrayList<>();
+        for (AnalysisResult candidate : candidates) {
+            if (candidate == null || candidate.isEmpty() || candidate.sources.isEmpty()) continue;
+            addUniqueExpr(alternatives, candidate.returnExpr);
+        }
+        if (alternatives.isEmpty()) return null;
+        Expr combined = alternatives.size() == 1 ? alternatives.get(0) : new Choice(List.copyOf(alternatives));
+        List<Source> sources = new ArrayList<>(collectSources(combined));
+        sources.sort(Comparator.comparingInt(HealthDataflowAnalyzer::externalSourcePriority)
+                .thenComparing(source -> source.label));
+        AnalysisResult result = new AnalysisResult(combined, List.copyOf(sources), entityClass);
+        if (EXTERNAL_WRITE_DUMPED.add(entityClass.getName() + "#merged")) {
+            EcaLogger.info("[HealthDataflow] EXTERNAL_SCAN entity={} complete hierarchy scan candidates={} alternatives={} sources={}",
+                    entityClass.getName(), candidates.size(), alternatives.size(), result.sources.size());
+            int i = 0;
+            for (Source source : result.sources) {
+                EcaLogger.info("[HealthDataflow]   external source #{} {} type={}", i++, source.label, source.valueType.getName());
+            }
+        }
+        return result;
+    }
+
+    private static int externalSourcePriority(Source source) {
+        if (source instanceof SynchedDataSource) return 0;
+        if (source instanceof MapEntrySource || source instanceof CapabilityDataSource) return 1;
+        if (source instanceof FieldChainSource) return 2;
+        if (source instanceof MethodCallSource) return 3;
+        return 4;
+    }
+
+    public static AnalysisResult analyzeExternalScan(Class<?> entityClass) {
+        List<AnalysisResult> candidates = new ArrayList<>();
+        //第 1 层：完整数据流逆推——跑 analyzeMethod + FCMPL/FCMPG 栈帧提取
+        for (Class<?> c = entityClass; c != null && c != LivingEntity.class; c = c.getSuperclass()) {
+            for (String[] names : new String[][]{{ISALIVE_NAME, ISALIVE_NAME_ALT, "isAlive"},
+                                                  {ISDEAD_NAME, ISDEAD_NAME_ALT, "isDeadOrDying"}}) {
+                AnalysisResult ar = analyzeExternalScanMethod(c, names[0], names[1], names[2]);
+                if (ar != null && !ar.isEmpty() && !ar.sources.isEmpty()) {
+                    if (EXTERNAL_SCAN_DUMPED.add(entityClass.getName())) {
+                        EcaLogger.info("[HealthDataflow] EXTERNAL_SCAN entity={} via {} in {} sources={}",
+                                entityClass.getName(), names[2], c.getName(), ar.sources.size());
+                    }
+                    candidates.add(ar);
+                }
+            }
+        }
+        return combineExternalScanCandidates(entityClass, candidates);
+    }
+
+    //对 isAlive/isDeadOrDying 跑数据流骨架，从 FCMPL/FCMPG 前栈帧提取血量表达式
+    private static AnalysisResult analyzeExternalScanMethod(Class<?> owner, String srgName, String mcpName, String label) {
+        java.util.function.BiFunction<MethodNode, Frame<TaintValue>[], Expr> cmpgExtractor = (mn, frames) -> {
+            int idx = 0;
+            for (AbstractInsnNode insn : mn.instructions) {
+                if (insn.getOpcode() == Opcodes.FCMPL || insn.getOpcode() == Opcodes.FCMPG) {
+                    Frame<TaintValue> f = frames[idx];
+                    if (f != null && f.getStackSize() >= 2) {
+                        //浮点比较两操作数中，非 Primitive 常数的那一侧才是真实血量表达式
+                        Expr top = f.getStack(f.getStackSize() - 1).expr;
+                        Expr second = f.getStack(f.getStackSize() - 2).expr;
+                        Expr healthExpr = (top instanceof Primitive && !(second instanceof Primitive)) ? second
+                                : (second instanceof Primitive && !(top instanceof Primitive)) ? top : null;
+                        if (healthExpr == null && !(top instanceof Primitive)) healthExpr = top;
+                        if (healthExpr != null && !(healthExpr instanceof UnknownExpr)) return healthExpr;
+                    }
+                }
+                idx++;
+            }
+            return null;
+        };
+        //同名只可能存在其一：先 srgName，未命中再 mcpName，避免重复跑 Analyzer
+        AnalysisResult ar = analyzeForHealthExpr(owner, srgName, BOOL_DESC, cmpgExtractor);
+        if (ar != null) return ar;
+        return analyzeForHealthExpr(owner, mcpName, BOOL_DESC, cmpgExtractor);
+    }
+
     /* ==================== AnalysisResult + 入口 ==================== */
 
+    private static AnalysisResult analyzeDamageWriteMethods(Class<?> owner, Class<?> requestedEntityClass) {
+        List<Expr> writes = new ArrayList<>();
+        for (String[] names : new String[][]{
+                {HURT_NAME, HURT_NAME_ALT, HURT_DESC, "hurt"},
+                {ACTUALLY_HURT_NAME, ACTUALLY_HURT_NAME_ALT, ACTUALLY_HURT_DESC, "actuallyHurt"}
+        }) {
+            AnalysisResult ar = analyzeDamageWriteMethod(owner, names[0], names[1], names[2]);
+            if (ar == null || ar.isEmpty()) continue;
+            addUniqueExpr(writes, ar.returnExpr);
+            if (EXTERNAL_WRITE_DUMPED.add(requestedEntityClass.getName() + "#" + names[3])) {
+                EcaLogger.info("[HealthDataflow] EXTERNAL_SCAN entity={} via {} write-sites in {} sources={}",
+                        requestedEntityClass.getName(), names[3], owner.getName(), ar.sources.size());
+            }
+        }
+        if (writes.isEmpty()) return null;
+        Expr expr = writes.size() == 1 ? writes.get(0) : new Choice(List.copyOf(writes));
+        return AnalysisResult.of(expr, owner);
+    }
+
+    private static AnalysisResult analyzeDamageWriteMethod(Class<?> owner, String srgName, String mcpName, String desc) {
+        AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+        Expr writes = analyzeMethodWrites(owner, srgName, desc, null, ctx, 0);
+        if (writes == null || writes instanceof UnknownExpr) {
+            writes = analyzeMethodWrites(owner, mcpName, desc, null, ctx, 0);
+        }
+        if (writes == null || writes instanceof UnknownExpr) return null;
+        Expr stripped = stripEcaHealthWrappers(writes);
+        if (stripped == null || stripped instanceof UnknownExpr) return null;
+        return AnalysisResult.of(stripped, owner);
+    }
+
+    private static Expr analyzeMethodWrites(Class<?> owner, String name, String desc,
+                                            TaintValue[] seedLocals, AnalysisCtx ctx, int depth) {
+        if (owner == null || owner.getClassLoader() == null || depth >= ctx.maxDepth) return null;
+        String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc + "#writes";
+        if (!ctx.inflight.add(cacheKey)) return new UnknownExpr("recursive-cycle-writes");
+        try {
+            byte[] bytes = classBytes(owner);
+            if (bytes == null) return null;
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
+            MethodNode mn = null;
+            for (MethodNode method : cn.methods) {
+                if (method.name.equals(name) && method.desc.equals(desc)) {
+                    mn = method;
+                    break;
+                }
+            }
+            if (mn == null || mn.instructions.size() == 0) return null;
+
+            String ownerInternal = internalName(owner);
+            TaintInterpreter interpreter = new TaintInterpreter(ctx, depth, ownerInternal, seedLocals);
+            Analyzer<TaintValue> analyzer = new Analyzer<>(interpreter);
+            Frame<TaintValue>[] frames = analyzer.analyze(ownerInternal, mn);
+
+            List<Expr> writes = new ArrayList<>();
+            int idx = 0;
+            for (AbstractInsnNode insn : mn.instructions) {
+                Expr write = extractWriteExpression(frames[idx], insn, ctx, depth);
+                if (write != null && !(write instanceof UnknownExpr)) addUniqueExpr(writes, write);
+                idx++;
+            }
+            if (writes.isEmpty()) return null;
+            return writes.size() == 1 ? writes.get(0) : new Choice(List.copyOf(writes));
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            EcaLogger.info("[HealthDataflow] analyzeMethodWrites {}.{} failed: {}", owner.getName(), name, t.toString());
+            return null;
+        } finally {
+            ctx.inflight.remove(cacheKey);
+        }
+    }
+
+    private static Expr extractWriteExpression(Frame<TaintValue> frame, AbstractInsnNode insn,
+                                               AnalysisCtx ctx, int depth) {
+        if (frame == null) return null;
+        int opcode = insn.getOpcode();
+        if (insn instanceof FieldInsnNode field) {
+            if (opcode == Opcodes.PUTFIELD && frame.getStackSize() >= 2) {
+                return buildFieldSourceFromReceiver(field, frame.getStack(frame.getStackSize() - 2).expr);
+            }
+            if (opcode == Opcodes.PUTSTATIC && frame.getStackSize() >= 1) return buildStaticFieldWriteSource(field);
+            return null;
+        }
+        if (!(insn instanceof MethodInsnNode call)) return null;
+        if (Type.getReturnType(call.desc) != Type.VOID_TYPE) return null;
+        List<Expr> args = invokeValueExprs(call, frame);
+        if (args.isEmpty()) return null;
+        Expr known = extractKnownWriteCall(call, args);
+        if (known != null) return known;
+        Expr inlined = tryInlineWriteCall(call, args, ctx, depth);
+        return inlined != null && !(inlined instanceof UnknownExpr) ? inlined : extractMethodCallWriteSource(call, args);
+    }
+
+    private static Expr extractKnownWriteCall(MethodInsnNode call, List<Expr> args) {
+        if (isSynchedDataSet(call) && args.size() >= 3) {
+            Expr accessor = args.get(1);
+            if (accessor instanceof Reference ref && ref.value() instanceof EntityDataAccessor<?> acc) {
+                return new StoreWrite(new SynchedDataSource(acc, Object.class), args.get(2));
+            }
+        }
+        if (isMapPut(call) && args.size() >= 3) {
+            Expr container = args.get(0);
+            Expr key = args.get(1);
+            return new MapEntrySource(container, key, detectKeyKind(key), mapOwnerHint(container), Object.class, call.owner);
+        }
+        return null;
+    }
+
+    private static Expr tryInlineWriteCall(MethodInsnNode call, List<Expr> args, AnalysisCtx ctx, int depth) {
+        if (isMethodHandleInvoke(call) && !args.isEmpty()) {
+            if (depth + 1 >= ctx.maxDepth || ctx.inlineBudget <= 0) return null;
+            MethodTarget target = resolveMethodHandleTarget(args.get(0));
+            if (target == null) return null;
+            Type[] targetArgs = Type.getArgumentTypes(target.desc());
+            if (args.size() - 1 != targetArgs.length) return null;
+            TaintValue[] seedLocals = new TaintValue[localCount(targetArgs) + 8];
+            int local = 0;
+            for (int i = 0; i < targetArgs.length; i++) {
+                Expr argExpr = isNumericAsmType(targetArgs[i])
+                        ? new WriteInput(i, descriptorChar(targetArgs[i]))
+                        : args.get(i + 1);
+                seedLocals[local] = new TaintValue(targetArgs[i].getSize(), argExpr);
+                local += targetArgs[i].getSize();
+            }
+            ctx.inlineBudget--;
+            return analyzeMethodWrites(target.owner(), target.name(), target.desc(), seedLocals, ctx, depth + 1);
+        }
+        if (depth + 1 >= ctx.maxDepth || ctx.inlineBudget <= 0 || call.name.startsWith("<")) return null;
+        if (call.owner.startsWith("java/") || call.owner.startsWith("javax/") || call.owner.startsWith("jdk/")
+                || call.owner.startsWith("net/minecraft/")) {
+            return null;
+        }
+        Class<?> owner = loadClass(call.owner);
+        if (owner == null) return null;
+        boolean isStatic = call.getOpcode() == Opcodes.INVOKESTATIC;
+        Type[] argTypes = Type.getArgumentTypes(call.desc);
+        int expectedArgs = argTypes.length + (isStatic ? 0 : 1);
+        if (args.size() != expectedArgs) return null;
+
+        int localCount = isStatic ? 0 : 1;
+        for (Type argType : argTypes) localCount += argType.getSize();
+        TaintValue[] seedLocals = new TaintValue[localCount + 8];
+        int local = 0;
+        int arg = 0;
+        if (!isStatic) seedLocals[local++] = new TaintValue(1, args.get(arg++));
+        for (int i = 0; i < argTypes.length; i++) {
+            Type argType = argTypes[i];
+            Expr argExpr = isNumericAsmType(argType) ? new WriteInput(i, descriptorChar(argType)) : args.get(arg);
+            seedLocals[local] = new TaintValue(argType.getSize(), argExpr);
+            arg++;
+            local += argType.getSize();
+        }
+        ctx.inlineBudget--;
+        return analyzeMethodWrites(owner, call.name, call.desc, seedLocals, ctx, depth + 1);
+    }
+
+    private static int localCount(Type[] types) {
+        int count = 0;
+        for (Type type : types) count += type.getSize();
+        return count;
+    }
+
+    private static boolean isNumericAsmType(Type type) {
+        if (type == null) return false;
+        return switch (type.getSort()) {
+            case Type.BYTE, Type.SHORT, Type.INT, Type.LONG, Type.FLOAT, Type.DOUBLE, Type.CHAR -> true;
+            default -> false;
+        };
+    }
+
+    private static char descriptorChar(Type type) {
+        return type == null || type.getDescriptor().isEmpty() ? '?' : type.getDescriptor().charAt(0);
+    }
+
+    private static Expr extractMethodCallWriteSource(MethodInsnNode call, List<Expr> args) {
+        Type[] argTypes = Type.getArgumentTypes(call.desc);
+        boolean isStatic = call.getOpcode() == Opcodes.INVOKESTATIC;
+        int start = isStatic ? 0 : 1;
+        if (args.size() < start + argTypes.length) return null;
+        boolean hasEntity = false;
+        for (Expr arg : args) {
+            if (arg == EntityParamMarker.I) {
+                hasEntity = true;
+                break;
+            }
+        }
+        if (!hasEntity || call.owner.startsWith("net/minecraft/") || call.owner.startsWith("java/")) return null;
+        for (int i = 0; i < argTypes.length; i++) {
+            if (!isNumericType(argTypes[i])) continue;
+            Expr valueExpr = args.get(start + i);
+            if (valueExpr instanceof Primitive) continue;
+            return new MethodCallSource(call.owner, call.name, call.desc, List.copyOf(args), i);
+        }
+        return null;
+    }
+
+    private static Source buildFieldSourceFromReceiver(FieldInsnNode field, Expr receiver) {
+        FieldStep step = new FieldStep(field.owner, field.name, field.desc);
+        if (receiver == EntityParamMarker.I) {
+            Expr source = makeFieldChainSource(List.of(step));
+            return source instanceof Source s ? s : null;
+        }
+        if (receiver instanceof FieldChainSource fcs) {
+            List<FieldStep> chain = new ArrayList<>(fcs.chain);
+            chain.add(step);
+            Expr source = makeFieldChainSource(chain);
+            return source instanceof Source s ? s : null;
+        }
+        Class<?> type = descriptorToClass(step.desc());
+        return new ChainedFieldSource(receiver, List.of(step), type == null ? Object.class : type);
+    }
+
+    private static Source buildStaticFieldWriteSource(FieldInsnNode field) {
+        try {
+            Class<?> owner = loadClass(field.owner);
+            if (owner == null) return null;
+            Field reflected = findFieldInHierarchy(owner, field.name);
+            if (reflected == null) return null;
+            reflected.setAccessible(true);
+            return new StaticFieldSource(reflected);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
+    private static Expr makeFieldChainSource(List<FieldStep> chain) {
+        try {
+            VarHandle[] handles = new VarHandle[chain.size()];
+            Class<?> lastType = null;
+            for (int i = 0; i < chain.size(); i++) {
+                FieldStep step = chain.get(i);
+                Class<?> owner = loadClass(step.ownerInternal());
+                Class<?> fieldType = descriptorToClass(step.desc());
+                if (owner == null || fieldType == null) return UnknownExpr.UNKNOWN;
+                Field field = findFieldInHierarchy(owner, step.name());
+                if (field == null) return UnknownExpr.UNKNOWN;
+                Class<?> declaring = field.getDeclaringClass();
+                MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(declaring, MethodHandles.lookup());
+                handles[i] = lookup.findVarHandle(declaring, step.name(), fieldType);
+                lastType = fieldType;
+            }
+            return new FieldChainSource(chain, handles, lastType);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return UnknownExpr.UNKNOWN;
+        }
+    }
+
+    private static boolean isSynchedDataSet(MethodInsnNode call) {
+        return call.owner.equals("net/minecraft/network/syncher/SynchedEntityData")
+                && (call.name.equals("m_135381_") || call.name.equals("set"));
+    }
+
+    private static boolean isMapPut(MethodInsnNode call) {
+        return (call.name.equals("put") || call.name.equals("putIfAbsent")) && isMapClassByName(call.owner);
+    }
+
+    private static boolean isNumericType(Type type) {
+        return switch (type.getSort()) {
+            case Type.BYTE, Type.SHORT, Type.INT, Type.LONG, Type.FLOAT, Type.DOUBLE -> true;
+            case Type.OBJECT -> {
+                String name = type.getInternalName();
+                yield name.equals("java/lang/Number") || name.equals("java/lang/Float")
+                        || name.equals("java/lang/Double") || name.equals("java/lang/Integer")
+                        || name.equals("java/lang/Long") || name.equals("java/lang/Short")
+                        || name.equals("java/lang/Byte");
+            }
+            default -> false;
+        };
+    }
+
+    private static void addUniqueExpr(List<Expr> expressions, Expr expression) {
+        if (expression == null) return;
+        if (expression instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) addUniqueExpr(expressions, alternative);
+            return;
+        }
+        if (!expressions.contains(expression)) expressions.add(expression);
+    }
+
+    private record MethodTarget(Class<?> owner, String name, String desc) {}
+
+    private static boolean isMethodHandleInvoke(MethodInsnNode call) {
+        return call.owner.equals("java/lang/invoke/MethodHandle")
+                && (call.name.equals("invokeExact") || call.name.equals("invoke"));
+    }
+
+    private static MethodTarget resolveMethodHandleTarget(Expr handleExpr) {
+        if (!(handleExpr instanceof Reference reference) || !(reference.value() instanceof MethodHandle handle)) {
+            return null;
+        }
+        try {
+            MethodHandleInfo info = MethodHandles.lookup().revealDirect(handle);
+            Class<?> owner = info.getDeclaringClass();
+            String name = info.getName();
+            String desc = info.getMethodType().toMethodDescriptorString();
+            MethodTarget remapped = remapHiddenNestmateTarget(owner, name, desc);
+            return remapped != null ? remapped : new MethodTarget(owner, name, desc);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
+    private static MethodTarget remapHiddenNestmateTarget(Class<?> owner, String name, String desc) {
+        try {
+            Class<?> host = owner.getNestHost();
+            if (host == null || host == owner || name == null || name.length() != 1) return null;
+            String hostName = name + "0";
+            if (findAnyMethod(host, hostName, desc) == null) return null;
+            return new MethodTarget(host, hostName, desc);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
     public static final class AnalysisResult {
-        public static final AnalysisResult EMPTY = new AnalysisResult(UnknownExpr.UNKNOWN, List.of());
+        public static final AnalysisResult EMPTY = new AnalysisResult(UnknownExpr.UNKNOWN, List.of(), null);
         public final Expr returnExpr;
         public final List<Source> sources;
-        private AnalysisResult(Expr e, List<Source> s) { this.returnExpr = e; this.sources = s; }
+        /* 实际定义 getHealth()F 方法的类（可能是实体类的父类），retransform 必须针对此类 */
+        public final Class<?> definingClass;
+        private AnalysisResult(Expr e, List<Source> s, Class<?> dc) {
+            this.returnExpr = e; this.sources = s; this.definingClass = dc;
+        }
         public boolean isEmpty() {
             return returnExpr == null || returnExpr instanceof UnknownExpr;
         }
-        public static AnalysisResult of(Expr e) {
-            return new AnalysisResult(e, List.copyOf(collectSources(e)));
+
+        // getHealth 返回值的分类语义，决定改血手段的分流
+        // CONSTANT：全树纯字面常数（无 Source/Choice），最简情况
+        // HAS_CONSTANT：树中存在常数分支（Choice 中至少一条 alternative 是常数），FRETURN patch 可覆盖
+        // SOLVABLE：含可写 Source，走 dataflow 真写存储（优先级高于 HAS_CONSTANT）
+        // OPAQUE：含 Unknown 或无法符号化的非常数计算
+        public enum Kind { SOLVABLE, CONSTANT, HAS_CONSTANT, OPAQUE }
+
+        /* HAS_CONSTANT 优先级高于 SOLVABLE：只要有常数分支就优先走 FRETURN patch + 常数覆盖，
+           即使树中也存在 Source（如加密保护的存储），常数覆盖仍能生效。
+           SOLVABLE 仅用于纯数据流可写、无常数分支的实体。 */
+        public Kind classify() {
+            if (returnExpr == null || containsUnknown(returnExpr)) return Kind.OPAQUE;
+            if (hasConstantBranch(returnExpr)) {
+                // 全树纯常数（无 Choice/Source）→ CONSTANT；含 Choice 且有常数分支 → HAS_CONSTANT
+                return isPureConstant(returnExpr) ? Kind.CONSTANT : Kind.HAS_CONSTANT;
+            }
+            if (!sources.isEmpty()) return Kind.SOLVABLE;
+            return Kind.OPAQUE;
         }
+        /* 判断表达式是否为纯常数，不含 Choice：Primitive 或纯常数的 Op。
+           用于区分 CONSTANT（全树纯常数）和 HAS_CONSTANT（Choice 中存在常数分支）。 */
+        private static boolean isPureConstant(Expr e) {
+            if (e instanceof Primitive) return true;
+            if (e instanceof Op op) {
+                for (Expr a : op.args()) if (!isPureConstant(a)) return false;
+                return true;
+            }
+            return false;
+        }
+
+        public static AnalysisResult of(Expr e, Class<?> definingClass) {
+            return new AnalysisResult(e, List.copyOf(collectSources(e)), definingClass);
+        }
+    }
+
+    private static boolean shouldKeepAsRuntimeCall(Class<?> owner, String name, String desc) {
+        if (!Type.getReturnType(desc).equals(Type.getType(String.class))) return false;
+        if (owner.getName().startsWith("java.")) return false;
+        try {
+            byte[] bytes = classBytes(owner);
+            if (bytes == null) return false;
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
+            for (MethodNode method : cn.methods) {
+                if (method.name.equals(name) && method.desc.equals(desc)) {
+                    return hasComplexStringRuntimeBoundary(method);
+                }
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
+        return false;
+    }
+
+    private static boolean hasComplexStringRuntimeBoundary(MethodNode method) {
+        for (AbstractInsnNode insn : method.instructions) {
+            int op = insn.getOpcode();
+            if (op == Opcodes.NEWARRAY || op == Opcodes.ANEWARRAY || op == Opcodes.MULTIANEWARRAY
+                    || isArrayStoreOpcode(op)) {
+                return true;
+            }
+            if (insn instanceof JumpInsnNode jump && jump.label != null) {
+                int insnIndex = method.instructions.indexOf(insn);
+                int targetIndex = method.instructions.indexOf(jump.label);
+                if (targetIndex >= 0 && targetIndex <= insnIndex) return true;
+            }
+        }
+        return false;
     }
 
     public static AnalysisResult analyze(Class<?> entityClass) {
@@ -1600,18 +2580,63 @@ public final class HealthDataflowAnalyzer {
 
     public static AnalysisResult analyze(Class<?> entityClass, int maxDepth) {
         try {
-            ClassAndMethod target = findMethodOwner(entityClass);
-            if (target == null) return AnalysisResult.EMPTY;
+            byte[] classBytes = classBytes(entityClass);
+            if (classBytes == null) {
+                EcaLogger.info("[HealthDataflow] classBytes({}) returned null — class bytes unreachable", entityClass.getName());
+                return AnalysisResult.EMPTY;
+            }
+            ClassAndMethod target = findMethodOwnerFromBytes(entityClass, classBytes);
+            if (target == null) {
+                EcaLogger.info("[HealthDataflow] findMethodOwner({}) returned null — getHealth()F not found in hierarchy bytes", entityClass.getName());
+                return AnalysisResult.EMPTY;
+            }
             AnalysisCtx ctx = new AnalysisCtx(maxDepth);
-            Expr ret = analyzeMethod(target.owner(), target.name(), GETHEALTH_DESC, null, ctx, 0);
-            ret = stripEcaHealthWrappers(ret);
-            if (ret == null || ret instanceof UnknownExpr) return AnalysisResult.EMPTY;
-            return AnalysisResult.of(ret);
+            Class<?> defClass = target.owner();
+            Expr ret = analyzeMethod(defClass, target.name(), GETHEALTH_DESC, null, ctx, 0);
+            if (ret == null) {
+                EcaLogger.info("[HealthDataflow] analyzeMethod({}.{}()) returned null — ASM analysis failed", defClass.getName(), target.name());
+                return AnalysisResult.EMPTY;
+            }
+            // 诊断：打印剥离前的原始分析树
+            if (ret instanceof UnknownExpr || !TREE_DUMPED.contains(entityClass.getName())) {
+                List<String> rawTree = new ArrayList<>();
+                appendExpr(rawTree, ret, "    RAW> ");
+                EcaLogger.info("[HealthDataflow] raw returnExpr (before strip):");
+                for (String line : rawTree) EcaLogger.info("[HealthDataflow] {}", line);
+            }
+            Expr stripped = stripEcaHealthWrappers(ret);
+            if (stripped == null || stripped instanceof UnknownExpr) {
+                EcaLogger.info("[HealthDataflow] stripEcaHealthWrappers -> {} — raw analysis = UnknownExpr or null",
+                        stripped == null ? "null" : "UnknownExpr");
+                return AnalysisResult.EMPTY;
+            }
+            return AnalysisResult.of(stripped, target.owner());
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
             EcaLogger.info("[HealthDataflow] analyze {} failed: {}", entityClass.getName(), t.toString());
             return AnalysisResult.EMPTY;
         }
+    }
+
+    /* 只载一次 classBytes，沿继承链扫描 getHealth()F 定义类 */
+    private static ClassAndMethod findMethodOwnerFromBytes(Class<?> startClass, byte[] startBytes) {
+        if (classDefinesMethodInBytes(startClass, startBytes, GETHEALTH_NAME)) return new ClassAndMethod(startClass, GETHEALTH_NAME);
+        if (classDefinesMethodInBytes(startClass, startBytes, GETHEALTH_NAME_ALT)) return new ClassAndMethod(startClass, GETHEALTH_NAME_ALT);
+        for (Class<?> c = startClass.getSuperclass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            if (classDefinesMethod(c, GETHEALTH_NAME, GETHEALTH_DESC)) return new ClassAndMethod(c, GETHEALTH_NAME);
+            if (classDefinesMethod(c, GETHEALTH_NAME_ALT, GETHEALTH_DESC)) return new ClassAndMethod(c, GETHEALTH_NAME_ALT);
+        }
+        return null;
+    }
+
+    private static boolean classDefinesMethodInBytes(Class<?> owner, byte[] bytes, String name) {
+        if (bytes == null) return false;
+        try {
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, 0);
+            for (MethodNode mn : cn.methods) if (mn.name.equals(name) && mn.desc.equals(GETHEALTH_DESC)) return true;
+        } catch (Exception ignored) {}
+        return false;
     }
 
     /* 动态求解用：以具体种子分析任意方法的返回表达式。seedExprs[i] 对应方法第 i 个局部槽
@@ -1719,7 +2744,7 @@ public final class HealthDataflowAnalyzer {
         return null;
     }
 
-    private static boolean classDefinesMethod(Class<?> clazz, String name, String desc) {
+    static boolean classDefinesMethod(Class<?> clazz, String name, String desc) {
         byte[] bytes = classBytes(clazz);
         if (bytes == null) return false;
         try {
@@ -1730,22 +2755,11 @@ public final class HealthDataflowAnalyzer {
         return false;
     }
 
-    /* 取类字节码：优先运行期(mixin/coremod 转换后)版本，使分析能看见 mixin 对 getHealth 等的修改；
-       取不到再回退磁盘原始 .class（隐藏类 Foo/0x... 剥去后缀按模板类加载，逻辑一致）。 */
+    /* 取类字节码：优先运行期(mixin/coremod 转换后)版本，使分析能看见 mixin 对 getHealth 等的修改。
+       取不到再回退磁盘原始 .class（先走 ClassLoader.getResourceAsStream，再走 SystemClassLoader 兜底，最后用 clazz.getResourceAsStream）。 */
+    //统一委托给 EcaSetHealthManager.classBytes(含 RuntimeBytecodeProvider + ClassLoader + CodeSource 回退)
     private static byte[] classBytes(Class<?> clazz) {
-        if (clazz == null) return null;
-        try {
-            byte[] runtime = RuntimeBytecodeProvider.get(clazz);
-            if (runtime != null) return runtime;
-        } catch (Throwable ignored) {}
-        ClassLoader cl = clazz.getClassLoader();
-        if (cl == null) cl = ClassLoader.getSystemClassLoader();
-        try (InputStream is = cl.getResourceAsStream(internalName(clazz) + ".class")) {
-            return is == null ? null : is.readAllBytes();
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
-            return null;
-        }
+        return EcaSetHealthManager.classBytes(clazz);
     }
 
     //类内部名：剥去隐藏类的运行期后缀(Foo/0x000... → Foo)，以便按磁盘模板类定位字节码。
@@ -1792,7 +2806,7 @@ public final class HealthDataflowAnalyzer {
         }
 
         //环检测：覆盖顶层方法 + 跨方法环(如 getHealth↔position↔setHealth 互相调用),已在分析栈上则坍缩 Unknown
-        if (!ctx.inflight.add(cacheKey)) return UnknownExpr.UNKNOWN;
+        if (!ctx.inflight.add(cacheKey)) return new UnknownExpr("recursive-cycle");
         try {
             byte[] bytes = classBytes(owner);
             if (bytes == null) return null;
@@ -1811,21 +2825,43 @@ public final class HealthDataflowAnalyzer {
 
             List<Expr> returns = new ArrayList<>();
             int idx = 0;
+            int totalReturns = 0, nullFrames = 0, zeroStack = 0, unknownExpr = 0, acceptedReturns = 0;
+            List<String> returnDiag = new ArrayList<>();
             for (AbstractInsnNode insn : mn.instructions) {
                 int op = insn.getOpcode();
                 if (op == Opcodes.IRETURN || op == Opcodes.LRETURN || op == Opcodes.FRETURN
                     || op == Opcodes.DRETURN || op == Opcodes.ARETURN) {
+                    totalReturns++;
                     Frame<TaintValue> f = frames[idx];
-                    if (f != null && f.getStackSize() > 0) {
-                        Expr e = f.getStack(f.getStackSize() - 1).expr;
-                        Expr expanded = expandArrayReturn(mn, frames, idx, e, ctx, depth);
-                        if (expanded != null && !collectSources(expanded).isEmpty()) e = expanded;
-                        if (e != null && !(e instanceof UnknownExpr)) returns.add(e);
+                    String diag = "  return#" + totalReturns + " op=" + op + " frameNull=" + (f == null);
+                    if (f != null) {
+                        diag += " stackSize=" + f.getStackSize();
+                        if (f.getStackSize() > 0) {
+                            Expr e = f.getStack(f.getStackSize() - 1).expr;
+                            diag += " topExpr=" + (e == null ? "null" : e.getClass().getSimpleName() + " " + e);
+                            if (e instanceof UnknownExpr u) diag += " prov=" + u.provenance();
+                            if (e != null && !(e instanceof UnknownExpr)) acceptedReturns++;
+                            else unknownExpr++;
+                            Expr expanded = expandArrayReturn(mn, frames, idx, e, ctx, depth);
+                            if (expanded != null && !collectSources(expanded).isEmpty()) e = expanded;
+                            if (e != null && !(e instanceof UnknownExpr)) returns.add(e);
+                        } else {
+                            zeroStack++;
+                        }
+                    } else {
+                        nullFrames++;
                     }
+                    returnDiag.add(diag);
                 }
                 idx++;
             }
-            Expr result = returns.isEmpty() ? UnknownExpr.UNKNOWN
+            if (seedLocals == null && (!returns.isEmpty() || !returnDiag.isEmpty())
+                    && METHOD_DIAG_DUMPED.add(owner.getName() + "." + name)) {
+                EcaLogger.info("[HealthDataflow] {}.{}() totalReturns={} nullFrames={} zeroStack={} unknownExpr={} accepted={}",
+                        owner.getName(), name, totalReturns, nullFrames, zeroStack, unknownExpr, acceptedReturns);
+                for (String line : returnDiag) EcaLogger.info("[HealthDataflow] {}", line);
+            }
+            Expr result = returns.isEmpty() ? new UnknownExpr("no-return-in-method")
                 : (returns.size() == 1 ? returns.get(0) : new Choice(dedupe(returns)));
             if (seedLocals == null) ctx.methodCache.put(cacheKey, result);
             return result;
@@ -1951,7 +2987,7 @@ public final class HealthDataflowAnalyzer {
                                           ArrayAllocExpr targetArray, Expr targetIndex,
                                           AnalysisCtx ctx, int depth) {
         String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc + "#arrayStore";
-        if (!ctx.inflight.add(cacheKey)) return UnknownExpr.UNKNOWN;
+        if (!ctx.inflight.add(cacheKey)) return new UnknownExpr("recursive-cycle-arrayStore");
         try {
             byte[] bytes = classBytes(owner);
             if (bytes == null) return null;
@@ -2065,7 +3101,7 @@ public final class HealthDataflowAnalyzer {
                     if (resolved != null) yield new TaintValue(t.getSize(), resolved);
                     yield new TaintValue(t.getSize(), UnknownExpr.UNKNOWN);
                 }
-                default -> new TaintValue(1, UnknownExpr.UNKNOWN);
+                default -> new TaintValue(1, new UnknownExpr("newOperation-unsupported-" + insn.getOpcode()));
             };
         }
 
@@ -2097,7 +3133,7 @@ public final class HealthDataflowAnalyzer {
                      Opcodes.TABLESWITCH, Opcodes.LOOKUPSWITCH,
                      Opcodes.PUTSTATIC, Opcodes.ATHROW,
                      Opcodes.MONITORENTER, Opcodes.MONITOREXIT -> null;
-                default -> new TaintValue(1, UnknownExpr.UNKNOWN);
+                default -> new TaintValue(1, new UnknownExpr("unaryOperation-unknown-" + insn.getOpcode()));
             };
         }
 
@@ -2119,7 +3155,7 @@ public final class HealthDataflowAnalyzer {
                     -> new TaintValue(1, new ArrayElementSource(v1.expr, v2.expr, guessArrayElementType(op), "arr"));
                 case Opcodes.LALOAD, Opcodes.DALOAD
                     -> new TaintValue(2, new ArrayElementSource(v1.expr, v2.expr, guessArrayElementType(op), "arr"));
-                default -> new TaintValue(1, UnknownExpr.UNKNOWN);
+                default -> new TaintValue(1, new UnknownExpr("binaryOperation-unknown-" + op));
             };
         }
 
@@ -2141,7 +3177,12 @@ public final class HealthDataflowAnalyzer {
             int sz = retType == Type.VOID_TYPE ? 0 : retType.getSize();
             if (retType == Type.VOID_TYPE) return null;
             //节点预算耗尽：停止展开调用/内联，坍缩 Unknown，防止表达式树爆炸
-            if (--ctx.nodeBudget <= 0) return new TaintValue(sz, UnknownExpr.UNKNOWN);
+            if (--ctx.nodeBudget <= 0) return new TaintValue(sz, new UnknownExpr("nodeBudget-exhausted"));
+
+            Expr methodHandle = tryInlineMethodHandleReturn(m, values);
+            if (methodHandle != null && !(methodHandle instanceof UnknownExpr)) {
+                return new TaintValue(sz, methodHandle);
+            }
 
             Expr functional = tryInlineFunctionalCall(m, values);
             if (functional != null && !(functional instanceof UnknownExpr)) {
@@ -2211,6 +3252,24 @@ public final class HealthDataflowAnalyzer {
             return new TaintValue(sz, new Call(m.owner, m.name, m.desc, argExprs));
         }
 
+        private Expr tryInlineMethodHandleReturn(MethodInsnNode method, List<? extends TaintValue> values) {
+            if (!isMethodHandleInvoke(method) || values.isEmpty()) return null;
+            if (depth + 1 >= ctx.maxDepth || ctx.inlineBudget <= 0) return null;
+            MethodTarget target = resolveMethodHandleTarget(values.get(0).expr);
+            if (target == null) return null;
+            Type[] targetArgs = Type.getArgumentTypes(target.desc());
+            if (values.size() - 1 != targetArgs.length) return null;
+
+            TaintValue[] seedLocals = new TaintValue[localCount(targetArgs) + 8];
+            int local = 0;
+            for (int i = 0; i < targetArgs.length; i++) {
+                seedLocals[local] = values.get(i + 1);
+                local += targetArgs[i].getSize();
+            }
+            ctx.inlineBudget--;
+            return analyzeMethod(target.owner(), target.name(), target.desc(), seedLocals, ctx, depth + 1);
+        }
+
         //闭包节点保留实现句柄与捕获值，使 SAM 调用可以按真实实现继续分析。
         private Closure closureFrom(InvokeDynamicInsnNode dynamic, List<? extends TaintValue> values) {
             List<Expr> captured = new ArrayList<>(values.size());
@@ -2248,12 +3307,16 @@ public final class HealthDataflowAnalyzer {
             if (fieldOwner == null) return null;
             Expr captureRoot = source.chain.size() == 1
                 ? EntityParamMarker.I : makeFieldChain(source.chain.subList(0, source.chain.size() - 1));
+            /* 取最后一次有效赋值：字段初始化器(如 = ()->默认值)会被编译进 <init> 且排在构造器体的真实赋值之前，
+               命中首个 PUTFIELD 会取到初始化器 lambda 而漏掉真实实现。遍历完 <init> 保留最后一个匹配的 closure。
+               沿继承链向上扫，最先出现匹配的(最派生)定义类即生效——其初始化器/构造器在构造序列中最后执行。 */
             for (Class<?> scan = fieldOwner; scan != null && scan != Object.class; scan = scan.getSuperclass()) {
                 try {
                     byte[] bytes = classBytes(scan);
                     if (bytes == null) continue;
                     ClassNode node = new ClassNode();
                     new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
+                    Closure lastInClass = null;
                     for (MethodNode method : node.methods) {
                         if (!method.name.equals("<init>")) continue;
                         InvokeDynamicInsnNode nearest = null;
@@ -2272,14 +3335,40 @@ public final class HealthDataflowAnalyzer {
                             Type[] capturedTypes = Type.getArgumentTypes(nearest.desc);
                             List<Expr> captured = new ArrayList<>(capturedTypes.length);
                             for (int i = 0; i < capturedTypes.length; i++) {
-                                captured.add(i == 0 ? captureRoot : new UnknownExpr("lambda-capture"));
+                                if (i == 0) {
+                                    captured.add(captureRoot);
+                                } else {
+                                    // 尝试映射捕获参数到构造器参数：回溯 INVOKEDYNAMIC 前的 ALOAD <idx>
+                                    Expr resolved = resolveCapturedArg(method.instructions, nearest, i);
+                                    captured.add(resolved != null ? resolved
+                                        : new UnknownExpr("lambda-capture-" + i));
+                                }
                             }
                             Closure closure = closureFromExprs(nearest, captured);
-                            if (closure != null) return closure;
+                            if (closure != null) lastInClass = closure;
                         }
                     }
+                    if (lastInClass != null) return lastInClass;
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
+                }
+            }
+            return null;
+        }
+
+        /* 尝试将 lambda 的第 captureIdx 个捕获参数映射到构造器的第 paramIdx 个参数。
+           回溯 INVOKEDYNAMIC 前的 ALOAD <idx> 指令：若 idx 在构造器参数范围内，
+           则用对应的 Primitive 或 EntityParamMarker 占位。 */
+        private Expr resolveCapturedArg(InsnList instructions, InvokeDynamicInsnNode target, int captureIdx) {
+            int aloadCount = 0;
+            for (AbstractInsnNode insn = target.getPrevious(); insn != null; insn = insn.getPrevious()) {
+                if (insn.getOpcode() == Opcodes.ALOAD && insn instanceof VarInsnNode v) {
+                    if (aloadCount == captureIdx) {
+                        if (v.var == 0) return EntityParamMarker.I;
+                        // 构造器参数从 1 开始（0 是 this）
+                        return new UnknownExpr("captured-ctor-param-" + v.var);
+                    }
+                    aloadCount++;
                 }
             }
             return null;
@@ -2438,12 +3527,17 @@ public final class HealthDataflowAnalyzer {
             return null;
         }
 
+        //识别简单 getter：实例方法 ALOD+GETFIELD+RETURN / 静态方法 GETSTATIC+RETURN
         private Expr tryInlineSimpleGetter(MethodInsnNode m, List<? extends TaintValue> values) {
-            if (m.getOpcode() == Opcodes.INVOKESTATIC || m.name.startsWith("<")) return null;
+            if (m.name.startsWith("<")) return null;
             if (m.owner.startsWith("java/") || m.owner.startsWith("javax/") || m.owner.startsWith("jdk/")) return null;
             if (TABLE.lookupCall(m.owner, m.name, m.desc) != null) return null;
-            if (Type.getArgumentTypes(m.desc).length != 0 || values.isEmpty()) return null;
-            Expr receiver = values.get(0).expr;
+            boolean isStatic = m.getOpcode() == Opcodes.INVOKESTATIC;
+            // 实例 getter：无参 + 有 receiver；静态 getter：无参即可
+            if (!isStatic && (Type.getArgumentTypes(m.desc).length != 0 || values.isEmpty())) return null;
+            if (isStatic && Type.getArgumentTypes(m.desc).length != 0) return null;
+            // 静态方法无需 receiver，实例方法从 values[0] 取
+            Expr receiver = isStatic ? EntityParamMarker.I : values.get(0).expr;
             if (receiver == null || receiver instanceof UnknownExpr) return null;
             try {
                 Class<?> owner = loadClass(m.owner);
@@ -2454,6 +3548,11 @@ public final class HealthDataflowAnalyzer {
                 new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
                 for (MethodNode method : cn.methods) {
                     if (!method.name.equals(m.name) || !method.desc.equals(m.desc)) continue;
+                    if (isStatic) {
+                        FieldInsnNode sf = simpleStaticGetterField(method);
+                        if (sf == null) return null;
+                        return buildStaticFieldSource(sf);
+                    }
                     FieldInsnNode field = simpleGetterField(method);
                     if (field == null) return null;
                     return buildGetFieldSource(field, receiver);
@@ -2465,12 +3564,24 @@ public final class HealthDataflowAnalyzer {
             }
         }
 
+        //识别 ALOD+GETFIELD+RETURN(3 指令) 的实例简单 getter
         private FieldInsnNode simpleGetterField(MethodNode method) {
             List<AbstractInsnNode> ops = meaningfulInstructions(method);
             if (ops.size() != 3) return null;
             if (ops.get(0).getOpcode() != Opcodes.ALOAD) return null;
             if (!(ops.get(1) instanceof FieldInsnNode field) || field.getOpcode() != Opcodes.GETFIELD) return null;
             if (!isReturnOpcode(ops.get(2).getOpcode())) return null;
+            Type returnType = Type.getReturnType(method.desc);
+            if (!field.desc.equals(returnType.getDescriptor())) return null;
+            return field;
+        }
+
+        //识别 GETSTATIC+RETURN(2 指令) 的静态简单 getter
+        private FieldInsnNode simpleStaticGetterField(MethodNode method) {
+            List<AbstractInsnNode> ops = meaningfulInstructions(method);
+            if (ops.size() != 2) return null;
+            if (!(ops.get(0) instanceof FieldInsnNode field) || field.getOpcode() != Opcodes.GETSTATIC) return null;
+            if (!isReturnOpcode(ops.get(1).getOpcode())) return null;
             Type returnType = Type.getReturnType(method.desc);
             if (!field.desc.equals(returnType.getDescriptor())) return null;
             return field;
@@ -2492,6 +3603,7 @@ public final class HealthDataflowAnalyzer {
         private Expr tryInline(MethodInsnNode m, List<? extends TaintValue> values) {
             Class<?> owner = loadClass(m.owner);
             if (owner == null) return null;
+            if (shouldKeepAsRuntimeCall(owner, m.name, m.desc)) return null;
             if (m.owner.startsWith("java/") || m.owner.startsWith("net/minecraft/")) {
                 Method jm = findAnyMethod(owner, m.name, m.desc);
                 if (jm == null) return null;
@@ -2499,7 +3611,7 @@ public final class HealthDataflowAnalyzer {
                 if (!(Modifier.isFinal(mods) || Modifier.isStatic(mods) || Modifier.isPrivate(mods))) return null;
             }
             //全局熔断：内联次数上限(环检测已由 analyzeMethod 的 inflight 统一负责)
-            if (ctx.inlineBudget <= 0) return UnknownExpr.UNKNOWN;
+            if (ctx.inlineBudget <= 0) return new UnknownExpr("inlineBudget-exhausted");
             ctx.inlineBudget--;
             boolean isStatic = m.getOpcode() == Opcodes.INVOKESTATIC;
             Type[] argTypes = Type.getArgumentTypes(m.desc);
@@ -2520,12 +3632,12 @@ public final class HealthDataflowAnalyzer {
         @Override public TaintValue merge(TaintValue v1, TaintValue v2) {
             if (v1.equals(v2)) return v1;
             int size = Math.max(v1.size, v2.size);
-            if (--ctx.nodeBudget <= 0) return new TaintValue(size, UnknownExpr.UNKNOWN);
+            if (--ctx.nodeBudget <= 0) return new TaintValue(size, new UnknownExpr("merge-nodeBudget-exhausted"));
             List<Expr> alts = new ArrayList<>();
             addAlt(alts, v1.expr);
             addAlt(alts, v2.expr);
             //加宽：分支过多直接坍缩 Unknown，让格有限高、循环处数据流收敛
-            if (alts.size() > MAX_CHOICE_ALTS) return new TaintValue(size, UnknownExpr.UNKNOWN);
+            if (alts.size() > MAX_CHOICE_ALTS) return new TaintValue(size, new UnknownExpr("merge-tooManyAlternatives(" + alts.size() + ">" + MAX_CHOICE_ALTS + ")"));
             if (alts.size() == 1) return new TaintValue(size, alts.get(0));
             return new TaintValue(size, new Choice(alts));
         }
@@ -2574,11 +3686,11 @@ public final class HealthDataflowAnalyzer {
                 for (int i = 0; i < chain.size(); i++) {
                     FieldStep s = chain.get(i);
                     Class<?> owner = loadClass(s.ownerInternal());
-                    if (owner == null) return UnknownExpr.UNKNOWN;
+                    if (owner == null) return new UnknownExpr("fieldChain-ownerNotFound-" + s.ownerInternal());
                     Class<?> ft = descriptorToClass(s.desc());
-                    if (ft == null) return UnknownExpr.UNKNOWN;
+                    if (ft == null) return new UnknownExpr("fieldChain-typeNotFound-" + s.desc());
                     Field field = findFieldInHierarchy(owner, s.name());
-                    if (field == null) return UnknownExpr.UNKNOWN;
+                    if (field == null) return new UnknownExpr("fieldChain-fieldNotFound-" + s.name());
                     Class<?> declaring = field.getDeclaringClass();
                     MethodHandles.Lookup lk = MethodHandles.privateLookupIn(declaring, MethodHandles.lookup());
                     handles[i] = lk.findVarHandle(declaring, s.name(), ft);
@@ -2587,7 +3699,26 @@ public final class HealthDataflowAnalyzer {
                 return new FieldChainSource(chain, handles, lastType);
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
-                return UnknownExpr.UNKNOWN;
+                return new UnknownExpr("fieldChain-VarHandle-failed");
+            }
+        }
+
+        //从 GETSTATIC FieldInsnNode 构建静态字段 Source；final static 常量折叠为 Reference
+        private Expr buildStaticFieldSource(FieldInsnNode field) {
+            try {
+                Class<?> owner = loadClass(field.owner);
+                if (owner == null) return null;
+                Field f = findFieldInHierarchy(owner, field.name);
+                if (f == null) return null;
+                f.setAccessible(true);
+                if (Modifier.isFinal(f.getModifiers())) {
+                    Object value = f.get(null);
+                    return value == null ? null : new Reference(value, field.owner);
+                }
+                return new StaticFieldSource(f);
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                return null;
             }
         }
 
@@ -2688,9 +3819,25 @@ public final class HealthDataflowAnalyzer {
         };
     }
 
+    //从内部名加载类：依次尝试上下文类加载器、系统类加载器、本类加载器，确保模组类能被定位
     private static Class<?> loadClass(String internalName) {
-        try { return Class.forName(internalName.replace('/', '.'), false, Thread.currentThread().getContextClassLoader()); }
-        catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
+        String className = internalName.replace('/', '.');
+        Throwable last = null;
+        for (ClassLoader cl : new ClassLoader[]{
+                Thread.currentThread().getContextClassLoader(),
+                ClassLoader.getSystemClassLoader(),
+                HealthDataflowAnalyzer.class.getClassLoader()
+        }) {
+            try { return Class.forName(className, false, cl); }
+            catch (Throwable t) {
+                if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+                last = t;
+            }
+        }
+        //终极回退：不指定类加载器(使用调用类的加载器)
+        try { return Class.forName(className); }
+        catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; }
+        return null;
     }
 
     private static Method findAnyMethod(Class<?> owner, String name, String desc) {

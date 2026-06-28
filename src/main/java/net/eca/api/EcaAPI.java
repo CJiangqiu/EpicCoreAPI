@@ -1351,36 +1351,6 @@ public final class EcaAPI {
         return TransformerWhitelist.getAll();
     }
 
-    // --- 兼容旧 API ---
-
-    // 添加受保护的包名前缀（已弃用，请使用 addAllReturnWhitelist）
-    /** @deprecated Use {@link #addAllReturnWhitelist(String)} instead. */
-    @Deprecated
-    public static void addProtectedPackage(String packagePrefix) {
-        addAllReturnWhitelist(packagePrefix);
-    }
-
-    // 移除受保护的包名前缀（已弃用，请使用 removeAllReturnWhitelist）
-    /** @deprecated Use {@link #removeAllReturnWhitelist(String)} instead. */
-    @Deprecated
-    public static boolean removeProtectedPackage(String packagePrefix) {
-        return removeAllReturnWhitelist(packagePrefix);
-    }
-
-    // 检查包名是否受保护（已弃用，请使用 isAllReturnWhitelisted）
-    /** @deprecated Use {@link #isAllReturnWhitelisted(String)} instead. */
-    @Deprecated
-    public static boolean isPackageProtected(String className) {
-        return isAllReturnWhitelisted(className);
-    }
-
-    // 获取所有受保护的包名前缀（已弃用，请使用 getAllWhitelistedPackages）
-    /** @deprecated Use {@link #getAllWhitelistedPackages()} instead. */
-    @Deprecated
-    public static Set<String> getAllProtectedPackages() {
-        return getAllWhitelistedPackages();
-    }
-
     // ==================== 强加载系统 ====================
 
     // 设置实体强加载状态

@@ -2,7 +2,6 @@ package net.eca.util;
 
 import net.eca.config.EcaConfiguration;
 import net.eca.network.ClientRemovePacket;
-import net.eca.network.EntityHealthSyncPacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.entity_extension.EntityExtensionManager;
@@ -61,9 +60,6 @@ public class EntityUtil {
     public static EntityDataAccessor<Boolean> INVULNERABLE;
     public static EntityDataAccessor<Boolean> RESURRECTION_TRACKED;
     public static EntityDataAccessor<String> MAX_HEALTH_LOCK_VALUE;
-
-    //标记当前调用来自同步包，防止重复发包
-    private static final ThreadLocal<Boolean> IS_FROM_SYNC = ThreadLocal.withInitial(() -> false);
 
     //正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
@@ -660,72 +656,43 @@ public class EntityUtil {
     public static boolean setHealth(LivingEntity entity, float expectedHealth) {
         if (entity == null) return false;
         try {
-            if (entity.level() != null && entity.level().isClientSide) {
-                if (!IS_FROM_SYNC.get()) return false;
-                setBasicHealth(entity, expectedHealth);
-                if (!(entity instanceof Player)) {
-                    EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
-                }
-                return EcaSetHealthManager.verify(entity, expectedHealth);
-            }
-            // 记录同步前血量，只有最终成功时才向客户端广播。
-            float beforeHealth = getHealth(entity);
             setBasicHealth(entity, expectedHealth);
             if (!(entity instanceof Player)) {
-                // 非原版血量返回路径需要逐级升级写入方式。
-                boolean dataflowOk = EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
-                if (!dataflowOk && EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
-                    boolean methodProbeOk = false;
-                    if (EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) {
-                        methodProbeOk = EcaSetHealthManager.setHealthByMethodProbe(entity, expectedHealth);
-                    }
-                    boolean bridgeOk = false;
-                    if (!methodProbeOk && EcaConfiguration.getAttackSetHealthEnableWriteSiteBridgeSafely()) {
-                        bridgeOk = EcaSetHealthManager.setHealthByWriteSiteBridge(entity, expectedHealth);
-                    }
-                    if (!methodProbeOk && !bridgeOk && EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely()) {
-                        EcaSetHealthManager.setHealthByNumericInversion(entity, expectedHealth);
-                    }
+                // 优先重放已缓存的改血路径（不限方法类型），命中则直接返回，避免每次重复分析
+                if (EcaSetHealthManager.replayCachedPath(entity, expectedHealth)) {
+                    return true;
                 }
+                //非原版血量返回路径逐级升级：数据流 → 常数覆盖 → 外部扫描 → 方法探针 → 写入桥接 → 数值反演
+                boolean ok = EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
+                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                        && EcaConfiguration.getAttackSetHealthEnableConstOverrideSafely()) {
+                    ok = EcaSetHealthManager.setHealthByConstOverride(entity, expectedHealth);
+                }
+                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                        && EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) {
+                    ok = EcaSetHealthManager.setHealthByExternalScan(entity, expectedHealth);
+                }
+                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                        && EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) {
+                    ok = EcaSetHealthManager.setHealthByMethodProbe(entity, expectedHealth);
+                }
+                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                        && EcaConfiguration.getAttackSetHealthEnableWriteSiteBridgeSafely()) {
+                    ok = EcaSetHealthManager.setHealthByWriteSiteBridge(entity, expectedHealth);
+                }
+                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                        && EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely()) {
+                    EcaSetHealthManager.setHealthByNumericInversion(entity, expectedHealth);
+                }
+                if (!ok) ok = EcaSetHealthManager.verify(entity, expectedHealth);
+                return ok;
             }
-            boolean ok = EcaSetHealthManager.verify(entity, expectedHealth);
-            if (ok) {
-                syncHealthToClients(entity, expectedHealth, beforeHealth);
-            }
-            return ok;
+            return EcaSetHealthManager.verify(entity, expectedHealth);
         } catch (Exception e) {
             EcaLogger.warn("setHealth threw exception entity={} expected={} msg={}",
                 entity.getClass().getName(), expectedHealth, e.getMessage());
             return false;
         }
-    }
-
-    //从同步包调用，在客户端执行改血（不再发包）
-    public static void setHealthFromSync(LivingEntity entity, float expectedHealth) {
-        IS_FROM_SYNC.set(true);
-        try {
-            if (entity == null) return;
-            setBasicHealth(entity, expectedHealth);
-            if (!(entity instanceof Player)) {
-                EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
-            }
-        } finally {
-            IS_FROM_SYNC.set(false);
-        }
-    }
-
-    //服务端改血后同步到客户端
-    private static void syncHealthToClients(LivingEntity entity, float expectedHealth, float beforeHealth) {
-        if (IS_FROM_SYNC.get()) return;
-        if (entity.level() == null || entity.level().isClientSide) return;
-        if (Math.abs(expectedHealth - beforeHealth) <= 0.001f) return;
-
-        try {
-            NetworkHandler.sendToTrackingClients(
-                    new EntityHealthSyncPacket(entity.getId(), expectedHealth),
-                    entity
-            );
-        } catch (Exception ignored) {}
     }
 
     //设置原版血量数据（DATA_HEALTH_ID）

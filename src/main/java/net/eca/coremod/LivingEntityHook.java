@@ -42,7 +42,7 @@ public final class LivingEntityHook {
             return healBan;
         }
 
-        // 放行：让原始方法体执行
+        // 放行：让原始方法体执行（常数覆盖已下沉至 CONSTANT 实体的 getHealth 方法体内）
         return Float.NaN;
     }
 

@@ -275,20 +275,6 @@ public final class TransformerWhitelist {
         return Collections.unmodifiableSet(all);
     }
 
-    // ==================== 兼容旧 API ====================
-
-    /** @deprecated Use {@link #addAllReturn(String)} instead. */
-    @Deprecated
-    public static void addCustom(String prefix) {
-        addAllReturn(prefix);
-    }
-
-    /** @deprecated Use {@link #removeAllReturn(String)} instead. */
-    @Deprecated
-    public static boolean removeCustom(String prefix) {
-        return removeAllReturn(prefix);
-    }
-
     // ==================== JSON 配置加载 ====================
 
     private static final String CONFIG_DIR = "config/eca";

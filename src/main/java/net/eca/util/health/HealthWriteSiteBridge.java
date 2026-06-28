@@ -102,13 +102,21 @@ public final class HealthWriteSiteBridge {
     }
 
     private static boolean install(Class<?> entityClass, BridgeSpec spec) {
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null || !inst.isModifiableClass(entityClass)) {
-            return false;
-        }
-        ensureRegistered(inst);
         String owner = Type.getInternalName(entityClass);
         SPECS.put(owner, spec);
+
+        // JVM TI 原生通道（激进防御开启时生效）
+        if (net.eca.coremod.JvmTiChannel.isActive()) {
+            ensureJvmTiRegistered();
+            net.eca.coremod.JvmTiChannel.retransformClasses(entityClass);
+        }
+
+        // Instrumentation 常规通道
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst == null || !inst.isModifiableClass(entityClass)) {
+            return SPECS.remove(owner) == null;  // JVM TI 已经做了 retransform，部分成功
+        }
+        ensureRegistered(inst);
         try {
             inst.retransformClasses(entityClass);
             return true;
@@ -118,6 +126,34 @@ public final class HealthWriteSiteBridge {
             EcaLogger.info("[HealthWriteSiteBridge] retransform failed entity={} msg={}",
                     entityClass.getName(), t.toString());
             return false;
+        }
+    }
+
+    private static volatile boolean jvmTiRegistered;
+
+    /* 确保 BridgeTransformer 的变换逻辑已在 JVM TI 回调注册表中。
+       仅注册一次（幂等），变换逻辑从静态 SPECS 读取，无需实例状态。 */
+    private static void ensureJvmTiRegistered() {
+        if (jvmTiRegistered) return;
+        synchronized (HealthWriteSiteBridge.class) {
+            if (jvmTiRegistered) return;
+            net.eca.coremod.JvmTiChannel.addTransformFunction(HealthWriteSiteBridge::transformStatic);
+            jvmTiRegistered = true;
+        }
+    }
+
+    /* 供 JVM TI 回调调用的静态版本——逻辑与 BridgeTransformer.transform 一致 */
+    static byte[] transformStatic(String className, byte[] classfileBuffer) {
+        BridgeSpec spec = SPECS.get(className);
+        if (spec == null) return null;
+        try {
+            ClassReader reader = new ClassReader(classfileBuffer);
+            ClassWriter writer = new SafeClassWriter(reader, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+            reader.accept(new BridgeClassVisitor(writer, spec), ClassReader.EXPAND_FRAMES);
+            return writer.toByteArray();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
         }
     }
 

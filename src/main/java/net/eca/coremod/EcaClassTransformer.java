@@ -2,6 +2,7 @@ package net.eca.coremod;
 
 import net.eca.agent.AgentLogWriter;
 import net.eca.agent.EcaAgent;
+import net.eca.util.health.ConstOverrideManager;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -51,11 +52,42 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         return transformCount;
     }
 
+    /* 供 JVM TI 原生回调调用的静态入口——绕过 InstrumentationImpl，直接访问变换逻辑。
+       JVM TI 回调无法提供 ClassLoader/ProtectionDomain/classBeingRedefined，
+       但内部逻辑仅依赖 className 和字节码。 */
+    public static byte[] transformStatic(String className, byte[] classfileBuffer) {
+        if (className == null) return null;
+        if (TransformerWhitelist.isSystemProtectedInternal(className)) return null;
+        try {
+            // 通过静态实例调用（ConstOverrideClassVisitor 等方法是非 static inner class，需实例）
+            return SINGLETON.doTransform(className, classfileBuffer);
+        } catch (Throwable t) {
+            AgentLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
+            return null;
+        }
+    }
+
+    /* 单例实例，供 transformStatic + JVM TI 回调复用 */
+    private static final EcaClassTransformer SINGLETON = new EcaClassTransformer();
+
     // ==================== 初始化入口 ====================
 
     private static volatile boolean registered = false;
 
-    //注册 Transformer 并重转换已加载的类（首次调用注册，后续只 retransform）
+    /* 仅注册 Transformer 与永久捕获器，不做 retransform。
+       在 mod CONSTRUCT 阶段调用：此时其他 mod（如 SuperSteve）正在并发构造/defineClass，
+       一旦在此 retransform 已加载的类，会与并发的 ModuleClassLoader 锁 + Mixin LaunchPluginHandler 锁
+       发生顺序反转死锁。注册是廉价的，且注册后续加载的类都会在加载期被变换，无需 retransform。 */
+    public static void register() {
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst == null) {
+            AgentLogWriter.info("[EcaClassTransformer] No Instrumentation available, skipping register");
+            return;
+        }
+        ensureRegistered(inst);
+    }
+
+    //注册 Transformer 并重转换已加载的类。须在 mod 加载完成后（线程池空闲）调用，避免并发 retransform 死锁
     public static void init() {
         Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst == null) {
@@ -63,6 +95,11 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             return;
         }
 
+        ensureRegistered(inst);
+        retransformLoadedClasses(inst);
+    }
+
+    private static void ensureRegistered(Instrumentation inst) {
         if (!registered) {
             TransformerWhitelist.loadJsonWhitelist();
             inst.addTransformer(new EcaClassTransformer(), true);
@@ -72,8 +109,6 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
         //注册永久捕获器排在链尾，之后所有类加载/retransform 自动缓存最终字节码
         RuntimeBytecodeProvider.registerPermanentCapture(inst);
-
-        retransformLoadedClasses(inst);
     }
 
     //重转换已加载的类（Entity/LivingEntity 子类 + DisplayWindow）
@@ -189,6 +224,15 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         if (hookResult != null) {
             result = hookResult;
             anyTransformed = true;
+        }
+
+        // 常数覆盖 FRETURN 替换：对分析阶段标记的 CONSTANT 类,内联 resolveHealth 调用
+        if (ConstOverrideManager.PATCHED_CLASSES.contains(className)) {
+            byte[] constResult = applyConstOverridePatching(className, result);
+            if (constResult != null) {
+                result = constResult;
+                anyTransformed = true;
+            }
         }
 
         return anyTransformed ? result : null;
@@ -342,6 +386,85 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             mv.visitInsn(Opcodes.IRETURN);
             mv.visitLabel(passthrough);
             mv.visitInsn(Opcodes.POP);
+        }
+    }
+
+    // ==================== 常数覆盖 FRETURN 替换 ====================
+
+    /* 对 PATCHED_CLASSES 中的 CONSTANT 实体类，在 getHealth 的每个 FRETURN 前内联
+       ConstOverrideManager.resolveHealth(this, originalValue) 调用。
+       若类不在 KNOWN_LIVING_ENTITY_CLASSES 中（加载晚于 init），同时注入 FloatHookVisitor。 */
+    private byte[] applyConstOverridePatching(String className, byte[] classfileBuffer) {
+        ClassReader cr = new ClassReader(classfileBuffer);
+        boolean[] hasGetHealth = {false};
+        cr.accept(new ClassVisitor(Opcodes.ASM9) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String desc, String sig, String[] exc) {
+                if (desc.equals("()F") && (name.equals(GET_HEALTH) || name.equals("getHealth"))) {
+                    hasGetHealth[0] = true;
+                }
+                return null;
+            }
+        }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+        if (!hasGetHealth[0]) return null;
+
+        boolean needsHook = !KNOWN_LIVING_ENTITY_CLASSES.contains(className);
+        cr = new ClassReader(classfileBuffer);
+        ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        ConstOverrideClassVisitor cv = new ConstOverrideClassVisitor(cw, needsHook);
+        cr.accept(cv, ClassReader.EXPAND_FRAMES);
+
+        if (cv.transformed) {
+            transformCount++;
+            AgentLogWriter.info("[EcaClassTransformer] ConstOverride patched: " + className
+                    + " needsHook=" + needsHook + " (total: " + transformCount + ")");
+            return cw.toByteArray();
+        }
+        return null;
+    }
+
+    /* 遍历类方法，对 getHealth()F 链式包裹 FloatHookVisitor（如需）+ ConstOverrideMethodVisitor */
+    private static class ConstOverrideClassVisitor extends ClassVisitor {
+        final boolean needsHook;
+        boolean transformed;
+
+        ConstOverrideClassVisitor(ClassWriter cw, boolean needsHook) {
+            super(Opcodes.ASM9, cw);
+            this.needsHook = needsHook;
+        }
+
+        @Override
+        public MethodVisitor visitMethod(int access, String name, String desc, String sig, String[] exc) {
+            MethodVisitor mv = super.visitMethod(access, name, desc, sig, exc);
+            if (desc.equals("()F") && (name.equals(GET_HEALTH) || name.equals("getHealth"))) {
+                transformed = true;
+                if (needsHook) {
+                    mv = new FloatHookVisitor(mv, LIVING_HOOK, "processGetHealth",
+                            "(Lnet/minecraft/world/entity/LivingEntity;)F", LIVING_ENTITY);
+                }
+                mv = new ConstOverrideMethodVisitor(mv);
+            }
+            return mv;
+        }
+    }
+
+    /* 在 getHealth 方法体的每条 FRETURN 前插入: ALOAD 0 + SWAP + INVOKESTATIC resolveHealth */
+    private static class ConstOverrideMethodVisitor extends MethodVisitor {
+        private static final String CO_MGR = "net/eca/util/health/ConstOverrideManager";
+        private static final String CO_DESC = "(Lnet/minecraft/world/entity/LivingEntity;F)F";
+
+        ConstOverrideMethodVisitor(MethodVisitor mv) {
+            super(Opcodes.ASM9, mv);
+        }
+
+        @Override
+        public void visitInsn(int opcode) {
+            if (opcode == Opcodes.FRETURN) {
+                mv.visitVarInsn(Opcodes.ALOAD, 0);
+                mv.visitInsn(Opcodes.SWAP);
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, CO_MGR, "resolveHealth", CO_DESC, false);
+            }
+            super.visitInsn(opcode);
         }
     }
 

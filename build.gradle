@@ -52,6 +52,7 @@ dependencies {
     implementation 'org.ow2.asm:asm-tree:9.7.1'
     implementation 'org.ow2.asm:asm-analysis:9.7.1'
     implementation fg.deobf("curse.maven:geckolib-388172:7553267")
+    compileOnly 'net.java.dev.jna:jna:5.12.1'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
 }
 
@@ -100,10 +101,10 @@ tasks.register('agentJar', Jar) {
 
     manifest {
         attributes(
-            'Agent-Class': 'net.eca.agent.EcaAgent',
-            'Premain-Class': 'net.eca.agent.EcaAgent',
-            'Can-Redefine-Classes': 'true',
-            'Can-Retransform-Classes': 'true'
+                'Agent-Class': 'net.eca.agent.EcaAgent',
+                'Premain-Class': 'net.eca.agent.EcaAgent',
+                'Can-Redefine-Classes': 'true',
+                'Can-Retransform-Classes': 'true'
         )
     }
 }
@@ -134,7 +135,7 @@ tasks.register('devJar', Jar) {
 
     manifest {
         attributes([
-            'MixinConfigs': 'eca.mixins.dev.json'
+                'MixinConfigs': 'eca.mixins.dev.json'
         ])
     }
 }
