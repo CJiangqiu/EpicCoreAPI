@@ -8,6 +8,7 @@ import net.eca.util.EcaLogger;
 import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
+import net.eca.util.ResurrectionManager;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.UnsafeUtil;
 import net.eca.util.entity_extension.EntityExtension;
@@ -41,6 +42,7 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.lang.instrument.Instrumentation;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -1400,6 +1402,141 @@ public final class EcaAPI {
     @OnlyIn(Dist.CLIENT)
     public static ShaderPreset shaderPreset(ResourceLocation id) {
         return ShaderPresetRegistry.getPreset(id);
+    }
+
+    // ==================== 线程复活 ====================
+
+    // 启动复活守护线程
+    /**
+     * Start the resurrection daemon thread (idempotent).
+     * Once started, the daemon continuously monitors all tracked entities and
+     * auto-revives any that die or lose their container instances.
+     * Do not use on entities that spawn in large numbers.
+     */
+    public static void startResurrection() {
+        ResurrectionManager.start();
+    }
+
+    // 停止复活守护线程
+    /**
+     * Stop the resurrection daemon thread.
+     */
+    public static void stopResurrection() {
+        ResurrectionManager.stop();
+    }
+
+    // 检查复活守护线程是否运行
+    /**
+     * Check whether the resurrection daemon thread is currently running.
+     * @return true if the daemon is active
+     */
+    public static boolean isResurrectionRunning() {
+        return ResurrectionManager.isRunning();
+    }
+
+    // 将实体加入复活追踪
+    /**
+     * Add an entity to the resurrection tracking set.
+     * Tracked entities are automatically revived on death every poll cycle.
+     * @param entity the entity to track
+     */
+    public static void addResurrectionTarget(Entity entity) {
+        ResurrectionManager.add(entity);
+    }
+
+    // 将实体从复活追踪中移除
+    /**
+     * Remove an entity from the resurrection tracking set.
+     * @param entity the entity to stop tracking
+     */
+    public static void removeResurrectionTarget(Entity entity) {
+        ResurrectionManager.remove(entity);
+    }
+
+    // 检查实体是否在复活追踪中
+    /**
+     * Check whether an entity is currently tracked for resurrection.
+     * @param entity the entity to check
+     * @return true if the entity is being tracked
+     */
+    public static boolean isResurrectionTracked(Entity entity) {
+        return entity != null && ResurrectionManager.isTracked(entity.getUUID());
+    }
+
+    // 获取复活追踪的实体数量
+    /**
+     * Get the number of entities currently tracked for resurrection.
+     * @return tracked entity count
+     */
+    public static int getResurrectionTrackedCount() {
+        return ResurrectionManager.getTrackedCount();
+    }
+
+    // 清除全部复活追踪目标
+    /**
+     * Remove all entities from the resurrection tracking set.
+     */
+    public static void clearAllResurrectionTargets() {
+        ResurrectionManager.clearAll();
+    }
+
+    // 设置复活轮询间隔
+    /**
+     * Set the daemon poll interval in milliseconds.
+     * @param ms poll interval, clamped to 1–10000 (default 25)
+     */
+    public static void setResurrectionPollInterval(long ms) {
+        ResurrectionManager.setPollIntervalMs(ms);
+    }
+
+    // 获取复活轮询间隔
+    /**
+     * Get the current daemon poll interval in milliseconds.
+     * @return poll interval in ms
+     */
+    public static long getResurrectionPollInterval() {
+        return ResurrectionManager.getPollIntervalMs();
+    }
+
+    // 获取累计复活次数
+    /**
+     * Get the total number of entities revived by the daemon since start.
+     * @return total revived count
+     */
+    public static long getResurrectionTotalRevived() {
+        return ResurrectionManager.getTotalRevivedCount();
+    }
+
+    // 获取累计检查次数
+    /**
+     * Get the total number of entity checks performed by the daemon since start.
+     * @return total check count
+     */
+    public static long getResurrectionTotalChecks() {
+        return ResurrectionManager.getTotalCheckCount();
+    }
+
+    // 对实体进行一次容器完整性检查
+    /**
+     * Perform a one-shot container integrity check for a tracked entity.
+     * Checks all server-side entity containers (sections, lookup, tickList, chunkMap, etc.).
+     * @param level the server level
+     * @param entity the entity to check
+     * @return map of container name to present status
+     */
+    public static Map<String, Boolean> checkResurrectionTarget(ServerLevel level, Entity entity) {
+        return entity != null ? ResurrectionManager.check(level, entity.getUUID()) : Collections.emptyMap();
+    }
+
+    // 手动强制复活实体
+    /**
+     * Manually force-revive a tracked entity immediately.
+     * @param level the server level
+     * @param entity the entity to revive
+     * @return container integrity map after revival
+     */
+    public static Map<String, Boolean> reviveResurrectionTarget(ServerLevel level, Entity entity) {
+        return entity != null ? ResurrectionManager.reviveNow(level, entity.getUUID()) : Collections.emptyMap();
     }
 
     private EcaAPI() {}

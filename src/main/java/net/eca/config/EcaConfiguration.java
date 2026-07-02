@@ -7,11 +7,10 @@ public class EcaConfiguration {
     public static final ForgeConfigSpec SPEC;
 
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_ENABLE_RADICAL_LOGIC;
-    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_CONST_OVERRIDE;
-    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_EXTERNAL_SCAN;
-    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_METHOD_PROBE;
-    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_WRITE_SITE_BRIDGE;
-    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SET_HEALTH_ENABLE_NUMERIC_INVERSION;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_CONST_OVERRIDE;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_EXTERNAL_SCAN;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_METHOD_PROBE;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_ENABLE_RADICAL_LOGIC;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_INVULNERABLE_UNTARGETABLE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
@@ -26,38 +25,29 @@ public class EcaConfiguration {
         BUILDER.push("Attack");
 
         ATTACK_ENABLE_RADICAL_LOGIC = BUILDER
-            .comment("Enable radical attack logic: memoryRemove, AllReturn, aggressive setHealth, etc. WARNING: This may cause game instability!",
-                     "启用激进攻击逻辑：memoryRemove、AllReturn、激进 setHealth 等。警告：可能导致游戏不稳定！")
+            .comment("Enable radical attack logic: memoryRemove, AllReturn, etc. WARNING: This may cause game instability!",
+                     "启用激进攻击逻辑：memoryRemove、AllReturn 等。警告：可能导致游戏不稳定！")
             .define("Enable Radical Logic", false);
 
-        BUILDER.push("setHealth");
+        ATTACK_SETHEALTH_ENABLE_CONST_OVERRIDE = BUILDER
+            .comment("Enable setHealth constant-override: patch constant-returning getHealth to consult a per-entity override table.",
+                     "启用 setHealth 常数覆写：将返回常数的 getHealth 改写为查询按实体的覆写表。")
+            .define("SetHealth Enable Const Override", false);
 
-        ATTACK_SET_HEALTH_ENABLE_CONST_OVERRIDE = BUILDER
-            .comment("Enable const override for setHealth after dataflow analysis fails, on entities whose getHealth returns an immutable constant: register an override value that hijacks getHealth's return. Server-side only. Requires Attack.Enable Radical Logic.",
-                     "启动 setHealth 常数覆盖：数据流逆向失败、且实体 getHealth 返回不可变常数时，登记覆盖值劫持其 getHealth 返回。仅服务端生效。需要启用 Attack.Enable Radical Logic。")
-            .define("Enable Const Override", false);
+        ATTACK_SETHEALTH_ENABLE_EXTERNAL_SCAN = BUILDER
+            .comment("Enable setHealth external scan: when getHealth is defended, also reverse isAlive/isDeadOrDying/hurt/actuallyHurt to locate the real health storage. Requires radical logic.",
+                     "启用 setHealth 外部扫描：getHealth 被防守时，额外逆向 isAlive/isDeadOrDying/hurt/actuallyHurt 定位真实血量存储。需同时开启激进逻辑。")
+            .define("SetHealth Enable External Scan", false);
 
-        ATTACK_SET_HEALTH_ENABLE_EXTERNAL_SCAN = BUILDER
-            .comment("Enable external scan for setHealth after const override fails: reverse-analyze isAlive/isDeadOrDying and hurt/actuallyHurt bytecode to locate the real health storage. Requires Attack.Enable Radical Logic.",
-                     "启动 setHealth 外部扫描：常数覆盖失败后，逆向分析 isAlive/isDeadOrDying 与 hurt/actuallyHurt 字节码定位真实血量存储。需要启用 Attack.Enable Radical Logic。")
-            .define("Enable External Scan", false);
+        ATTACK_SETHEALTH_ENABLE_METHOD_PROBE = BUILDER
+            .comment("Enable setHealth method-probe: when storage is unreachable, drive the entity's own health-writing method (behavioral direct call, or a HEAD-injected token/writer bridge). Requires radical logic.",
+                     "启用 setHealth 方法探针：存储不可达时，驱动实体自身的血量写方法(行为直调，或 HEAD 注入的 token/writer 桥)。需同时开启激进逻辑。")
+            .define("SetHealth Enable Method Probe", false);
 
-        ATTACK_SET_HEALTH_ENABLE_METHOD_PROBE = BUILDER
-            .comment("Enable method probe for setHealth after external scan fails: invoke the entity's own numeric write methods to find the one that actually moves health. Requires Attack.Enable Radical Logic.",
-                     "启动 setHealth 方法探针：外部扫描失败后，尝试调用实体自身的数值写入方法定位真正改动血量的那个。需要启用 Attack.Enable Radical Logic。")
-            .define("Enable Method Probe", false);
-
-        ATTACK_SET_HEALTH_ENABLE_WRITE_SITE_BRIDGE = BUILDER
-            .comment("Enable write site bridge for setHealth after method probe fails: bridge to the real write site already present inside candidate methods. Requires Attack.Enable Radical Logic.",
-                     "启动 setHealth 写入点桥接：方法探针失败后，桥接候选方法内部已有的真实写入点。需要启用 Attack.Enable Radical Logic。")
-            .define("Enable Write Site Bridge", false);
-
-        ATTACK_SET_HEALTH_ENABLE_NUMERIC_INVERSION = BUILDER
-            .comment("NOT RECOMMENDED, may cause lag and crashes. Enable numeric inversion for setHealth as the final fallback after write site bridge fails: perturb numeric values to locate the real health field. Requires Attack.Enable Radical Logic.",
-                     "不推荐，可能造成卡顿和崩溃。启动 setHealth 数值反演：作为最后兜底，写入桥接失败后通过数值扰动定位真实血量字段。需要启用 Attack.Enable Radical Logic。")
-            .define("Enable Numeric Inversion", false);
-
-        BUILDER.pop();
+        ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION = BUILDER
+            .comment("Enable setHealth numeric inversion: at the dead-end of dataflow reversal (custom non-invertible decode), descend into the live object graph and perturb primitive cells to drive getHealth to target. Requires radical logic.",
+                     "启用 setHealth 数值反演：数据流逆向在自定义非可逆解码处死角时，深入运行期对象图扰动原始 cell，令 getHealth 逼近目标。需同时开启激进逻辑。")
+            .define("SetHealth Enable Numeric Inversion", false);
 
         BUILDER.pop();
 
@@ -128,23 +118,19 @@ public class EcaConfiguration {
     }
 
     public static boolean getAttackSetHealthEnableConstOverrideSafely() {
-        return safeGet(ATTACK_SET_HEALTH_ENABLE_CONST_OVERRIDE, false);
+        return safeGet(ATTACK_SETHEALTH_ENABLE_CONST_OVERRIDE, false);
     }
 
     public static boolean getAttackSetHealthEnableExternalScanSafely() {
-        return safeGet(ATTACK_SET_HEALTH_ENABLE_EXTERNAL_SCAN, false);
+        return safeGet(ATTACK_SETHEALTH_ENABLE_EXTERNAL_SCAN, false);
     }
 
     public static boolean getAttackSetHealthEnableMethodProbeSafely() {
-        return safeGet(ATTACK_SET_HEALTH_ENABLE_METHOD_PROBE, false);
-    }
-
-    public static boolean getAttackSetHealthEnableWriteSiteBridgeSafely() {
-        return safeGet(ATTACK_SET_HEALTH_ENABLE_WRITE_SITE_BRIDGE, false);
+        return safeGet(ATTACK_SETHEALTH_ENABLE_METHOD_PROBE, false);
     }
 
     public static boolean getAttackSetHealthEnableNumericInversionSafely() {
-        return safeGet(ATTACK_SET_HEALTH_ENABLE_NUMERIC_INVERSION, false);
+        return safeGet(ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION, false);
     }
 
     public static boolean getDefenceEnableRadicalLogicSafely() {

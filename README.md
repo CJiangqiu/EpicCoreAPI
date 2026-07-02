@@ -140,10 +140,6 @@ side="BOTH"
 - `isAllReturnWhitelisted(className)` - Check if a class is protected from AllReturn
 - `isTransformWhitelisted(className)` - Check if a class is protected from all ECA transformations
 - `getAllWhitelistedPackages()` - Get all whitelist prefixes (both levels, built-in + custom)
-- `addProtectedPackage(prefix)` - Add a package prefix to the system-protected list (never transformed by ECA)
-- `removeProtectedPackage(prefix)` - Remove a package prefix from the protected list (built-in entries cannot be removed)
-- `isPackageProtected(className)` - Check if a class is system-protected
-- `getAllProtectedPackages()` - Get all protected package prefixes (built-in + custom)
 - `getEntityExtensionRegistry()` - Get all registered entity extensions (Map<EntityType, EntityExtension>)
 - `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
 - `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
@@ -186,6 +182,20 @@ side="BOTH"
 - `getEntities(level, area, entityClass)` - Get entities of specified type in area
 - `getEntities(server)` - Get all entities across all server levels
 - `getEntities(server, filter)` - Get entities across all levels using custom predicate
+- `startResurrection()` - Start the resurrection daemon thread (idempotent)
+- `stopResurrection()` - Stop the resurrection daemon thread
+- `isResurrectionRunning()` - Check whether the daemon is running
+- `addResurrectionTarget(entity)` - Add an entity to the resurrection tracking set
+- `removeResurrectionTarget(entity)` - Remove an entity from the resurrection tracking set
+- `isResurrectionTracked(entity)` - Check whether an entity is tracked for resurrection
+- `getResurrectionTrackedCount()` - Get the number of currently tracked entities
+- `clearAllResurrectionTargets()` - Remove all entities from the tracking set
+- `setResurrectionPollInterval(ms)` - Set the daemon poll interval (ms, clamped 1–10000, default 25)
+- `getResurrectionPollInterval()` - Get the current poll interval in ms
+- `getResurrectionTotalRevived()` - Get the total number of entities revived since start
+- `getResurrectionTotalChecks()` - Get the total number of entity checks performed since start
+- `checkResurrectionTarget(level, entity)` - Perform a one-shot container integrity check
+- `reviveResurrectionTarget(level, entity)` - Manually force-revive a tracked entity immediately
 
 Here is a simple example:
 
@@ -309,24 +319,15 @@ EcaAPI.clearGlobalSkybox(serverLevel);
 EcaAPI.setGlobalMusic(serverLevel, new MusicData(new ResourceLocation("your_mod", "music.boss"), 0, 1.0f, 1.0f, true, true));
 EcaAPI.clearGlobalMusic(serverLevel);
 EcaAPI.clearAllGlobalEffects(serverLevel);
+
+// Resurrection
+EcaAPI.startResurrection();
+EcaAPI.addResurrectionTarget(entity);
+boolean tracked = EcaAPI.isResurrectionTracked(entity);
+EcaAPI.removeResurrectionTarget(entity);
+EcaAPI.setResurrectionPollInterval(50);
+EcaAPI.stopResurrection();
 ```
-
-### Resurrection
-
-This mod provides a dedicated daemon thread outside the Forge event bus and MC tick loop. Once started, it continuously watches tracked entities and auto-revives any that die or lose their instance in the vanilla low-level containers.
-
-**Related API** (these APIs are not yet exposed through `EcaAPI`; you need to additionally `import net.eca.util.ResurrectionManager`):
-
-```java
-ResurrectionManager.start(); // start daemon (idempotent)
-ResurrectionManager.add(entity); // begin tracking
-ResurrectionManager.remove(entity); // stop tracking
-boolean tracked = ResurrectionManager.isTracked(uuid);
-ResurrectionManager.setPollIntervalMs(50); // adjust poll frequency
-ResurrectionManager.stop(); // stop daemon
-```
-
-> Note: The daemon thread runs at slightly below normal priority. Default poll interval is 25 ms, meaning a tracked entity is revived within ~25 ms of death. Do not use on entities that spawn in large numbers!
 
 ### Entity Extensions
 
@@ -886,10 +887,6 @@ side="BOTH"
 - `isAllReturnWhitelisted(className)` - 检查类是否在 AllReturn 白名单中
 - `isTransformWhitelisted(className)` - 检查类是否在转换白名单中（跳过全部转换）
 - `getAllWhitelistedPackages()` - 获取所有白名单前缀（两级合并，内置 + 自定义）
-- `addProtectedPackage(prefix)` - 添加包前缀到系统保护列表（永不被 ECA 转换）
-- `removeProtectedPackage(prefix)` - 从保护列表移除包前缀（内置项不可移除）
-- `isPackageProtected(className)` - 检查类是否被系统保护
-- `getAllProtectedPackages()` - 获取所有受保护的包前缀（内置 + 自定义）
 - `getEntityExtensionRegistry()` - 获取所有已注册的实体扩展（Map<EntityType, EntityExtension>）
 - `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
 - `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）
@@ -932,6 +929,20 @@ side="BOTH"
 - `getEntities(level, area, entityClass)` - 获取范围内指定类型实体
 - `getEntities(server)` - 获取全服全部实体
 - `getEntities(server, filter)` - 使用自定义条件获取全服实体
+- `startResurrection()` - 启动复活守护线程（幂等）
+- `stopResurrection()` - 停止复活守护线程
+- `isResurrectionRunning()` - 检查守护线程是否运行
+- `addResurrectionTarget(entity)` - 将实体加入复活追踪
+- `removeResurrectionTarget(entity)` - 将实体从复活追踪中移除
+- `isResurrectionTracked(entity)` - 检查实体是否在复活追踪中
+- `getResurrectionTrackedCount()` - 获取当前追踪的实体数量
+- `clearAllResurrectionTargets()` - 清除全部复活追踪目标
+- `setResurrectionPollInterval(ms)` - 设置复活轮询间隔（毫秒，范围 1–10000，默认 25）
+- `getResurrectionPollInterval()` - 获取当前轮询间隔（毫秒）
+- `getResurrectionTotalRevived()` - 获取累计复活次数
+- `getResurrectionTotalChecks()` - 获取累计检查次数
+- `checkResurrectionTarget(level, entity)` - 进行一次容器完整性检查
+- `reviveResurrectionTarget(level, entity)` - 手动强制复活被追踪的实体
 
 以下是一个简易示例：
 
@@ -1055,24 +1066,15 @@ EcaAPI.clearGlobalSkybox(serverLevel);
 EcaAPI.setGlobalMusic(serverLevel, new MusicData(new ResourceLocation("your_mod", "music.boss"), 0, 1.0f, 1.0f, true, true));
 EcaAPI.clearGlobalMusic(serverLevel);
 EcaAPI.clearAllGlobalEffects(serverLevel);
+
+// 线程复活
+EcaAPI.startResurrection();
+EcaAPI.addResurrectionTarget(entity);
+boolean tracked = EcaAPI.isResurrectionTracked(entity);
+EcaAPI.removeResurrectionTarget(entity);
+EcaAPI.setResurrectionPollInterval(50);
+EcaAPI.stopResurrection();
 ```
-
-### 线程复活
-
-本 Mod 提供了一个在 Forge 事件总线和 MC tick 循环之外的一个独立守护线程，开启后将会持续监控被追踪的实体，一旦死亡或原版底层容器中的对应实体实例丢失就自动复活。
-
-**相关 API**（目前这些 API 还未通过 `EcaAPI` 暴露，需要你额外 `import net.eca.util.ResurrectionManager`）：
-
-```java
-ResurrectionManager.start(); // 启动守护线程（幂等）
-ResurrectionManager.add(entity); // 开始追踪
-ResurrectionManager.remove(entity); // 停止追踪
-boolean tracked = ResurrectionManager.isTracked(uuid);
-ResurrectionManager.setPollIntervalMs(50); // 调整轮询频率
-ResurrectionManager.stop(); // 停止守护线程
-```
-
-> 注意：守护线程以略低于正常的优先级运行，默认轮询间隔 25 ms，即被追踪实体在死亡后约 25 ms 内即被复活，请勿用于会大量生成的实体！
 
 ### 实体扩展
 

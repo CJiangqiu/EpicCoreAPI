@@ -4,6 +4,7 @@ import net.eca.config.EcaConfiguration;
 import net.eca.network.ClientRemovePacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
+import net.eca.network.SetHealthClientSyncPacket;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.health.HealthLockManager;
@@ -653,46 +654,63 @@ public class EntityUtil {
     }
 
     //设置实体生命值
+    //标记当前改血由客户端同步包驱动，防止客户端独立改血 + 避免回环广播
+    private static final ThreadLocal<Boolean> IS_FROM_SYNC = ThreadLocal.withInitial(() -> false);
+
     public static boolean setHealth(LivingEntity entity, float expectedHealth) {
         if (entity == null) return false;
         try {
+            boolean client = entity.level() != null && entity.level().isClientSide;
+            //客户端仅允许被同步包驱动改血(否则客户端会与服务端各自为政)
+            if (client && !IS_FROM_SYNC.get()) return false;
+            float beforeHealth = EcaSetHealthManager.safeGetHealth(entity);
+
+            //第一步：写原版 DATA_HEALTH_ID。若目标 getHealth 就是读这里(原版实体多数如此)，验证已通过则直接成功，
+            //  避免每次都触发数据流逆向分析。Player 跳过(原版自带保护)，非 Player 走完整链。
             setBasicHealth(entity, expectedHealth);
-            if (!(entity instanceof Player)) {
-                // 优先重放已缓存的改血路径（不限方法类型），命中则直接返回，避免每次重复分析
-                if (EcaSetHealthManager.replayCachedPath(entity, expectedHealth)) {
-                    return true;
-                }
-                //非原版血量返回路径逐级升级：数据流 → 常数覆盖 → 外部扫描 → 方法探针 → 写入桥接 → 数值反演
-                boolean ok = EcaSetHealthManager.setHealthByDataflow(entity, expectedHealth);
-                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
-                        && EcaConfiguration.getAttackSetHealthEnableConstOverrideSafely()) {
-                    ok = EcaSetHealthManager.setHealthByConstOverride(entity, expectedHealth);
-                }
-                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
-                        && EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) {
-                    ok = EcaSetHealthManager.setHealthByExternalScan(entity, expectedHealth);
-                }
-                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
-                        && EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) {
-                    ok = EcaSetHealthManager.setHealthByMethodProbe(entity, expectedHealth);
-                }
-                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
-                        && EcaConfiguration.getAttackSetHealthEnableWriteSiteBridgeSafely()) {
-                    ok = EcaSetHealthManager.setHealthByWriteSiteBridge(entity, expectedHealth);
-                }
-                if (!ok && EcaConfiguration.getAttackEnableRadicalLogicSafely()
-                        && EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely()) {
-                    EcaSetHealthManager.setHealthByNumericInversion(entity, expectedHealth);
-                }
-                if (!ok) ok = EcaSetHealthManager.verify(entity, expectedHealth);
-                return ok;
+            boolean ok;
+            if (entity instanceof Player) {
+                ok = EcaSetHealthManager.verify(entity, expectedHealth);
+            } else if (EcaSetHealthManager.verify(entity, expectedHealth)) {
+                ok = true;                                                         //原版同步即生效
+            } else if (EcaSetHealthManager.applyDataflow(entity, expectedHealth)) {
+                ok = true;                                                         //数据流逆向定位真实存储
+            } else if (EcaSetHealthManager.applyExternalScan(entity, expectedHealth)) {
+                ok = true;                                                         //外部扫描(isAlive/hurt 旁证)
+            } else if (EcaSetHealthManager.applyMethodProbe(entity, expectedHealth)) {
+                ok = true;                                                         //方法探针(借实体自身 writer)
+            } else {
+                ok = EcaSetHealthManager.applyNumericInversion(entity, expectedHealth); //数值反演(死角对象图扰动)
             }
-            return EcaSetHealthManager.verify(entity, expectedHealth);
+
+            //服务端改血成功 → 广播给追踪客户端，令自定义存储型实体客户端显示同步(客户端重跑同一条链)
+            if (ok && !client) syncHealthToClients(entity, expectedHealth, beforeHealth);
+            return ok;
         } catch (Exception e) {
             EcaLogger.warn("setHealth threw exception entity={} expected={} msg={}",
                 entity.getClass().getName(), expectedHealth, e.getMessage());
             return false;
         }
+    }
+
+    //由同步包在客户端调用：标记来源后走同一条链改本地实体(setHealth 的客户端分支据 IS_FROM_SYNC 放行，且不再回发包)
+    public static void setHealthFromSync(LivingEntity entity, float expectedHealth) {
+        IS_FROM_SYNC.set(true);
+        try {
+            setHealth(entity, expectedHealth);
+        } finally {
+            IS_FROM_SYNC.set(false);
+        }
+    }
+
+    //服务端改血成功后同步到追踪客户端；同步驱动/客户端/无实质变化时不发
+    private static void syncHealthToClients(LivingEntity entity, float expectedHealth, float beforeHealth) {
+        if (IS_FROM_SYNC.get()) return;
+        if (entity.level() == null || entity.level().isClientSide) return;
+        if (Math.abs(expectedHealth - beforeHealth) <= 0.001f) return;
+        try {
+            NetworkHandler.sendToTrackingClients(new SetHealthClientSyncPacket(entity.getId(), expectedHealth), entity);
+        } catch (Exception ignored) {}
     }
 
     //设置原版血量数据（DATA_HEALTH_ID）

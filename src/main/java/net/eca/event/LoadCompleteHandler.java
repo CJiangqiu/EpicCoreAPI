@@ -8,6 +8,8 @@ import net.eca.coremod.EcaClassTransformer;
 
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
+import net.eca.util.health.EcaSetHealthManager;
+import net.eca.util.health.HealthDataFlow;
 import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.item_extension.ItemExtensionManager;
@@ -72,6 +74,11 @@ public final class LoadCompleteHandler {
         if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
             event.enqueueWork(LoadCompleteHandler::applyLoadCompleteTransformers);
         }
+
+        // 数据流分析器注入 ECA 运行期字节码源与 hook 剥离配置，必须排在 warmup 之前
+        event.enqueueWork(HealthDataFlow::init);
+        // 数据流改血预热：排在所有 ECA 字节码处理之后，确保读到的是含 ECA hook 的最终字节码
+        event.enqueueWork(EcaSetHealthManager::startWarmup);
     }
 
     // ── 激进模式：延迟 retransform ──

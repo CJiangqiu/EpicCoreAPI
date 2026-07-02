@@ -138,6 +138,12 @@ public class NetworkHandler {
                 .decoder(FilterSyncPacket::decode)
                 .consumerMainThread(FilterSyncPacket::handle)
                 .add();
+
+        CHANNEL.messageBuilder(SetHealthClientSyncPacket.class, id(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(SetHealthClientSyncPacket::encode)
+                .decoder(SetHealthClientSyncPacket::decode)
+                .consumerMainThread(SetHealthClientSyncPacket::handle)
+                .add();
     }
 
     /**

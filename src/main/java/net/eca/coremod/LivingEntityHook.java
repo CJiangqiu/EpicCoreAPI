@@ -17,6 +17,14 @@ public final class LivingEntityHook {
     private LivingEntityHook() {
     }
 
+    /* ECA 内部原始读：改血 verify 读 getHealth 时置位，令 processGetHealth 放行禁疗/血锁、暴露真实存储值。
+       否则 verify 恒读到自家禁疗/血锁记录值，正确写入被误判失败并回滚。 */
+    private static final ThreadLocal<Boolean> RAW_HEALTH_READ = ThreadLocal.withInitial(() -> false);
+
+    public static void beginRawHealthRead() { RAW_HEALTH_READ.set(true); }
+
+    public static void endRawHealthRead() { RAW_HEALTH_READ.set(false); }
+
     // ==================== getHealth() hook ====================
 
     // 处理 getHealth()：锁血 + 禁疗，NaN 表示放行
@@ -30,6 +38,10 @@ public final class LivingEntityHook {
      * @return locked/banned health value, or NaN for passthrough
      */
     public static float processGetHealth(LivingEntity entity) {
+        // ECA 内部原始读：放行禁疗/血锁，回落真实 getHealth，供改血 verify 读到真实存储值
+        if (RAW_HEALTH_READ.get()) {
+            return Float.NaN;
+        }
         // 锁血：直接返回锁定值
         Float locked = HealthLockManager.getLock(entity);
         if (locked != null) {

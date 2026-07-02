@@ -1,281 +1,200 @@
 package net.eca.util.health;
 
+import net.eca.agent.EcaAgent;
 import net.eca.config.EcaConfiguration;
-import net.eca.coremod.RuntimeBytecodeProvider;
-import net.eca.util.reflect.VarHandleUtil;
+import net.eca.coremod.LivingEntityHook;
+import net.eca.util.EcaLogger;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
 
-import java.io.InputStream;
-import java.lang.reflect.Field;
-import java.security.CodeSource;
+import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Modifier;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.jar.JarFile;
 
 /*
- * 改血总管理器：持有"路径表"——每个实体类用什么改血方法(method, 后续扩充)、以及已确定的修改路径(writer)，
- * 命中即直接重放，避免重复分析。同时集中改血流程复用的基础 API(取字节码、字段 IO、数值强转、校验)。
- * 数据流逆向分析交给 HealthDataflowAnalyzer，本类只负责编排 + 缓存 + 复用工具。
+ * 改血总管理器：持有数据流分析表 + 调度 + 校验。
+ * 数据流逆向分析交给 HealthDataflowAnalyzer，写入交给 HealthDataFlow，本类只负责编排表 + warmup + verify。
  */
 public final class EcaSetHealthManager {
 
     private EcaSetHealthManager() {}
 
-    /* ==================== 路径表 ==================== */
+    /* ==================== 数据流主表 ==================== */
 
-    // 改血方法类型，后续会扩充更多 method
-    public enum WriteMethod {
-        VANILLA,    // 原版同步数据(DATA_HEALTH_ID)
-        DATAFLOW,   // getHealth 字节码数据流逆向定位的存储
-        CONST_OVERRIDE,   // getHealth 返回不可变常数时，劫持其返回值
-        EXTERNAL_SCAN,    // CONST_OVERRIDE 失败时，逆向分析 isAlive/isDeadOrDying 定位真实存储
-        METHOD_PROBE,
-        WRITE_SITE_BRIDGE,
-        NUMERIC_INVERSION
-    }
+    /* 数据流主表：实体类 → 2 态。成功 = 可写结构 AnalysisResult；失败 = AnalysisResult.DATA_FLOW_ANALYZER_FAILED 哨兵。
+       warmup 后台预填，setHealth 时查询；未命中现场分析并写回，失败标记后续不再重复分析。 */
+    private static final Map<Class<?>, HealthDataflowAnalyzer.AnalysisResult> DATAFLOW_TABLE = new ConcurrentHashMap<>();
 
-    // 改血写入器：把目标血量写进实体真实存储，成功返回 true
-    @FunctionalInterface
-    public interface HealthWriter {
-        boolean write(LivingEntity entity, float target);
-    }
+    /* 外部扫描已装 patch 的类：外部扫描缓存在分析器内(须零副作用)，故 install 的每类去重在管理器侧记 */
+    private static final Set<Class<?>> EXTERNAL_INSTALLED = ConcurrentHashMap.newKeySet();
 
-    // 一条已确定的改血路径：用什么方法 + 具体写入器
-    public record HealthPath(WriteMethod method, HealthWriter writer) {
-        public boolean write(LivingEntity entity, float target) {
-            try {
-                return writer.write(entity, target);
-            } catch (Throwable t) {
-                if (t instanceof VirtualMachineError e) throw e;
-                return false;
-            }
-        }
-    }
+    /* 方法探针：HeadBridge 已烤入的类；DirectCall 已探测的类 + 命中 writer 缓存(跨同类实例复用) */
+    private static final Set<Class<?>> METHOD_BRIDGE_INSTALLED = ConcurrentHashMap.newKeySet();
+    private static final Set<Class<?>> DIRECT_PROBED = ConcurrentHashMap.newKeySet();
+    private static final Map<Class<?>, MethodProbe.DirectWriter> DIRECT_WRITER = new ConcurrentHashMap<>();
 
-    // 实体类 → 已确定改血路径。仅缓存验证通过的路径，绝不缓存失败(避免一次误判把该类永久判死)
-    private static final Map<Class<?>, HealthPath> PATHS = new ConcurrentHashMap<>();
-
-    // 实体类 → 完整分析结果，供各降级手段独立判断，避免重复 analyze
-    private static final Map<Class<?>, HealthDataflowAnalyzer.AnalysisResult> ANALYSIS_CACHE = new ConcurrentHashMap<>();
-
-    public static HealthPath getPath(Class<?> entityClass) {
-        return entityClass == null ? null : PATHS.get(entityClass);
-    }
-
-    public static void putPath(Class<?> entityClass, HealthPath path) {
-        if (entityClass != null && path != null) PATHS.put(entityClass, path);
-    }
-
-    public static void removePath(Class<?> entityClass) {
-        if (entityClass != null) PATHS.remove(entityClass);
-    }
-
-    public static void clear() {
-        PATHS.clear();
-    }
-
-    public static boolean replayCachedPath(LivingEntity entity, float target) {
-        if (entity == null) return false;
-        HealthPath cached = PATHS.get(entity.getClass());
-        if (cached == null) return false;
-        return cached.write(entity, target) && verify(entity, target);
-    }
+    /* 数值反演前置跳过诊断去重：每类每原因只打一次，避免每-tick 改血刷屏 */
+    private static final Set<String> NUMERIC_INVERSION_SKIP_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* ==================== 对外编排入口 ==================== */
 
-    /* 用数据流路径给实体改血：先重放该类已确定的路径，未命中或失效再走逆向分析重新定位。
-       仅在写入并校验通过后才缓存路径。仅处理 SOLVABLE 实体——CONSTANT/HAS_CONSTANT 由 setHealthByConstOverride 独立接管。 */
-    public static boolean setHealthByDataflow(LivingEntity entity, float target) {
-        if (entity == null) return false;
-        Class<?> cls = entity.getClass();
-
-        HealthPath cached = PATHS.get(cls);
-        if (cached != null && cached.method() != WriteMethod.DATAFLOW) {
-            cached = null;
-        }
-        if (cached != null && cached.write(entity, target) && verify(entity, target)) {
-            return true;
-        }
-
-        HealthPath resolved = HealthDataflowAnalyzer.resolvePath(cls);
-        if (resolved == null) return false;
-        if (resolved.write(entity, target) && verify(entity, target)) {
-            PATHS.put(cls, resolved);
-            return true;
-        }
-        return false;
+    /* 数据流改血主入口：查 DATAFLOW_TABLE，命中失败哨兵直接放弃；命中可写结构则交 HealthDataFlow 写入；
+       未命中现场分析并落表。 */
+    public static boolean applyDataflow(LivingEntity target, float targetHealth) {
+        if (target == null) return false;
+        HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(target.getClass());
+        if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) return false;
+        return HealthDataFlow.write(tree, target, targetHealth);
     }
 
-    public static boolean setHealthByMethodProbe(LivingEntity entity, float target) {
-        if (entity == null) return false;
-        Class<?> cls = entity.getClass();
-
-        HealthPath cached = PATHS.get(cls);
-        if (cached != null && cached.method() == WriteMethod.METHOD_PROBE
-                && cached.write(entity, target) && verify(entity, target)) {
-            return true;
-        }
-
-        HealthPath resolved = HealthMethodProbe.resolvePath(entity, target);
-        if (resolved == null) return false;
-        if (resolved.write(entity, target) && verify(entity, target)) {
-            PATHS.put(cls, resolved);
-            return true;
-        }
-        return false;
+    /* 外部扫描兜底入口：getHealth 数据流打不穿时，逆向 isAlive/isDeadOrDying/hurt/actuallyHurt 定位真实血量存储。
+       双门控(激进逻辑 + 外部扫描开关)任一关闭直接放弃；resolveExternalScanResult 已带缓存，install 每类只跑一次。 */
+    public static boolean applyExternalScan(LivingEntity target, float targetHealth) {
+        if (target == null) return false;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return false;
+        Class<?> cls = target.getClass();
+        HealthDataflowAnalyzer.AnalysisResult tree = HealthDataflowAnalyzer.resolveExternalScanResult(cls);
+        if (tree == null) return false;
+        if (EXTERNAL_INSTALLED.add(cls)) ConstOverride.install(tree);
+        return HealthDataFlow.writeExternal(tree, target, targetHealth);
     }
 
-    //外部扫描路径：const override 失败后，逆向 isAlive/isDeadOrDying 定位真实存储
-    public static boolean setHealthByExternalScan(LivingEntity entity, float target) {
-        if (entity == null) return false;
-        Class<?> cls = entity.getClass();
+    /* 方法探针兜底入口：存储直写(数据流/外部扫描)全打不穿时，借实体自身合法 writer 改血。
+       双门控(激进逻辑 + 方法探针开关)任一关闭直接放弃。
+       DirectCall 优先(可调用 setter，行为探测命中即缓存复用)；失败退 HeadBridge(writer 被守护，借实体可信帧发起)。 */
+    public static boolean applyMethodProbe(LivingEntity target, float targetHealth) {
+        if (target == null) return false;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                || !EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) return false;
+        Class<?> cls = target.getClass();
 
-        HealthPath cached = PATHS.get(cls);
-        if (cached != null && cached.method() == WriteMethod.EXTERNAL_SCAN
-                && cached.write(entity, target) && verifyExternalScan(entity, target)) {
-            return true;
+        MethodProbe.DirectWriter writer = DIRECT_WRITER.get(cls);
+        if (writer == null && DIRECT_PROBED.add(cls)) {
+            writer = MethodProbe.resolveDirect(target, MethodProbe.findDirectCandidates(cls), targetHealth);
+            if (writer != null) DIRECT_WRITER.put(cls, writer);
         }
+        if (writer != null && writer.write(target, targetHealth) && verify(target, targetHealth)) return true;
 
-        HealthPath resolved = HealthDataflowAnalyzer.resolveExternalScan(cls);
-        if (resolved != null && resolved.write(entity, target) && verifyExternalScan(entity, target)) {
-            PATHS.put(cls, resolved);
-            return true;
-        }
-        return false;
+        installMethodBridgeOnce(cls);
+        MethodProbe.BridgeSpec spec = MethodProbe.getSpec(cls.getName().replace('.', '/'));
+        if (spec == null) return false;
+        return MethodProbe.invokeBridge(target, spec, targetHealth);
     }
 
-    //外部扫描验证：kill 时检查 isAlive / isDeadOrDying，非 kill 时读 getHealth
-    private static boolean verifyExternalScan(LivingEntity entity, float target) {
-        if (target <= 0.0f) {
-            return !entity.isAlive() || entity.isDeadOrDying();
-        }
-        float actual = safeGetHealth(entity);
-        if (Float.isFinite(actual)) {
-            float tolerance = Math.max(0.5f, Math.abs(target) * 0.02f);
-            if (Math.abs(actual - target) <= tolerance) return true;
-        }
-        return entity.isAlive() && !entity.isDeadOrDying();
+    /* HeadBridge 每类只烤入一次(warmup 与惰性共用)。无条件烤入——运行期是否借桥由配置双门控 + 激活态决定。 */
+    public static void installMethodBridgeOnce(Class<?> cls) {
+        if (cls != null && METHOD_BRIDGE_INSTALLED.add(cls)) MethodProbe.installBridge(cls);
     }
 
-    /* 常数覆盖：仅对 getHealth 存在常数分支的实体生效(CONSTANT / HAS_CONSTANT)。
-       不写实体存储，只登记覆盖表，由 getHealth 内联的 resolveHealth 读取返回。
-       首次命中时触发 retransform 打 FRETURN patch，后续调用直接走覆盖表。 */
-    public static boolean setHealthByConstOverride(LivingEntity entity, float target) {
-        if (entity == null) return false;
-        Class<?> cls = entity.getClass();
-        HealthDataflowAnalyzer.AnalysisResult ar =
-                ANALYSIS_CACHE.computeIfAbsent(cls, c -> HealthDataflowAnalyzer.analyze(c));
+    /* 数值反演兜底入口：前面通道全打不穿(通常卡在自定义非可逆解码)时，从数据流逆向的死角活对象继续向下扰动原始 cell。
+       双门控(激进逻辑 + 数值反演开关)任一关闭直接放弃；无可用死角(树失败/无死角根)直接返回 false。 */
+    public static boolean applyNumericInversion(LivingEntity target, float targetHealth) {
+        if (target == null) return false;
+        Class<?> cls = target.getClass();
+        boolean radical = EcaConfiguration.getAttackEnableRadicalLogicSafely();
+        boolean enabled = EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely();
+        if (!radical || !enabled) {
+            dumpNumericInversionSkip(cls, "gate closed (radical=" + radical + " numericInversion=" + enabled + ")");
+            return false;
+        }
+        HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(cls);
+        if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
+            dumpNumericInversionSkip(cls, "dataflow tree unavailable (no writable structure to frame dead-ends)");
+            return false;
+        }
+        List<Object> roots = HealthDataflowAnalyzer.collectDeadEndRoots(
+                tree.returnExpr, HealthDataflowAnalyzer.newContext(target));
+        if (roots.isEmpty()) {
+            dumpNumericInversionSkip(cls, "no dead-end roots (nothing non-invertible to descend into)");
+            return false;
+        }
+        // 进入搜索：命中/失败结局由 NumericInverter 自身记录
+        return NumericInverter.search(target, targetHealth, roots);
+    }
+
+    // 数值反演前置跳过诊断：每类每原因只打一次
+    private static void dumpNumericInversionSkip(Class<?> cls, String reason) {
+        if (NUMERIC_INVERSION_SKIP_DUMPED.add(cls.getName() + "|" + reason))
+            EcaLogger.info("[NumericInverter] skipped entity={} reason={}", cls.getName(), reason);
+    }
+
+    // 查表：命中返回结构或失败哨兵；未命中现场分析(归一化为 2 态)并原子落表
+    private static HealthDataflowAnalyzer.AnalysisResult resolveTree(Class<?> cls) {
+        return DATAFLOW_TABLE.computeIfAbsent(cls, EcaSetHealthManager::analyzeForTable);
+    }
+
+    /* 分析并归一化为 2 态：可写结构(DATAFLOW 或 CONST_OVERRIDE 带可写源) / DATA_FLOW_ANALYZER_FAILED。
+       异常、空结果、无可写源形态(无源 CONST_OVERRIDE/UNRESOLVED)统一记失败，避免后续重复分析。 */
+    private static HealthDataflowAnalyzer.AnalysisResult analyzeForTable(Class<?> cls) {
+        HealthDataflowAnalyzer.AnalysisResult ar;
+        try {
+            ar = HealthDataflowAnalyzer.analyze(cls);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
+        }
+        if (ar == null) return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
         HealthDataflowAnalyzer.AnalysisResult.Kind kind = ar.classify();
-        if (kind != HealthDataflowAnalyzer.AnalysisResult.Kind.CONSTANT
-                && kind != HealthDataflowAnalyzer.AnalysisResult.Kind.HAS_CONSTANT) return false;
+        boolean eligible = kind == HealthDataflowAnalyzer.AnalysisResult.Kind.DATAFLOW
+                || (kind == HealthDataflowAnalyzer.AnalysisResult.Kind.CONST_OVERRIDE && !ar.sources.isEmpty());
+        if (!eligible) return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
+        // 落表即安装常数覆写 patch：warmup 与晚加载惰性两路都经此，无条件转换，运行期由配置双门控激活
+        ConstOverride.install(ar);
+        return ar;
+    }
 
-        /* retransform 必须针对定义 getHealth()F 的类（可能是父类），
-           否则 EcaClassTransformer 找不到该方法而跳过 FRETURN patch */
-        if (EcaConfiguration.getAttackEnableRadicalLogicSafely()
-                && EcaConfiguration.getAttackSetHealthEnableConstOverrideSafely()) {
-            Class<?> defCls = ar.definingClass != null ? ar.definingClass : cls;
-            String internalName = internalName(defCls);
-            if (ConstOverrideManager.PATCHED_CLASSES.add(internalName)) {
-                HealthDataflowAnalyzer.retransformClass(defCls);
+    /* 后台预热入口：FMLLoadComplete 在所有 ECA 字节码处理之后调用。
+       单条 daemon 线程跑，避免阻塞主加载线程；纯分析只读，离开主线程安全。 */
+    public static void startWarmup() {
+        Thread t = new Thread(EcaSetHealthManager::warmupAll, "ECA-Health-Dataflow-Warmup");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /* 遍历已加载的 LivingEntity 子类(排除 Player 与抽象类)，逐个分析填表。
+       晚加载的实体类不在此列，仍由 setHealth 时惰性补分析(computeIfAbsent 与本线程互不冲突)。 */
+    private static void warmupAll() {
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst == null) {
+            EcaLogger.info("[HealthDataflow] warmup skipped: Instrumentation unavailable");
+            return;
+        }
+        int analyzed = 0;
+        for (Class<?> clazz : inst.getAllLoadedClasses()) {
+            if (clazz == null) continue;
+            if (!LivingEntity.class.isAssignableFrom(clazz)) continue;
+            if (Player.class.isAssignableFrom(clazz)) continue;
+            if (Modifier.isAbstract(clazz.getModifiers())) continue;
+            if (DATAFLOW_TABLE.containsKey(clazz)) continue;
+            try {
+                resolveTree(clazz);
+                installMethodBridgeOnce(clazz);
+                analyzed++;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                EcaLogger.info("[HealthDataflow] warmup analyze {} failed: {}", clazz.getName(), t.toString());
             }
         }
-
-        ConstOverrideManager.setOverride(entity, target);
-        return verify(entity, target);
+        EcaLogger.info("[HealthDataflow] warmup complete: analyzed {} entity classes, table size={}",
+                analyzed, DATAFLOW_TABLE.size());
     }
 
-    public static boolean setHealthByNumericInversion(LivingEntity entity, float target) {
-        if (entity == null) return false;
-        Class<?> cls = entity.getClass();
+    /* ==================== 校验 ==================== */
 
-        HealthPath cached = PATHS.get(cls);
-        if (cached != null && cached.method() == WriteMethod.NUMERIC_INVERSION
-                && cached.write(entity, target) && verify(entity, target)) {
-            return true;
-        }
-
-        HealthPath resolved = HealthNumericInverter.resolvePath(entity, target);
-        if (resolved == null) return false;
-        if (resolved.write(entity, target) && verify(entity, target)) {
-            PATHS.put(cls, resolved);
-            return true;
-        }
-        return false;
-    }
-
-    public static boolean setHealthByWriteSiteBridge(LivingEntity entity, float target) {
-        if (entity == null) return false;
-        Class<?> cls = entity.getClass();
-
-        HealthPath cached = PATHS.get(cls);
-        if (cached != null && cached.method() == WriteMethod.WRITE_SITE_BRIDGE
-                && cached.write(entity, target) && verify(entity, target)) {
-            return true;
-        }
-
-        HealthPath resolved = HealthWriteSiteBridge.resolvePath(entity, target);
-        if (resolved == null) return false;
-        if (resolved.write(entity, target) && verify(entity, target)) {
-            PATHS.put(cls, resolved);
-            return true;
-        }
-        return false;
-    }
-
-    /* ==================== 改血复用 API ==================== */
-
-    // 取类的运行期字节码(含 mixin/coremod 转换后)，取不到回退磁盘原始 .class，再取不到回退 CodeSource JAR
-    public static byte[] classBytes(Class<?> clazz) {
-        if (clazz == null) return null;
+    // 安全读取目标当前"真实"血量：置原始读旁路，放行 ECA 自家禁疗/血锁 hook，避免 verify 被自身锁定值劫持。异常/非有限值返回 NaN
+    public static float safeGetHealth(LivingEntity target) {
         try {
-            byte[] runtime = RuntimeBytecodeProvider.get(clazz);
-            if (runtime != null) return runtime;
-        } catch (Throwable ignored) {}
-        ClassLoader cl = clazz.getClassLoader();
-        if (cl == null) cl = ClassLoader.getSystemClassLoader();
-        String path = internalName(clazz) + ".class";
-        try (InputStream is = cl.getResourceAsStream(path)) {
-            if (is != null) return is.readAllBytes();
-        } catch (Throwable ignored) {}
-        // CodeSource 回退：从 ProtectionDomain 的 JAR 中直接读取 .class 条目
-        try {
-            CodeSource cs = clazz.getProtectionDomain().getCodeSource();
-            if (cs != null && cs.getLocation() != null) {
-                try (JarFile jar = new JarFile(cs.getLocation().getPath())) {
-                    java.util.jar.JarEntry entry = jar.getJarEntry(path);
-                    if (entry != null) {
-                        try (InputStream jis = jar.getInputStream(entry)) {
-                            return jis.readAllBytes();
-                        }
-                    }
-                }
+            LivingEntityHook.beginRawHealthRead();
+            float h;
+            try {
+                h = target.getHealth();
+            } finally {
+                LivingEntityHook.endRawHealthRead();
             }
-        } catch (Throwable ignored) {}
-        return null;
-    }
-
-    /* 类内部名：剥去隐藏类运行期后缀(Foo/0x000... → Foo)，按磁盘模板类定位字节码。
-       隐藏类 getName() 可能只剩 SimpleName，此时用其超类的包补全(隐藏类与模板同包)。 */
-    public static String internalName(Class<?> clazz) {
-        String n = clazz.getName().replace('.', '/');
-        int hidden = n.indexOf("/0x");
-        if (hidden < 0) return n;
-        String stripped = n.substring(0, hidden);
-        if (stripped.indexOf('/') < 0) {
-            Class<?> sup = clazz.getSuperclass();
-            if (sup != null) {
-                String supInternal = sup.getName().replace('.', '/');
-                int lastSlash = supInternal.lastIndexOf('/');
-                if (lastSlash >= 0) return supInternal.substring(0, lastSlash + 1) + stripped;
-            }
-        }
-        return stripped;
-    }
-
-    // 安全读取实体当前血量，异常或非有限值返回 NaN
-    public static float safeGetHealth(LivingEntity entity) {
-        try {
-            float h = entity.getHealth();
             return Float.isFinite(h) ? h : Float.NaN;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
@@ -284,31 +203,10 @@ public final class EcaSetHealthManager {
     }
 
     // 校验改血是否生效：getHealth 落在目标值容差内
-    public static boolean verify(LivingEntity entity, float target) {
-        float actual = safeGetHealth(entity);
+    public static boolean verify(LivingEntity target, float targetHealth) {
+        float actual = safeGetHealth(target);
         if (!Float.isFinite(actual)) return false;
-        float tolerance = Math.max(0.5f, Math.abs(target) * 0.02f);
-        return Math.abs(actual - target) <= tolerance;
-    }
-
-    // 用 VarHandle 读字段值，失败返回 null
-    public static <T> T readField(Object target, Field field) {
-        return VarHandleUtil.getFieldValue(target, field);
-    }
-
-    // 用 VarHandle 给字段写值(自动数值强转)，成功返回 true
-    public static boolean writeField(Object target, Field field, Object value) {
-        return VarHandleUtil.setFieldValue(target, field, value);
-    }
-
-    // 把目标血量强转到字段的数值类型(基本类型或包装类型)，非数值类型返回 null
-    public static Object coerceNumber(float value, Class<?> type) {
-        if (type == float.class || type == Float.class) return value;
-        if (type == double.class || type == Double.class) return (double) value;
-        if (type == int.class || type == Integer.class) return (int) value;
-        if (type == long.class || type == Long.class) return (long) value;
-        if (type == short.class || type == Short.class) return (short) value;
-        if (type == byte.class || type == Byte.class) return (byte) value;
-        return null;
+        float tolerance = Math.max(0.5f, Math.abs(targetHealth) * 0.02f);
+        return Math.abs(actual - targetHealth) <= tolerance;
     }
 }
