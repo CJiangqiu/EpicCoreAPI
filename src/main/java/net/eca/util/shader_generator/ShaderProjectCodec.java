@@ -39,8 +39,6 @@ public final class ShaderProjectCodec {
             JsonObject layerObj = new JsonObject();
             layerObj.addProperty("name", layer.name());
             layerObj.addProperty("visible", layer.visible());
-            layerObj.addProperty("blend_mode", layer.blendMode().name().toLowerCase());
-            layerObj.addProperty("opacity", layer.opacity());
             JsonArray baseColor = new JsonArray();
             baseColor.add(layer.baseRed());
             baseColor.add(layer.baseGreen());
@@ -86,9 +84,7 @@ public final class ShaderProjectCodec {
             JsonObject layerObj = layersArray.get(li).getAsJsonObject();
             ShaderLayer layer = new ShaderLayer(
                 layerObj.get("name").getAsString(),
-                layerObj.get("visible").getAsBoolean(),
-                ShaderLayerBlendMode.valueOf(layerObj.get("blend_mode").getAsString().toUpperCase()),
-                layerObj.get("opacity").getAsFloat()
+                layerObj.get("visible").getAsBoolean()
             );
             if (layerObj.has("base_color")) {
                 JsonArray baseColor = layerObj.getAsJsonArray("base_color");

@@ -46,11 +46,24 @@ public final class ShaderColorPickerScreen extends Screen {
         addRenderableWidget(Button.builder(
             Component.literal("-"),
             button -> alpha = clamp(alpha - 0.05F)
-        ).bounds(left + PICKER_SIZE + 32, top + 70, 20, 20).build());
+        ).bounds(left + PICKER_SIZE + 32, top + 78, 20, 20).build());
+        addRenderableWidget(new ShaderPercentEditWidget(
+            left + PICKER_SIZE + 32,
+            top + 58,
+            64,
+            16,
+            Component.translatable("gui.eca.shader_generator.color_picker.alpha", 0),
+            () -> alpha,
+            value -> alpha = (float) value,
+            value -> Component.translatable(
+                "gui.eca.shader_generator.color_picker.alpha",
+                ShaderPercentEditWidget.displayPercent(value)
+            )
+        ));
         addRenderableWidget(Button.builder(
             Component.literal("+"),
             button -> alpha = clamp(alpha + 0.05F)
-        ).bounds(left + PICKER_SIZE + 76, top + 70, 20, 20).build());
+        ).bounds(left + PICKER_SIZE + 76, top + 78, 20, 20).build());
         addRenderableWidget(Button.builder(
             Component.translatable("gui.eca.shader_generator.button.confirm"),
             button -> confirm()
@@ -83,19 +96,9 @@ public final class ShaderColorPickerScreen extends Screen {
         graphics.renderOutline(left + PICKER_SIZE + 32, top, 64, 56, 0xFFFFFFFF);
         graphics.drawCenteredString(
             font,
-            Component.translatable(
-                "gui.eca.shader_generator.color_picker.alpha",
-                Math.round(alpha * 100.0F)
-            ),
-            left + PICKER_SIZE + 64,
-            top + 62,
-            0xFFFFFFFF
-        );
-        graphics.drawCenteredString(
-            font,
             String.format("#%06X", color & 0xFFFFFF),
             left + PICKER_SIZE + 64,
-            top + 98,
+            top + 106,
             0xFFCDD1D7
         );
         super.render(graphics, mouseX, mouseY, partialTick);

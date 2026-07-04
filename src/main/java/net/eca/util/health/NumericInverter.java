@@ -18,7 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 数值反演：数据流逆向的死角接管层。静态逆向撞上无法符号反演的节点(自定义解码 Call/Op)后，
  * 从该节点的活对象继续向下走运行期对象图，收集可扰动的原始 cell，扰动测斜率、梯度逼近使 getHealth 命中目标。
  * 副作用全在本类。写回一律"引用替换"(装箱/不可变绝不原地改共享对象)；快照回滚、超时、异常硬隔离保证崩溃安全。
- * 搜索范围由静态死角框定，不盲扫全内存；对象图深度不设人为上限，仅超时兜运行边界。
+ * 搜索范围由静态死角框定，不盲扫全内存；对象图遍历设递归深度上限防栈溢出(deadline 只兜 wall-clock，挡不住深图爆栈)，超时兜运行时间边界。
  */
 public final class NumericInverter {
 
@@ -26,6 +26,7 @@ public final class NumericInverter {
 
     private static final long TIME_BUDGET_NANOS = 200_000_000L;   // 单次搜索 wall-clock 预算
     private static final int MAX_PASSES = 64;                      // 坐标下降迭代上限(超时为主，本值为备)
+    private static final int MAX_WALK_DEPTH = 64;                  // 对象图递归深度上限，防深图爆栈(StackOverflowError)
     private static final double PERTURB = 1.0;                     // 测斜率的单位微扰
 
     /* 搜索结局诊断去重：每类每原因只打一次，避免每-tick 改血刷屏 */
@@ -43,7 +44,7 @@ public final class NumericInverter {
 
         List<Cell> cells = new ArrayList<>();
         Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-        for (Object root : roots) walk(root, cells, visited, deadline);
+        for (Object root : roots) walk(root, cells, visited, deadline, 0);
         if (cells.isEmpty()) {
             diag(entity, "no perturbable numeric cells reachable from dead-end roots (roots=" + roots.size() + ")");
             return false;
@@ -66,7 +67,7 @@ public final class NumericInverter {
             for (Cell cell : cells) {
                 if (System.nanoTime() > deadline) break;
                 double cur = cell.read();
-                if (Double.isNaN(cur)) continue;
+                if (!Double.isFinite(cur)) continue;
                 Object exact = cell.snapshot();   // 精确原值：避免 long→double 往返丢精度改坏旁观 cell(如 UUID 键)
                 if (!cell.write(cur + PERTURB)) continue;
                 float h = EcaSetHealthManager.safeGetHealth(entity);
@@ -89,9 +90,8 @@ public final class NumericInverter {
                 for (int i = 0; i < relevant.size(); i++) {
                     Cell cell = relevant.get(i);
                     double cur = cell.read();
-                    if (Double.isNaN(cur)) continue;
-                    cell.write(cur + err / slopes.get(i));
-                    h = EcaSetHealthManager.safeGetHealth(entity);
+                    if (!Double.isFinite(cur)) continue;
+                    h = step(entity, target, cell, cur, err / slopes.get(i), h);
                     if (hit(h, target)) break;
                     err = target - h;
                 }
@@ -118,6 +118,23 @@ public final class NumericInverter {
         return Math.abs(actual - target) <= tol;
     }
 
+    private static float step(LivingEntity entity, float target, Cell cell, double current, double delta, float before) {
+        if (!Double.isFinite(delta)) return before;
+        Object exact = cell.snapshot();
+        double beforeError = Math.abs((double) target - before);
+        double scale = 1.0;
+        for (int attempt = 0; attempt < 12; attempt++, scale *= 0.5) {
+            cell.restore(exact);
+            if (!cell.write(current + delta * scale)) continue;
+            float after = EcaSetHealthManager.safeGetHealth(entity);
+            if (!Float.isFinite(after)) continue;
+            double afterError = Math.abs((double) target - after);
+            if (hit(after, target) || afterError < beforeError) return after;
+        }
+        cell.restore(exact);
+        return before;
+    }
+
     private static void rollback(List<Cell> cells, Object[] snapshot) {
         for (int i = cells.size() - 1; i >= 0; i--) {
             try { cells.get(i).restore(snapshot[i]); }
@@ -127,8 +144,8 @@ public final class NumericInverter {
 
     // ==================== 对象图遍历：收集可扰动原始 cell ====================
 
-    private static void walk(Object obj, List<Cell> cells, Set<Object> visited, long deadline) {
-        if (obj == null || System.nanoTime() > deadline) return;
+    private static void walk(Object obj, List<Cell> cells, Set<Object> visited, long deadline, int depth) {
+        if (obj == null || depth > MAX_WALK_DEPTH || System.nanoTime() > deadline) return;
         if (obj instanceof Number || obj instanceof Boolean || obj instanceof Character || obj instanceof String) return;
         if (!visited.add(obj)) return;
         Class<?> cls = obj.getClass();
@@ -144,7 +161,7 @@ public final class NumericInverter {
                     if (System.nanoTime() > deadline) return;
                     Object el = Array.get(obj, i);
                     if (el instanceof Number) cells.add(new ArrayCell(obj, i));
-                    else walk(el, cells, visited, deadline);
+                    else walk(el, cells, visited, deadline, depth + 1);
                 }
             }
             return;
@@ -163,7 +180,7 @@ public final class NumericInverter {
                         Object v = f.get(obj);
                         if (v == null) continue;
                         if (v instanceof Number) cells.add(new FieldCell(obj, f));
-                        else walk(v, cells, visited, deadline);
+                        else walk(v, cells, visited, deadline, depth + 1);
                     }
                 } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
             }

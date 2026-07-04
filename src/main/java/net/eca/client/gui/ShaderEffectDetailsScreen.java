@@ -65,26 +65,27 @@ public final class ShaderEffectDetailsScreen extends Screen {
         for (int index = scroll; index < end; index++) {
             ShaderModuleDefinition.Parameter parameter = visibleParameters.get(index);
             int y = top + 26 + (index - scroll) * 22;
-            if (parameter.key().equals("repeat")) {
-                addRenderableWidget(Button.builder(
-                    Component.translatable(effect.value("repeat") >= 0.5F
-                        ? "gui.eca.shader_generator.effects.repeat_on"
-                        : "gui.eca.shader_generator.effects.repeat_off"),
-                    button -> {
-                        effect.setValue("repeat", effect.value("repeat") >= 0.5F ? 0.0F : 1.0F);
-                        rebuildWidgets();
-                    }
-                ).bounds(left + 220, y, 140, 20).build());
-                continue;
-            }
             addRenderableWidget(Button.builder(
                 Component.literal("-"),
                 button -> adjust(parameter, -parameter.step())
             ).bounds(left + 220, y, 36, 20).build());
-            addRenderableWidget(Button.builder(
-                Component.literal(String.format(Locale.ROOT, "%.2f", effect.value(parameter.key()))),
-                button -> {}
-            ).bounds(left + 260, y, 56, 20).build());
+            if (isAlphaParameter(parameter.key())) {
+                addRenderableWidget(new ShaderPercentEditWidget(
+                    left + 260,
+                    y,
+                    56,
+                    20,
+                    Component.translatable(parameter.displayName()),
+                    () -> effect.value(parameter.key()),
+                    value -> setParameter(parameter, (float) value),
+                    value -> Component.literal(ShaderPercentEditWidget.displayPercent(value) + "%")
+                ));
+            } else {
+                addRenderableWidget(Button.builder(
+                    Component.literal(String.format(Locale.ROOT, "%.2f", effect.value(parameter.key()))),
+                    button -> {}
+                ).bounds(left + 260, y, 56, 20).build());
+            }
             addRenderableWidget(Button.builder(
                 Component.literal("+"),
                 button -> adjust(parameter, parameter.step())
@@ -111,8 +112,12 @@ public final class ShaderEffectDetailsScreen extends Screen {
     }
 
     private void adjust(ShaderModuleDefinition.Parameter parameter, float delta) {
-        effect.setValue(parameter.key(), effect.value(parameter.key()) + delta);
+        setParameter(parameter, effect.value(parameter.key()) + delta);
         rebuildWidgets();
+    }
+
+    private void setParameter(ShaderModuleDefinition.Parameter parameter, float value) {
+        effect.setValue(parameter.key(), value);
     }
 
     private void openColorPicker() {
@@ -219,6 +224,10 @@ public final class ShaderEffectDetailsScreen extends Screen {
             || key.equals("color_g")
             || key.equals("color_b")
             || key.equals("color_a");
+    }
+
+    private static boolean isAlphaParameter(String key) {
+        return key.endsWith("_alpha") || key.equals("alpha");
     }
 
     private static int channel(float value) {

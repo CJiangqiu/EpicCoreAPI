@@ -26,9 +26,8 @@ public class EcaTransformationService implements ITransformationService {
 
     // 预加载 CoreMod 阶段需要的所有类（必须在双加载移除之前，包括内部类）
     // 双加载移除后 module layer 不可用，未预加载的类会 NoClassDefFoundError
+    // CoreMod 阶段只保留加载屏幕转换；实体健康 hook 与容器替换改由 agent/JVMTI 在 LoadComplete 收尾施加
     private static final Class<?>[] PRELOADED = preloadAll(
-        // ITransformer
-        "net.eca.coremod.EcaCoreTransformer",
         // LoadingScreenTransformer + 全部内部类
         "net.eca.coremod.LoadingScreenTransformer",
         "net.eca.coremod.LoadingScreenTransformer$DisplayWindowVisitor",
@@ -40,13 +39,14 @@ public class EcaTransformationService implements ITransformationService {
         AgentLogWriter.resetForNewSession();
         AgentLoader.enableSelfAttach();
         AgentLoader.loadAgent();
-        enableEcaDualLoading();
-        initLoadingScreenTransformer();
+        // prepare() 必须在 dual loading 移除 ECA 模块之前：否则 JvmTiChannel 及其 JNA 依赖在模块移除后无法再加载（NoClassDefFoundError）
         try {
             JvmTiChannel.prepare();
         } catch (Throwable t) {
             log("[CoreMod] JvmTiChannel prepare skipped: " + t.getMessage());
         }
+        enableEcaDualLoading();
+        initLoadingScreenTransformer();
     }
 
     private static Class<?>[] preloadAll(String... names) {
@@ -65,7 +65,7 @@ public class EcaTransformationService implements ITransformationService {
     //在 CoreMod 阶段注册加载屏幕 Transformer（直接用预加载的类实例，无匿名类）
     private static void initLoadingScreenTransformer() {
         try {
-            if (PRELOADED[1] == null || !LoadingScreenTransformer.ENABLED) {
+            if (PRELOADED[0] == null || !LoadingScreenTransformer.ENABLED) {
                 log("[CoreMod] Loading screen transformer disabled or unavailable");
                 return;
             }
@@ -126,17 +126,8 @@ public class EcaTransformationService implements ITransformationService {
     @Override
     @SuppressWarnings("rawtypes")
     public @NotNull List<ITransformer> transformers() {
-        if (PRELOADED[0] == null) {
-            log("[CoreMod] EcaCoreTransformer not available, skipping");
-            return List.of();
-        }
-        try {
-            ITransformer<?> transformer = (ITransformer<?>) PRELOADED[0].getDeclaredConstructor().newInstance();
-            return List.of(transformer);
-        } catch (Throwable t) {
-            log("[CoreMod] Failed to create EcaCoreTransformer: " + t.getMessage());
-            return List.of();
-        }
+        // 不再注册 CoreMod 层 ITransformer：实体健康 hook 与容器替换全部改由 agent/JVMTI 在 LoadComplete 收尾施加，避免在 define 期抢跑其他 mod 的同类字节码处理
+        return List.of();
     }
 
     // 双重加载防护

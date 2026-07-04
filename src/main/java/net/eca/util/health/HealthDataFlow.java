@@ -70,14 +70,23 @@ public final class HealthDataFlow {
         }
     }
 
+    /* 诊断去重：每类只报一次字节码来源 */
+    private static final Set<String> BYTES_SOURCE_DUMPED = ConcurrentHashMap.newKeySet();
+
     /* RuntimeBytecodeProvider 优先(含 mixin/coremod 转换后)，缺失回退分析器内置默认实现 */
     private static byte[] classBytesViaRuntime(Class<?> clazz) {
         try {
             byte[] runtime = net.eca.coremod.RuntimeBytecodeProvider.get(clazz);
-            if (runtime != null) return runtime;
+            if (runtime != null) {
+                if (BYTES_SOURCE_DUMPED.add(clazz.getName()))
+                    EcaLogger.info("[HealthDataflow] bytes for {} <- RuntimeBytecodeProvider(runtime,{}B)", clazz.getName(), runtime.length);
+                return runtime;
+            }
         } catch (Throwable ignored) {
             if (ignored instanceof VirtualMachineError e) throw e;
         }
+        if (BYTES_SOURCE_DUMPED.add(clazz.getName()))
+            EcaLogger.info("[HealthDataflow] bytes for {} <- DISK fallback (runtime capture MISSING)", clazz.getName());
         return HealthDataflowAnalyzer.defaultClassBytes(clazz);
     }
 

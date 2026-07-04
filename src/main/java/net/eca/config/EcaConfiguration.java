@@ -29,25 +29,29 @@ public class EcaConfiguration {
                      "启用激进攻击逻辑：memoryRemove、AllReturn 等。警告：可能导致游戏不稳定！")
             .define("Enable Radical Logic", false);
 
+        BUILDER.push("setHealth");
+
         ATTACK_SETHEALTH_ENABLE_CONST_OVERRIDE = BUILDER
             .comment("Enable setHealth constant-override: patch constant-returning getHealth to consult a per-entity override table.",
                      "启用 setHealth 常数覆写：将返回常数的 getHealth 改写为查询按实体的覆写表。")
-            .define("SetHealth Enable Const Override", false);
+            .define("Enable Const Override", false);
 
         ATTACK_SETHEALTH_ENABLE_EXTERNAL_SCAN = BUILDER
             .comment("Enable setHealth external scan: when getHealth is defended, also reverse isAlive/isDeadOrDying/hurt/actuallyHurt to locate the real health storage. Requires radical logic.",
                      "启用 setHealth 外部扫描：getHealth 被防守时，额外逆向 isAlive/isDeadOrDying/hurt/actuallyHurt 定位真实血量存储。需同时开启激进逻辑。")
-            .define("SetHealth Enable External Scan", false);
+            .define("Enable External Scan", false);
 
         ATTACK_SETHEALTH_ENABLE_METHOD_PROBE = BUILDER
             .comment("Enable setHealth method-probe: when storage is unreachable, drive the entity's own health-writing method (behavioral direct call, or a HEAD-injected token/writer bridge). Requires radical logic.",
                      "启用 setHealth 方法探针：存储不可达时，驱动实体自身的血量写方法(行为直调，或 HEAD 注入的 token/writer 桥)。需同时开启激进逻辑。")
-            .define("SetHealth Enable Method Probe", false);
+            .define("Enable Method Probe", false);
 
         ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION = BUILDER
             .comment("Enable setHealth numeric inversion: at the dead-end of dataflow reversal (custom non-invertible decode), descend into the live object graph and perturb primitive cells to drive getHealth to target. Requires radical logic.",
                      "启用 setHealth 数值反演：数据流逆向在自定义非可逆解码处死角时，深入运行期对象图扰动原始 cell，令 getHealth 逼近目标。需同时开启激进逻辑。")
-            .define("SetHealth Enable Numeric Inversion", false);
+            .define("Enable Numeric Inversion", false);
+
+        BUILDER.pop();
 
         BUILDER.pop();
 

@@ -7,7 +7,6 @@ public final class ShaderLayerComposer {
 
     public static String compose(List<ShaderLayer> layers) {
         StringBuilder source = new StringBuilder()
-            .append(ShaderLayerBlendMode.generateAllGlslFunctions())
             .append("float ecaHash(vec2 value) {\n")
             .append("    return fract(sin(dot(value, vec2(127.1, 311.7))) * 43758.5453123);\n")
             .append("}\n\n")
@@ -38,11 +37,13 @@ public final class ShaderLayerComposer {
             .append("    float sector = 6.2831853 / sides;\n")
             .append("    return cos(floor(0.5 + angle / sector) * sector - angle) * length(point) - radius;\n")
             .append("}\n\n")
-            .append("float ecaEffectProgress(float gameTime, float duration, bool repeatEffect) {\n")
+            .append("float ecaEffectProgress(float gameTime, float duration, float repeatInterval) {\n")
             .append("    if (duration <= 0.0) return 1.0;\n")
             .append("    float elapsedSeconds = gameTime * 1200.0;\n")
-            .append("    float progress = elapsedSeconds / duration;\n")
-            .append("    return repeatEffect ? fract(progress) : clamp(progress, 0.0, 1.0);\n")
+            .append("    float cycle = max(duration + max(repeatInterval, 0.0), 0.000001);\n")
+            .append("    float cycleTime = mod(elapsedSeconds, cycle);\n")
+            .append("    if (cycleTime > duration) return -1.0;\n")
+            .append("    return clamp(cycleTime / duration, 0.0, 1.0);\n")
             .append("}\n\n")
             .append("vec4 renderEffect(vec2 effectUv, vec3 direction, float gameTime) {\n")
             .append("    vec3 finalColor = vec3(0.0);\n")
@@ -104,17 +105,8 @@ public final class ShaderLayerComposer {
                     }
                 }
 
-                float opacity = layer.opacity();
-                source.append("        vec3 blended = ")
-                    .append(layer.blendMode().glslFunctionName())
-                    .append("(finalColor, color);\n");
-                /* 不透明度=1 时完全使用混合结果；不透明度=0 时保持 finalColor。
-                   NORMAL 模式的不透明度即标准的 alpha 合成。 */
-                source.append(String.format(Locale.ROOT,
-                    "        finalColor = mix(finalColor, blended, alpha * %.4f);\n"
-                        + "        finalAlpha = max(finalAlpha, alpha * %.4f);\n",
-                    opacity,
-                    opacity))
+                source.append("        finalColor = mix(finalColor, color, alpha);\n")
+                    .append("        finalAlpha = max(finalAlpha, alpha);\n")
                     .append("    }\n\n");
 
                 layerCount++;
@@ -147,6 +139,18 @@ public final class ShaderLayerComposer {
         float spreadY = module.value("spread_y");
         float seed = module.value("seed");
         StringBuilder source = new StringBuilder();
+        source.append(String.format(Locale.ROOT,
+            "        float effectProgress%d = ecaEffectProgress(gameTime, %.4f, %.4f);\n"
+                + "        float effectAlphaScale%d = effectProgress%d < 0.0 ? 0.0 : %.4f + %.4f * effectProgress%d;\n",
+            moduleIndex,
+            module.value("duration"),
+            module.value("repeat_interval"),
+            moduleIndex,
+            moduleIndex,
+            module.value("start_alpha"),
+            module.value("end_alpha") - module.value("start_alpha"),
+            moduleIndex
+        ));
         for (int instance = 0; instance < count; instance++) {
             float offsetX = signedRandom(seed, instance, 17.13F) * spreadX;
             float offsetY = signedRandom(seed, instance, 71.91F) * spreadY;
@@ -155,7 +159,7 @@ public final class ShaderLayerComposer {
                 "        vec2 imageUv%d_%d = (effectUv - vec2(%.4f, %.4f)) / %.4f + vec2(0.5);\n"
                     + "        if (all(greaterThanEqual(imageUv%d_%d, vec2(0.0))) && all(lessThanEqual(imageUv%d_%d, vec2(1.0)))) {\n"
                     + "            vec4 imageSample%d_%d = texture(%s, imageUv%d_%d);\n"
-                    + "            imageSample%d_%d *= vec4(%.4f, %.4f, %.4f, %.4f);\n"
+                    + "            imageSample%d_%d *= vec4(%.4f, %.4f, %.4f, %.4f * effectAlphaScale%d);\n"
                     + "            color = mix(color, imageSample%d_%d.rgb, imageSample%d_%d.a);\n"
                     + "            alpha = max(alpha, imageSample%d_%d.a);\n"
                     + "        }\n",
@@ -165,6 +169,7 @@ public final class ShaderLayerComposer {
                 moduleIndex, instance,
                 module.value("color_r"), module.value("color_g"),
                 module.value("color_b"), module.value("color_a"),
+                moduleIndex,
                 moduleIndex, instance, moduleIndex, instance,
                 moduleIndex, instance
             ));

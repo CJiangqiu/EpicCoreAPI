@@ -190,13 +190,18 @@ public final class ShaderModuleRegistry {
         float spreadY = module.value("spread_y");
         float seed = module.value("seed");
         float duration = module.value("duration");
-        boolean repeat = module.value("repeat") >= 0.5F;
         StringBuilder source = new StringBuilder();
         source.append(String.format(Locale.ROOT,
-            "        float effectProgress%d = ecaEffectProgress(gameTime, %.4f, %s);\n",
+            "        float effectProgress%d = ecaEffectProgress(gameTime, %.4f, %.4f);\n"
+                + "        float effectAlphaScale%d = effectProgress%d < 0.0 ? 0.0 : %.4f + %.4f * effectProgress%d;\n",
             moduleIndex,
             duration,
-            repeat ? "true" : "false"
+            module.value("repeat_interval"),
+            moduleIndex,
+            moduleIndex,
+            module.value("start_alpha"),
+            module.value("end_alpha") - module.value("start_alpha"),
+            moduleIndex
         ));
         for (int instance = 0; instance < count; instance++) {
             float randomX = signedRandom(seed, instance, 17.13F);
@@ -215,10 +220,8 @@ public final class ShaderModuleRegistry {
                 .append(shapeEmitter.emit(module, moduleIndex, point, instanceSize))
                 .append(";\n");
             source.append(String.format(Locale.ROOT,
-                "        %s *= %.4f + %.4f * effectProgress%d;\n",
+                "        %s *= effectAlphaScale%d;\n",
                 mask,
-                module.value("start_alpha"),
-                module.value("end_alpha") - module.value("start_alpha"),
                 moduleIndex
             ));
             source.append(String.format(Locale.ROOT,
@@ -249,7 +252,7 @@ public final class ShaderModuleRegistry {
             parameter("spread_y", "gui.eca.shader_generator.parameter.spread_y", 0.0F, 1.0F, 0.02F, 0.0F),
             parameter("seed", "gui.eca.shader_generator.parameter.seed", 0.0F, 1000.0F, 1.0F, 1.0F),
             parameter("duration", "gui.eca.shader_generator.parameter.duration", 0.0F, 60.0F, 0.25F, 0.0F),
-            parameter("repeat", "gui.eca.shader_generator.parameter.repeat", 0.0F, 1.0F, 1.0F, 1.0F),
+            parameter("repeat_interval", "gui.eca.shader_generator.parameter.repeat_interval", 0.0F, 60.0F, 0.25F, 0.0F),
             parameter("start_alpha", "gui.eca.shader_generator.parameter.start_alpha", 0.0F, 1.0F, 0.05F, 1.0F),
             parameter("end_alpha", "gui.eca.shader_generator.parameter.end_alpha", 0.0F, 1.0F, 0.05F, 1.0F)
         );

@@ -6,6 +6,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -20,6 +21,9 @@ import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import java.lang.instrument.Instrumentation;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -67,6 +71,8 @@ public final class MethodProbe {
     public record BridgeSpec(String ownerInternal, String methodName, String methodDesc,
                              StaticCall token, StaticCall writer) {}
 
+    private record TrustedBridge(MethodHandle apply, String className) {}
+
     public enum WriterKind { METHOD, FUNCTIONAL_FIELD }
 
     /* DirectCall 候选：METHOD=实体自身 1 参数数值方法；FUNCTIONAL_FIELD=持单数值 SAM 的函数式字段。
@@ -85,6 +91,14 @@ public final class MethodProbe {
     /* 扫实体类的 void(float) 方法，返回首个匹配 token+writer 授权写模式的 BridgeSpec；无则 null。 */
     public static BridgeSpec findBridgeSpec(Class<?> entityClass) {
         if (entityClass == null) return null;
+        for (Class<?> c = entityClass; c != null && c != LivingEntity.class && c != Object.class; c = c.getSuperclass()) {
+            BridgeSpec spec = findBridgeSpecInClass(c);
+            if (spec != null) return spec;
+        }
+        return null;
+    }
+
+    private static BridgeSpec findBridgeSpecInClass(Class<?> entityClass) {
         byte[] bytes = bytesProvider.get(entityClass);
         if (bytes == null) return null;
         try {
@@ -220,10 +234,19 @@ public final class MethodProbe {
     // ==================== HeadBridge 注入 + 安装 ====================
 
     private static final Map<String, BridgeSpec> SPECS = new ConcurrentHashMap<>();
+    private static final Map<String, TrustedBridge> TRUSTED_BRIDGES = new ConcurrentHashMap<>();
+    private static final Set<String> TRUSTED_BRIDGE_FAILED = ConcurrentHashMap.newKeySet();
+    private static final int TRUSTED_BRIDGE_DEPTH = 8;
 
     public static void registerSite(BridgeSpec spec) {
         if (spec == null || spec.ownerInternal() == null) return;
         SPECS.putIfAbsent(spec.ownerInternal(), spec);
+    }
+
+    private static void registerSite(BridgeSpec spec, String lookupInternal) {
+        registerSite(spec);
+        if (spec == null || lookupInternal == null) return;
+        SPECS.putIfAbsent(lookupInternal, spec);
     }
 
     public static BridgeSpec getSpec(String classInternal) {
@@ -277,7 +300,7 @@ public final class MethodProbe {
         if (entityClass == null) return;
         BridgeSpec spec = findBridgeSpec(entityClass);
         if (spec == null) return;
-        registerSite(spec);
+        registerSite(spec, Type.getInternalName(entityClass));
         Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst == null) {
             EcaLogger.info("[MethodProbe] bridge install skipped: Instrumentation unavailable");
@@ -313,7 +336,8 @@ public final class MethodProbe {
     // ==================== DirectCall：行为探测 ====================
 
     /* 逐候选行为探测，返回首个真正控血的 writer；无则 null。探测会临时改动活体血量并回滚。 */
-    public static DirectWriter resolveDirect(LivingEntity entity, List<DirectCandidate> candidates, float target) {
+    public static DirectWriter resolveDirect(LivingEntity entity, List<DirectCandidate> candidates,
+                                             float target, List<Object> rollbackRoots) {
         float baseline = EcaSetHealthManager.safeGetHealth(entity);
         if (!Float.isFinite(baseline)) return null;
         float probeA = probeValue(baseline, target, 0.5f);
@@ -322,11 +346,14 @@ public final class MethodProbe {
         for (DirectCandidate candidate : candidates) {
             DirectWriter writer = bind(candidate);
             if (writer == null) continue;
+            ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.capture(entity, rollbackRoots);
             if (testWriter(entity, writer, baseline, probeA, probeB, target)) {
+                snapshot.restore();
                 EcaLogger.info("[MethodProbe] direct writer hit entity={} writer={}",
                         entity.getClass().getName(), writer.describe());
                 return writer;
             }
+            snapshot.restore();
         }
         return null;
     }
@@ -420,18 +447,21 @@ public final class MethodProbe {
     // ==================== HeadBridge：借实体自身可信帧发起 ====================
 
     /* 为实体激活桥并调其被注入的 void(float) 方法，让 HEAD 桥直发 token+writer；验证后清激活态。 */
-    public static boolean invokeBridge(LivingEntity entity, BridgeSpec spec, float target) {
+    public static boolean invokeBridge(LivingEntity entity, BridgeSpec spec, float target, List<Object> rollbackRoots) {
         Method method = resolveBridgeMethod(entity.getClass(), spec);
         if (method == null) return false;
+        ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.capture(entity, rollbackRoots);
         try {
             ACTIVE_ENTITY.set(entity);
             method.invoke(entity, target);
             boolean ok = EcaSetHealthManager.verify(entity, target);
             if (ok) EcaLogger.info("[MethodProbe] head bridge hit entity={} method={}",
                     entity.getClass().getName(), spec.methodName());
+            if (!ok) snapshot.restore();
             return ok;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
+            snapshot.restore();
             return false;
         } finally {
             ACTIVE_ENTITY.remove();
@@ -454,6 +484,145 @@ public final class MethodProbe {
             }
         }
         return null;
+    }
+
+    public static boolean invokeTrustedBridge(LivingEntity entity, BridgeSpec spec, float target) {
+        if (entity == null || spec == null) return false;
+        TrustedBridge bridge = trustedBridge(spec);
+        if (bridge == null) return false;
+        float baseline = EcaSetHealthManager.safeGetHealth(entity);
+        try {
+            bridge.apply().invokeExact((Entity) entity, target);
+            if (EcaSetHealthManager.verify(entity, target)) {
+                EcaLogger.info("[MethodProbe] trusted bridge hit entity={} bridge={}",
+                        entity.getClass().getName(), bridge.className());
+                return true;
+            }
+            restoreTrustedBridge(bridge, entity, baseline);
+            return false;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            restoreTrustedBridge(bridge, entity, baseline);
+            return false;
+        }
+    }
+
+    private static void restoreTrustedBridge(TrustedBridge bridge, LivingEntity entity, float baseline) {
+        if (!Float.isFinite(baseline)) return;
+        try {
+            bridge.apply().invokeExact((Entity) entity, baseline);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+    }
+
+    private static TrustedBridge trustedBridge(BridgeSpec spec) {
+        String key = bridgeKey(spec);
+        TrustedBridge cached = TRUSTED_BRIDGES.get(key);
+        if (cached != null) return cached;
+        if (TRUSTED_BRIDGE_FAILED.contains(key)) return null;
+        try {
+            TrustedBridge created = createTrustedBridge(spec, key);
+            if (created == null) {
+                TRUSTED_BRIDGE_FAILED.add(key);
+                return null;
+            }
+            TrustedBridge existing = TRUSTED_BRIDGES.putIfAbsent(key, created);
+            return existing != null ? existing : created;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            if (TRUSTED_BRIDGE_FAILED.add(key)) {
+                EcaLogger.info("[MethodProbe] trusted bridge unavailable owner={} msg={}",
+                        spec.ownerInternal(), t.toString());
+            }
+            return null;
+        }
+    }
+
+    private static TrustedBridge createTrustedBridge(BridgeSpec spec, String key) throws Throwable {
+        Class<?> owner = HealthDataflowAnalyzer.loadClass(spec.ownerInternal());
+        if (owner == null) return null;
+        String helperInternal = helperInternalName(spec.ownerInternal(), key);
+        String helperBinary = helperInternal.replace('/', '.');
+        Class<?> helper = findLoadedHelper(owner, helperBinary);
+        if (helper == null) {
+            byte[] bytes = buildTrustedBridgeClass(helperInternal, spec);
+            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(owner, MethodHandles.lookup());
+            helper = lookup.defineClass(bytes);
+        }
+        MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(helper, MethodHandles.lookup());
+        MethodHandle apply = lookup.findStatic(helper, "apply",
+                MethodType.methodType(void.class, Entity.class, float.class));
+        return new TrustedBridge(apply, helperBinary);
+    }
+
+    private static Class<?> findLoadedHelper(Class<?> owner, String binaryName) {
+        try {
+            return Class.forName(binaryName, false, owner.getClassLoader());
+        } catch (ClassNotFoundException ignored) {
+            return null;
+        }
+    }
+
+    private static String bridgeKey(BridgeSpec spec) {
+        return spec.ownerInternal() + "|" + spec.methodName() + spec.methodDesc()
+                + "|" + spec.token().owner() + "." + spec.token().name() + spec.token().desc()
+                + "|" + spec.writer().owner() + "." + spec.writer().name() + spec.writer().desc();
+    }
+
+    private static String helperInternalName(String ownerInternal, String key) {
+        int slash = ownerInternal.lastIndexOf('/');
+        String pkg = slash >= 0 ? ownerInternal.substring(0, slash + 1) : "";
+        return pkg + "EcaHealthBridge$" + Integer.toUnsignedString(key.hashCode(), 16);
+    }
+
+    private static byte[] buildTrustedBridgeClass(String helperInternal, BridgeSpec spec) {
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER,
+                helperInternal, null, "java/lang/Object", null);
+
+        MethodVisitor init = cw.visitMethod(Opcodes.ACC_PRIVATE, "<init>", "()V", null, null);
+        init.visitCode();
+        init.visitVarInsn(Opcodes.ALOAD, 0);
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        init.visitInsn(Opcodes.RETURN);
+        init.visitMaxs(0, 0);
+        init.visitEnd();
+
+        writeBridgeForwarder(cw, helperInternal, "apply", "step0", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC);
+        for (int i = 0; i < TRUSTED_BRIDGE_DEPTH - 1; i++) {
+            writeBridgeForwarder(cw, helperInternal, "step" + i, "step" + (i + 1), Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC);
+        }
+        writeBridgeWriter(cw, spec, "step" + (TRUSTED_BRIDGE_DEPTH - 1));
+
+        cw.visitEnd();
+        return cw.toByteArray();
+    }
+
+    private static void writeBridgeForwarder(ClassWriter cw, String helperInternal, String name, String next, int access) {
+        MethodVisitor mv = cw.visitMethod(access, name, "(Lnet/minecraft/world/entity/Entity;F)V", null, null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.FLOAD, 1);
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, helperInternal, next,
+                "(Lnet/minecraft/world/entity/Entity;F)V", false);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    private static void writeBridgeWriter(ClassWriter cw, BridgeSpec spec, String name) {
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, name,
+                "(Lnet/minecraft/world/entity/Entity;F)V", null, null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.FLOAD, 1);
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, spec.token().owner(), spec.token().name(), spec.token().desc(), false);
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, spec.writer().owner(), spec.writer().name(), spec.writer().desc(), false);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
     }
 
     // ==================== Writer 实现 + 数值工具 ====================

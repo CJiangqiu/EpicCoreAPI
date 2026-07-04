@@ -137,41 +137,12 @@ public final class HealthDataflowAnalyzer {
         if (expected <= 0.0f) {
             return healthLikeSink && (!entity.isAlive() || entity.isDeadOrDying());
         }
-        float actual = safeGetHealth(entity);
-        if (Float.isFinite(actual)) {
-            float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
-            if (Math.abs(actual - expected) <= tolerance) return true;
-        }
-        return healthLikeSink && verifiesExternalExpression(root, entity, expected, sink);
+        return EcaSetHealthManager.verify(entity, expected);
     }
 
     private static boolean isExternalHealthLikeSink(Source sink) {
-        return sink instanceof SynchedDataSource || sink instanceof MapEntrySource || sink instanceof CapabilityDataSource;
-    }
-
-    private static boolean verifiesExternalExpression(Expr expr, LivingEntity entity, float expected, Source sink) {
-        if (expr == null || sink == null || !containsSink(expr, sink)) return false;
-        if (expr instanceof Choice choice) {
-            for (Expr alternative : choice.alternatives()) {
-                if (verifiesExternalExpression(alternative, entity, expected, sink)) return true;
-            }
-            return false;
-        }
-        Object value = evaluate(expr, new SimpleEvalContext(entity));
-        if (!(value instanceof Number number)) return false;
-        float actual = number.floatValue();
-        if (!Float.isFinite(actual)) return false;
-        float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
-        return Math.abs(actual - expected) <= tolerance || Math.abs(Math.abs(actual) - expected) <= tolerance;
-    }
-
-    private static float safeGetHealth(LivingEntity entity) {
-        try {
-            return entity.getHealth();
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            return Float.NaN;
-        }
+        return sink instanceof SynchedDataSource || sink instanceof MapEntrySource
+                || sink instanceof CapabilityDataSource || sink instanceof ConstOverrideSource;
     }
 
     /* ==================== Expr 类型系统 ==================== */
@@ -874,8 +845,9 @@ public final class HealthDataflowAnalyzer {
             boolean changed = false;
             List<Expr> rebuilt = new ArrayList<>(c.alternatives().size());
             for (Expr alt : c.alternatives()) {
-                ConstOverrideSource co = asConstOverride(alt);
-                if (co != null) { rebuilt.add(co); changed = true; } else rebuilt.add(alt);
+                Expr rewritten = rewriteConstOverrides(alt);
+                if (rewritten != alt) changed = true;
+                rebuilt.add(rewritten);
             }
             return changed ? new Choice(rebuilt) : e;
         }

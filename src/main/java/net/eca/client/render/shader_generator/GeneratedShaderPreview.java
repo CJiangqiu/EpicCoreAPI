@@ -288,6 +288,7 @@ public final class GeneratedShaderPreview implements ShaderPreviewSource, AutoCl
 
     private static final class UniformSet {
 
+        private final Uniform time;
         private final Uniform cameraYaw;
         private final Uniform cameraPitch;
         private final Uniform colorKeyColor;
@@ -296,6 +297,7 @@ public final class GeneratedShaderPreview implements ShaderPreviewSource, AutoCl
         private final Uniform localUvScale;
 
         private UniformSet(ShaderInstance shader) {
+            this.time = shader.getUniform("GameTime");
             this.cameraYaw = shader.getUniform("CameraYaw");
             this.cameraPitch = shader.getUniform("CameraPitch");
             this.colorKeyColor = shader.getUniform("ColorKeyColor");
@@ -306,6 +308,10 @@ public final class GeneratedShaderPreview implements ShaderPreviewSource, AutoCl
 
         private void apply() {
             Minecraft minecraft = Minecraft.getInstance();
+            if (time != null) {
+                float systemTime = (System.currentTimeMillis() % 1000000L) / 1000.0F;
+                time.set(systemTime);
+            }
             if (minecraft.gameRenderer != null && minecraft.gameRenderer.getMainCamera() != null) {
                 if (cameraYaw != null) {
                     cameraYaw.set((float) Math.toRadians(

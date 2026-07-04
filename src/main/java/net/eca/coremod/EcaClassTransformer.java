@@ -58,6 +58,15 @@ public final class EcaClassTransformer implements ClassFileTransformer {
        但内部逻辑仅依赖 className 和字节码。 */
     public static byte[] transformStatic(String className, byte[] classfileBuffer) {
         if (className == null) return null;
+        // 实体健康 hook 目标（LivingEntity/Entity 及已知子类）绕过 net.minecraft 系统保护，只施加 HEAD hook
+        if (isHealthHookTarget(className) && TransformerWhitelist.isSystemProtectedInternal(className)) {
+            try {
+                return SINGLETON.doHookTransform(className, classfileBuffer);
+            } catch (Throwable t) {
+                AgentLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
+                return null;
+            }
+        }
         if (TransformerWhitelist.isSystemProtectedInternal(className)) return null;
         try {
             // 通过静态实例调用（ConstOverrideClassVisitor 等方法是非 static inner class，需实例）
@@ -68,8 +77,20 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         }
     }
 
+    // 实体健康 hook 目标：基类 LivingEntity/Entity 恒为目标（不依赖 KNOWN_* 预填充），子类由收集阶段填入 KNOWN_*
+    private static boolean isHealthHookTarget(String className) {
+        return LIVING_ENTITY.equals(className) || ENTITY.equals(className)
+                || KNOWN_LIVING_ENTITY_CLASSES.contains(className)
+                || KNOWN_ENTITY_ONLY_CLASSES.contains(className);
+    }
+
     /* 单例实例，供 transformStatic + JVM TI 回调复用 */
     private static final EcaClassTransformer SINGLETON = new EcaClassTransformer();
+
+    /* 标记当前线程正在执行 ECA 自己发起的 retransform。
+       实体 hook 仅在"自然首次加载(classBeingRedefined==null)"或此标记为真时注入；
+       其他 mod 发起的 retransform/redefine 期间返回 null，避免 ECA 加入他人的重转换链导致 VerifyError。 */
+    private static final ThreadLocal<Boolean> OWN_RETRANSFORM = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     // ==================== 初始化入口 ====================
 
@@ -162,23 +183,29 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
         AgentLogWriter.info("[EcaClassTransformer] Retransforming " + toRetransform.size() + " loaded classes");
 
-        // 批量 retransform
-        int batchSize = 32;
-        for (int i = 0; i < toRetransform.size(); i += batchSize) {
-            int end = Math.min(i + batchSize, toRetransform.size());
-            Class<?>[] batch = toRetransform.subList(i, end).toArray(new Class<?>[0]);
-            try {
-                inst.retransformClasses(batch);
-            } catch (Throwable t) {
-                // 批量失败时逐个重试
-                for (Class<?> clazz : batch) {
-                    try {
-                        inst.retransformClasses(clazz);
-                    } catch (Throwable t2) {
-                        AgentLogWriter.error("[EcaClassTransformer] Failed to retransform: " + clazz.getName(), t2);
+        // 标记本线程为 ECA 自己的 retransform，使实体 hook 分支放行（他人触发的 retransform 无此标记，不参与）
+        OWN_RETRANSFORM.set(Boolean.TRUE);
+        try {
+            // 批量 retransform
+            int batchSize = 32;
+            for (int i = 0; i < toRetransform.size(); i += batchSize) {
+                int end = Math.min(i + batchSize, toRetransform.size());
+                Class<?>[] batch = toRetransform.subList(i, end).toArray(new Class<?>[0]);
+                try {
+                    inst.retransformClasses(batch);
+                } catch (Throwable t) {
+                    // 批量失败时逐个重试
+                    for (Class<?> clazz : batch) {
+                        try {
+                            inst.retransformClasses(clazz);
+                        } catch (Throwable t2) {
+                            AgentLogWriter.error("[EcaClassTransformer] Failed to retransform: " + clazz.getName(), t2);
+                        }
                     }
                 }
             }
+        } finally {
+            OWN_RETRANSFORM.remove();
         }
     }
 
@@ -208,6 +235,18 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         // 白名单内的特殊目标：MC 原版容器替换
         if (ContainerReplacementTransformer.isTarget(className)) {
             return ContainerReplacementTransformer.transform(className, classfileBuffer);
+        }
+
+        // 实体健康 hook 目标（LivingEntity/Entity 及已知子类）绕过 net.minecraft 系统保护，只施加 HEAD hook。
+        // 仅在自然首次加载或 ECA 自己发起的 retransform 时注入；他人的 retransform/redefine 期间不参与，避免 VerifyError
+        if (isHealthHookTarget(className) && TransformerWhitelist.isSystemProtectedInternal(className)) {
+            if (classBeingRedefined != null && !OWN_RETRANSFORM.get()) return null;
+            try {
+                return doHookTransform(className, classfileBuffer);
+            } catch (Throwable t) {
+                AgentLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
+                return null;
+            }
         }
 
         if (TransformerWhitelist.isSystemProtectedInternal(className)) return null;
@@ -258,9 +297,9 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     }
 
     private byte[] doHookTransform(String className, byte[] classfileBuffer) {
-        // 查预计算缓存，O(1)
-        boolean isLivingEntity = KNOWN_LIVING_ENTITY_CLASSES.contains(className);
-        boolean isEntity = !isLivingEntity && KNOWN_ENTITY_ONLY_CLASSES.contains(className);
+        // 基类恒为目标，子类查预计算缓存 O(1)
+        boolean isLivingEntity = LIVING_ENTITY.equals(className) || KNOWN_LIVING_ENTITY_CLASSES.contains(className);
+        boolean isEntity = !isLivingEntity && (ENTITY.equals(className) || KNOWN_ENTITY_ONLY_CLASSES.contains(className));
         if (!isLivingEntity && !isEntity) return null;
 
         // 确认类声明了目标方法（跳过代码/调试/帧，只遍历方法签名）

@@ -31,6 +31,9 @@ public final class EcaSetHealthManager {
     /* 外部扫描已装 patch 的类：外部扫描缓存在分析器内(须零副作用)，故 install 的每类去重在管理器侧记 */
     private static final Set<Class<?>> EXTERNAL_INSTALLED = ConcurrentHashMap.newKeySet();
 
+    /* UNRESOLVED 失败诊断去重：按 getHealth 定义类只 dump 一次 */
+    private static final Set<String> UNRESOLVED_DUMPED = ConcurrentHashMap.newKeySet();
+
     /* 方法探针：HeadBridge 已烤入的类；DirectCall 已探测的类 + 命中 writer 缓存(跨同类实例复用) */
     private static final Set<Class<?>> METHOD_BRIDGE_INSTALLED = ConcurrentHashMap.newKeySet();
     private static final Set<Class<?>> DIRECT_PROBED = ConcurrentHashMap.newKeySet();
@@ -71,18 +74,24 @@ public final class EcaSetHealthManager {
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
                 || !EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) return false;
         Class<?> cls = target.getClass();
+        List<Object> rollbackRoots = collectRollbackRoots(target);
 
         MethodProbe.DirectWriter writer = DIRECT_WRITER.get(cls);
         if (writer == null && DIRECT_PROBED.add(cls)) {
-            writer = MethodProbe.resolveDirect(target, MethodProbe.findDirectCandidates(cls), targetHealth);
+            writer = MethodProbe.resolveDirect(target, MethodProbe.findDirectCandidates(cls), targetHealth, rollbackRoots);
             if (writer != null) DIRECT_WRITER.put(cls, writer);
         }
-        if (writer != null && writer.write(target, targetHealth) && verify(target, targetHealth)) return true;
+        if (writer != null) {
+            ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.capture(target, rollbackRoots);
+            if (writer.write(target, targetHealth) && verify(target, targetHealth)) return true;
+            snapshot.restore();
+        }
 
         installMethodBridgeOnce(cls);
         MethodProbe.BridgeSpec spec = MethodProbe.getSpec(cls.getName().replace('.', '/'));
         if (spec == null) return false;
-        return MethodProbe.invokeBridge(target, spec, targetHealth);
+        if (MethodProbe.invokeTrustedBridge(target, spec, targetHealth)) return true;
+        return MethodProbe.invokeBridge(target, spec, targetHealth, rollbackRoots);
     }
 
     /* HeadBridge 每类只烤入一次(warmup 与惰性共用)。无条件烤入——运行期是否借桥由配置双门控 + 激活态决定。 */
@@ -123,6 +132,13 @@ public final class EcaSetHealthManager {
     }
 
     // 查表：命中返回结构或失败哨兵；未命中现场分析(归一化为 2 态)并原子落表
+    private static List<Object> collectRollbackRoots(LivingEntity target) {
+        HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(target.getClass());
+        if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) return List.of();
+        return HealthDataflowAnalyzer.collectDeadEndRoots(
+                tree.returnExpr, HealthDataflowAnalyzer.newContext(target));
+    }
+
     private static HealthDataflowAnalyzer.AnalysisResult resolveTree(Class<?> cls) {
         return DATAFLOW_TABLE.computeIfAbsent(cls, EcaSetHealthManager::analyzeForTable);
     }
@@ -135,13 +151,33 @@ public final class EcaSetHealthManager {
             ar = HealthDataflowAnalyzer.analyze(cls);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
+            EcaLogger.info("[HealthDataflow] analyze {} threw {} => FAILED", cls.getName(), t.toString());
             return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
         }
-        if (ar == null) return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
+        if (ar == null) {
+            EcaLogger.info("[HealthDataflow] analyze {} => null => FAILED", cls.getName());
+            return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
+        }
         HealthDataflowAnalyzer.AnalysisResult.Kind kind = ar.classify();
         boolean eligible = kind == HealthDataflowAnalyzer.AnalysisResult.Kind.DATAFLOW
                 || (kind == HealthDataflowAnalyzer.AnalysisResult.Kind.CONST_OVERRIDE && !ar.sources.isEmpty());
-        if (!eligible) return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
+        EcaLogger.info("[HealthDataflow] analyze {} => kind={} definingClass={} sources={} eligible={}",
+                cls.getName(), kind,
+                ar.definingClass != null ? ar.definingClass.getName() : "null",
+                ar.sources.size(), eligible);
+        // 失败诊断：按 getHealth 定义类去重，打印返回表达式与各源 label，判断 10 个源是别的 mod 叠的还是 ECA 剥离残留
+        if (!eligible) {
+            String dc = ar.definingClass != null ? ar.definingClass.getName() : "null";
+            if (UNRESOLVED_DUMPED.add(dc)) {
+                EcaLogger.info("[HealthDataflow] UNRESOLVED dump definingClass={} returnExpr={}", dc, ar.returnExpr);
+                int i = 0;
+                for (HealthDataflowAnalyzer.Source s : ar.sources) {
+                    EcaLogger.info("[HealthDataflow]   src#{} label={} type={} kind={}",
+                            i++, s.label, s.valueType.getName(), s.getClass().getSimpleName());
+                }
+            }
+            return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
+        }
         // 落表即安装常数覆写 patch：warmup 与晚加载惰性两路都经此，无条件转换，运行期由配置双门控激活
         ConstOverride.install(ar);
         return ar;

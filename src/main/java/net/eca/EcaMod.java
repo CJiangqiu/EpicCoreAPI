@@ -44,6 +44,9 @@ public final class EcaMod {
         ModConfigs.register();
         // 激进防御开启时激活 JVM TI 原生变换通道
         if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+            // GAME 层重新获取 JVMTI env：CoreMod 层与 GAME 层是不同 classloader，JvmTiChannel 静态 env 不共享，
+            // 否则本层 activate() 看到的 env 为 null（日志曾出现 "activate skipped: no JVM TI env"）
+            JvmTiChannel.prepare();
             // 按调用链顺序注册：EcaClassTransformer 先，健康模块后注册，捕获器最后
             JvmTiChannel.addTransformFunction(EcaClassTransformer::transformStatic);
             RuntimeBytecodeProvider.registerJvmTiCapture();

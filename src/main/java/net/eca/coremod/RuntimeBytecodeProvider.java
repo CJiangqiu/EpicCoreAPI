@@ -32,7 +32,7 @@ public final class RuntimeBytecodeProvider {
             public byte[] transform(ClassLoader loader, String name,
                     Class<?> beingRedefined, ProtectionDomain pd, byte[] buf) {
                 if (name != null && buf != null) {
-                    RUNTIME_BYTES.putIfAbsent(name, buf.clone());
+                    RUNTIME_BYTES.put(name, buf.clone());
                 }
                 return null;   // 只读不改
             }
@@ -50,7 +50,7 @@ public final class RuntimeBytecodeProvider {
     /* 供 JVM TI 回调调用的静态捕获函数——仅捕获，不修改字节码 */
     static byte[] captureStatic(String className, byte[] bytes) {
         if (className != null && bytes != null) {
-            RUNTIME_BYTES.putIfAbsent(className, bytes.clone());
+            RUNTIME_BYTES.put(className, bytes.clone());
         }
         return null;   // 只读不改
     }

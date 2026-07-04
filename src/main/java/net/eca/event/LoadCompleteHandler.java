@@ -70,10 +70,8 @@ public final class LoadCompleteHandler {
         }
         event.enqueueWork(BossShowManager::scanAndRegisterAll);
 
-        // 激进防御：FMLLoadComplete 后重应用 Entity + LivingEntity 转换
-        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            event.enqueueWork(LoadCompleteHandler::applyLoadCompleteTransformers);
-        }
+        // 实体健康 hook 收尾：普通与激进模式都在所有 mod 构造完成后施加，确保 ECA 排在其他 mod 的字节码处理之后
+        event.enqueueWork(LoadCompleteHandler::applyLoadCompleteTransformers);
 
         // 数据流分析器注入 ECA 运行期字节码源与 hook 剥离配置，必须排在 warmup 之前
         event.enqueueWork(HealthDataFlow::init);
@@ -95,9 +93,12 @@ public final class LoadCompleteHandler {
         }
 
         try {
-            logRadicalSecondPassMethodTargets(inst);
+            // 第二遍方法目标报告仅在激进模式下打印
+            if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+                logRadicalSecondPassMethodTargets(inst);
+            }
 
-            // 重新触发 retransform（EcaClassTransformer 已在 CoreMod 阶段注册）
+            // 触发 retransform：填充 KNOWN_* 并对已加载的 Entity/LivingEntity/子类/容器施加 hook
             EcaClassTransformer.init();
 
             hasDelayedRetransform = true;

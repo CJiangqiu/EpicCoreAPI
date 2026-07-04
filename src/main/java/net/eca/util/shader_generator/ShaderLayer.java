@@ -10,12 +10,10 @@ public final class ShaderLayer {
 
     private String name;
     private boolean visible = true;
-    private ShaderLayerBlendMode blendMode = ShaderLayerBlendMode.NORMAL;
-    private float opacity = 1.0F;
     private float baseRed;
     private float baseGreen;
     private float baseBlue;
-    private float baseAlpha;
+    private float baseAlpha = 1.0F;
     private String backgroundImagePath;
     private final List<ShaderModuleInstance> elements = new ArrayList<>();
 
@@ -28,20 +26,13 @@ public final class ShaderLayer {
 
     public ShaderLayer(
         String name,
-        boolean visible,
-        ShaderLayerBlendMode blendMode,
-        float opacity
+        boolean visible
     ) {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("Layer name must not be blank");
         }
-        if (blendMode == null) {
-            throw new IllegalArgumentException("Layer blend mode must not be null");
-        }
         this.name = name;
         this.visible = visible;
-        this.blendMode = blendMode;
-        this.opacity = Mth.clamp(opacity, 0.0F, 1.0F);
     }
 
     public String name() {
@@ -61,24 +52,6 @@ public final class ShaderLayer {
 
     public void setVisible(boolean visible) {
         this.visible = visible;
-    }
-
-    public ShaderLayerBlendMode blendMode() {
-        return blendMode;
-    }
-
-    public void setBlendMode(ShaderLayerBlendMode blendMode) {
-        if (blendMode != null) {
-            this.blendMode = blendMode;
-        }
-    }
-
-    public float opacity() {
-        return opacity;
-    }
-
-    public void setOpacity(float opacity) {
-        this.opacity = Mth.clamp(opacity, 0.0F, 1.0F);
     }
 
     public float baseRed() {
@@ -157,7 +130,7 @@ public final class ShaderLayer {
 
     /* 深拷贝，用于撤销/重做系统 */
     public ShaderLayer copy() {
-        ShaderLayer copy = new ShaderLayer(name, visible, blendMode, opacity);
+        ShaderLayer copy = new ShaderLayer(name, visible);
         copy.setBaseColor(baseRed, baseGreen, baseBlue, baseAlpha);
         copy.backgroundImagePath = backgroundImagePath;
         for (ShaderModuleInstance element : elements) {

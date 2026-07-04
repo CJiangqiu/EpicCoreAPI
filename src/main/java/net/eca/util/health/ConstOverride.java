@@ -18,8 +18,10 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import java.lang.instrument.Instrumentation;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -85,9 +87,13 @@ public final class ConstOverride {
 
     /* 待 patch 的常数点：类内某方法某指令下标处加载 original 浮点常数。 */
     public record Site(String methodName, String methodDesc, int insnIndex, float original) {}
+    private record PatchTarget(MethodNode method, AbstractInsnNode insn, boolean fallback) {}
 
     private static final Map<String, List<Site>> SPECS = new ConcurrentHashMap<>();
     private static final String SELF_INTERNAL = "net/eca/util/health/ConstOverride";
+    private static final Set<String> INSTALL_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> PATCH_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> MISS_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* 登记一个待 patch 的常数点。classInternal 为持有者类内部名。同一点重复登记幂等。 */
     public static void registerSite(String classInternal, String methodName, String methodDesc,
@@ -112,19 +118,38 @@ public final class ConstOverride {
             ClassReader cr = new ClassReader(bytes);
             ClassNode cn = new ClassNode();
             cr.accept(cn, ClassReader.EXPAND_FRAMES);
-            boolean any = false;
+            List<PatchTarget> targets = new ArrayList<>();
+            Set<AbstractInsnNode> used = Collections.newSetFromMap(new IdentityHashMap<>());
+            int missed = 0;
             for (Site site : sites) {
                 MethodNode mn = findMethod(cn, site.methodName(), site.methodDesc());
-                if (mn == null) continue;
-                if ((mn.access & Opcodes.ACC_STATIC) != 0) continue;   // 需 this(local 0)
-                AbstractInsnNode target = instructionAt(mn, site.insnIndex());
-                if (!isFloatConstLoad(target, site.original())) continue;
-                mn.instructions.insertBefore(target, new VarInsnNode(Opcodes.ALOAD, 0));
-                mn.instructions.insert(target, new MethodInsnNode(Opcodes.INVOKESTATIC,
-                        SELF_INTERNAL, "resolveHealth", "(Ljava/lang/Object;F)F", false));
-                any = true;
+                if (mn == null || (mn.access & Opcodes.ACC_STATIC) != 0) {
+                    missed++;
+                    continue;
+                }
+                PatchTarget target = findPatchTarget(mn, site);
+                if (target == null || !used.add(target.insn())) {
+                    missed++;
+                    continue;
+                }
+                targets.add(target);
             }
-            if (!any) return null;
+            if (targets.isEmpty()) {
+                if (MISS_DUMPED.add(classInternal)) {
+                    EcaLogger.info("[ConstOverride] transform missed class={} sites={} missed={}",
+                            classInternal, sites.size(), missed);
+                }
+                return null;
+            }
+            int fallbackCount = 0;
+            for (PatchTarget target : targets) {
+                if (target.fallback()) fallbackCount++;
+                insertResolveCall(target.method(), target.insn());
+            }
+            if (PATCH_DUMPED.add(classInternal)) {
+                EcaLogger.info("[ConstOverride] transform patched class={} sites={} patched={} fallback={} missed={}",
+                        classInternal, sites.size(), targets.size(), fallbackCount, missed);
+            }
             ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
             cn.accept(cw);
             return cw.toByteArray();
@@ -144,6 +169,49 @@ public final class ConstOverride {
     private static AbstractInsnNode instructionAt(MethodNode mn, int index) {
         if (index < 0 || index >= mn.instructions.size()) return null;
         return mn.instructions.get(index);
+    }
+
+    private static PatchTarget findPatchTarget(MethodNode mn, Site site) {
+        AbstractInsnNode exact = instructionAt(mn, site.insnIndex());
+        if (isPatchableFloatConst(exact, site.original())) {
+            return new PatchTarget(mn, exact, false);
+        }
+        AbstractInsnNode fallback = nearestFloatConstLoad(mn, site);
+        return fallback == null ? null : new PatchTarget(mn, fallback, true);
+    }
+
+    private static AbstractInsnNode nearestFloatConstLoad(MethodNode mn, Site site) {
+        AbstractInsnNode best = null;
+        int bestDistance = Integer.MAX_VALUE;
+        int i = 0;
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext(), i++) {
+            if (!isPatchableFloatConst(insn, site.original())) continue;
+            int distance = Math.abs(i - site.insnIndex());
+            if (distance < bestDistance) {
+                best = insn;
+                bestDistance = distance;
+            }
+        }
+        return best;
+    }
+
+    private static boolean isPatchableFloatConst(AbstractInsnNode insn, float original) {
+        if (!isFloatConstLoad(insn, original)) return false;
+        return !isResolveCall(insn.getNext());
+    }
+
+    private static boolean isResolveCall(AbstractInsnNode insn) {
+        return insn instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKESTATIC
+                && SELF_INTERNAL.equals(call.owner)
+                && "resolveHealth".equals(call.name)
+                && "(Ljava/lang/Object;F)F".equals(call.desc);
+    }
+
+    private static void insertResolveCall(MethodNode mn, AbstractInsnNode target) {
+        mn.instructions.insertBefore(target, new VarInsnNode(Opcodes.ALOAD, 0));
+        mn.instructions.insert(target, new MethodInsnNode(Opcodes.INVOKESTATIC,
+                SELF_INTERNAL, "resolveHealth", "(Ljava/lang/Object;F)F", false));
     }
 
     /* 校验目标指令确为压入指定浮点常数的指令，防止字节码漂移后误 patch。 */
@@ -174,13 +242,19 @@ public final class ConstOverride {
     public static void install(AnalysisResult tree) {
         if (tree == null || tree.sources.isEmpty()) return;
         Set<String> ownerInternals = new HashSet<>();
+        int siteCount = 0;
         for (Source s : tree.sources) {
             if (!(s instanceof ConstOverrideSource co)) continue;
             ConstProvenance p = co.provenance;
             registerSite(p.ownerInternal(), p.methodName(), p.methodDesc(), p.insnIndex(), co.original);
             ownerInternals.add(p.ownerInternal());
+            siteCount++;
         }
         if (ownerInternals.isEmpty()) return;
+        String installKey = ownerInternals + "|" + siteCount;
+        if (INSTALL_DUMPED.add(installKey)) {
+            EcaLogger.info("[ConstOverride] install sites={} owners={}", siteCount, ownerInternals);
+        }
         Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst == null) {
             EcaLogger.info("[ConstOverride] install skipped: Instrumentation unavailable");
@@ -189,9 +263,18 @@ public final class ConstOverride {
         // 全部 site 登记完再逐 owner retransform：retransform 从原始字节码重跑全链，一次覆盖该类所有 site
         for (String internal : ownerInternals) {
             Class<?> owner = HealthDataflowAnalyzer.loadClass(internal);
-            if (owner == null) continue;
+            if (owner == null) {
+                if (INSTALL_DUMPED.add("missing:" + internal)) {
+                    EcaLogger.info("[ConstOverride] install skipped: owner missing {}", internal);
+                }
+                continue;
+            }
             try {
-                if (inst.isModifiableClass(owner)) inst.retransformClasses(owner);
+                if (inst.isModifiableClass(owner)) {
+                    inst.retransformClasses(owner);
+                } else if (INSTALL_DUMPED.add("unmodifiable:" + internal)) {
+                    EcaLogger.info("[ConstOverride] install skipped: owner unmodifiable {}", owner.getName());
+                }
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
                 EcaLogger.info("[ConstOverride] retransform failed owner={} msg={}", owner.getName(), t.toString());
