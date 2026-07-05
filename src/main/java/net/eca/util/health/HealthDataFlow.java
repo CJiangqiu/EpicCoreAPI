@@ -65,7 +65,9 @@ public final class HealthDataFlow {
             HealthDataflowAnalyzer.setStripConfig(
                     Set.of("net/eca/coremod/LivingEntityHook", "net/eca/util/health/HealthLockManager"),
                     Set.of("SF:net.eca.util.EntityUtil.HEALTH_LOCK_VALUE",
-                           "SF:net.eca.util.EntityUtil.HEAL_BAN_VALUE"));
+                           "SF:net.eca.util.EntityUtil.HEAL_BAN_VALUE",
+                           "SF:net.eca.util.EntityUtil.MAX_HEALTH_LOCK_VALUE"),
+                    Set.of("ecaHealthLockValue", "ecaHealBanValue", "ecaMaxHealthLockValue"));
             initialized = true;
         }
     }

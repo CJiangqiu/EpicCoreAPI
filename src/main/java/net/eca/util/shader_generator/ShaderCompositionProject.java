@@ -24,6 +24,15 @@ public final class ShaderCompositionProject {
         return layer;
     }
 
+    public ShaderLayer insertLayer(int index, ShaderLayer layer) {
+        if (layer == null) {
+            throw new IllegalArgumentException("Layer must not be null");
+        }
+        int clamped = Math.max(0, Math.min(index, layers.size()));
+        layers.add(clamped, layer);
+        return layer;
+    }
+
     public void removeLayer(int index) {
         if (index >= 0 && index < layers.size() && layers.size() > 1) {
             layers.remove(index);

@@ -24,6 +24,7 @@ import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.Mth;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.util.tinyfd.TinyFileDialogs;
 
@@ -51,6 +52,12 @@ public final class ShaderGeneratorScreen extends Screen {
     private static final int PROJECT_ROW_Y = 2;
     private static final int MAX_UNDO = 50;
     private static final int LAYER_ROW_HEIGHT = 22;
+    /* 画布视图缩放范围与滚轮步进；手柄尺寸(像素)与旋转手柄距选框上沿的偏移 */
+    private static final double CANVAS_ZOOM_MIN = 0.25;
+    private static final double CANVAS_ZOOM_MAX = 8.0;
+    private static final double CANVAS_ZOOM_STEP = 1.1;
+    private static final int CANVAS_HANDLE_SIZE = 7;
+    private static final int CANVAS_ROTATE_HANDLE_OFFSET = 18;
     private static final long DOUBLE_CLICK_MS = 450L;
     /* 连续拖动编辑在此窗口内合并为一次撤销快照 */
     private static final long EDIT_COALESCE_MS = 400L;
@@ -75,6 +82,8 @@ public final class ShaderGeneratorScreen extends Screen {
     private GeneratedShaderPreview generatedPreview;
     private ShaderPreviewTarget previewTarget = ShaderPreviewTarget.PLANE;
     private int selectedLayerIndex = -1;
+    /* 右栏模式：LAYER_LIST 只显示图层列表；LAYER_DETAIL 显示选中图层的完整编辑器 */
+    private RightPanelMode rightPanelMode = RightPanelMode.LAYER_LIST;
     private int sourceIndex;
     private int layerScroll;
     private int visibleLayerRowCount = 1;
@@ -95,6 +104,21 @@ public final class ShaderGeneratorScreen extends Screen {
     private double dragOffsetX;
     private double dragOffsetY;
     private boolean dragUndoStarted;
+    /* 手柄拖拽模式：MOVE 改位置，SCALE 改 size，ROTATE 改 rotation */
+    private CanvasDragMode canvasDragMode = CanvasDragMode.MOVE;
+    private float dragStartSize;
+    private float dragStartRotation;
+    private double dragStartAngle;
+    private double dragStartDist;
+    /* 画布视图：缩放与平移(像素)，仅影响预览显示与 UV 映射，不改工程数据 */
+    private double canvasZoom = 1.0;
+    private double canvasPanX;
+    private double canvasPanY;
+    private boolean panningCanvas;
+    /* 剪贴板：clipboardIsElement 决定粘贴的是元素还是整层 */
+    private ShaderModuleInstance clipboardElement;
+    private ShaderLayer clipboardLayer;
+    private boolean clipboardIsElement;
     /* 编辑手势合并与编译节流的时间戳 */
     private long lastEditActivityMs;
     private long lastCompileMs;
@@ -183,8 +207,12 @@ public final class ShaderGeneratorScreen extends Screen {
         if (selectedLayerIndex < 0 && !project.layers().isEmpty()) {
             selectedLayerIndex = project.layers().size() - 1;
         }
-        addLayerPanel();
-        addInspectorPanel();
+        if (rightPanelMode == RightPanelMode.LAYER_DETAIL && selectedLayer() != null) {
+            addLayerDetailPanel();
+        } else {
+            rightPanelMode = RightPanelMode.LAYER_LIST;
+            addLayerListPanel();
+        }
         addMenuBar();
         if (generatedPreview == null) {
             compileCurrentProject();
@@ -453,6 +481,11 @@ public final class ShaderGeneratorScreen extends Screen {
             rebuildWidgets();
             return true;
         }
+        /* 中键在视口内按下即开始平移画布 */
+        if (button == 2 && previewViewport().contains(mx, my)) {
+            panningCanvas = true;
+            return true;
+        }
         if (button == 0 && handleCanvasClick(mx, my)) {
             return true;
         }
@@ -461,8 +494,17 @@ public final class ShaderGeneratorScreen extends Screen {
 
     @Override
     public boolean mouseDragged(double mx, double my, int button, double dragX, double dragY) {
+        if (button == 2 && panningCanvas) {
+            canvasPanX += dragX;
+            canvasPanY += dragY;
+            return true;
+        }
         if (button == 0 && draggingElementIndex >= 0) {
-            dragCanvasElement(mx, my);
+            switch (canvasDragMode) {
+                case SCALE -> scaleCanvasElement(mx, my);
+                case ROTATE -> rotateCanvasElement(mx, my);
+                default -> dragCanvasElement(mx, my);
+            }
             return true;
         }
         return super.mouseDragged(mx, my, button, dragX, dragY);
@@ -470,9 +512,12 @@ public final class ShaderGeneratorScreen extends Screen {
 
     @Override
     public boolean mouseReleased(double mx, double my, int button) {
+        if (button == 2 && panningCanvas) {
+            panningCanvas = false;
+            return true;
+        }
         if (button == 0 && draggingElementIndex >= 0) {
-            draggingElementIndex = -1;
-            dragUndoStarted = false;
+            resetDragState();
             rebuildWidgets();
             return true;
         }
@@ -516,6 +561,12 @@ public final class ShaderGeneratorScreen extends Screen {
                     rebuildWidgets();
                     return true;
                 }
+                case GLFW.GLFW_KEY_C -> {
+                    return copySelection();
+                }
+                case GLFW.GLFW_KEY_V -> {
+                    return pasteClipboard();
+                }
                 default -> {
                     return false;
                 }
@@ -527,6 +578,7 @@ public final class ShaderGeneratorScreen extends Screen {
             case GLFW.GLFW_KEY_RIGHT -> nudgeSelectedElement(1, 0, shift);
             case GLFW.GLFW_KEY_UP -> nudgeSelectedElement(0, -1, shift);
             case GLFW.GLFW_KEY_DOWN -> nudgeSelectedElement(0, 1, shift);
+            case GLFW.GLFW_KEY_0, GLFW.GLFW_KEY_KP_0 -> resetCanvasView();
             default -> false;
         };
     }
@@ -564,14 +616,77 @@ public final class ShaderGeneratorScreen extends Screen {
         return true;
     }
 
+    /* 复制：有选中元素则复制元素，否则复制整层 */
+    private boolean copySelection() {
+        ShaderLayer layer = selectedLayer();
+        if (layer == null) {
+            return false;
+        }
+        ShaderModuleInstance element = selectedElementInLayer(layer);
+        statusError = false;
+        if (element != null) {
+            clipboardElement = element.copy();
+            clipboardIsElement = true;
+            status = Component.translatable("gui.eca.shader_generator.status.element_copied");
+        } else {
+            clipboardLayer = layer.copy();
+            clipboardIsElement = false;
+            status = Component.translatable("gui.eca.shader_generator.status.layer_copied");
+        }
+        return true;
+    }
+
+    private boolean pasteClipboard() {
+        return clipboardIsElement ? pasteElement() : pasteLayer();
+    }
+
+    private boolean pasteElement() {
+        ShaderLayer layer = selectedLayer();
+        if (layer == null || clipboardElement == null) {
+            return false;
+        }
+        pushUndo();
+        ShaderModuleInstance element = clipboardElement.copy();
+        if (containsPositionParameters(element)) {
+            element.setValue("center_x", element.value("center_x") + 0.03F);
+            element.setValue("center_y", element.value("center_y") + 0.03F);
+        }
+        layer.addElement(element);
+        selectedElementIndex = layer.elements().size() - 1;
+        elementParamView = true;
+        markDirty("gui.eca.shader_generator.status.element_pasted");
+        rebuildWidgets();
+        return true;
+    }
+
+    private boolean pasteLayer() {
+        if (clipboardLayer == null) {
+            return false;
+        }
+        pushUndo();
+        int insertIndex = selectedLayerIndex >= 0 ? selectedLayerIndex + 1 : project.layers().size();
+        ShaderLayer pasted = project.insertLayer(insertIndex, clipboardLayer.copy());
+        selectLayerForInspector(project.layers().indexOf(pasted));
+        ensureSelectedLayerVisible();
+        markDirty("gui.eca.shader_generator.status.layer_pasted");
+        rebuildWidgets();
+        return true;
+    }
+
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+        /* 滚轮在视口内缩放画布，并以光标为锚点 */
+        if (openDropdown < 0 && previewViewport().contains(mouseX, mouseY)) {
+            zoomCanvasAt(mouseX, mouseY, delta > 0.0 ? CANVAS_ZOOM_STEP : 1.0 / CANVAS_ZOOM_STEP);
+            return true;
+        }
         int panelLeft = this.width - RIGHT_WIDTH + 8;
         int panelRight = this.width - 8;
         if (openDropdown < 0 && mouseX >= panelLeft && mouseX < panelRight) {
             int direction = delta > 0.0 ? -1 : 1;
-            /* 图层列表滚动 */
-            if (mouseY >= layerListTop && mouseY < layerListBottom) {
+            /* 图层列表滚动（仅列表模式） */
+            if (rightPanelMode == RightPanelMode.LAYER_LIST
+                && mouseY >= layerListTop && mouseY < layerListBottom) {
                 int maxScroll = Math.max(0, project.layers().size() - visibleLayerRowCount);
                 int next = Math.max(0, Math.min(maxScroll, layerScroll + direction));
                 if (next != layerScroll) {
@@ -580,9 +695,10 @@ public final class ShaderGeneratorScreen extends Screen {
                 }
                 return true;
             }
-            /* 检查器列表滚动（元素列表或参数列表） */
+            /* 检查器列表滚动（元素列表或参数列表，仅详细编辑模式） */
             ShaderLayer layer = selectedLayer();
-            if (layer != null && mouseY >= inspectorListTop && mouseY < inspectorListBottom) {
+            if (rightPanelMode == RightPanelMode.LAYER_DETAIL
+                && layer != null && mouseY >= inspectorListTop && mouseY < inspectorListBottom) {
                 if (elementParamView && selectedElementInLayer(layer) != null) {
                     int total = visibleParameters(selectedElementInLayer(layer)).size();
                     int maxScroll = Math.max(0, total - inspectorVisibleRows);
@@ -607,20 +723,16 @@ public final class ShaderGeneratorScreen extends Screen {
 
     /* ---------- right: layer stack ---------- */
 
-    private void addLayerPanel() {
+    /* LAYER_LIST 模式：图层列表独占整条右栏，带滚动 */
+    private void addLayerListPanel() {
         int px = this.width - RIGHT_WIDTH + 8;
         int y = TOP_HEIGHT + 20;
         int lw = RIGHT_WIDTH - 16;
         List<ShaderLayer> layers = project.layers();
         int panelBottom = this.height - BOTTOM_HEIGHT - 8;
 
-        /* 右栏纵向切分：上部图层列表，下部检查器面板 */
-        int layerRegion = Math.max(LAYER_ROW_HEIGHT,
-            Math.min((panelBottom - y) / 2, LAYER_ROW_HEIGHT * 5));
         layerListTop = y;
-        layerListBottom = y + layerRegion;
-        inspectorTop = layerListBottom + 16;
-        inspectorBottom = panelBottom;
+        layerListBottom = panelBottom;
         visibleLayerRowCount = Math.max(1, (layerListBottom - layerListTop) / LAYER_ROW_HEIGHT);
         int layerMaxScroll = Math.max(0, layers.size() - visibleLayerRowCount);
         layerScroll = Math.max(0, Math.min(layerScroll, layerMaxScroll));
@@ -634,6 +746,7 @@ public final class ShaderGeneratorScreen extends Screen {
         }
     }
 
+    /* 每行：可见性 | ↑ | ↓ | 名字(双击重命名) | 详细编辑 */
     private void addLayerRow(int x, int y, int w, ShaderLayer layer, int layerIdx) {
         visibleLayerRows.add(new LayerRowVisual(
             x,
@@ -644,38 +757,35 @@ public final class ShaderGeneratorScreen extends Screen {
             LAYER_COLORS[Math.floorMod(layerIdx, LAYER_COLORS.length)]
         ));
         VisibilityWidget visibility = new VisibilityWidget(
-            x + 5,
+            x + 3,
             y + 1,
-            20,
+            18,
             16,
             layer.visible(),
-            () -> {
-                pushUndo();
-                layer.setVisible(!layer.visible());
-                markDirty("gui.eca.shader_generator.status.layer_visibility_changed");
-                rebuildWidgets();
-            }
+            () -> toggleLayerVisibility(layer)
         );
         visibility.setTooltip(Tooltip.create(
             Component.translatable("gui.eca.shader_generator.layer.visibility_tooltip")
         ));
         addRenderableWidget(visibility);
 
-        addRenderableWidget(new ColorSwatchWidget(
-            x + 28,
-            y + 1,
-            20,
-            16,
-            layerColorArgb(layer),
-            () -> openLayerColorPicker(layerIdx)
-        ));
+        addRenderableWidget(Button.builder(
+            Component.translatable("gui.eca.shader_generator.button.move_up"),
+            button -> moveLayerRow(layerIdx, 1)
+        ).bounds(x + 23, y, 18, 18).build());
+        addRenderableWidget(Button.builder(
+            Component.translatable("gui.eca.shader_generator.button.move_down"),
+            button -> moveLayerRow(layerIdx, -1)
+        ).bounds(x + 43, y, 18, 18).build());
 
+        int editX = x + w - 46;
+        int nameW = editX - (x + 63) - 2;
         if (editingLayerIndex == layerIdx) {
             layerNameField = new EditBox(
                 font,
-                x + 50,
+                x + 63,
                 y,
-                w - 54,
+                nameW,
                 18,
                 Component.translatable("gui.eca.shader_generator.layer.rename")
             );
@@ -687,14 +797,109 @@ public final class ShaderGeneratorScreen extends Screen {
             layerNameField.setHighlightPos(0);
         } else {
             addRenderableWidget(new LayerSelectWidget(
-                x + 50,
+                x + 63,
                 y,
-                w - 54,
+                nameW,
                 18,
                 Component.literal(layer.name()),
                 () -> handleLayerNameClick(layerIdx)
             ));
         }
+
+        Button edit = Button.builder(
+            Component.translatable("gui.eca.shader_generator.layer.edit"),
+            button -> enterLayerDetail(layerIdx)
+        ).bounds(editX, y, 46, 18).build();
+        edit.setTooltip(Tooltip.create(
+            Component.translatable("gui.eca.shader_generator.layer.edit_tooltip")));
+        addRenderableWidget(edit);
+    }
+
+    /* LAYER_DETAIL 模式：选中图层的完整编辑器独占整条右栏 */
+    private void addLayerDetailPanel() {
+        ShaderLayer layer = selectedLayer();
+        if (layer == null) {
+            rightPanelMode = RightPanelMode.LAYER_LIST;
+            addLayerListPanel();
+            return;
+        }
+        visibleLayerRows.clear();
+        int x = this.width - RIGHT_WIDTH + 8;
+        int w = RIGHT_WIDTH - 16;
+        int y = TOP_HEIGHT + 20;
+        int panelBottom = this.height - BOTTOM_HEIGHT - 8;
+
+        addRenderableWidget(Button.builder(
+            Component.translatable("gui.eca.shader_generator.layer.back"),
+            button -> exitLayerDetail()
+        ).bounds(x, y, 40, 18).build());
+
+        int headerNameX = x + 44;
+        int headerNameW = w - 44;
+        if (editingLayerIndex == selectedLayerIndex) {
+            layerNameField = new EditBox(
+                font, headerNameX, y, headerNameW, 18,
+                Component.translatable("gui.eca.shader_generator.layer.rename"));
+            layerNameField.setMaxLength(64);
+            layerNameField.setValue(layer.name());
+            addRenderableWidget(layerNameField);
+            setInitialFocus(layerNameField);
+            layerNameField.setFocused(true);
+            layerNameField.setHighlightPos(0);
+        } else {
+            addRenderableWidget(new LayerSelectWidget(
+                headerNameX, y, headerNameW, 18,
+                Component.literal(layer.name()),
+                () -> handleLayerNameClick(selectedLayerIndex)));
+        }
+
+        inspectorTop = y + 24;
+        inspectorBottom = panelBottom;
+        addInspectorPanel();
+    }
+
+    private void enterLayerDetail(int layerIndex) {
+        if (layerIndex < 0 || layerIndex >= project.layers().size()) {
+            return;
+        }
+        selectLayerForInspector(layerIndex);
+        ensureSelectedLayerVisible();
+        rightPanelMode = RightPanelMode.LAYER_DETAIL;
+        rebuildWidgets();
+    }
+
+    private void exitLayerDetail() {
+        rightPanelMode = RightPanelMode.LAYER_LIST;
+        elementParamView = false;
+        selectedElementIndex = -1;
+        resetDragState();
+        rebuildWidgets();
+    }
+
+    private void toggleLayerVisibility(ShaderLayer layer) {
+        pushUndo();
+        layer.setVisible(!layer.visible());
+        markDirty("gui.eca.shader_generator.status.layer_visibility_changed");
+        rebuildWidgets();
+    }
+
+    /* 直接移动指定行的图层，并让选中/画布跟随 */
+    private void moveLayerRow(int layerIndex, int offset) {
+        int target = layerIndex + offset;
+        if (layerIndex < 0 || layerIndex >= project.layers().size()
+            || target < 0 || target >= project.layers().size()) {
+            return;
+        }
+        pushUndo();
+        project.moveLayer(layerIndex, offset);
+        if (selectedLayerIndex == layerIndex) {
+            selectedLayerIndex = target;
+        } else if (selectedLayerIndex == target) {
+            selectedLayerIndex = layerIndex;
+        }
+        markDirty("gui.eca.shader_generator.status.layer_order_changed");
+        ensureSelectedLayerVisible();
+        rebuildWidgets();
     }
 
     /* ---------- actions ---------- */
@@ -794,6 +999,13 @@ public final class ShaderGeneratorScreen extends Screen {
                 "gui.eca.shader_generator.layer_editor.base_alpha",
                 ShaderPercentEditWidget.displayPercent(value))
         ));
+        y += pitch;
+
+        addRenderableWidget(Button.builder(
+            Component.translatable("gui.eca.shader_generator.layer_editor.blend_mode",
+                Component.translatable(layer.blendMode().displayKey())),
+            button -> cycleSelectedLayerBlendMode()
+        ).bounds(x, y, w, rowH).build());
         y += pitch;
 
         addRenderableWidget(Button.builder(
@@ -1042,6 +1254,17 @@ public final class ShaderGeneratorScreen extends Screen {
         beginEdit();
         layer.setBaseColor(layer.baseRed(), layer.baseGreen(), layer.baseBlue(), alpha);
         markDirty("gui.eca.shader_generator.status.layer_base_changed");
+    }
+
+    private void cycleSelectedLayerBlendMode() {
+        ShaderLayer layer = selectedLayer();
+        if (layer == null) {
+            return;
+        }
+        pushUndo();
+        layer.setBlendMode(layer.blendMode().next());
+        markDirty("gui.eca.shader_generator.status.layer_blend_changed");
+        rebuildWidgets();
     }
 
     private void importSelectedLayerBackground() {
@@ -1439,7 +1662,9 @@ public final class ShaderGeneratorScreen extends Screen {
         g.fill(0, 0, this.width, this.height, 0xFF111315);
         g.fill(0, 0, this.width, TOP_HEIGHT, PANEL_DARK);
         g.fill(this.width - RIGHT_WIDTH, TOP_HEIGHT, this.width, this.height - BOTTOM_HEIGHT, PANEL_COLOR);
-        drawLayerRows(g);
+        if (rightPanelMode == RightPanelMode.LAYER_LIST) {
+            drawLayerRows(g);
+        }
 
         Component projectLabel = currentProjectRef() == null
             ? Component.translatable("gui.eca.shader_generator.project.unnamed")
@@ -1447,18 +1672,26 @@ public final class ShaderGeneratorScreen extends Screen {
         String projectText = this.font.plainSubstrByWidth(projectLabel.getString(), 112);
         g.drawString(this.font, projectText, 8, PROJECT_ROW_Y + 5, 0xFFCDD1D7, false);
 
-        /* 2. 预览区域 */
-        PreviewRect preview = previewBounds();
-        g.fill(preview.left() - 1, preview.top() - 1, preview.right() + 1, preview.bottom() + 1, BORDER_COLOR);
-        g.fill(preview.left(), preview.top(), preview.right(), preview.bottom(), 0xFF08090B);
+        /* 2. 预览区域：视口固定作裁剪框，内容矩形按缩放/平移绘制 */
+        PreviewRect viewport = previewViewport();
+        PreviewRect content = previewBounds();
+        g.fill(viewport.left() - 1, viewport.top() - 1, viewport.right() + 1, viewport.bottom() + 1, BORDER_COLOR);
+        g.fill(viewport.left(), viewport.top(), viewport.right(), viewport.bottom(), 0xFF08090B);
+        g.enableScissor(viewport.left(), viewport.top(), viewport.right(), viewport.bottom());
         ShaderPreviewRenderer.render(g, activeSource(), previewTarget,
-            preview.left(), preview.top(), preview.right(), preview.bottom(), mx, my, pt);
-        drawCanvasSelection(g, preview);
+            content.left(), content.top(), content.right(), content.bottom(), mx, my, pt);
+        drawCanvasSelection(g, content);
+        g.disableScissor();
 
         /* 3. 标签 + 文本 */
-        g.drawString(this.font, Component.translatable("gui.eca.shader_generator.panel.layers"),
+        Component panelLabel = rightPanelMode == RightPanelMode.LAYER_DETAIL
+            ? Component.translatable("gui.eca.shader_generator.panel.layer_detail")
+            : Component.translatable("gui.eca.shader_generator.panel.layers");
+        g.drawString(this.font, panelLabel,
             this.width - RIGHT_WIDTH + 8, TOP_HEIGHT + 4, 0xFFBFC4CC, false);
-        drawInspector(g);
+        if (rightPanelMode == RightPanelMode.LAYER_DETAIL) {
+            drawInspector(g);
+        }
 
         /* 4. 普通控件 */
         super.render(g, mx, my, pt);
@@ -1493,7 +1726,8 @@ public final class ShaderGeneratorScreen extends Screen {
 
     /* ---------- canvas direct manipulation ---------- */
 
-    private PreviewRect previewBounds() {
+    /* 固定的画布视口(裁剪框)，几何仅由窗口尺寸决定，不受缩放/平移影响 */
+    private PreviewRect previewViewport() {
         int al = LEFT_WIDTH + 8;
         int at = TOP_HEIGHT + 8;
         int ar = this.width - RIGHT_WIDTH - 8;
@@ -1504,7 +1738,46 @@ public final class ShaderGeneratorScreen extends Screen {
         return new PreviewRect(left, top, left + ps, top + ps);
     }
 
+    /* 应用缩放/平移后的内容矩形，可能超出视口；UV 映射与命中测试均基于此 */
+    private PreviewRect previewBounds() {
+        PreviewRect viewport = previewViewport();
+        double size = (viewport.right() - viewport.left()) * canvasZoom;
+        double centerX = (viewport.left() + viewport.right()) / 2.0 + canvasPanX;
+        double centerY = (viewport.top() + viewport.bottom()) / 2.0 + canvasPanY;
+        int left = (int) Math.round(centerX - size / 2.0);
+        int top = (int) Math.round(centerY - size / 2.0);
+        int right = (int) Math.round(centerX + size / 2.0);
+        int bottom = (int) Math.round(centerY + size / 2.0);
+        return new PreviewRect(left, top, right, bottom);
+    }
+
+    private void zoomCanvasAt(double screenX, double screenY, double rawFactor) {
+        double newZoom = Mth.clamp(canvasZoom * rawFactor, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX);
+        double factor = newZoom / canvasZoom;
+        PreviewRect viewport = previewViewport();
+        double viewportCenterX = (viewport.left() + viewport.right()) / 2.0;
+        double viewportCenterY = (viewport.top() + viewport.bottom()) / 2.0;
+        canvasPanX = factor * canvasPanX + (1.0 - factor) * (screenX - viewportCenterX);
+        canvasPanY = factor * canvasPanY + (1.0 - factor) * (screenY - viewportCenterY);
+        canvasZoom = newZoom;
+    }
+
+    private boolean resetCanvasView() {
+        if (canvasZoom == 1.0 && canvasPanX == 0.0 && canvasPanY == 0.0) {
+            return false;
+        }
+        canvasZoom = 1.0;
+        canvasPanX = 0.0;
+        canvasPanY = 0.0;
+        statusError = false;
+        status = Component.translatable("gui.eca.shader_generator.status.view_reset");
+        return true;
+    }
+
     private void drawCanvasSelection(GuiGraphics g, PreviewRect preview) {
+        if (rightPanelMode != RightPanelMode.LAYER_DETAIL) {
+            return;
+        }
         ShaderLayer layer = selectedLayer();
         if (layer == null) {
             return;
@@ -1513,15 +1786,75 @@ public final class ShaderGeneratorScreen extends Screen {
         if (element == null || !containsPositionParameters(element)) {
             return;
         }
+        PreviewRect box = elementScreenBox(element, preview);
+        int left = box.left();
+        int top = box.top();
+        int right = box.right();
+        int bottom = box.bottom();
+        g.renderOutline(left, top, Math.max(1, right - left), Math.max(1, bottom - top), 0xFFE6E9ED);
+
+        drawHandle(g, left, top);
+        drawHandle(g, right, top);
+        drawHandle(g, right, bottom);
+        drawHandle(g, left, bottom);
+        if (element.values().containsKey("rotation")) {
+            int handleX = (left + right) / 2;
+            int handleY = top - CANVAS_ROTATE_HANDLE_OFFSET;
+            g.fill(handleX, handleY, handleX + 1, top, 0xFFE6E9ED);
+            drawHandle(g, handleX, handleY, 0xFF4D8DFF);
+        }
+    }
+
+    /* 元素选框在屏幕空间的矩形，绘制与手柄命中共用以保证几何一致 */
+    private PreviewRect elementScreenBox(ShaderModuleInstance element, PreviewRect content) {
         double rx = elementRadiusX(element);
         double ry = elementRadiusY(element);
-        int spanX = preview.right() - preview.left();
-        int spanY = preview.bottom() - preview.top();
-        int left = preview.left() + (int) Math.round((element.value("center_x") - rx) * spanX);
-        int top = preview.top() + (int) Math.round((element.value("center_y") - ry) * spanY);
-        int right = preview.left() + (int) Math.round((element.value("center_x") + rx) * spanX);
-        int bottom = preview.top() + (int) Math.round((element.value("center_y") + ry) * spanY);
-        g.renderOutline(left, top, Math.max(1, right - left), Math.max(1, bottom - top), 0xFFE6E9ED);
+        int spanX = content.right() - content.left();
+        int spanY = content.bottom() - content.top();
+        int left = content.left() + (int) Math.round((element.value("center_x") - rx) * spanX);
+        int top = content.top() + (int) Math.round((element.value("center_y") - ry) * spanY);
+        int right = content.left() + (int) Math.round((element.value("center_x") + rx) * spanX);
+        int bottom = content.top() + (int) Math.round((element.value("center_y") + ry) * spanY);
+        return new PreviewRect(left, top, right, bottom);
+    }
+
+    /* 命中选框手柄：0=左上 1=右上 2=右下 3=左下 4=旋转，未命中返回 -1 */
+    private int hitCanvasHandle(ShaderModuleInstance element, PreviewRect content, double mouseX, double mouseY) {
+        PreviewRect box = elementScreenBox(element, content);
+        int[][] corners = {
+            {box.left(), box.top()},
+            {box.right(), box.top()},
+            {box.right(), box.bottom()},
+            {box.left(), box.bottom()}
+        };
+        for (int i = 0; i < corners.length; i++) {
+            if (nearHandle(mouseX, mouseY, corners[i][0], corners[i][1])) {
+                return i;
+            }
+        }
+        if (element.values().containsKey("rotation")) {
+            int handleX = (box.left() + box.right()) / 2;
+            int handleY = box.top() - CANVAS_ROTATE_HANDLE_OFFSET;
+            if (nearHandle(mouseX, mouseY, handleX, handleY)) {
+                return 4;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean nearHandle(double mouseX, double mouseY, int handleX, int handleY) {
+        int reach = CANVAS_HANDLE_SIZE;
+        return Math.abs(mouseX - handleX) <= reach && Math.abs(mouseY - handleY) <= reach;
+    }
+
+    private void drawHandle(GuiGraphics g, int cx, int cy) {
+        drawHandle(g, cx, cy, 0xFFE6E9ED);
+    }
+
+    private void drawHandle(GuiGraphics g, int cx, int cy, int color) {
+        int half = CANVAS_HANDLE_SIZE / 2;
+        g.fill(cx - half - 1, cy - half - 1, cx + half + 1, cy + half + 1, 0xFF111315);
+        g.fill(cx - half, cy - half, cx + half, cy + half, color);
     }
 
     /* 命中测试：返回选中图层内最上层被点中的、含位置参数的元素索引 */
@@ -1540,29 +1873,47 @@ public final class ShaderGeneratorScreen extends Screen {
     }
 
     private boolean handleCanvasClick(double mouseX, double mouseY) {
-        PreviewRect preview = previewBounds();
-        if (!preview.contains(mouseX, mouseY)) {
+        /* 元素直接操纵只在图层详细编辑模式下开放；总览模式画布只读 */
+        if (rightPanelMode != RightPanelMode.LAYER_DETAIL) {
+            return false;
+        }
+        /* 视口是固定裁剪框，缩放后内容虽可溢出视口，但仅视口内响应画布交互 */
+        if (!previewViewport().contains(mouseX, mouseY)) {
             return false;
         }
         ShaderLayer layer = selectedLayer();
         if (layer == null) {
             return false;
         }
-        int index = hitCanvasElement(layer, preview, mouseX, mouseY);
+        PreviewRect content = previewBounds();
+        /* 优先命中已选元素的手柄（缩放/旋转），再命中元素本体 */
+        ShaderModuleInstance selected = selectedElementInLayer(layer);
+        if (selected != null && containsPositionParameters(selected)) {
+            int handle = hitCanvasHandle(selected, content, mouseX, mouseY);
+            if (handle == 4) {
+                beginHandleDrag(selectedElementIndex, CanvasDragMode.ROTATE, content, mouseX, mouseY);
+                return true;
+            }
+            if (handle >= 0) {
+                beginHandleDrag(selectedElementIndex, CanvasDragMode.SCALE, content, mouseX, mouseY);
+                return true;
+            }
+        }
+        int index = hitCanvasElement(layer, content, mouseX, mouseY);
         if (index >= 0) {
             ShaderModuleInstance element = layer.elements().get(index);
             selectedElementIndex = index;
             elementParamView = true;
             draggingElementIndex = index;
+            canvasDragMode = CanvasDragMode.MOVE;
             dragUndoStarted = false;
-            dragOffsetX = preview.uvX(mouseX) - element.value("center_x");
-            dragOffsetY = preview.uvY(mouseY) - element.value("center_y");
+            dragOffsetX = content.uvX(mouseX) - element.value("center_x");
+            dragOffsetY = content.uvY(mouseY) - element.value("center_y");
             rebuildWidgets();
             return true;
         }
         /* 点击画布空白：清除元素选择，退出参数视图回到图层属性 */
-        draggingElementIndex = -1;
-        dragUndoStarted = false;
+        resetDragState();
         boolean changed = elementParamView || selectedElementIndex >= 0;
         elementParamView = false;
         selectedElementIndex = -1;
@@ -1570,6 +1921,80 @@ public final class ShaderGeneratorScreen extends Screen {
             rebuildWidgets();
         }
         return true;
+    }
+
+    private void beginHandleDrag(int index, CanvasDragMode mode, PreviewRect content, double mouseX, double mouseY) {
+        ShaderLayer layer = selectedLayer();
+        if (layer == null || index < 0 || index >= layer.elements().size()) {
+            return;
+        }
+        ShaderModuleInstance element = layer.elements().get(index);
+        draggingElementIndex = index;
+        canvasDragMode = mode;
+        dragUndoStarted = false;
+        double centerX = content.left() + element.value("center_x") * (content.right() - content.left());
+        double centerY = content.top() + element.value("center_y") * (content.bottom() - content.top());
+        if (mode == CanvasDragMode.SCALE) {
+            dragStartSize = element.value("size");
+            dragStartDist = Math.max(1.0, Math.hypot(mouseX - centerX, mouseY - centerY));
+        } else {
+            dragStartRotation = element.value("rotation");
+            dragStartAngle = Math.atan2(mouseY - centerY, mouseX - centerX);
+        }
+        elementParamView = true;
+        rebuildWidgets();
+    }
+
+    private ShaderModuleInstance draggingElement(ShaderLayer layer) {
+        if (layer == null || draggingElementIndex < 0 || draggingElementIndex >= layer.elements().size()) {
+            return null;
+        }
+        return layer.elements().get(draggingElementIndex);
+    }
+
+    private void resetDragState() {
+        draggingElementIndex = -1;
+        dragUndoStarted = false;
+        canvasDragMode = CanvasDragMode.MOVE;
+    }
+
+    private void scaleCanvasElement(double mouseX, double mouseY) {
+        PreviewRect content = previewBounds();
+        ShaderModuleInstance element = draggingElement(selectedLayer());
+        if (element == null || !containsPositionParameters(element)) {
+            resetDragState();
+            return;
+        }
+        if (!dragUndoStarted) {
+            pushUndo();
+            dragUndoStarted = true;
+        }
+        double centerX = content.left() + element.value("center_x") * (content.right() - content.left());
+        double centerY = content.top() + element.value("center_y") * (content.bottom() - content.top());
+        double dist = Math.hypot(mouseX - centerX, mouseY - centerY);
+        element.setValue("size", (float) (dragStartSize * dist / dragStartDist));
+        markDirty("gui.eca.shader_generator.status.parameter_changed",
+            Component.translatable(element.definition().displayName()));
+    }
+
+    private void rotateCanvasElement(double mouseX, double mouseY) {
+        PreviewRect content = previewBounds();
+        ShaderModuleInstance element = draggingElement(selectedLayer());
+        if (element == null || !element.values().containsKey("rotation")) {
+            resetDragState();
+            return;
+        }
+        if (!dragUndoStarted) {
+            pushUndo();
+            dragUndoStarted = true;
+        }
+        double centerX = content.left() + element.value("center_x") * (content.right() - content.left());
+        double centerY = content.top() + element.value("center_y") * (content.bottom() - content.top());
+        double angle = Math.atan2(mouseY - centerY, mouseX - centerX);
+        double rotated = dragStartRotation + Math.toDegrees(angle - dragStartAngle);
+        element.setValue("rotation", (float) ((rotated % 360.0 + 360.0) % 360.0));
+        markDirty("gui.eca.shader_generator.status.parameter_changed",
+            Component.translatable(element.definition().displayName()));
     }
 
     private void dragCanvasElement(double mouseX, double mouseY) {
@@ -1630,6 +2055,17 @@ public final class ShaderGeneratorScreen extends Screen {
             base = Math.max(base, element.value("size") * element.value("thickness"));
         }
         return Math.max(0.02D, base);
+    }
+
+    private enum CanvasDragMode {
+        MOVE,
+        SCALE,
+        ROTATE
+    }
+
+    private enum RightPanelMode {
+        LAYER_LIST,
+        LAYER_DETAIL
     }
 
     private record PreviewRect(int left, int top, int right, int bottom) {

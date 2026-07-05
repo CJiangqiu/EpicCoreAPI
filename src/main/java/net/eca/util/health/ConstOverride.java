@@ -1,7 +1,7 @@
 package net.eca.util.health;
 
-import net.eca.agent.EcaAgent;
 import net.eca.config.EcaConfiguration;
+import net.eca.coremod.EcaTransformerManager;
 import net.eca.util.EcaLogger;
 import net.eca.util.health.HealthDataflowAnalyzer.AnalysisResult;
 import net.eca.util.health.HealthDataflowAnalyzer.ConstOverrideSource;
@@ -17,7 +17,6 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
-import java.lang.instrument.Instrumentation;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -255,11 +254,6 @@ public final class ConstOverride {
         if (INSTALL_DUMPED.add(installKey)) {
             EcaLogger.info("[ConstOverride] install sites={} owners={}", siteCount, ownerInternals);
         }
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
-            EcaLogger.info("[ConstOverride] install skipped: Instrumentation unavailable");
-            return;
-        }
         // 全部 site 登记完再逐 owner retransform：retransform 从原始字节码重跑全链，一次覆盖该类所有 site
         for (String internal : ownerInternals) {
             Class<?> owner = HealthDataflowAnalyzer.loadClass(internal);
@@ -270,10 +264,9 @@ public final class ConstOverride {
                 continue;
             }
             try {
-                if (inst.isModifiableClass(owner)) {
-                    inst.retransformClasses(owner);
-                } else if (INSTALL_DUMPED.add("unmodifiable:" + internal)) {
-                    EcaLogger.info("[ConstOverride] install skipped: owner unmodifiable {}", owner.getName());
+                if (!EcaTransformerManager.retransformClass(owner)
+                        && INSTALL_DUMPED.add("unmodifiable:" + internal)) {
+                    EcaLogger.info("[ConstOverride] install skipped: owner retransform unavailable {}", owner.getName());
                 }
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;

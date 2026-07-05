@@ -59,8 +59,8 @@ public class EcaConfiguration {
         BUILDER.push("Defence");
 
         DEFENCE_ENABLE_RADICAL_LOGIC = BUILDER
-            .comment("Enable radical defence logic: ReTransformer after all mods loaded, etc.",
-                     "启用激进防御逻辑：所有模组加载后执行 ReTransformer 等。")
+            .comment("Enable radical defence logic: when the Java agent is unavailable, start JVMTI to perform retransformation.",
+                     "启用激进防御逻辑：当 Java agent 不可用时，将会启动 JVMTI 进行重转换。")
             .define("Enable Radical Logic", false);
 
         DEFENCE_INVULNERABLE_UNTARGETABLE = BUILDER

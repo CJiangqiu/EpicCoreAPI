@@ -50,6 +50,7 @@ public final class JvmTiChannel {
     private static final int JVMTI_ALLOCATE = 45;
     private static final int JVMTI_DEALLOCATE = 46;          // 规范函数 47 Deallocate
     private static final int JVMTI_GET_CLASS_SIGNATURE = 47; // 规范函数 48 GetClassSignature
+    private static final int JVMTI_IS_MODIFIABLE_CLASS = 44; // 规范函数 45 IsModifiableClass
     private static final int JVMTI_GET_LOADED_CLASSES = 77;  // 规范函数 78 GetLoadedClasses
     private static final int JVMTI_ADD_CAPABILITIES = 141;   // 规范函数 142 AddCapabilities
     private static final int JVMTI_GET_CAPABILITIES = 88;    // 规范函数 89 GetCapabilities（注意：并非紧邻 AddCapabilities）
@@ -64,6 +65,7 @@ public final class JvmTiChannel {
 
     /* JNI 函数表索引（0-based） */
     private static final int JNI_FIND_CLASS = 6;
+    private static final int JNI_IS_ASSIGNABLE_FROM = 11;
 
     /* ClassFileLoadHook 在 jvmtiEventCallbacks 结构体中的字段偏移（字段数） */
     private static final int CLASS_FILE_LOAD_HOOK_FIELD_INDEX = 4;
@@ -72,6 +74,19 @@ public final class JvmTiChannel {
     private static volatile ClassFileLoadHookCallback activeCallback;
 
     private JvmTiChannel() {}
+
+    public record LoadedClassInfo(String internalName, boolean modifiable,
+                                  boolean livingEntity, boolean entityOnly) {}
+
+    @FunctionalInterface
+    public interface LoadedClassMatcher {
+        boolean test(LoadedClassInfo info);
+    }
+
+    @FunctionalInterface
+    public interface LoadedClassConsumer {
+        void accept(LoadedClassInfo info);
+    }
 
     // ==================== 公共 API ====================
 
@@ -314,6 +329,49 @@ public final class JvmTiChannel {
         return active;
     }
 
+    public static boolean isAvailable() {
+        return active && jvmtiEnv != null;
+    }
+
+    public static boolean retransformLoadedClasses(LoadedClassMatcher matcher) {
+        if (!isAvailable() || matcher == null) return false;
+        ScanResult scan = scanLoadedClasses();
+        if (scan == null || scan.entries.isEmpty()) return false;
+        try {
+            List<Pointer> matched = new ArrayList<>();
+            for (LoadedEntry entry : scan.entries) {
+                LoadedClassInfo info = new LoadedClassInfo(entry.internalName, entry.modifiable,
+                        entry.livingEntity, entry.entityOnly);
+                if (entry.modifiable && matcher.test(info)) {
+                    matched.add(entry.jclass);
+                }
+            }
+            return retransformJclasses(matched, "matched loaded classes");
+        } finally {
+            scan.release();
+        }
+    }
+
+    public static boolean retransformInternalName(String internalName) {
+        if (internalName == null || internalName.isEmpty()) return false;
+        return retransformLoadedClasses(info -> internalName.equals(info.internalName()));
+    }
+
+    public static boolean forEachLoadedClass(LoadedClassConsumer consumer) {
+        if (!isAvailable() || consumer == null) return false;
+        ScanResult scan = scanLoadedClasses();
+        if (scan == null) return false;
+        try {
+            for (LoadedEntry entry : scan.entries) {
+                consumer.accept(new LoadedClassInfo(entry.internalName, entry.modifiable,
+                        entry.livingEntity, entry.entityOnly));
+            }
+            return true;
+        } finally {
+            scan.release();
+        }
+    }
+
     /* 通过 JVM TI 原生 RetransformClasses 重转换类。
        全部参数为 Java Class 对象，内部通过 JNI FindClass 转为 jclass 指针，
        完全绕过 InstrumentationImpl。失败时静默跳过（记日志）。 */
@@ -351,6 +409,204 @@ public final class JvmTiChannel {
     // ==================== JNI 工具 ====================
 
     /* 获取当前线程的 JNIEnv* */
+    private static boolean retransformJclasses(List<Pointer> classes, String reason) {
+        if (classes == null || classes.isEmpty()) return false;
+        int ptrSize = Native.POINTER_SIZE;
+        int batchSize = 32;
+        boolean anySucceeded = false;
+        int successCount = 0;
+        for (int start = 0; start < classes.size(); start += batchSize) {
+            int end = Math.min(start + batchSize, classes.size());
+            com.sun.jna.Memory arr = new com.sun.jna.Memory((long) (end - start) * ptrSize);
+            for (int i = start; i < end; i++) {
+                arr.setPointer((long) (i - start) * ptrSize, classes.get(i));
+            }
+            try {
+                Function retransform = jvmtiFunction(JVMTI_RETRANSFORM_CLASSES);
+                int result = retransform.invokeInt(new Object[]{jvmtiEnv, end - start, arr});
+                if (result == 0) {
+                    anySucceeded = true;
+                    successCount += end - start;
+                } else {
+                    AgentLogWriter.info("[JvmTiChannel] RetransformClasses failed, code=" + result
+                            + " (" + reason + ")");
+                    for (int i = start; i < end; i++) {
+                        if (retransformOne(classes.get(i), reason)) {
+                            anySucceeded = true;
+                            successCount++;
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                AgentLogWriter.info("[JvmTiChannel] retransform batch error: " + t.getMessage());
+                for (int i = start; i < end; i++) {
+                    if (retransformOne(classes.get(i), reason)) {
+                        anySucceeded = true;
+                        successCount++;
+                    }
+                }
+            }
+        }
+        if (successCount > 0) {
+            AgentLogWriter.info("[JvmTiChannel] Retransformed " + successCount
+                    + " classes via JVM TI (" + reason + ")");
+        }
+        return anySucceeded;
+    }
+
+    private static boolean retransformOne(Pointer jclass, String reason) {
+        if (jclass == null) return false;
+        try {
+            com.sun.jna.Memory arr = new com.sun.jna.Memory(Native.POINTER_SIZE);
+            arr.setPointer(0, jclass);
+            Function retransform = jvmtiFunction(JVMTI_RETRANSFORM_CLASSES);
+            int result = retransform.invokeInt(new Object[]{jvmtiEnv, 1, arr});
+            if (result == 0) {
+                return true;
+            }
+            AgentLogWriter.info("[JvmTiChannel] RetransformClasses single failed, code=" + result
+                    + " (" + reason + ")");
+        } catch (Throwable t) {
+            AgentLogWriter.info("[JvmTiChannel] retransform single error: " + t.getMessage());
+        }
+        return false;
+    }
+
+    private static final class LoadedEntry {
+        final Pointer jclass;
+        final String internalName;
+        final boolean modifiable;
+        boolean livingEntity;
+        boolean entityOnly;
+
+        LoadedEntry(Pointer jclass, String internalName, boolean modifiable) {
+            this.jclass = jclass;
+            this.internalName = internalName;
+            this.modifiable = modifiable;
+        }
+    }
+
+    private static final class ScanResult {
+        final Pointer classesArray;
+        final List<LoadedEntry> entries;
+
+        ScanResult(Pointer classesArray, List<LoadedEntry> entries) {
+            this.classesArray = classesArray;
+            this.entries = entries;
+        }
+
+        void release() {
+            deallocate(classesArray);
+        }
+    }
+
+    private static ScanResult scanLoadedClasses() {
+        if (jvmtiEnv == null) return null;
+        int ptrSize = Native.POINTER_SIZE;
+        Pointer classesArray = null;
+        try {
+            com.sun.jna.Memory countPtr = new com.sun.jna.Memory(4);
+            com.sun.jna.Memory arrPtrPtr = new com.sun.jna.Memory(ptrSize);
+            Function getLoaded = jvmtiFunction(JVMTI_GET_LOADED_CLASSES);
+            int code = getLoaded.invokeInt(new Object[]{jvmtiEnv, countPtr, arrPtrPtr});
+            if (code != 0) {
+                AgentLogWriter.info("[JvmTiChannel] GetLoadedClasses failed, code=" + code);
+                return null;
+            }
+            int count = countPtr.getInt(0);
+            classesArray = arrPtrPtr.getPointer(0);
+            if (classesArray == null || count <= 0) {
+                return new ScanResult(classesArray, List.of());
+            }
+
+            List<LoadedEntry> entries = new ArrayList<>();
+            Pointer livingClass = null;
+            Pointer entityClass = null;
+            for (int i = 0; i < count; i++) {
+                Pointer jclass = classesArray.getPointer((long) i * ptrSize);
+                if (jclass == null) continue;
+                String internalName = getInternalName(jclass);
+                if (internalName == null) continue;
+                boolean modifiable = isModifiable(jclass);
+                LoadedEntry entry = new LoadedEntry(jclass, internalName, modifiable);
+                entries.add(entry);
+                if ("net/minecraft/world/entity/LivingEntity".equals(internalName)) {
+                    livingClass = jclass;
+                } else if ("net/minecraft/world/entity/Entity".equals(internalName)) {
+                    entityClass = jclass;
+                }
+            }
+
+            for (LoadedEntry entry : entries) {
+                if (livingClass != null && isAssignableFrom(entry.jclass, livingClass)) {
+                    entry.livingEntity = true;
+                } else if (entityClass != null && isAssignableFrom(entry.jclass, entityClass)) {
+                    entry.entityOnly = true;
+                }
+            }
+
+            return new ScanResult(classesArray, entries);
+        } catch (Throwable t) {
+            if (classesArray != null) deallocate(classesArray);
+            AgentLogWriter.info("[JvmTiChannel] scanLoadedClasses error: " + t.getMessage());
+            return null;
+        }
+    }
+
+    private static String getInternalName(Pointer jclass) {
+        try {
+            com.sun.jna.Memory sigPtrPtr = new com.sun.jna.Memory(Native.POINTER_SIZE);
+            com.sun.jna.Memory genericPtrPtr = new com.sun.jna.Memory(Native.POINTER_SIZE);
+            Function getSig = jvmtiFunction(JVMTI_GET_CLASS_SIGNATURE);
+            int code = getSig.invokeInt(new Object[]{jvmtiEnv, jclass, sigPtrPtr, genericPtrPtr});
+            if (code != 0) return null;
+            Pointer sigPtr = sigPtrPtr.getPointer(0);
+            Pointer genericPtr = genericPtrPtr.getPointer(0);
+            try {
+                if (sigPtr == null) return null;
+                String signature = sigPtr.getString(0);
+                if (signature == null || !signature.startsWith("L") || !signature.endsWith(";")) {
+                    return null;
+                }
+                return signature.substring(1, signature.length() - 1);
+            } finally {
+                deallocate(sigPtr);
+                deallocate(genericPtr);
+            }
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static boolean isModifiable(Pointer jclass) {
+        try {
+            com.sun.jna.Memory out = new com.sun.jna.Memory(1);
+            out.clear(1);
+            Function fn = jvmtiFunction(JVMTI_IS_MODIFIABLE_CLASS);
+            int code = fn.invokeInt(new Object[]{jvmtiEnv, jclass, out});
+            return code == 0 && out.getByte(0) != 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static boolean isAssignableFrom(Pointer sub, Pointer sup) {
+        if (sub == null || sup == null) return false;
+        if (Pointer.nativeValue(sub) == Pointer.nativeValue(sup)) return true;
+        Pointer jniEnv = getJniEnv();
+        if (jniEnv == null) return false;
+        try {
+            int ptrSize = Native.POINTER_SIZE;
+            Pointer functions = jniEnv.getPointer(0);
+            Pointer fnPtr = functions.getPointer((long) JNI_IS_ASSIGNABLE_FROM * ptrSize);
+            Function fn = Function.getFunction(fnPtr, Function.C_CONVENTION);
+            int result = fn.invokeInt(new Object[]{jniEnv, sub, sup});
+            return result != 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static Pointer getJniEnv() {
         if (javaVM == null) return null;
         try {

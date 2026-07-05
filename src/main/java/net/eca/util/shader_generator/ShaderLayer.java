@@ -14,6 +14,7 @@ public final class ShaderLayer {
     private float baseGreen;
     private float baseBlue;
     private float baseAlpha = 1.0F;
+    private ShaderBlendMode blendMode = ShaderBlendMode.NORMAL;
     private String backgroundImagePath;
     private final List<ShaderModuleInstance> elements = new ArrayList<>();
 
@@ -77,6 +78,14 @@ public final class ShaderLayer {
         this.baseAlpha = Mth.clamp(alpha, 0.0F, 1.0F);
     }
 
+    public ShaderBlendMode blendMode() {
+        return blendMode;
+    }
+
+    public void setBlendMode(ShaderBlendMode blendMode) {
+        this.blendMode = blendMode == null ? ShaderBlendMode.NORMAL : blendMode;
+    }
+
     public String backgroundImagePath() {
         return backgroundImagePath;
     }
@@ -132,6 +141,7 @@ public final class ShaderLayer {
     public ShaderLayer copy() {
         ShaderLayer copy = new ShaderLayer(name, visible);
         copy.setBaseColor(baseRed, baseGreen, baseBlue, baseAlpha);
+        copy.blendMode = blendMode;
         copy.backgroundImagePath = backgroundImagePath;
         for (ShaderModuleInstance element : elements) {
             copy.elements.add(element.copy());

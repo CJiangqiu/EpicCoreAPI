@@ -1,7 +1,7 @@
 package net.eca.api;
 
-import net.eca.agent.EcaAgent;
 import net.eca.coremod.AllReturnToggle;
+import net.eca.coremod.EcaTransformerManager;
 import net.eca.coremod.TransformerWhitelist;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
@@ -41,7 +41,6 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
-import java.lang.instrument.Instrumentation;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -225,7 +224,7 @@ public final class EcaAPI {
         if (entity == null) {
             return false;
         }
-        boolean managerInvulnerable = InvulnerableEntityManager.isInvulnerable(entity.getUUID());
+        boolean managerInvulnerable = InvulnerableEntityManager.isInvulnerable(entity);
         if (!(entity instanceof LivingEntity livingEntity)) {
             return managerInvulnerable;
         }
@@ -1185,10 +1184,6 @@ public final class EcaAPI {
             EcaLogger.warn("AllReturn requires Attack Radical Logic to be enabled in config");
             return false;
         }
-        if (EcaAgent.getInstrumentation() == null) {
-            EcaLogger.warn("AllReturn: Agent is not initialized");
-            return false;
-        }
 
         String binaryName = entity.getClass().getName();
         if (TransformerWhitelist.isProtected(binaryName)) return false;
@@ -1198,6 +1193,11 @@ public final class EcaAPI {
 
         AllReturnToggle.setEnabled(true);
         AllReturnToggle.addAllowedPrefix(internalPrefix);
+        if (!EcaTransformerManager.retransformInternalName(binaryName.replace('.', '/'))) {
+            AllReturnToggle.removeAllowedPrefix(internalPrefix);
+            EcaLogger.warn("AllReturn: target class retransform failed");
+            return false;
+        }
         return true;
     }
 
@@ -1236,22 +1236,19 @@ public final class EcaAPI {
             return false;
         }
 
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
-            EcaLogger.warn("GlobalAllReturn: Agent is not initialized");
-            return false;
-        }
-
         Set<String> collectedPrefixes = new HashSet<>();
-        for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!inst.isModifiableClass(clazz)) continue;
-            if (clazz.isInterface() || clazz.isArray() || clazz.isPrimitive()) continue;
+        boolean enumerated = EcaTransformerManager.forEachLoadedInternalName(info -> {
+            if (info == null || !info.modifiable()) return;
+            String internalName = info.internalName();
+            if (internalName == null || internalName.indexOf('/') < 0) return;
+            if (TransformerWhitelist.isProtectedInternal(internalName)) return;
 
-            String className = clazz.getName();
-            if (TransformerWhitelist.isProtected(className)) continue;
-
-            String prefix = toInternalPrefix(className);
+            String prefix = toInternalPrefix(internalName.replace('/', '.'));
             if (prefix != null) collectedPrefixes.add(prefix);
+        });
+        if (!enumerated) {
+            EcaLogger.warn("GlobalAllReturn: loaded class enumeration unavailable");
+            return false;
         }
 
         if (collectedPrefixes.isEmpty()) {

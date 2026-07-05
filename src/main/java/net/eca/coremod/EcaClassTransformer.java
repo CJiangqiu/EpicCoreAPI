@@ -101,29 +101,41 @@ public final class EcaClassTransformer implements ClassFileTransformer {
        一旦在此 retransform 已加载的类，会与并发的 ModuleClassLoader 锁 + Mixin LaunchPluginHandler 锁
        发生顺序反转死锁。注册是廉价的，且注册后续加载的类都会在加载期被变换，无需 retransform。 */
     public static void register() {
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
-            AgentLogWriter.info("[EcaClassTransformer] No Instrumentation available, skipping register");
-            return;
-        }
-        ensureRegistered(inst);
+        EcaTransformerManager.registerClassTransformer();
     }
 
     //注册 Transformer 并重转换已加载的类。须在 mod 加载完成后（线程池空闲）调用，避免并发 retransform 死锁
     public static void init() {
-        Instrumentation inst = EcaAgent.getInstrumentation();
+        EcaTransformerManager.applyLoadCompleteTransforms();
+    }
+
+    static boolean registerWithInstrumentation(Instrumentation inst) {
+        if (inst == null) {
+            AgentLogWriter.info("[EcaClassTransformer] No Instrumentation available, skipping register");
+            return false;
+        }
+        ensureRegistered(inst);
+        return true;
+    }
+
+    static boolean retransformLoadedClassesWithInstrumentation(Instrumentation inst) {
         if (inst == null) {
             AgentLogWriter.info("[EcaClassTransformer] No Instrumentation available, skipping init");
-            return;
+            return false;
         }
-
         ensureRegistered(inst);
+        int before = transformCount;
         retransformLoadedClasses(inst);
+        return transformCount > before;
+    }
+
+    static void ensureWhitelistLoaded() {
+        TransformerWhitelist.loadJsonWhitelist();
     }
 
     private static void ensureRegistered(Instrumentation inst) {
         if (!registered) {
-            TransformerWhitelist.loadJsonWhitelist();
+            ensureWhitelistLoaded();
             inst.addTransformer(new EcaClassTransformer(), true);
             AgentLogWriter.info("[EcaClassTransformer] Registered as ClassFileTransformer");
             registered = true;
@@ -210,6 +222,29 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     }
 
     // 返回 1=LivingEntity子类, 2=Entity子类(非LivingEntity), 0=都不是
+    static void noteLoadedClass(String internalName, boolean livingEntity, boolean entityOnly) {
+        if (internalName == null) return;
+        if (livingEntity) {
+            KNOWN_LIVING_ENTITY_CLASSES.add(internalName);
+        } else if (entityOnly) {
+            KNOWN_ENTITY_ONLY_CLASSES.add(internalName);
+        }
+    }
+
+    static boolean isJvmTiLoadCompleteTarget(JvmTiChannel.LoadedClassInfo info) {
+        if (info == null || info.internalName() == null) return false;
+        String internalName = info.internalName();
+        noteLoadedClass(internalName, info.livingEntity(), info.entityOnly());
+        if (LoadingScreenTransformer.ENABLED && LoadingScreenTransformer.TARGET_CLASS.equals(internalName)) {
+            return true;
+        }
+        if (ContainerReplacementTransformer.isTarget(internalName)) {
+            return true;
+        }
+        return info.livingEntity() || info.entityOnly()
+                || LIVING_ENTITY.equals(internalName) || ENTITY.equals(internalName);
+    }
+
     private static int classifyEntity(Class<?> clazz) {
         for (Class<?> c = clazz.getSuperclass(); c != null && c != Object.class; c = c.getSuperclass()) {
             String name = c.getName();

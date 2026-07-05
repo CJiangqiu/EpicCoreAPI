@@ -6,7 +6,6 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongAVLTreeSet;
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
-import net.eca.util.InvulnerableEntityManager;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.ChunkEntities;
 import net.minecraft.world.level.entity.EntitySection;
@@ -546,44 +545,29 @@ public final class EcaContainers {
             super(c);
         }
 
-        private boolean shouldProtectUUID(Object o) {
-            return o instanceof java.util.UUID uuid
-                && InvulnerableEntityManager.isInvulnerable(uuid)
-                && !EntityUtil.isChangingDimension(uuid);
-        }
-
         @Override
         public boolean remove(Object o) {
-            if (shouldProtectUUID(o)) {
-                return false;
-            }
             return super.remove(o);
         }
 
         @Override
         public boolean removeAll(Collection<?> c) {
-            Collection<?> filtered = c.stream()
-                .filter(item -> !shouldProtectUUID(item))
-                .toList();
-            return super.removeAll(filtered);
+            return super.removeAll(c);
         }
 
         @Override
         public boolean removeIf(java.util.function.Predicate<? super E> filter) {
-            java.util.function.Predicate<E> protectedFilter = item ->
-                !shouldProtectUUID(item) && filter.test(item);
-            return super.removeIf(protectedFilter);
+            return super.removeIf(filter);
         }
 
         @Override
         public boolean retainAll(Collection<?> c) {
-            return super.removeIf(item ->
-                !shouldProtectUUID(item) && !c.contains(item));
+            return super.retainAll(c);
         }
 
         @Override
         public void clear() {
-            super.removeIf(item -> !shouldProtectUUID(item));
+            super.clear();
         }
 
         @Override
@@ -605,9 +589,6 @@ public final class EcaContainers {
 
                 @Override
                 public void remove() {
-                    if (shouldProtectUUID(current)) {
-                        return;
-                    }
                     delegate.remove();
                     current = null;
                 }

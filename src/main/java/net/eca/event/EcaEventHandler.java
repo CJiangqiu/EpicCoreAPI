@@ -2,6 +2,7 @@ package net.eca.event;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityLocationManager;
+import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.bossshow.BossShowPlaybackTracker;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
@@ -116,6 +117,7 @@ public class EcaEventHandler {
     //服务器停止时清空静态状态，防止单人模式下集成服务器跨存档残留
     @SubscribeEvent
     public void onServerStopped(ServerStoppedEvent event) {
+        InvulnerableEntityManager.clearAll();
         GlobalEffectOverrideManager.clearAllDimensions();
         EntityExtensionManager.clearAll();
     }

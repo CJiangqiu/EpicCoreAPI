@@ -64,7 +64,7 @@ public class ServerLevelMixin {
         ServerLevel self = (ServerLevel) (Object) this;
         long currentTime = self.getGameTime();
 
-        for (UUID uuid : InvulnerableEntityManager.getAllInvulnerableUUIDs()) {
+        for (UUID uuid : InvulnerableEntityManager.getAllInvulnerableUUIDs(self)) {
             Entity entity = self.getEntities().get(uuid);
             if (entity == null || EntityUtil.isChangingDimension(entity)) {
                 continue;
@@ -112,7 +112,7 @@ public class ServerLevelMixin {
         // End→Overworld 终末之诗流程中不存在旧重复实例（旧实体在 End，新实体在 Overworld）
         // 但 InvulnerableEntityManager 仍持有 UUID，需要同步无敌状态到新实例的 EntityData
         if (eca$oldDuplicate == null) {
-            if (InvulnerableEntityManager.isInvulnerable(newPlayer.getUUID())) {
+            if (InvulnerableEntityManager.isInvulnerable(newPlayer)) {
                 EcaAPI.setInvulnerable(newPlayer, true);
             }
             eca$duplicateWasInvulnerable = false;

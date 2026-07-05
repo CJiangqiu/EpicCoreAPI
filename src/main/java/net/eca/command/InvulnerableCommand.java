@@ -96,7 +96,7 @@ public class InvulnerableCommand {
 
         try {
             ServerLevel level = source.getLevel();
-            Set<UUID> invulnerableUUIDs = InvulnerableEntityManager.getAllInvulnerableUUIDs();
+            Set<UUID> invulnerableUUIDs = InvulnerableEntityManager.getAllInvulnerableUUIDs(level);
 
             if (invulnerableUUIDs.isEmpty()) {
                 source.sendSuccess(() -> Component.literal("§eNo invulnerable entities registered"), false);

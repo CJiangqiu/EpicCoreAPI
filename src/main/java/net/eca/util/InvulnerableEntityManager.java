@@ -1,47 +1,75 @@
 package net.eca.util;
 
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.storage.LevelResource;
 
+import java.nio.file.Path;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-//无敌实体管理器（用于测试和验证）
 public class InvulnerableEntityManager {
 
-    //存储所有无敌实体的 UUID
-    private static final Set<UUID> INVULNERABLE_ENTITIES = ConcurrentHashMap.newKeySet();
+    private static final Map<String, Set<UUID>> INVULNERABLE_ENTITIES_BY_SAVE = new ConcurrentHashMap<>();
 
-    //添加无敌实体记录
     public static void addInvulnerable(Entity entity) {
-        if (entity == null) return;
-        INVULNERABLE_ENTITIES.add(entity.getUUID());
+        String saveKey = getSaveKey(entity);
+        if (saveKey == null) return;
+        INVULNERABLE_ENTITIES_BY_SAVE
+            .computeIfAbsent(saveKey, key -> ConcurrentHashMap.newKeySet())
+            .add(entity.getUUID());
     }
 
-    //移除无敌实体记录
     public static void removeInvulnerable(Entity entity) {
-        if (entity == null) return;
-        INVULNERABLE_ENTITIES.remove(entity.getUUID());
+        String saveKey = getSaveKey(entity);
+        if (saveKey == null) return;
+        Set<UUID> uuids = INVULNERABLE_ENTITIES_BY_SAVE.get(saveKey);
+        if (uuids == null) return;
+        uuids.remove(entity.getUUID());
+        if (uuids.isEmpty()) {
+            INVULNERABLE_ENTITIES_BY_SAVE.remove(saveKey, uuids);
+        }
     }
 
-    //检查是否是无敌实体（通过UUID）
-    public static boolean isInvulnerable(UUID uuid) {
-        return INVULNERABLE_ENTITIES.contains(uuid);
+    public static boolean isInvulnerable(Entity entity) {
+        String saveKey = getSaveKey(entity);
+        if (saveKey == null) return false;
+        Set<UUID> uuids = INVULNERABLE_ENTITIES_BY_SAVE.get(saveKey);
+        return uuids != null && uuids.contains(entity.getUUID());
     }
 
-    //获取所有无敌实体的 UUID
-    public static Set<UUID> getAllInvulnerableUUIDs() {
-        return Set.copyOf(INVULNERABLE_ENTITIES);
+    public static Set<UUID> getAllInvulnerableUUIDs(ServerLevel level) {
+        String saveKey = getSaveKey(level);
+        if (saveKey == null) return Set.of();
+        Set<UUID> uuids = INVULNERABLE_ENTITIES_BY_SAVE.get(saveKey);
+        return uuids == null ? Set.of() : Set.copyOf(uuids);
     }
 
-    //获取无敌实体数量
-    public static int getInvulnerableCount() {
-        return INVULNERABLE_ENTITIES.size();
+    public static int getInvulnerableCount(ServerLevel level) {
+        String saveKey = getSaveKey(level);
+        if (saveKey == null) return 0;
+        Set<UUID> uuids = INVULNERABLE_ENTITIES_BY_SAVE.get(saveKey);
+        return uuids == null ? 0 : uuids.size();
     }
 
-    //清空所有记录
     public static void clearAll() {
-        INVULNERABLE_ENTITIES.clear();
+        INVULNERABLE_ENTITIES_BY_SAVE.clear();
     }
 
+    private static String getSaveKey(Entity entity) {
+        if (entity == null || !(entity.level() instanceof ServerLevel level)) {
+            return null;
+        }
+        return getSaveKey(level);
+    }
+
+    private static String getSaveKey(ServerLevel level) {
+        if (level == null || level.getServer() == null) {
+            return null;
+        }
+        Path root = level.getServer().getWorldPath(LevelResource.ROOT);
+        return root.toAbsolutePath().normalize().toString();
+    }
 }

@@ -6,7 +6,14 @@ import java.util.Locale;
 public final class ShaderLayerComposer {
 
     public static String compose(List<ShaderLayer> layers) {
-        StringBuilder source = new StringBuilder()
+        StringBuilder source = new StringBuilder();
+        if (usesOverlay(layers)) {
+            source.append("vec3 ecaOverlay(vec3 backdrop, vec3 source) {\n")
+                .append("    return mix(2.0 * backdrop * source,\n")
+                .append("        1.0 - 2.0 * (1.0 - backdrop) * (1.0 - source), step(vec3(0.5), backdrop));\n")
+                .append("}\n\n");
+        }
+        source
             .append("float ecaHash(vec2 value) {\n")
             .append("    return fract(sin(dot(value, vec2(127.1, 311.7))) * 43758.5453123);\n")
             .append("}\n\n")
@@ -105,7 +112,7 @@ public final class ShaderLayerComposer {
                     }
                 }
 
-                source.append("        finalColor = mix(finalColor, color, alpha);\n")
+                source.append("        finalColor = ").append(blendExpression(layer.blendMode())).append(";\n")
                     .append("        finalAlpha = max(finalAlpha, alpha);\n")
                     .append("    }\n\n");
 
@@ -116,6 +123,30 @@ public final class ShaderLayerComposer {
         source.append("    return vec4(max(finalColor, vec3(0.0)), finalAlpha);\n")
             .append("}\n");
         return source.toString();
+    }
+
+    /* 按混合模式生成 finalColor 更新表达式。finalColor 为下方累积色(backdrop)，color 为本图层色(source)，
+       结果统一按图层 alpha 加权，NORMAL 退化为历史的直接 alpha 叠加。 */
+    private static String blendExpression(ShaderBlendMode mode) {
+        return switch (mode) {
+            case ADD -> "finalColor + color * alpha";
+            case MULTIPLY -> "mix(finalColor, finalColor * color, alpha)";
+            case SCREEN -> "mix(finalColor, 1.0 - (1.0 - finalColor) * (1.0 - color), alpha)";
+            case OVERLAY -> "mix(finalColor, ecaOverlay(finalColor, color), alpha)";
+            default -> "mix(finalColor, color, alpha)";
+        };
+    }
+
+    private static boolean usesOverlay(List<ShaderLayer> layers) {
+        if (layers == null) {
+            return false;
+        }
+        for (ShaderLayer layer : layers) {
+            if (layer.visible() && layer.blendMode() == ShaderBlendMode.OVERLAY) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static String layerSamplerName(int layerIndex) {

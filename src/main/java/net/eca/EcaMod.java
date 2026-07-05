@@ -4,8 +4,7 @@ import net.eca.agent.EcaAgent;
 import net.eca.compat.GeckoLibCompat;
 import net.eca.config.EcaConfiguration;
 import net.eca.coremod.EcaClassTransformer;
-import net.eca.coremod.JvmTiChannel;
-import net.eca.coremod.RuntimeBytecodeProvider;
+import net.eca.coremod.EcaTransformerManager;
 import net.eca.event.EcaEventHandler;
 import net.eca.event.LoadCompleteHandler;
 import net.eca.init.ModConfigs;
@@ -44,13 +43,7 @@ public final class EcaMod {
         ModConfigs.register();
         // 激进防御开启时激活 JVM TI 原生变换通道
         if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            // GAME 层重新获取 JVMTI env：CoreMod 层与 GAME 层是不同 classloader，JvmTiChannel 静态 env 不共享，
-            // 否则本层 activate() 看到的 env 为 null（日志曾出现 "activate skipped: no JVM TI env"）
-            JvmTiChannel.prepare();
-            // 按调用链顺序注册：EcaClassTransformer 先，健康模块后注册，捕获器最后
-            JvmTiChannel.addTransformFunction(EcaClassTransformer::transformStatic);
-            RuntimeBytecodeProvider.registerJvmTiCapture();
-            JvmTiChannel.activate();
+            EcaTransformerManager.activateJvmTiIfNeeded();
         }
         // 注册网络处理器
         NetworkHandler.register();

@@ -1,6 +1,6 @@
 package net.eca.util.health;
 
-import net.eca.agent.EcaAgent;
+import net.eca.coremod.EcaTransformerManager;
 import net.eca.util.EcaLogger;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -20,7 +20,6 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
-import java.lang.instrument.Instrumentation;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
@@ -294,22 +293,18 @@ public final class MethodProbe {
         }
     }
 
-    /* 发现实体类的授权写模式并登记 + retransform 烤入 HEAD 桥；无 spec 或无 Instrumentation 则无操作。
-       无条件安装——运行期是否借桥由配置双门控 + 激活态决定，未激活时桥惰性、方法照常。 */
+    /* Register the bridge site and bake it through the active transform backend. */
     public static void installBridge(Class<?> entityClass) {
         if (entityClass == null) return;
         BridgeSpec spec = findBridgeSpec(entityClass);
         if (spec == null) return;
         registerSite(spec, Type.getInternalName(entityClass));
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
-            EcaLogger.info("[MethodProbe] bridge install skipped: Instrumentation unavailable");
-            return;
-        }
         Class<?> owner = HealthDataflowAnalyzer.loadClass(spec.ownerInternal());
         if (owner == null) return;
         try {
-            if (inst.isModifiableClass(owner)) inst.retransformClasses(owner);
+            if (!EcaTransformerManager.retransformClass(owner)) {
+                EcaLogger.info("[MethodProbe] bridge retransform unavailable owner={}", owner.getName());
+            }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             EcaLogger.info("[MethodProbe] bridge retransform failed owner={} msg={}", owner.getName(), t.toString());

@@ -19,16 +19,13 @@ import java.util.*;
 
 /**
  * Earliest entry point via ITransformationService SPI.
- * Responsibilities: attach Agent, prevent dual loading, register ClassFileTransformer.
+ * Responsibilities: attach Agent, prepare JVMTI, and prevent dual loading.
  */
 @SuppressWarnings("unchecked")
 public class EcaTransformationService implements ITransformationService {
 
-    // 预加载 CoreMod 阶段需要的所有类（必须在双加载移除之前，包括内部类）
-    // 双加载移除后 module layer 不可用，未预加载的类会 NoClassDefFoundError
-    // CoreMod 阶段只保留加载屏幕转换；实体健康 hook 与容器替换改由 agent/JVMTI 在 LoadComplete 收尾施加
+    // Loading screen is an early-display feature and must run before LoadComplete.
     private static final Class<?>[] PRELOADED = preloadAll(
-        // LoadingScreenTransformer + 全部内部类
         "net.eca.coremod.LoadingScreenTransformer",
         "net.eca.coremod.LoadingScreenTransformer$DisplayWindowVisitor",
         "net.eca.coremod.LoadingScreenTransformer$PaintMethodVisitor",
@@ -62,7 +59,6 @@ public class EcaTransformationService implements ITransformationService {
         return result;
     }
 
-    //在 CoreMod 阶段注册加载屏幕 Transformer（直接用预加载的类实例，无匿名类）
     private static void initLoadingScreenTransformer() {
         try {
             if (PRELOADED[0] == null || !LoadingScreenTransformer.ENABLED) {
@@ -76,11 +72,9 @@ public class EcaTransformationService implements ITransformationService {
                 return;
             }
 
-            // 直接用预加载的类实例注册（无匿名类，避免双加载后 NoClassDefFoundError）
             LoadingScreenTransformer transformer = new LoadingScreenTransformer();
             inst.addTransformer(transformer, true);
 
-            // 重转换已加载的 DisplayWindow
             for (Class<?> clazz : inst.getAllLoadedClasses()) {
                 if (clazz.getName().equals("net.minecraftforge.fml.earlydisplay.DisplayWindow")) {
                     inst.retransformClasses(clazz);

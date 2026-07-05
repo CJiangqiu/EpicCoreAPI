@@ -45,6 +45,7 @@ public final class ShaderProjectCodec {
             baseColor.add(layer.baseBlue());
             baseColor.add(layer.baseAlpha());
             layerObj.add("base_color", baseColor);
+            layerObj.addProperty("blend_mode", layer.blendMode().name().toLowerCase());
             if (layer.backgroundImagePath() != null) {
                 layerObj.addProperty("background_image", layer.backgroundImagePath());
             }
@@ -96,6 +97,9 @@ public final class ShaderProjectCodec {
                         baseColor.get(3).getAsFloat()
                     );
                 }
+            }
+            if (layerObj.has("blend_mode")) {
+                layer.setBlendMode(ShaderBlendMode.fromName(layerObj.get("blend_mode").getAsString()));
             }
             if (layerObj.has("background_image")) {
                 layer.setBackgroundImagePath(layerObj.get("background_image").getAsString());

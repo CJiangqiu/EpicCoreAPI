@@ -87,11 +87,19 @@ public final class HealthDataflowAnalyzer {
        分析时从结果树中剥离，避免把调用者自己的逻辑误当作真实血量。独立运行不调用即默认不剥离。 */
     private static final Set<String> WRAPPER_CALL_OWNERS = ConcurrentHashMap.newKeySet();
     private static final Set<String> WRAPPER_SOURCE_LABEL_PREFIXES = ConcurrentHashMap.newKeySet();
+    private static final Set<String> WRAPPER_REFERENCE_VALUES = ConcurrentHashMap.newKeySet();
     public static void setStripConfig(Set<String> wrapperCallOwners, Set<String> wrapperSourceLabelPrefixes) {
+        setStripConfig(wrapperCallOwners, wrapperSourceLabelPrefixes, Set.of());
+    }
+
+    public static void setStripConfig(Set<String> wrapperCallOwners, Set<String> wrapperSourceLabelPrefixes,
+                                      Set<String> wrapperReferenceValues) {
         WRAPPER_CALL_OWNERS.clear();
         WRAPPER_SOURCE_LABEL_PREFIXES.clear();
+        WRAPPER_REFERENCE_VALUES.clear();
         if (wrapperCallOwners != null) WRAPPER_CALL_OWNERS.addAll(wrapperCallOwners);
         if (wrapperSourceLabelPrefixes != null) WRAPPER_SOURCE_LABEL_PREFIXES.addAll(wrapperSourceLabelPrefixes);
+        if (wrapperReferenceValues != null) WRAPPER_REFERENCE_VALUES.addAll(wrapperReferenceValues);
     }
 
     /* 默认字节码源：ClassLoader 资源 + CodeSource JAR 回退，调用者可注入运行期转换后字节码 */
@@ -2073,8 +2081,9 @@ public final class HealthDataflowAnalyzer {
            即使树中也存在 Source（如加密保护的存储），常数覆写仍能生效。
            DATAFLOW 仅用于纯数据流可写、无常数语义的实体。 */
         public Kind classify() {
-            if (returnExpr == null || containsUnknown(returnExpr)) return Kind.UNRESOLVED;
             if (hasConstantBranch(returnExpr)) return Kind.CONST_OVERRIDE;
+            if (sources.stream().anyMatch(ConstOverrideSource.class::isInstance)) return Kind.CONST_OVERRIDE;
+            if (returnExpr == null || containsUnknown(returnExpr)) return Kind.UNRESOLVED;
             if (!sources.isEmpty()) return Kind.DATAFLOW;
             return Kind.UNRESOLVED;
         }
@@ -2274,6 +2283,9 @@ public final class HealthDataflowAnalyzer {
             if (isEcaHealthWrapperSource(source)) return discardWrapper ? null : UnknownExpr.UNKNOWN;
             return expr;
         }
+        if (expr instanceof Reference reference && isEcaHealthWrapperReference(reference)) {
+            return discardWrapper ? null : UnknownExpr.UNKNOWN;
+        }
         if (expr instanceof Call call) {
             if (isEcaHealthWrapperCall(call)) return discardWrapper ? null : UnknownExpr.UNKNOWN;
             List<Expr> args = new ArrayList<>(call.args().size());
@@ -2331,6 +2343,11 @@ public final class HealthDataflowAnalyzer {
             if (source.label.startsWith(prefix)) return true;
         }
         return false;
+    }
+
+    private static boolean isEcaHealthWrapperReference(Reference reference) {
+        Object value = reference.value();
+        return value instanceof String s && WRAPPER_REFERENCE_VALUES.contains(s);
     }
 
     public static Expr analyzeSeeded(Class<?> owner, String methodName, String desc, Expr[] seedExprs) {

@@ -1,18 +1,18 @@
 package net.eca.util.health;
 
-import net.eca.agent.EcaAgent;
 import net.eca.config.EcaConfiguration;
+import net.eca.coremod.EcaTransformerManager;
 import net.eca.coremod.LivingEntityHook;
 import net.eca.util.EcaLogger;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 
-import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Modifier;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /*
  * 改血总管理器：持有数据流分析表 + 调度 + 校验。
@@ -169,7 +169,7 @@ public final class EcaSetHealthManager {
         if (!eligible) {
             String dc = ar.definingClass != null ? ar.definingClass.getName() : "null";
             if (UNRESOLVED_DUMPED.add(dc)) {
-                EcaLogger.info("[HealthDataflow] UNRESOLVED dump definingClass={} returnExpr={}", dc, ar.returnExpr);
+                EcaLogger.info("[HealthDataflow] UNRESOLVED definingClass={} sources={}", dc, ar.sources.size());
                 int i = 0;
                 for (HealthDataflowAnalyzer.Source s : ar.sources) {
                     EcaLogger.info("[HealthDataflow]   src#{} label={} type={} kind={}",
@@ -194,29 +194,40 @@ public final class EcaSetHealthManager {
     /* 遍历已加载的 LivingEntity 子类(排除 Player 与抽象类)，逐个分析填表。
        晚加载的实体类不在此列，仍由 setHealth 时惰性补分析(computeIfAbsent 与本线程互不冲突)。 */
     private static void warmupAll() {
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
-            EcaLogger.info("[HealthDataflow] warmup skipped: Instrumentation unavailable");
-            return;
-        }
-        int analyzed = 0;
-        for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (clazz == null) continue;
-            if (!LivingEntity.class.isAssignableFrom(clazz)) continue;
-            if (Player.class.isAssignableFrom(clazz)) continue;
-            if (Modifier.isAbstract(clazz.getModifiers())) continue;
-            if (DATAFLOW_TABLE.containsKey(clazz)) continue;
-            try {
-                resolveTree(clazz);
-                installMethodBridgeOnce(clazz);
-                analyzed++;
-            } catch (Throwable t) {
-                if (t instanceof VirtualMachineError e) throw e;
-                EcaLogger.info("[HealthDataflow] warmup analyze {} failed: {}", clazz.getName(), t.toString());
+        AtomicInteger analyzed = new AtomicInteger();
+        boolean enumerated = EcaTransformerManager.forEachLoadedClass(clazz -> {
+            warmupClass(clazz, analyzed);
+        });
+        if (!enumerated) {
+            boolean internalEnumerated = EcaTransformerManager.forEachLoadedInternalName(info -> {
+                if (info == null || !info.modifiable() || !info.livingEntity()) return;
+                Class<?> clazz = HealthDataflowAnalyzer.loadClass(info.internalName());
+                if (clazz == null) return;
+                warmupClass(clazz, analyzed);
+            });
+            if (!internalEnumerated) {
+                EcaLogger.info("[HealthDataflow] warmup skipped: loaded class enumeration unavailable");
+                return;
             }
         }
         EcaLogger.info("[HealthDataflow] warmup complete: analyzed {} entity classes, table size={}",
-                analyzed, DATAFLOW_TABLE.size());
+                analyzed.get(), DATAFLOW_TABLE.size());
+    }
+
+    private static void warmupClass(Class<?> clazz, AtomicInteger analyzed) {
+        if (clazz == null) return;
+        if (!LivingEntity.class.isAssignableFrom(clazz)) return;
+        if (Player.class.isAssignableFrom(clazz)) return;
+        if (Modifier.isAbstract(clazz.getModifiers())) return;
+        if (DATAFLOW_TABLE.containsKey(clazz)) return;
+        try {
+            resolveTree(clazz);
+            installMethodBridgeOnce(clazz);
+            analyzed.incrementAndGet();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            EcaLogger.info("[HealthDataflow] warmup analyze {} failed: {}", clazz.getName(), t.toString());
+        }
     }
 
     /* ==================== 校验 ==================== */

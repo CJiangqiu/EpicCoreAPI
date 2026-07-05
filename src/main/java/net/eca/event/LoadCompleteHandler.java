@@ -87,14 +87,10 @@ public final class LoadCompleteHandler {
         }
 
         Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) {
-            EcaLogger.warn("Cannot apply load-complete transformers: Instrumentation not available");
-            return;
-        }
 
         try {
             // 第二遍方法目标报告仅在激进模式下打印
-            if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+            if (inst != null && EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
                 logRadicalSecondPassMethodTargets(inst);
             }
 

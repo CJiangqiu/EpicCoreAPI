@@ -18,7 +18,7 @@ import java.security.ProtectionDomain;
 /**
  * Replaces the solid-color glClear in DisplayWindow.paintFramebuffer()
  * with a vertical gradient: purple (128,0,128) at edges → red (239,50,61) at center.
- * Implements ClassFileTransformer so it can be registered directly in CoreMod stage.
+ * The unified load-complete transformer calls this implementation for DisplayWindow.
  */
 public final class LoadingScreenTransformer implements ClassFileTransformer {
 
