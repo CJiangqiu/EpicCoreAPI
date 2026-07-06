@@ -17,6 +17,8 @@ public final class ShaderModuleRegistry {
         registerBasicLine();
         registerBasicRectangle();
         registerBasicPolygon();
+        registerCrossStar();
+        registerDotStar();
         registerImageElement();
     }
 
@@ -150,6 +152,34 @@ public final class ShaderModuleRegistry {
         ));
     }
 
+    /* 十字星：收割自 starlight.fsh 的 crossStar，两条交叉柔臂 + 中心柔核 */
+    private static void registerCrossStar() {
+        register(shaped(
+            "cross_star",
+            "gui.eca.shader_generator.module.cross_star",
+            ShaderModuleDefinition.Category.STARRY_SKY,
+            List.of(),
+            (module, index, point, size) -> String.format(Locale.ROOT,
+                "max(smoothstep(%1$.4f, 0.0, abs(%2$s).x) * smoothstep(%3$.4f, 0.0, abs(%2$s).y)"
+                    + " + smoothstep(%1$.4f, 0.0, abs(%2$s).y) * smoothstep(%3$.4f, 0.0, abs(%2$s).x),"
+                    + " smoothstep(%4$.4f, 0.0, length(%2$s)))",
+                size, point, size * 0.15F, size * 0.3F)
+        ));
+    }
+
+    /* 圆点星星：收割自 starlight.fsh 的 circleStar，中心亮、向外柔化 */
+    private static void registerDotStar() {
+        register(shaped(
+            "dot_star",
+            "gui.eca.shader_generator.module.dot_star",
+            ShaderModuleDefinition.Category.STARRY_SKY,
+            List.of(),
+            (module, index, point, size) -> String.format(Locale.ROOT,
+                "smoothstep(%1$.4f, %2$.4f, length(%3$s))",
+                size, size * 0.3F, point)
+        ));
+    }
+
     private static void registerImageElement() {
         register(new ShaderModuleDefinition(
             "image_element",
@@ -166,12 +196,23 @@ public final class ShaderModuleRegistry {
         List<ShaderModuleDefinition.Parameter> specificParameters,
         ShapeEmitter shapeEmitter
     ) {
+        return shaped(id, displayName, ShaderModuleDefinition.Category.BASIC, specificParameters, shapeEmitter);
+    }
+
+    /* 与 basic() 相同的实例化/上色/动画通道，但可指定分类，用于星空、魔法等 */
+    private static ShaderModuleDefinition shaped(
+        String id,
+        String displayName,
+        ShaderModuleDefinition.Category category,
+        List<ShaderModuleDefinition.Parameter> specificParameters,
+        ShapeEmitter shapeEmitter
+    ) {
         List<ShaderModuleDefinition.Parameter> parameters = new ArrayList<>(commonParameters());
         parameters.addAll(specificParameters);
         return new ShaderModuleDefinition(
             id,
             displayName,
-            ShaderModuleDefinition.Category.BASIC,
+            category,
             parameters,
             (module, moduleIndex) -> emitInstances(module, moduleIndex, shapeEmitter)
         );

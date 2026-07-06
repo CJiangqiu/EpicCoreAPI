@@ -187,6 +187,8 @@
   "gui.eca.shader_generator.module.basic_line": "Line",
   "gui.eca.shader_generator.module.basic_rectangle": "Rectangle",
   "gui.eca.shader_generator.module.basic_polygon": "Polygon",
+  "gui.eca.shader_generator.module.cross_star": "Cross Star",
+  "gui.eca.shader_generator.module.dot_star": "Dot Star",
   "gui.eca.shader_generator.module.image_element": "Custom Image Element",
   "gui.eca.shader_generator.parameter.color_r": "Color: Red",
   "gui.eca.shader_generator.parameter.color_g": "Color: Green",

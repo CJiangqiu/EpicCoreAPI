@@ -187,6 +187,8 @@
   "gui.eca.shader_generator.module.basic_line": "直线",
   "gui.eca.shader_generator.module.basic_rectangle": "矩形",
   "gui.eca.shader_generator.module.basic_polygon": "多边形",
+  "gui.eca.shader_generator.module.cross_star": "十字星",
+  "gui.eca.shader_generator.module.dot_star": "圆点星星",
   "gui.eca.shader_generator.module.image_element": "自定义图片元素",
   "gui.eca.shader_generator.parameter.color_r": "颜色：红",
   "gui.eca.shader_generator.parameter.color_g": "颜色：绿",
