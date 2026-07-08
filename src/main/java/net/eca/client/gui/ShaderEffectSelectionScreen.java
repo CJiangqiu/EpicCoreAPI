@@ -1,6 +1,7 @@
 package net.eca.client.gui;
 
 import net.eca.util.shader_generator.ShaderModuleDefinition;
+import net.eca.util.shader_generator.ShaderModuleRegistry;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
@@ -62,6 +63,14 @@ public final class ShaderEffectSelectionScreen extends Screen {
             addRenderableWidget(Button.builder(
                 Component.translatable(category.translationKey()),
                 button -> {
+                    /* IMAGE 分类只有 image_element 一个条目，直接进入详情编辑 */
+                    if (category == ShaderModuleDefinition.Category.IMAGE) {
+                        ShaderModuleDefinition definition = ShaderModuleRegistry.get("image_element");
+                        if (definition != null) {
+                            selectionHandler.accept(definition);
+                        }
+                        return;
+                    }
                     selectedCategory = category;
                     scroll = 0;
                     rebuildWidgets();

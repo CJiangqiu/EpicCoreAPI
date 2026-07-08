@@ -12,6 +12,7 @@ import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkStatus;
@@ -48,7 +49,7 @@ public abstract class ChunkMapMixin {
 
     @Inject(method = "removeEntity", at = @At("HEAD"), cancellable = true)
     private void eca$onRemoveEntity(Entity entity, CallbackInfo ci) {
-        if (EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
+        if (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
             ci.cancel();
         }
     }

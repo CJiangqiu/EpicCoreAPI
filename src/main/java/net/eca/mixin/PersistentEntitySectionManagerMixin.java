@@ -6,6 +6,7 @@ import net.eca.util.EntityUtil;
 import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.entity.EntityAccess;
 import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import org.spongepowered.asm.mixin.Final;
@@ -41,7 +42,7 @@ public class PersistentEntitySectionManagerMixin {
 
     @Inject(method = "unloadEntity", at = @At("HEAD"), cancellable = true)
     private void eca$onUnloadEntity(EntityAccess entity, CallbackInfo ci) {
-        if (entity instanceof Entity realEntity) {
+        if (entity instanceof LivingEntity realEntity) {
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {
                 ci.cancel();
             }
@@ -50,7 +51,7 @@ public class PersistentEntitySectionManagerMixin {
 
     @Inject(method = "stopTicking", at = @At("HEAD"), cancellable = true)
     private void eca$onStopTicking(EntityAccess entity, CallbackInfo ci) {
-        if (entity instanceof Entity realEntity) {
+        if (entity instanceof LivingEntity realEntity) {
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {
                 ci.cancel();
                 return;
@@ -60,7 +61,7 @@ public class PersistentEntitySectionManagerMixin {
 
     @Inject(method = "stopTracking", at = @At("HEAD"), cancellable = true)
     private void eca$onStopTracking(EntityAccess entity, CallbackInfo ci) {
-        if (entity instanceof Entity realEntity) {
+        if (entity instanceof LivingEntity realEntity) {
             if (EcaAPI.isInvulnerable(realEntity) && !EntityUtil.isChangingDimension(realEntity)) {
                 ci.cancel();
                 return;
@@ -76,7 +77,7 @@ public class PersistentEntitySectionManagerMixin {
 
         @Inject(method = "onRemove", at = @At("HEAD"), cancellable = true)
         private void eca$onRemove(Entity.RemovalReason reason, CallbackInfo ci) {
-            if (this.entity instanceof Entity realEntity) {
+            if (this.entity instanceof LivingEntity realEntity) {
                 if (EcaAPI.isInvulnerable(realEntity) && !(reason == Entity.RemovalReason.CHANGED_DIMENSION && EntityUtil.isChangingDimension(realEntity))) {
                     ci.cancel();
                 }

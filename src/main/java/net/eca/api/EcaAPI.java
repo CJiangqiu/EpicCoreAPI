@@ -224,15 +224,27 @@ public final class EcaAPI {
         if (entity == null) {
             return false;
         }
-        boolean managerInvulnerable = InvulnerableEntityManager.isInvulnerable(entity);
         if (!(entity instanceof LivingEntity livingEntity)) {
-            return managerInvulnerable;
+            return false;
         }
+        boolean dataInvulnerable;
         if (EntityUtil.INVULNERABLE != null) {
-            return livingEntity.getEntityData().get(EntityUtil.INVULNERABLE) || managerInvulnerable;
+            dataInvulnerable = livingEntity.getEntityData().get(EntityUtil.INVULNERABLE);
         } else {
-            return livingEntity.getPersistentData().getBoolean("ecaInvulnerable") || managerInvulnerable;
+            dataInvulnerable = livingEntity.getPersistentData().getBoolean("ecaInvulnerable");
         }
+        if (dataInvulnerable || !EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+            return dataInvulnerable;
+        }
+        boolean managerInvulnerable = InvulnerableEntityManager.isInvulnerable(entity);
+        if (managerInvulnerable) {
+            if (EntityUtil.INVULNERABLE != null) {
+                livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, true);
+            } else {
+                livingEntity.getPersistentData().putBoolean("ecaInvulnerable", true);
+            }
+        }
+        return managerInvulnerable;
     }
 
     // 设置实体无敌状态
@@ -1388,10 +1400,9 @@ public final class EcaAPI {
     // 获取自定义着色器预设（仅客户端）
     /**
      * Get a registered custom shader preset by its resource id (client only).
-     * A preset is registered via {@link net.eca.api.RegisterShaderPreset} + a static call to
-     * {@code ShaderPresetRegistry.register(id)}, backed by a standard core shader three-file set at
-     * {@code assets/<namespace>/shaders/core/<path>.vsh/.fsh/.json}. The returned object exposes five
-     * ready-made RenderTypes ({@code skybox()}, {@code bossBar()}, {@code bossLayer()}, {@code item()},
+     * ECA auto-discovers presets from standard five-file sets under
+     * {@code config/eca/shadergenerator/} or {@code assets/<namespace>/shaders/core/}.
+     * The returned object exposes five ready-made RenderTypes ({@code skybox()}, {@code bossBar()}, {@code bossLayer()}, {@code item()},
      * {@code entityEffect(texture)}) for use in Entity/Item extensions.
      * @param id the preset resource id
      * @return the shader preset, or null if no preset is registered for the id

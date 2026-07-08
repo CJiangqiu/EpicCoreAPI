@@ -144,7 +144,9 @@ public final class ForceLoadingManager {
 
     // 防移除保护：无敌实体 或 强加载实体
     public static boolean shouldProtect(Entity entity) {
-        return EcaAPI.isInvulnerable(entity) || isForceLoadedType(entity.getType()) || FORCE_LOADED_MANUAL.contains(entity.getUUID());
+        return (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity))
+                || isForceLoadedType(entity.getType())
+                || FORCE_LOADED_MANUAL.contains(entity.getUUID());
     }
 
     // 强加载专属：超视距渲染、追踪距离扩大、区块票据、防despawn

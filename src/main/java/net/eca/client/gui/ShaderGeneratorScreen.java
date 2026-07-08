@@ -7,6 +7,8 @@ import net.eca.client.render.shader_generator.ShaderPreviewSourceCatalog;
 import net.eca.client.render.shader_generator.ShaderPreviewTarget;
 import net.eca.util.EcaLogger;
 import net.eca.util.shader_generator.ShaderCompositionProject;
+import net.eca.util.shader_generator.ShaderExportBundle;
+import net.eca.util.shader_generator.ShaderGenerator;
 import net.eca.util.shader_generator.ShaderLayer;
 import net.eca.util.shader_generator.ShaderModuleDefinition;
 import net.eca.util.shader_generator.ShaderModuleInstance;
@@ -14,6 +16,7 @@ import net.eca.util.shader_generator.ShaderModuleRegistry;
 import net.eca.util.shader_generator.ShaderProject;
 import net.eca.util.shader_generator.ShaderProjectCodec;
 import net.eca.util.shader_generator.ShaderProjectCodec.ProjectRef;
+import net.eca.util.shader_generator.ShaderTargetProfile;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -33,6 +36,7 @@ import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -78,6 +82,7 @@ public final class ShaderGeneratorScreen extends Screen {
     private final List<ShaderCompositionProject> undoStack = new ArrayList<>();
     private final List<ShaderCompositionProject> redoStack = new ArrayList<>();
     private final List<LayerRowVisual> visibleLayerRows = new ArrayList<>();
+    private final List<ElementRowVisual> visibleElementRows = new ArrayList<>();
     private List<ShaderPreviewSource> registeredSources = List.of();
     private GeneratedShaderPreview generatedPreview;
     private ShaderPreviewTarget previewTarget = ShaderPreviewTarget.PLANE;
@@ -325,6 +330,14 @@ public final class ShaderGeneratorScreen extends Screen {
                 openDropdown = -1;
                 openProjectDetails(true);
             });
+        row++;
+
+        dropdownOption(mx, y + row * MENU_ITEM_H, w,
+            Component.translatable("gui.eca.shader_generator.file.export_as",
+                currentProjectRef() == null ? "?" : currentProjectRef().shaderName()), () -> {
+                openDropdown = -1;
+                exportFiveFiles();
+            });
     }
 
     /* 编辑 */
@@ -387,43 +400,39 @@ public final class ShaderGeneratorScreen extends Screen {
         }
     }
 
-    /* 着色器效果：点击分类展开/收起右侧效果列表（PS 折叠面板风格） */
+    /* 着色器效果：基础/星空/魔法点击展开效果列表，自定义直接进入详情编辑 */
     private void addEffectDropdown() {
         int mx = 180;
         int y = MENU_Y + MENU_ITEM_H + 2;
         int width = 130;
 
-        /* 只展示有子项的三大分类——IMAGE 不在此处作为分类按钮 */
-        ShaderModuleDefinition.Category[] categories = {
-            ShaderModuleDefinition.Category.BASIC,
-            ShaderModuleDefinition.Category.STARRY_SKY,
-            ShaderModuleDefinition.Category.MAGIC
-        };
+        ShaderModuleDefinition.Category[] categories = ShaderModuleDefinition.Category.values();
         for (int i = 0; i < categories.length; i++) {
             ShaderModuleDefinition.Category category = categories[i];
             int rowY = y + i * MENU_ITEM_H;
-            dropdownOption(mx, rowY, width,
-                Component.translatable(category.translationKey()),
-                () -> {
-                    expandedEffectCategory = (expandedEffectCategory == category) ? null : category;
-                    rebuildWidgets();
-                });
+            if (category == ShaderModuleDefinition.Category.IMAGE) {
+                /* 自定义分类：直接进入详情编辑，不展开效果列表 */
+                ShaderModuleDefinition imageDef = ShaderModuleRegistry.get("image_element");
+                if (imageDef != null) {
+                    dropdownOption(mx, rowY, width,
+                        Component.translatable(category.translationKey()),
+                        () -> {
+                            openDropdown = -1;
+                            expandedEffectCategory = null;
+                            selectEffectFromMenu(imageDef);
+                        });
+                }
+            } else {
+                dropdownOption(mx, rowY, width,
+                    Component.translatable(category.translationKey()),
+                    () -> {
+                        expandedEffectCategory = (expandedEffectCategory == category) ? null : category;
+                        rebuildWidgets();
+                    });
+            }
         }
 
-        /* image_element 作为直接条目，不归属任何分类飞出一级 */
-        ShaderModuleDefinition imageDef = ShaderModuleRegistry.get("image_element");
-        if (imageDef != null) {
-            int imageRowY = y + (categories.length + 1) * MENU_ITEM_H;
-            dropdownOption(mx, imageRowY, width,
-                Component.translatable(imageDef.displayName()),
-                () -> {
-                    openDropdown = -1;
-                    expandedEffectCategory = null;
-                    selectEffectFromMenu(imageDef);
-                });
-        }
-
-        /* 点击分类后右侧固定展开效果列表 */
+        /* 点击基础/星空/魔法分类后右侧展开效果列表 */
         if (expandedEffectCategory != null) {
             List<ShaderModuleDefinition> effects = ShaderModuleRegistry.byCategory(expandedEffectCategory);
             int flyoutX = mx + width + 4;
@@ -1026,6 +1035,7 @@ public final class ShaderGeneratorScreen extends Screen {
         inspectorListBottom = inspectorBottom;
         int listPitch = 22;
         inspectorVisibleRows = Math.max(1, (inspectorListBottom - inspectorListTop) / listPitch);
+        visibleElementRows.clear();
         List<ShaderModuleInstance> elements = layer.elements();
         int maxScroll = Math.max(0, elements.size() - inspectorVisibleRows);
         elementScroll = Math.max(0, Math.min(elementScroll, maxScroll));
@@ -1034,31 +1044,44 @@ public final class ShaderGeneratorScreen extends Screen {
             int elementIndex = i;
             ShaderModuleInstance element = elements.get(i);
             int ry = inspectorListTop + (i - elementScroll) * listPitch;
+            boolean selected = elementIndex == selectedElementIndex && !elementParamView;
+            int rowColor = LAYER_COLORS[Math.floorMod(elementIndex, LAYER_COLORS.length)];
+
+            visibleElementRows.add(new ElementRowVisual(x, ry, w, 20, elementIndex, rowColor));
+
+            /* 启用/禁用切换，用 ●/○ 视觉提示 */
+            addRenderableWidget(Button.builder(
+                Component.literal(element.enabled() ? "●" : "○"),
+                button -> toggleElement(elementIndex)
+            ).bounds(x + 3, ry + 1, 18, 18).build());
+
+            addRenderableWidget(Button.builder(
+                Component.literal("↑"),
+                button -> moveElement(elementIndex, -1)
+            ).bounds(x + 23, ry + 1, 18, 18).build());
+
+            addRenderableWidget(Button.builder(
+                Component.literal("↓"),
+                button -> moveElement(elementIndex, 1)
+            ).bounds(x + 43, ry + 1, 18, 18).build());
+
+            int nameX = x + 63;
+            int deleteW = 22;
+            int nameW = w - 63 - deleteW - 2;
             Component label = Component.translatable(element.definition().displayName());
             if (!element.enabled()) {
                 label = label.copy().append(
                     Component.translatable("gui.eca.shader_generator.layer.disabled"));
             }
             addRenderableWidget(new LayerSelectWidget(
-                x, ry, w - 96, 20, label,
+                nameX, ry + 1, nameW, 18, label,
                 () -> openElementParams(elementIndex)
             ));
+
             addRenderableWidget(Button.builder(
-                Component.literal(element.enabled() ? "I" : "O"),
-                button -> toggleElement(elementIndex)
-            ).bounds(x + w - 92, ry, 22, 20).build());
-            addRenderableWidget(Button.builder(
-                Component.literal("^"),
-                button -> moveElement(elementIndex, -1)
-            ).bounds(x + w - 68, ry, 22, 20).build());
-            addRenderableWidget(Button.builder(
-                Component.literal("v"),
-                button -> moveElement(elementIndex, 1)
-            ).bounds(x + w - 44, ry, 22, 20).build());
-            addRenderableWidget(Button.builder(
-                Component.literal("X"),
+                Component.literal("✕"),
                 button -> removeElement(elementIndex)
-            ).bounds(x + w - 20, ry, 20, 20).build());
+            ).bounds(x + w - deleteW - 2, ry + 1, deleteW, 18).build());
         }
     }
 
@@ -1072,12 +1095,9 @@ public final class ShaderGeneratorScreen extends Screen {
             Component.literal("<"),
             button -> closeElementParams()
         ).bounds(x, y, 40, rowH).build());
-        addRenderableWidget(Button.builder(
-            Component.translatable("gui.eca.shader_generator.parameter.color"),
-            button -> openElementColorPicker(element)
-        ).bounds(x + 44, y, w - 44, rowH).build());
         y += pitch;
 
+        /* 自定义图像元素：导入/替换图片按钮放在最前面 */
         if (element.definition().id().equals("image_element")) {
             addRenderableWidget(Button.builder(
                 Component.translatable(element.imagePath() == null
@@ -1087,6 +1107,12 @@ public final class ShaderGeneratorScreen extends Screen {
             ).bounds(x, y, w, rowH).build());
             y += pitch;
         }
+
+        addRenderableWidget(Button.builder(
+            Component.translatable("gui.eca.shader_generator.parameter.color"),
+            button -> openElementColorPicker(element)
+        ).bounds(x, y, w, rowH).build());
+        y += pitch;
 
         inspectorListTop = y;
         inspectorListBottom = inspectorBottom;
@@ -1489,6 +1515,39 @@ public final class ShaderGeneratorScreen extends Screen {
         rebuildWidgets();
     }
 
+    /* 将当前工程生成为标准五文件，写入 config/eca/shadergenerator/<ns>/<name>/ */
+    private void exportFiveFiles() {
+        ProjectRef reference = currentProjectRef();
+        if (reference == null) {
+            statusError = true;
+            status = Component.translatable("gui.eca.shader_generator.status.project_required");
+            return;
+        }
+        try {
+            ShaderProject sp = project.toShaderProject(reference.modId(), reference.shaderName());
+            ShaderGenerator generator = ShaderGenerator.standard();
+            ShaderExportBundle bundle = generator.generate(new ShaderGenerator.Request(
+                sp, project.exportMode(), Set.of(ShaderTargetProfile.BLOCK, ShaderTargetProfile.NEW_ENTITY)
+            ));
+            java.nio.file.Path exportDir = java.nio.file.Path.of(
+                "config", "eca", "shadergenerator", reference.modId(), reference.shaderName()
+            );
+            java.nio.file.Files.createDirectories(exportDir);
+            for (ShaderExportBundle.File file : bundle.files()) {
+                String fileName = java.nio.file.Path.of(file.relativePath()).getFileName().toString();
+                java.nio.file.Path target = exportDir.resolve(fileName);
+                java.nio.file.Files.writeString(target, file.content(), java.nio.charset.StandardCharsets.UTF_8);
+            }
+            statusError = false;
+            status = Component.translatable("gui.eca.shader_generator.status.exported",
+                reference.modId() + ":" + reference.shaderName());
+        } catch (Throwable t) {
+            statusError = true;
+            status = Component.translatable("gui.eca.shader_generator.status.export_failed",
+                conciseMessage(t));
+        }
+    }
+
     private void saveCurrentProject() {
         ProjectRef reference = currentProjectRef();
         if (reference == null) {
@@ -1715,6 +1774,19 @@ public final class ShaderGeneratorScreen extends Screen {
                 Component.translatable("gui.eca.shader_generator.inspector.no_layer"),
                 x + w / 2, inspectorTop + 8, 0xFF9DA3AC);
             return;
+        }
+        /* 元素列表：与主界面图层列表一致的色条 + 背景 + 选中轮廓 */
+        if (!elementParamView) {
+            for (ElementRowVisual row : visibleElementRows) {
+                boolean selected = row.elementIndex() == selectedElementIndex;
+                int background = (selected ? 0x66000000 : 0x33000000)
+                    | (row.color() & 0x00FFFFFF);
+                g.fill(row.x(), row.y(), row.x() + row.width(), row.y() + row.height(), background);
+                g.fill(row.x(), row.y(), row.x() + 4, row.y() + row.height(), row.color());
+                if (selected) {
+                    g.renderOutline(row.x(), row.y(), row.width(), row.height(), 0xFFE6E9ED);
+                }
+            }
         }
         ShaderModuleInstance element = selectedElementInLayer(layer);
         if ((!elementParamView || element == null) && layer.elements().isEmpty()) {
@@ -2331,6 +2403,15 @@ public final class ShaderGeneratorScreen extends Screen {
         int width,
         int height,
         int layerIndex,
+        int color
+    ) {}
+
+    private record ElementRowVisual(
+        int x,
+        int y,
+        int width,
+        int height,
+        int elementIndex,
         int color
     ) {}
 

@@ -9,10 +9,10 @@ import net.minecraftforge.api.distmarker.OnlyIn;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/* 一个自定义预设对外暴露的 5 种 RenderType 集合，按顶点格式分两组：BLOCK profile（天空盒 / Boss 血条）共享
-   blockState，NEW_ENTITY profile（Boss 实体层 / 物品层 / 实体效果层）共享 entityState。每个 ShaderState 读对应
-   profile 的当前 ShaderInstance（资源重载换实例后自动跟随），并在 setupRenderState 时喂入该 profile 的标准 uniform。
-   组织方式与内置 XxxRenderTypes 一致。entityEffect 依赖纹理，按纹理缓存，避免每帧重复构造 RenderType。 */
+/* 一个自定义预设的 5 种 RenderType 集合，由双 profile 五文件组成。
+   BLOCK profile（<name>_block.vsh/.json）→ skybox / boss bar。
+   NEW_ENTITY profile（<name>_entity.vsh/.json）→ boss layer / item / entity effect。
+   共享 <name>.fsh。entityEffect 按纹理缓存。 */
 @OnlyIn(Dist.CLIENT)
 public final class ShaderPreset {
 

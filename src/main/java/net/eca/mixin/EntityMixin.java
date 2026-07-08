@@ -6,6 +6,7 @@ import net.eca.util.EntityUtil;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
@@ -19,14 +20,16 @@ public class EntityMixin {
 
     @Inject(method = "kill", at = @At("HEAD"), cancellable = true)
     private void onKill(CallbackInfo ci) {
-        if (EcaAPI.isInvulnerable((Entity) (Object) this)) {
+        Entity entity = (Entity) (Object) this;
+        if (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity)) {
             ci.cancel();
         }
     }
 
     @Inject(method = "discard", at = @At("HEAD"), cancellable = true)
     private void onDiscard(CallbackInfo ci) {
-        if (EcaAPI.isInvulnerable((Entity) (Object) this)) {
+        Entity entity = (Entity) (Object) this;
+        if (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity)) {
             ci.cancel();
         }
     }
@@ -41,7 +44,7 @@ public class EntityMixin {
         }
 
         // 检查无敌保护
-        if (EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
+        if (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
             ci.cancel();
         }
     }
@@ -56,7 +59,7 @@ public class EntityMixin {
         }
 
         // 检查无敌保护
-        if (EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
+        if (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
             ci.cancel();
         }
     }
@@ -66,6 +69,7 @@ public class EntityMixin {
     private void eca$preventRemovedState(CallbackInfoReturnable<Boolean> cir) {
         Entity entity = (Entity) (Object) this;
         if (entity.removalReason != null
+                && entity instanceof LivingEntity
                 && !EntityUtil.isChangingDimension(entity)
                 && EcaAPI.isInvulnerable(entity)) {
             entity.removalReason = null;
@@ -76,7 +80,7 @@ public class EntityMixin {
     @Inject(method = "setLevelCallback", at = @At("HEAD"), cancellable = true)
     private void onSetLevelCallback(EntityInLevelCallback callback, CallbackInfo ci) {
         Entity entity = (Entity) (Object) this;
-        if (!EcaAPI.isInvulnerable(entity) || EntityUtil.isChangingDimension(entity)) {
+        if (!(entity instanceof LivingEntity) || !EcaAPI.isInvulnerable(entity) || EntityUtil.isChangingDimension(entity)) {
             return;
         }
 
@@ -130,7 +134,7 @@ public class EntityMixin {
     private void onShouldBeSaved(CallbackInfoReturnable<Boolean> cir) {
         Entity entity = (Entity) (Object) this;
 
-        if (!EcaAPI.isInvulnerable(entity)) {
+        if (!(entity instanceof LivingEntity) || !EcaAPI.isInvulnerable(entity)) {
             return;
         }
         cir.setReturnValue(true);
@@ -140,7 +144,7 @@ public class EntityMixin {
     private void onSaveAsPassenger(CompoundTag tag, CallbackInfoReturnable<Boolean> cir) {
         Entity entity = (Entity) (Object) this;
 
-        if (!EcaAPI.isInvulnerable(entity)) {
+        if (!(entity instanceof LivingEntity) || !EcaAPI.isInvulnerable(entity)) {
             return;
         }
 

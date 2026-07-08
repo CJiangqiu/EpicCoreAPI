@@ -3,6 +3,7 @@ package net.eca.coremod;
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 
 /**
  * Hook handler for Entity bytecode injection.
@@ -29,12 +30,16 @@ public final class EntityHook {
         if (entity == null) {
             return -1;
         }
+        if (entity.getRemovalReason() == null) {
+            return -1;
+        }
+        if (!(entity instanceof LivingEntity)) {
+            return -1;
+        }
         if (!EcaAPI.isInvulnerable(entity) || EntityUtil.isChangingDimension(entity)) {
             return -1;
         }
-        if (entity.getRemovalReason() != null) {
-            entity.removalReason = null;
-        }
+        entity.removalReason = null;
         return 0;
     }
 }

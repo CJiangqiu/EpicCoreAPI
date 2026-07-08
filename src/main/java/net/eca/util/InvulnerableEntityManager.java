@@ -1,6 +1,7 @@
 package net.eca.util;
 
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.storage.LevelResource;
 
@@ -13,6 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class InvulnerableEntityManager {
 
     private static final Map<String, Set<UUID>> INVULNERABLE_ENTITIES_BY_SAVE = new ConcurrentHashMap<>();
+    private static final Map<MinecraftServer, String> SAVE_KEY_CACHE = new ConcurrentHashMap<>();
 
     public static void addInvulnerable(Entity entity) {
         String saveKey = getSaveKey(entity);
@@ -56,6 +58,7 @@ public class InvulnerableEntityManager {
 
     public static void clearAll() {
         INVULNERABLE_ENTITIES_BY_SAVE.clear();
+        SAVE_KEY_CACHE.clear();
     }
 
     private static String getSaveKey(Entity entity) {
@@ -69,7 +72,14 @@ public class InvulnerableEntityManager {
         if (level == null || level.getServer() == null) {
             return null;
         }
-        Path root = level.getServer().getWorldPath(LevelResource.ROOT);
-        return root.toAbsolutePath().normalize().toString();
+        MinecraftServer server = level.getServer();
+        String cached = SAVE_KEY_CACHE.get(server);
+        if (cached != null) {
+            return cached;
+        }
+        Path root = server.getWorldPath(LevelResource.ROOT);
+        String saveKey = root.toAbsolutePath().normalize().toString();
+        SAVE_KEY_CACHE.put(server, saveKey);
+        return saveKey;
     }
 }

@@ -4,6 +4,7 @@ import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -25,7 +26,7 @@ public class ClientLevelMixin {
             ClientLevel clientLevel = (ClientLevel) (Object) this;
             Entity entity = clientLevel.getEntity(entityId);
 
-            if (entity != null && EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
+            if (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
                 ci.cancel();
             }
         } catch (Exception ignored) {

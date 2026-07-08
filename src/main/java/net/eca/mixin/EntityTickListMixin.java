@@ -5,6 +5,7 @@ import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.entity.EntityTickList;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -30,7 +31,7 @@ public class EntityTickListMixin {
     @Inject(method = "remove", at = @At("HEAD"), cancellable = true)
     private void eca$onRemove(Entity entity, CallbackInfo ci) {
         // Allow dimension change operations even for invulnerable entities
-        if (EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
+        if (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity)) {
             ci.cancel();
         }
     }

@@ -47,24 +47,39 @@ public final class ShaderEffectDetailsScreen extends Screen {
     @Override
     protected void init() {
         int left = (width - PANEL_WIDTH) / 2;
-        int top = 44;
+        int rowY = 44;
         int controlsBottom = height - 42;
-        visibleRows = Math.max(1, (controlsBottom - top - 28) / 22);
-        visibleParameters = effect.definition().parameters().stream()
-            .filter(parameter -> !isColorParameter(parameter.key()))
-            .toList();
-        int maxScroll = Math.max(0, visibleParameters.size() - visibleRows);
-        scroll = Math.max(0, Math.min(scroll, maxScroll));
 
+        /* 自定义图像元素：导入/替换图片按钮置顶 */
+        if (effect.definition().id().equals("image_element")) {
+            addRenderableWidget(Button.builder(
+                Component.translatable(effect.imagePath() == null
+                    ? "gui.eca.shader_generator.effects.import_image"
+                    : "gui.eca.shader_generator.effects.replace_image"),
+                button -> importImage()
+            ).bounds(left, rowY, PANEL_WIDTH, 20).build());
+            rowY += 26;
+        }
+
+        /* 颜色按钮 */
         addRenderableWidget(Button.builder(
             Component.translatable("gui.eca.shader_generator.parameter.color"),
             button -> openColorPicker()
-        ).bounds(left, top, PANEL_WIDTH, 20).build());
+        ).bounds(left, rowY, PANEL_WIDTH, 20).build());
+        rowY += 26;
+
+        /* 参数列表 */
+        visibleParameters = effect.definition().parameters().stream()
+            .filter(parameter -> !isColorParameter(parameter.key()))
+            .toList();
+        visibleRows = Math.max(1, (controlsBottom - rowY) / 22);
+        int maxScroll = Math.max(0, visibleParameters.size() - visibleRows);
+        scroll = Math.max(0, Math.min(scroll, maxScroll));
 
         int end = Math.min(visibleParameters.size(), scroll + visibleRows);
         for (int index = scroll; index < end; index++) {
             ShaderModuleDefinition.Parameter parameter = visibleParameters.get(index);
-            int y = top + 26 + (index - scroll) * 22;
+            int y = rowY + (index - scroll) * 22;
             addRenderableWidget(Button.builder(
                 Component.literal("-"),
                 button -> adjust(parameter, -parameter.step())
@@ -90,15 +105,6 @@ public final class ShaderEffectDetailsScreen extends Screen {
                 Component.literal("+"),
                 button -> adjust(parameter, parameter.step())
             ).bounds(left + 320, y, 40, 20).build());
-        }
-
-        if (effect.definition().id().equals("image_element")) {
-            addRenderableWidget(Button.builder(
-                Component.translatable(effect.imagePath() == null
-                    ? "gui.eca.shader_generator.effects.import_image"
-                    : "gui.eca.shader_generator.effects.replace_image"),
-                button -> importImage()
-            ).bounds(left, height - 66, PANEL_WIDTH, 20).build());
         }
 
         addRenderableWidget(Button.builder(
@@ -182,16 +188,19 @@ public final class ShaderEffectDetailsScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         renderBackground(graphics);
         int left = (width - PANEL_WIDTH) / 2;
-        int top = 44;
+        /* 颜色色块：紧跟在标题下方，与颜色按钮的 y=44（或含导入则 y=70）对齐 */
+        int swatchY = effect.definition().id().equals("image_element") ? 70 : 44;
         graphics.drawCenteredString(font, title, width / 2, 18, 0xFFFFFFFF);
         int color = colorArgb();
-        graphics.fill(left + 8, top + 4, left + 44, top + 16, color);
-        graphics.renderOutline(left + 8, top + 4, 36, 12, 0xFFFFFFFF);
+        graphics.fill(left + 8, swatchY + 4, left + 44, swatchY + 16, color);
+        graphics.renderOutline(left + 8, swatchY + 4, 36, 12, 0xFFFFFFFF);
 
+        /* 参数标签：与 init 中 rowY + (index - scroll) * 22 对应 */
+        int paramBaseY = swatchY + 26;
         int end = Math.min(visibleParameters.size(), scroll + visibleRows);
         for (int index = scroll; index < end; index++) {
             ShaderModuleDefinition.Parameter parameter = visibleParameters.get(index);
-            int y = top + 32 + (index - scroll) * 22;
+            int y = paramBaseY + (index - scroll) * 22;
             graphics.drawString(
                 font,
                 Component.translatable(parameter.displayName()),
@@ -200,9 +209,6 @@ public final class ShaderEffectDetailsScreen extends Screen {
                 0xFFC7CBD1,
                 false
             );
-        }
-        if (effect.definition().id().equals("image_element") && effect.imagePath() != null) {
-            graphics.drawCenteredString(font, effect.imagePath(), width / 2, height - 78, 0xFFCDD1D7);
         }
         super.render(graphics, mouseX, mouseY, partialTick);
     }

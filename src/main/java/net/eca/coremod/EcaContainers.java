@@ -7,6 +7,7 @@ import it.unimi.dsi.fastutil.longs.LongAVLTreeSet;
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.entity.ChunkEntities;
 import net.minecraft.world.level.entity.EntitySection;
 
@@ -65,7 +66,9 @@ public final class EcaContainers {
      * @return true if removal should be blocked
      */
     private static boolean shouldProtectEntity(Entity entity) {
-        return EcaAPI.isInvulnerable(entity) && !EntityUtil.isChangingDimension(entity);
+        return entity instanceof LivingEntity
+                && EcaAPI.isInvulnerable(entity)
+                && !EntityUtil.isChangingDimension(entity);
     }
 
     private static boolean shouldProtectTarget(Object value) {

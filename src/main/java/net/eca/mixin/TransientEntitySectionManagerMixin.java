@@ -8,6 +8,7 @@ import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.entity.EntityAccess;
 import net.minecraft.world.level.entity.LevelCallback;
@@ -61,7 +62,7 @@ public class TransientEntitySectionManagerMixin {
 
         @Inject(method = "onRemove", at = @At("HEAD"), cancellable = true)
         private void eca$onRemove(Entity.RemovalReason reason, CallbackInfo ci) {
-            if (this.entity instanceof Entity realEntity) {
+            if (this.entity instanceof LivingEntity realEntity) {
                 if (EcaAPI.isInvulnerable(realEntity) && !(reason == Entity.RemovalReason.CHANGED_DIMENSION && EntityUtil.isChangingDimension(realEntity))) {
                     ci.cancel();
                 }
