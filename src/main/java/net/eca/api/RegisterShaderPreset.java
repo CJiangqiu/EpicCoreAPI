@@ -12,11 +12,11 @@ import java.lang.annotation.Target;
  * ECA resolves the corresponding five standard core shader files from
  * {@code assets/<namespace>/shaders/core/<path>.*} at startup. The annotated class
  * itself serves as a discoverable marker — MCreator plugins can enumerate
- * {@code @EcaShaderPreset} classes to populate preset dropdowns.
+ * {@code @RegisterShaderPreset} classes to populate preset dropdowns.
  *
  * <p><b>Usage</b></p>
  * <pre>{@code
- * @EcaShaderPreset("mymod:my_nebula")
+ * @RegisterShaderPreset("mymod:my_nebula")
  * public final class MyNebulaPreset {}
  * }</pre>
  *
@@ -32,7 +32,7 @@ import java.lang.annotation.Target;
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.TYPE)
-public @interface EcaShaderPreset {
+public @interface RegisterShaderPreset {
 
     /** 预设资源 id，格式 "namespace:path"（如 "mymod:my_nebula"） */
     String value();

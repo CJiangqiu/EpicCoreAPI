@@ -591,6 +591,91 @@ Filter presets:
 - `TOXIC` — toxic
 - `COSMOS` — cosmos
 
+### Shader Generator
+
+ECA provides an in-game shader preset generator for building portable Minecraft core shader presets without writing GLSL by hand. Open it with:
+
+```mcfunction
+/eca shaderGenerator
+```
+
+The generator edits a layered composition project. Each layer can contain multiple visual modules, including basic shapes, starry sky effects, magic symbols, and image elements. The editor supports live preview, undo/redo, layer visibility, layer ordering, blend modes, canvas editing, project save/load, and five-file shader export.
+
+Preview targets currently include plane, item, entity, skybox, and Boss bar. The exported preset uses the standard core shader five-file layout:
+
+```text
+assets/<namespace>/shaders/core/<name>.fsh
+assets/<namespace>/shaders/core/<name>_block.vsh
+assets/<namespace>/shaders/core/<name>_block.json
+assets/<namespace>/shaders/core/<name>_entity.vsh
+assets/<namespace>/shaders/core/<name>_entity.json
+```
+
+The fragment shader is shared by both profiles. The two vertex profiles are generated separately because Minecraft uses different vertex formats for different render targets:
+
+- `<name>_block.*` uses `DefaultVertexFormat.BLOCK`, for skybox, plane preview, and Boss bar rendering.
+- `<name>_entity.*` uses `DefaultVertexFormat.NEW_ENTITY`, for entity layers, item layers, and textured entity effects.
+
+Export modes:
+
+- `PORTABLE`: standard Minecraft core shader output with no ECA-specific uniforms.
+- `PORTABLE_WITH_ECA_HINTS`: includes ECA uniform hooks with harmless defaults, while remaining usable without ECA.
+- `ECA_ENHANCED`: includes ECA-specific uniforms and expects ECA's enhanced shader runtime.
+
+Project files are saved under `config/eca/shadergenerator/<namespace>/<name>/project.json`. Use **File -> Export As <shader>** to export a runtime-loadable five-file preset into `config/eca/shadergenerator/<namespace>/<name>/`. ECA automatically discovers presets from both mod assets and exported config presets. A preset ID is always `<namespace>:<name>`.
+
+For mod-packaged presets, place the five files under `src/main/resources/assets/<namespace>/shaders/core/`. You may also declare the preset with `@RegisterShaderPreset`. The annotation registers the preset ID during startup scanning and is useful for mods that want to expose custom presets through an explicit Java marker class:
+
+```java
+import net.eca.api.RegisterShaderPreset;
+
+@RegisterShaderPreset("mymod:my_nebula")
+public final class MyNebulaPreset {
+}
+```
+
+At runtime, use `EcaPresets` to obtain the generated RenderTypes:
+
+```java
+import net.eca.client.render.preset.EcaPresets;
+import net.minecraft.client.renderer.RenderType;
+import net.minecraft.resources.ResourceLocation;
+
+public final class MyPresetRenderTypes {
+    public static RenderType bossBar() {
+        return EcaPresets.bossBar("mymod:my_nebula");
+    }
+
+    public static RenderType bossLayer() {
+        return EcaPresets.bossLayer("mymod:my_nebula");
+    }
+
+    public static RenderType skybox() {
+        return EcaPresets.skybox("mymod:my_nebula");
+    }
+
+    public static RenderType item() {
+        return EcaPresets.item("mymod:my_nebula");
+    }
+
+    public static RenderType entityEffect(ResourceLocation texture) {
+        return EcaPresets.entityEffect("mymod:my_nebula", texture);
+    }
+}
+```
+
+You can also query the preset object through `EcaAPI`:
+
+```java
+import net.eca.api.EcaAPI;
+import net.eca.client.render.preset.ShaderPreset;
+import net.minecraft.resources.ResourceLocation;
+
+ShaderPreset preset = EcaAPI.shaderPreset(new ResourceLocation("mymod", "my_nebula"));
+```
+
+The returned `ShaderPreset` exposes five ready-made render targets: `bossBar()`, `bossLayer()`, `skybox()`, `item()`, and `entityEffect(texture)`.
+
 ### BossShow Cinematics
 
 BossShow plays a cutscene that locks the player's camera onto a pre-recorded path around a target entity, with subtitles and server-side event callbacks. Camera paths are recorded with the built-in in-game editor — you don't need to write keyframes by hand.
@@ -1336,6 +1421,91 @@ public class DiamondSwordExtension extends ItemExtension {
 - `SNOW` — 雪
 - `TOXIC` — 剧毒
 - `COSMOS` — 宇宙
+
+### 着色器生成器
+
+ECA 提供了游戏内着色器预设生成器，用于在不手写 GLSL 的情况下制作可移植的 Minecraft core shader 预设。使用以下命令打开：
+
+```mcfunction
+/eca shaderGenerator
+```
+
+生成器编辑的是一个分层合成工程。每个图层可以包含多个视觉模块，例如基础形状、星空效果、魔法符号和图片元素。编辑器支持实时预览、撤销/重做、图层显隐、图层排序、混合模式、画布编辑、工程保存/读取，以及标准五文件导出。
+
+当前预览目标包括平面、物品、实体、天空盒和 Boss 血条。导出的预设使用标准 core shader 五文件结构：
+
+```text
+assets/<namespace>/shaders/core/<name>.fsh
+assets/<namespace>/shaders/core/<name>_block.vsh
+assets/<namespace>/shaders/core/<name>_block.json
+assets/<namespace>/shaders/core/<name>_entity.vsh
+assets/<namespace>/shaders/core/<name>_entity.json
+```
+
+片元着色器由两个 profile 共享。顶点着色器必须分成两个 profile，因为 Minecraft 不同渲染目标使用的顶点格式不同：
+
+- `<name>_block.*` 使用 `DefaultVertexFormat.BLOCK`，用于天空盒、平面预览和 Boss 血条。
+- `<name>_entity.*` 使用 `DefaultVertexFormat.NEW_ENTITY`，用于实体额外渲染层、物品额外渲染层和带纹理的实体效果层。
+
+导出模式：
+
+- `PORTABLE`：标准 Minecraft core shader 输出，不包含 ECA 专属 uniform。
+- `PORTABLE_WITH_ECA_HINTS`：包含 ECA uniform 钩子和无害默认值，但脱离 ECA 仍可使用。
+- `ECA_ENHANCED`：包含 ECA 专属 uniform，并预期由 ECA 增强运行时加载。
+
+工程会保存到 `config/eca/shadergenerator/<namespace>/<name>/project.json`。使用 **File -> Export As <shader>** 可以把当前工程导出为运行时可加载的五文件预设，位置为 `config/eca/shadergenerator/<namespace>/<name>/`。ECA 会自动发现 mod assets 内的预设，以及 config 中导出的预设。预设 ID 固定为 `<namespace>:<name>`。
+
+如果要把预设打包进 Mod，将五个文件放到 `src/main/resources/assets/<namespace>/shaders/core/`。也可以使用 `@RegisterShaderPreset` 显式声明预设。这个注解会在启动扫描阶段注册对应的预设 ID，适合希望通过 Java 标记类明确暴露自定义预设的 Mod：
+
+```java
+import net.eca.api.RegisterShaderPreset;
+
+@RegisterShaderPreset("mymod:my_nebula")
+public final class MyNebulaPreset {
+}
+```
+
+运行时可以通过 `EcaPresets` 获取生成后的 RenderType：
+
+```java
+import net.eca.client.render.preset.EcaPresets;
+import net.minecraft.client.renderer.RenderType;
+import net.minecraft.resources.ResourceLocation;
+
+public final class MyPresetRenderTypes {
+    public static RenderType bossBar() {
+        return EcaPresets.bossBar("mymod:my_nebula");
+    }
+
+    public static RenderType bossLayer() {
+        return EcaPresets.bossLayer("mymod:my_nebula");
+    }
+
+    public static RenderType skybox() {
+        return EcaPresets.skybox("mymod:my_nebula");
+    }
+
+    public static RenderType item() {
+        return EcaPresets.item("mymod:my_nebula");
+    }
+
+    public static RenderType entityEffect(ResourceLocation texture) {
+        return EcaPresets.entityEffect("mymod:my_nebula", texture);
+    }
+}
+```
+
+也可以通过 `EcaAPI` 查询预设对象：
+
+```java
+import net.eca.api.EcaAPI;
+import net.eca.client.render.preset.ShaderPreset;
+import net.minecraft.resources.ResourceLocation;
+
+ShaderPreset preset = EcaAPI.shaderPreset(new ResourceLocation("mymod", "my_nebula"));
+```
+
+返回的 `ShaderPreset` 提供五个可直接用于扩展系统的渲染入口：`bossBar()`、`bossLayer()`、`skybox()`、`item()` 和 `entityEffect(texture)`。
 
 ### BossShow 演出
 

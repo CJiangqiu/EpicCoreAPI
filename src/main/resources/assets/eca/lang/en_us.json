@@ -76,7 +76,6 @@
   "key.eca.bossshow.mark_keyframe": "BossShow: Mark current frame as keyframe",
   "key.eca.bossshow.rec_pause": "BossShow: Pause recording",
   "key.eca.bossshow.rec_start": "BossShow: Start/Resume recording",
-  "key.eca.shader_generator.open": "Shader Generator: Open editor",
   "msg.eca.bossshow.delete_failed": "§cFailed to delete: %s",
   "msg.eca.bossshow.deleted": "§aDeleted cutscene %s",
   "command.eca.shader_generator.opened": "Opened shader generator",

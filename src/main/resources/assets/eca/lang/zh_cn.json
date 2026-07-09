@@ -76,7 +76,6 @@
   "key.eca.bossshow.mark_keyframe": "BossShow：将当前帧标记为关键帧",
   "key.eca.bossshow.rec_pause": "BossShow：暂停录制",
   "key.eca.bossshow.rec_start": "BossShow：开始/继续录制",
-  "key.eca.shader_generator.open": "着色器生成器：打开编辑器",
   "msg.eca.bossshow.delete_failed": "§c删除失败：%s",
   "msg.eca.bossshow.deleted": "§a已删除演出 %s",
   "command.eca.shader_generator.opened": "已打开着色器生成器",

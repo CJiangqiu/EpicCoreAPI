@@ -1,6 +1,6 @@
 package net.eca.client.render.preset;
 
-import net.eca.api.EcaShaderPreset;
+import net.eca.api.RegisterShaderPreset;
 import net.eca.util.EcaLogger;
 import net.eca.util.entity_extension.GlobalEffectRegistry;
 import net.minecraft.client.Minecraft;
@@ -39,7 +39,7 @@ public final class ShaderPresetRegistry {
 
     private static volatile boolean shadersLoaded = false;
 
-    /* 启动时三路扫描：@EcaShaderPreset 注解 → mod assets 文件 → config 导出目录 */
+    /* 启动时三路扫描：@RegisterShaderPreset 注解 → mod assets 文件 → config 导出目录 */
     public static void scanAndRegisterAll() {
         scanAnnotations();
         scanModPresets();
@@ -50,12 +50,12 @@ public final class ShaderPresetRegistry {
         }
     }
 
-    /* 扫描 @EcaShaderPreset 注解：读 value() 得到预设 id，作为 MCR 可发现的清单条目 */
+    /* 扫描 @RegisterShaderPreset 注解：读 value() 得到预设 id，作为 MCR 可发现的清单条目 */
     private static void scanAnnotations() {
         ModList.get().forEachModFile(modFile -> {
             for (IModInfo modInfo : modFile.getModInfos()) {
                 modFile.getScanResult().getAnnotations().forEach(annotationData -> {
-                    if (EcaShaderPreset.class.getName().equals(annotationData.annotationType().getClassName())) {
+                    if (RegisterShaderPreset.class.getName().equals(annotationData.annotationType().getClassName())) {
                         String idStr = (String) annotationData.annotationData().get("value");
                         if (idStr != null && !idStr.isBlank()) {
                             ResourceLocation id = ResourceLocation.tryParse(idStr);
