@@ -11,6 +11,9 @@ import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.UnsafeUtil;
+
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
@@ -50,6 +53,15 @@ import java.util.UUID;
 import java.util.function.Predicate;
 
 public final class EcaAPI {
+
+    // 无敌实体快速路径：按 entityId 记录当前处于 ECA 无敌状态的实体。
+    // isInvulnerable() 先查此集，不在则直接返回 false 跳过 SynchedEntityData 读取。
+    private static final Set<Integer> INVULNERABLE_IDS = ConcurrentHashMap.newKeySet();
+
+    // 清除快速路径条目（供 EntityUtil 内部清理调用）
+    public static void clearInvulnerableFastPath(int entityId) {
+        INVULNERABLE_IDS.remove(entityId);
+    }
 
     // 锁定血量
     /**
@@ -227,6 +239,10 @@ public final class EcaAPI {
         if (!(entity instanceof LivingEntity livingEntity)) {
             return false;
         }
+        // 快速路径：绝大多数实体不无敌，直接返回 false，跳过 SynchedEntityData 读取
+        if (!INVULNERABLE_IDS.contains(entity.getId())) {
+            return false;
+        }
         boolean dataInvulnerable;
         if (EntityUtil.INVULNERABLE != null) {
             dataInvulnerable = livingEntity.getEntityData().get(EntityUtil.INVULNERABLE);
@@ -276,6 +292,7 @@ public final class EcaAPI {
 
         if (invulnerable) {
             // 开启无敌：复活 + 锁血 + 设置无敌状态 + 添加记录
+            INVULNERABLE_IDS.add(entity.getId());
             revive(livingEntity);
             float lockValue = Math.max(EntityUtil.getHealth(livingEntity), livingEntity.getMaxHealth());
             lockValue = Math.max(lockValue, 1.0f);
@@ -288,6 +305,7 @@ public final class EcaAPI {
             InvulnerableEntityManager.addInvulnerable(entity);
         } else {
             // 关闭无敌：解除无敌状态 + 解锁血量 + 移除记录
+            INVULNERABLE_IDS.remove(entity.getId());
             if (EntityUtil.INVULNERABLE != null) {
                 livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, false);
             } else {

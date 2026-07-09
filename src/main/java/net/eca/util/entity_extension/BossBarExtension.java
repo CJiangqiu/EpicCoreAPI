@@ -64,4 +64,22 @@ public class BossBarExtension {
     public int getFillOffsetY() {
         return 0;
     }
+
+    /**
+     * Returns the opacity of the boss bar frame (border).
+     * 1.0 is fully opaque (default), 0.0 is fully transparent.
+     * @return alpha value in range [0, 1]
+     */
+    public float getFrameAlpha() {
+        return 1.0f;
+    }
+
+    /**
+     * Returns the opacity of the boss bar fill (health bar).
+     * 1.0 is fully opaque (default), 0.0 is fully transparent.
+     * @return alpha value in range [0, 1]
+     */
+    public float getFillAlpha() {
+        return 1.0f;
+    }
 }

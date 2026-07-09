@@ -29,6 +29,7 @@ public final class ForceLoadingManager {
 
     private static final Map<UUID, TrackedChunk> TRACKED = new ConcurrentHashMap<>();
     private static final Set<UUID> FORCE_LOADED_MANUAL = ConcurrentHashMap.newKeySet();
+    private static final Map<EntityType<?>, Boolean> FORCE_LOADED_TYPE_CACHE = new ConcurrentHashMap<>();
 
     private static final ThreadLocal<Entity> CURRENT_RENDERING_ENTITY = new ThreadLocal<>();
 
@@ -230,6 +231,19 @@ public final class ForceLoadingManager {
     }
 
     public static boolean isForceLoadedType(EntityType<?> type) {
+        if (type == null) {
+            return false;
+        }
+        return FORCE_LOADED_TYPE_CACHE.computeIfAbsent(type, ForceLoadingManager::resolveForceLoadedType);
+    }
+
+    static void clearForceLoadedTypeCache(EntityType<?> type) {
+        if (type != null) {
+            FORCE_LOADED_TYPE_CACHE.remove(type);
+        }
+    }
+
+    private static boolean resolveForceLoadedType(EntityType<?> type) {
         EntityExtension extension = EntityExtensionManager.getExtension(type);
         return extension != null && extension.enableForceLoading();
     }

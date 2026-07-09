@@ -6,6 +6,9 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.world.entity.LivingEntity;
 
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
 //血量锁定管理器
 public class HealthLockManager {
 
@@ -16,6 +19,18 @@ public class HealthLockManager {
     private static final String NBT_HEALTH_LOCK_VALUE = "ecaHealthLockValue";
     private static final String NBT_HEAL_BAN_VALUE = "ecaHealBanValue";
     private static final String NBT_MAX_HEALTH_LOCK_VALUE = "ecaMaxHealthLockValue";
+
+    /*
+     快速路径：按 entityId 记录当前有活跃锁/禁疗/最大血量锁的实体。
+     绝大多数实体从未被锁定——get 方法中先查此集合，不在直接返回 null，
+     完全跳过 SynchedEntityData / NBT 读取。
+
+     entityId 可能被复用（旧实体移除、新实体同 id），但 false positive
+     只意味着多做一次实际存储读取，不会造成错误行为，且开销远低于每帧
+     对全部实体的全量读取。 */
+    private static final Set<Integer> HEALTH_LOCK_IDS = ConcurrentHashMap.newKeySet();
+    private static final Set<Integer> HEAL_BAN_IDS = ConcurrentHashMap.newKeySet();
+    private static final Set<Integer> MAX_HEALTH_LOCK_IDS = ConcurrentHashMap.newKeySet();
 
     //SynchedEntityData 读取失败日志的一次性开关，避免构造期对每个实体刷屏
     private static volatile boolean synchedReadFailureLogged = false;
@@ -40,6 +55,7 @@ public class HealthLockManager {
     //设置血量锁定
     public static void setLock(LivingEntity entity, float value) {
         if (entity == null) return;
+        HEALTH_LOCK_IDS.add(entity.getId());
         String encrypted = encryptHealth(value);
         if (EntityUtil.HEALTH_LOCK_VALUE != null) {
             entity.getEntityData().set(EntityUtil.HEALTH_LOCK_VALUE, encrypted);
@@ -52,6 +68,7 @@ public class HealthLockManager {
     //移除血量锁定
     public static void removeLock(LivingEntity entity) {
         if (entity == null) return;
+        HEALTH_LOCK_IDS.remove(entity.getId());
         String unlockedValue = encryptHealth(0.0f);
         if (EntityUtil.HEALTH_LOCK_VALUE != null) {
             entity.getEntityData().set(EntityUtil.HEALTH_LOCK_VALUE, unlockedValue);
@@ -63,6 +80,7 @@ public class HealthLockManager {
     //获取锁定值（如果没有锁定返回 null）
     public static Float getLock(LivingEntity entity) {
         if (entity == null) return null;
+        if (!HEALTH_LOCK_IDS.contains(entity.getId())) return null;
         String encrypted;
         if (EntityUtil.HEALTH_LOCK_VALUE != null) {
             encrypted = readSynchedSafely(entity, EntityUtil.HEALTH_LOCK_VALUE);
@@ -80,6 +98,7 @@ public class HealthLockManager {
     //设置禁疗
     public static void setHealBan(LivingEntity entity, float value) {
         if (entity == null) return;
+        HEAL_BAN_IDS.add(entity.getId());
         String encrypted = encryptHealth(value);
         if (EntityUtil.HEAL_BAN_VALUE != null) {
             entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, encrypted);
@@ -92,6 +111,7 @@ public class HealthLockManager {
     //移除禁疗
     public static void removeHealBan(LivingEntity entity) {
         if (entity == null) return;
+        HEAL_BAN_IDS.remove(entity.getId());
         if (EntityUtil.HEAL_BAN_VALUE != null) {
             entity.getEntityData().set(EntityUtil.HEAL_BAN_VALUE, "");
         } else {
@@ -102,6 +122,7 @@ public class HealthLockManager {
     //获取禁疗值（如果没有禁疗返回 null）
     public static Float getHealBan(LivingEntity entity) {
         if (entity == null) return null;
+        if (!HEAL_BAN_IDS.contains(entity.getId())) return null;
         String encrypted;
         if (EntityUtil.HEAL_BAN_VALUE != null) {
             encrypted = readSynchedSafely(entity, EntityUtil.HEAL_BAN_VALUE);
@@ -118,6 +139,7 @@ public class HealthLockManager {
     //设置最大生命值锁定
     public static void setMaxHealthLock(LivingEntity entity, float value) {
         if (entity == null) return;
+        MAX_HEALTH_LOCK_IDS.add(entity.getId());
         String encrypted = encryptHealth(value);
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
             entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, encrypted);
@@ -129,6 +151,7 @@ public class HealthLockManager {
     //移除最大生命值锁定
     public static void removeMaxHealthLock(LivingEntity entity) {
         if (entity == null) return;
+        MAX_HEALTH_LOCK_IDS.remove(entity.getId());
         String unlockedValue = encryptHealth(0.0f);
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
             entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, unlockedValue);
@@ -140,6 +163,7 @@ public class HealthLockManager {
     //获取最大生命值锁定值（如果没有锁定返回 null）
     public static Float getMaxHealthLock(LivingEntity entity) {
         if (entity == null) return null;
+        if (!MAX_HEALTH_LOCK_IDS.contains(entity.getId())) return null;
         String encrypted;
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null) {
             encrypted = readSynchedSafely(entity, EntityUtil.MAX_HEALTH_LOCK_VALUE);

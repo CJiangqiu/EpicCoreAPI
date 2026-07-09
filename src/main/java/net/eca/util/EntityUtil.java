@@ -1,5 +1,6 @@
 package net.eca.util;
 
+import net.eca.api.EcaAPI;
 import net.eca.config.EcaConfiguration;
 import net.eca.network.ClientRemovePacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
@@ -865,6 +866,7 @@ public class EntityUtil {
             livingEntity.getPersistentData().putBoolean("ecaInvulnerable", false);
         }
         InvulnerableEntityManager.removeInvulnerable(livingEntity);
+        EcaAPI.clearInvulnerableFastPath(entity.getId());
         HealthLockManager.removeLock(livingEntity);
         HealthLockManager.removeHealBan(livingEntity);
         HealthLockManager.removeMaxHealthLock(livingEntity);

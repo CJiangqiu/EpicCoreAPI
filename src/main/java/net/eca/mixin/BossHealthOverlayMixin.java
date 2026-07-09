@@ -9,6 +9,7 @@ import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.renderer.GameRenderer;
+import net.eca.client.render.shader.EcaShaderInstance;
 import net.eca.util.entity_extension.EntityExtensionClientState;
 import net.eca.client.render.TextureSizeCache;
 import net.eca.util.entity_extension.EntityExtension;
@@ -167,12 +168,12 @@ public class BossHealthOverlayMixin {
 
         // 外框：满宽渲染（先渲染作为底层）
         eca$renderLayer(graphics, frameTexture, frameType,
-                frameDrawX, frameDrawY, barWidth, barHeight, barWidth, barHeight);
+                frameDrawX, frameDrawY, barWidth, barHeight, barWidth, barHeight, bossBar.getFrameAlpha());
 
         // 填充：按 progress 裁剪渲染（后渲染覆盖在外框上方）
         if (fillWidth > 0) {
             eca$renderLayer(graphics, fillTexture, fillType,
-                    fillDrawX, fillDrawY, fillWidth, fillTextureHeight, fillTextureWidth, fillTextureHeight);
+                    fillDrawX, fillDrawY, fillWidth, fillTextureHeight, fillTextureWidth, fillTextureHeight, bossBar.getFillAlpha());
         }
 
         graphics.pose().popPose();
@@ -182,17 +183,25 @@ public class BossHealthOverlayMixin {
 
     @Unique
     private void eca$renderLayer(GuiGraphics graphics, ResourceLocation texture, RenderType renderType,
-                                 int x, int y, int drawWidth, int drawHeight, int fullWidth, int fullHeight) {
+                                 int x, int y, int drawWidth, int drawHeight, int fullWidth, int fullHeight,
+                                 float alpha) {
         if (texture == null && renderType == null) {
             return;
         }
-        if (texture != null && renderType != null) {
-            drawTextureWithShaderMask(graphics, texture, renderType,
-                    x, y, drawWidth, drawHeight, fullWidth, fullHeight);
-        } else if (texture != null) {
-            graphics.blit(texture, x, y, 0, 0, drawWidth, drawHeight, fullWidth, fullHeight);
-        } else {
-            drawRenderType(graphics, renderType, x, y, drawWidth, drawHeight, fullWidth);
+        EcaShaderInstance.setOpacity(alpha);
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, alpha);
+        try {
+            if (texture != null && renderType != null) {
+                drawTextureWithShaderMask(graphics, texture, renderType,
+                        x, y, drawWidth, drawHeight, fullWidth, fullHeight);
+            } else if (texture != null) {
+                graphics.blit(texture, x, y, 0, 0, drawWidth, drawHeight, fullWidth, fullHeight);
+            } else {
+                drawRenderType(graphics, renderType, x, y, drawWidth, drawHeight, fullWidth);
+            }
+        } finally {
+            RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+            EcaShaderInstance.clearOpacity();
         }
     }
 
