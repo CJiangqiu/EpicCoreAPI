@@ -24,7 +24,7 @@ public class StormShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance stormShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            ResourceLocation.fromNamespaceAndPath("eca", "storm"),
+            new ResourceLocation("eca", "storm"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(stormShader, instance -> {

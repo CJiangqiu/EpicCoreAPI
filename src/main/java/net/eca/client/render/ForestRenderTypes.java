@@ -12,7 +12,7 @@ import net.eca.client.render.shader.ForestShader;
 @OnlyIn(Dist.CLIENT)
 public class ForestRenderTypes {
 
-    private static final ResourceLocation LEAVES_TEXTURE = ResourceLocation.fromNamespaceAndPath("eca", "textures/shader/forest_leaves.png");
+    private static final ResourceLocation LEAVES_TEXTURE = new ResourceLocation("eca", "textures/shader/forest_leaves.png");
 
     private static final RenderStateShard.ShaderStateShard SHADER_STATE = new RenderStateShard.ShaderStateShard(ForestShader::getShader) {
         @Override

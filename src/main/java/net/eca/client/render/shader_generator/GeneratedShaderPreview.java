@@ -29,7 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-
+@SuppressWarnings("removal")
 public final class GeneratedShaderPreview implements ShaderPreviewSource, AutoCloseable {
 
     private static final AtomicLong TEXTURE_REVISION = new AtomicLong();
@@ -86,12 +86,12 @@ public final class GeneratedShaderPreview implements ShaderPreviewSource, AutoCl
         try {
             blockShader = EcaShaderInstance.create(
                 provider,
-                ResourceLocation.fromNamespaceAndPath(project.namespace(), project.path() + "_block"),
+                new ResourceLocation(project.namespace(), project.path() + "_block"),
                 DefaultVertexFormat.BLOCK
             );
             ShaderInstance entityShader = EcaShaderInstance.create(
                 provider,
-                ResourceLocation.fromNamespaceAndPath(project.namespace(), project.path() + "_entity"),
+                new ResourceLocation(project.namespace(), project.path() + "_entity"),
                 DefaultVertexFormat.NEW_ENTITY
             );
             List<ResourceLocation> textures = bindImportedTextures(

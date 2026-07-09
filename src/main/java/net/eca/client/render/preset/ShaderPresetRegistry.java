@@ -29,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
    BLOCK profile → skybox / boss bar 的 RenderType。
    NEW_ENTITY profile → boss layer / item / entity effect 的 RenderType。
    纯客户端：服务端无着色器子系统。 */
+@SuppressWarnings("removal")
 @OnlyIn(Dist.CLIENT)
 public final class ShaderPresetRegistry {
 
@@ -83,7 +84,7 @@ public final class ShaderPresetRegistry {
                         if (!Files.isDirectory(presetDir)) continue;
                         String name = presetDir.getFileName().toString();
                         if (hasPresetFiles(presetDir, name)) {
-                            ResourceLocation id = ResourceLocation.fromNamespaceAndPath(namespace, name);
+                            ResourceLocation id = new ResourceLocation(namespace, name);
                             register(id);
                         }
                     }
@@ -108,7 +109,7 @@ public final class ShaderPresetRegistry {
                         if (!fileName.endsWith(".fsh")) continue;
                         String name = fileName.substring(0, fileName.length() - 4);
                         if (hasPresetFiles(shaderDir, name)) {
-                            register(ResourceLocation.fromNamespaceAndPath(modid, name));
+                            register(new ResourceLocation(modid, name));
                         }
                     }
                 } catch (IOException | RuntimeException e) {

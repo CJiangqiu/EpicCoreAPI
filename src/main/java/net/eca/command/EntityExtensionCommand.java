@@ -149,7 +149,7 @@ public class EntityExtensionCommand {
 
         try {
             ServerLevel level = source.getLevel();
-            ResourceLocation presetId = ResourceLocation.fromNamespaceAndPath("eca", preset);
+            ResourceLocation presetId = new ResourceLocation("eca", preset);
 
             SkyboxData data = new SkyboxData(
                 false, null,

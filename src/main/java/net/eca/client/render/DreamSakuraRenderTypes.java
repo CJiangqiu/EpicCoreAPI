@@ -13,7 +13,7 @@ import net.eca.client.render.shader.DreamSakuraShader;
 @OnlyIn(Dist.CLIENT)
 public class DreamSakuraRenderTypes {
 
-    private static final ResourceLocation DREAM_SAKURA_TEXTURE = ResourceLocation.fromNamespaceAndPath("eca", "textures/shader/dream_sakura.png");
+    private static final ResourceLocation DREAM_SAKURA_TEXTURE = new ResourceLocation("eca", "textures/shader/dream_sakura.png");
 
     private static final RenderStateShard.ShaderStateShard SHADER_STATE = new RenderStateShard.ShaderStateShard(DreamSakuraShader::getShader) {
         @Override

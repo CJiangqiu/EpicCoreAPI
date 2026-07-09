@@ -80,7 +80,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_sketch"),
+                        new ResourceLocation(EcaMod.MOD_ID, "eca_sketch"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> sketchShader = instance
@@ -88,7 +88,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_spotlight"),
+                        new ResourceLocation(EcaMod.MOD_ID, "eca_spotlight"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> spotlightShader = instance
@@ -96,7 +96,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_matrix"),
+                        new ResourceLocation(EcaMod.MOD_ID, "eca_matrix"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> matrixShader = instance
@@ -104,7 +104,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_rain"),
+                        new ResourceLocation(EcaMod.MOD_ID, "eca_rain"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> rainShader = instance
@@ -112,7 +112,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_desert"),
+                        new ResourceLocation(EcaMod.MOD_ID, "eca_desert"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> desertShader = instance
@@ -120,7 +120,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_snow"),
+                        new ResourceLocation(EcaMod.MOD_ID, "eca_snow"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> snowShader = instance
@@ -128,7 +128,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_toxic"),
+                        new ResourceLocation(EcaMod.MOD_ID, "eca_toxic"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> toxicShader = instance
@@ -136,7 +136,7 @@ public class FilterRenderer {
         event.registerShader(
                 EcaShaderInstance.create(
                         event.getResourceProvider(),
-                        ResourceLocation.fromNamespaceAndPath(EcaMod.MOD_ID, "eca_cosmos"),
+                        new ResourceLocation(EcaMod.MOD_ID, "eca_cosmos"),
                         DefaultVertexFormat.POSITION_TEX
                 ),
                 instance -> cosmosShader = instance

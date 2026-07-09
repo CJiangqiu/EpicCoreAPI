@@ -24,7 +24,7 @@ public class StarlightShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance starlightShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            ResourceLocation.fromNamespaceAndPath("eca", "starlight"),
+            new ResourceLocation("eca", "starlight"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(starlightShader, instance -> {

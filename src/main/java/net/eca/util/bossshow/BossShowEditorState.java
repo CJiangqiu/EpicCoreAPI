@@ -403,10 +403,10 @@ public final class BossShowEditorState {
         ResourceLocation typeId = type != null ? BuiltInRegistries.ENTITY_TYPE.getKey(type) : null;
         String namespace = typeId != null ? typeId.getNamespace() : "eca";
         String basePath = typeId != null ? typeId.getPath() : "anchor";
-        ResourceLocation candidate = ResourceLocation.fromNamespaceAndPath(namespace, basePath);
+        ResourceLocation candidate = new ResourceLocation(namespace, basePath);
         int n = 2;
         while (idTaken(candidate)) {
-            candidate = ResourceLocation.fromNamespaceAndPath(namespace, basePath + "_" + n);
+            candidate = new ResourceLocation(namespace, basePath + "_" + n);
             n++;
         }
         return candidate;

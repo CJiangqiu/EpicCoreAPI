@@ -24,7 +24,7 @@ public class OceanShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance oceanShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            ResourceLocation.fromNamespaceAndPath("eca", "ocean"),
+            new ResourceLocation("eca", "ocean"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(oceanShader, instance -> {

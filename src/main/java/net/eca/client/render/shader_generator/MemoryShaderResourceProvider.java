@@ -17,7 +17,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-
+@SuppressWarnings("removal")
 final class MemoryShaderResourceProvider implements ResourceProvider {
 
     private final Map<ResourceLocation, byte[]> resources = new HashMap<>();
@@ -37,7 +37,7 @@ final class MemoryShaderResourceProvider implements ResourceProvider {
             }
             String path = file.relativePath().substring(prefix.length());
             resources.put(
-                ResourceLocation.fromNamespaceAndPath(namespace, path),
+                new ResourceLocation(namespace, path),
                 file.content().getBytes(StandardCharsets.UTF_8)
             );
         }

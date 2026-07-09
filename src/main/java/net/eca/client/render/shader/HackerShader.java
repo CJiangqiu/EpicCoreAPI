@@ -24,7 +24,7 @@ public class HackerShader {
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance hackerShader = EcaShaderInstance.create(
             event.getResourceProvider(),
-            ResourceLocation.fromNamespaceAndPath("eca", "hacker"),
+            new ResourceLocation("eca", "hacker"),
             DefaultVertexFormat.BLOCK
         );
         event.registerShader(hackerShader, instance -> {
