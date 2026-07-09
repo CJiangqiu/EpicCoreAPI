@@ -10,6 +10,7 @@ import net.minecraft.world.item.TooltipFlag;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
+import java.util.Collections;
 import java.util.List;
 
 @SuppressWarnings("removal")
@@ -65,6 +66,14 @@ public abstract class ItemExtension {
      */
     public MutableComponent getItemName(ItemStack stack) {
         return null;
+    }
+
+    /**
+     * Return tooltip lines with explicit insertion positions.
+     * Each line can carry its own rich Component styling and animation effects.
+     */
+    public List<EcaTooltipLine> getTooltipLines(ItemStack stack, TooltipFlag flag) {
+        return Collections.emptyList();
     }
 
     /**

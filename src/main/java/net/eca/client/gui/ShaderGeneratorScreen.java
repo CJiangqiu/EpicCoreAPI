@@ -30,6 +30,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.util.tinyfd.TinyFileDialogs;
+import org.joml.Quaternionf;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -1858,63 +1859,68 @@ public final class ShaderGeneratorScreen extends Screen {
         if (element == null || !containsPositionParameters(element)) {
             return;
         }
-        PreviewRect box = elementScreenBox(element, preview);
-        int left = box.left();
-        int top = box.top();
-        int right = box.right();
-        int bottom = box.bottom();
-        g.renderOutline(left, top, Math.max(1, right - left), Math.max(1, bottom - top), 0xFFE6E9ED);
+        ElementScreenTransform box = elementScreenTransform(element, preview);
+        g.pose().pushPose();
+        g.pose().translate((float) box.centerX(), (float) box.centerY(), 0.0F);
+        g.pose().mulPose(new Quaternionf().rotateZ((float) box.rotationRadians()));
+        int left = (int) Math.round(-box.radiusX());
+        int top = (int) Math.round(-box.radiusY());
+        int width = Math.max(1, (int) Math.round(box.radiusX() * 2.0D));
+        int height = Math.max(1, (int) Math.round(box.radiusY() * 2.0D));
+        g.renderOutline(left, top, width, height, 0xFFE6E9ED);
 
         drawHandle(g, left, top);
-        drawHandle(g, right, top);
-        drawHandle(g, right, bottom);
-        drawHandle(g, left, bottom);
-        if (element.values().containsKey("rotation")) {
-            int handleX = (left + right) / 2;
-            int handleY = top - CANVAS_ROTATE_HANDLE_OFFSET;
-            g.fill(handleX, handleY, handleX + 1, top, 0xFFE6E9ED);
-            drawHandle(g, handleX, handleY, 0xFF4D8DFF);
-        }
+        drawHandle(g, left + width, top);
+        drawHandle(g, left + width, top + height);
+        drawHandle(g, left, top + height);
+        int handleY = top - CANVAS_ROTATE_HANDLE_OFFSET;
+        g.fill(0, handleY, 1, top, 0xFFE6E9ED);
+        drawHandle(g, 0, handleY, 0xFF4D8DFF);
+        g.pose().popPose();
     }
 
     /* 元素选框在屏幕空间的矩形，绘制与手柄命中共用以保证几何一致 */
-    private PreviewRect elementScreenBox(ShaderModuleInstance element, PreviewRect content) {
+    private ElementScreenTransform elementScreenTransform(ShaderModuleInstance element, PreviewRect content) {
         double rx = elementRadiusX(element);
         double ry = elementRadiusY(element);
         int spanX = content.right() - content.left();
         int spanY = content.bottom() - content.top();
-        int left = content.left() + (int) Math.round((element.value("center_x") - rx) * spanX);
-        int top = content.top() + (int) Math.round((element.value("center_y") - ry) * spanY);
-        int right = content.left() + (int) Math.round((element.value("center_x") + rx) * spanX);
-        int bottom = content.top() + (int) Math.round((element.value("center_y") + ry) * spanY);
-        return new PreviewRect(left, top, right, bottom);
+        double centerX = content.left() + element.value("center_x") * spanX;
+        double centerY = content.top() + element.value("center_y") * spanY;
+        return new ElementScreenTransform(
+            centerX,
+            centerY,
+            rx * spanX,
+            ry * spanY,
+            elementRotationRadians(element)
+        );
     }
 
     /* 命中选框手柄：0=左上 1=右上 2=右下 3=左下 4=旋转，未命中返回 -1 */
     private int hitCanvasHandle(ShaderModuleInstance element, PreviewRect content, double mouseX, double mouseY) {
-        PreviewRect box = elementScreenBox(element, content);
-        int[][] corners = {
-            {box.left(), box.top()},
-            {box.right(), box.top()},
-            {box.right(), box.bottom()},
-            {box.left(), box.bottom()}
+        ElementScreenTransform box = elementScreenTransform(element, content);
+        double dx = mouseX - box.centerX();
+        double dy = mouseY - box.centerY();
+        double localX = rotateX(dx, dy, -box.rotationRadians());
+        double localY = rotateY(dx, dy, -box.rotationRadians());
+        double[][] corners = {
+            {-box.radiusX(), -box.radiusY()},
+            {box.radiusX(), -box.radiusY()},
+            {box.radiusX(), box.radiusY()},
+            {-box.radiusX(), box.radiusY()}
         };
         for (int i = 0; i < corners.length; i++) {
-            if (nearHandle(mouseX, mouseY, corners[i][0], corners[i][1])) {
+            if (nearHandle(localX, localY, corners[i][0], corners[i][1])) {
                 return i;
             }
         }
-        if (element.values().containsKey("rotation")) {
-            int handleX = (box.left() + box.right()) / 2;
-            int handleY = box.top() - CANVAS_ROTATE_HANDLE_OFFSET;
-            if (nearHandle(mouseX, mouseY, handleX, handleY)) {
-                return 4;
-            }
+        if (nearHandle(localX, localY, 0.0D, -box.radiusY() - CANVAS_ROTATE_HANDLE_OFFSET)) {
+            return 4;
         }
         return -1;
     }
 
-    private static boolean nearHandle(double mouseX, double mouseY, int handleX, int handleY) {
+    private static boolean nearHandle(double mouseX, double mouseY, double handleX, double handleY) {
         int reach = CANVAS_HANDLE_SIZE;
         return Math.abs(mouseX - handleX) <= reach && Math.abs(mouseY - handleY) <= reach;
     }
@@ -2103,8 +2109,31 @@ public final class ShaderGeneratorScreen extends Screen {
         double centerY = element.value("center_y");
         double radiusX = elementRadiusX(element);
         double radiusY = elementRadiusY(element);
-        return uvX >= centerX - radiusX && uvX <= centerX + radiusX
-            && uvY >= centerY - radiusY && uvY <= centerY + radiusY;
+        double dx = uvX - centerX;
+        double dy = uvY - centerY;
+        double localX = rotateX(dx, dy, -elementRotationRadians(element));
+        double localY = rotateY(dx, dy, -elementRotationRadians(element));
+        return localX >= -radiusX && localX <= radiusX
+            && localY >= -radiusY && localY <= radiusY;
+    }
+
+    private static double elementRotationRadians(ShaderModuleInstance element) {
+        if (!element.values().containsKey("rotation")) {
+            return 0.0D;
+        }
+        return Math.toRadians(element.value("rotation"));
+    }
+
+    private static double rotateX(double x, double y, double radians) {
+        double cosine = Math.cos(radians);
+        double sine = Math.sin(radians);
+        return x * cosine - y * sine;
+    }
+
+    private static double rotateY(double x, double y, double radians) {
+        double cosine = Math.cos(radians);
+        double sine = Math.sin(radians);
+        return x * sine + y * cosine;
     }
 
     private static double elementRadiusX(ShaderModuleInstance element) {
@@ -2154,6 +2183,14 @@ public final class ShaderGeneratorScreen extends Screen {
             return (mouseY - top) / Math.max(1.0D, bottom - top);
         }
     }
+
+    private record ElementScreenTransform(
+        double centerX,
+        double centerY,
+        double radiusX,
+        double radiusY,
+        double rotationRadians
+    ) {}
 
     private void drawLayerRows(GuiGraphics graphics) {
         for (LayerRowVisual row : visibleLayerRows) {

@@ -505,11 +505,16 @@ You can create item extensions to add shader rendering effects to specific items
 ```java
 import net.eca.api.RegisterItemExtension;
 import net.eca.client.render.StarlightRenderTypes;
+import net.eca.util.ItemUtil;
+import net.eca.util.item_extension.EcaTooltipLine;
 import net.eca.util.item_extension.ItemExtension;
 import net.eca.util.item_extension.ItemExtensionManager;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.TooltipFlag;
+
+import java.util.List;
 
 @RegisterItemExtension
 public class DiamondSwordExtension extends ItemExtension {
@@ -560,8 +565,30 @@ public class DiamondSwordExtension extends ItemExtension {
     public float getAlpha() {
         return 0.8f;  // shader layer transparency, 0.0~1.0 (default 1.0 = fully opaque)
     }
+
+    @Override
+    public List<EcaTooltipLine> getTooltipLines(ItemStack stack, TooltipFlag flag) {
+        return List.of(
+            EcaTooltipLine.head(ItemUtil.of("Starlight Forged")
+                .addEffect.GRADIENT(0x7C4DFF, 0x00E5FF)
+                .addEffect.BOLD()),
+            EcaTooltipLine.body(ItemUtil.of("Arcane resonance: unstable")
+                .addEffect.SOLID(0xFFAA00)
+                .addEffect.ITALIC()),
+            EcaTooltipLine.tail(ItemUtil.of("Hold Shift for hidden lore")
+                .addEffect.RAINBOW())
+        );
+    }
 }
 ```
+
+Structured tooltip lines can choose their own insertion position:
+
+- `EcaTooltipLine.head(...)`: below the item name.
+- `EcaTooltipLine.body(...)`: in the main tooltip body, before advanced item id/NBT/disabled lines when present.
+- `EcaTooltipLine.tail(...)`: at the end of the tooltip.
+
+Each line accepts either a normal `Component` or an `EcaText` built through `ItemUtil.of(...)`, so tooltip text supports the same rich effects as item names: gradient, rainbow, solid color, shimmer, glitch, bold, italic, underline, and strikethrough. The older `appendTooltip(ItemStack, TooltipFlag, List<Component>)` hook is still available when you need to directly edit the final tooltip list.
 
 Note: Like entity extensions, each item can only have one extension. Duplicate registrations are rejected with an error log. Both entity layer extensions (`EntityLayerExtension.getAlpha()`, default 0.5) and item extensions (`ItemExtension.getAlpha()`, default 1.0) support adjustable transparency for their shader overlay layers.
 
@@ -1338,11 +1365,16 @@ public class MyBossExtension extends EntityExtension {
 ```java
 import net.eca.api.RegisterItemExtension;
 import net.eca.client.render.StarlightRenderTypes;
+import net.eca.util.ItemUtil;
+import net.eca.util.item_extension.EcaTooltipLine;
 import net.eca.util.item_extension.ItemExtension;
 import net.eca.util.item_extension.ItemExtensionManager;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.TooltipFlag;
+
+import java.util.List;
 
 @RegisterItemExtension
 public class DiamondSwordExtension extends ItemExtension {
@@ -1393,8 +1425,30 @@ public class DiamondSwordExtension extends ItemExtension {
     public float getAlpha() {
         return 0.8f;  // 着色器层透明度，0.0~1.0（默认 1.0 = 完全不透明）
     }
+
+    @Override
+    public List<EcaTooltipLine> getTooltipLines(ItemStack stack, TooltipFlag flag) {
+        return List.of(
+            EcaTooltipLine.head(ItemUtil.of("Starlight Forged")
+                .addEffect.GRADIENT(0x7C4DFF, 0x00E5FF)
+                .addEffect.BOLD()),
+            EcaTooltipLine.body(ItemUtil.of("Arcane resonance: unstable")
+                .addEffect.SOLID(0xFFAA00)
+                .addEffect.ITALIC()),
+            EcaTooltipLine.tail(ItemUtil.of("Hold Shift for hidden lore")
+                .addEffect.RAINBOW())
+        );
+    }
 }
 ```
+
+结构化 tooltip 行可以分别决定自己的插入位置：
+
+- `EcaTooltipLine.head(...)`：插入到物品名下方。
+- `EcaTooltipLine.body(...)`：插入到主体 tooltip 区域；存在高级物品 ID、NBT 或 disabled 提示时，会尽量放在这些行之前。
+- `EcaTooltipLine.tail(...)`：插入到 tooltip 末尾。
+
+每一行都可以传入普通 `Component`，也可以传入 `ItemUtil.of(...)` 创建的 `EcaText`，因此 tooltip 支持和物品名相同的富文本效果：渐变、彩虹、纯色、闪烁、乱码、粗体、斜体、下划线和删除线。旧的 `appendTooltip(ItemStack, TooltipFlag, List<Component>)` 仍然保留，适合需要直接修改最终 tooltip 列表的高级用法。
 注意：和实体扩展一样，每个物品只能有一个扩展，重复注册会被拒绝并输出错误日志。实体层扩展（`EntityLayerExtension.getAlpha()`，默认 0.5）和物品扩展（`ItemExtension.getAlpha()`，默认 1.0）均支持调整着色器叠加层的透明度。
 
 

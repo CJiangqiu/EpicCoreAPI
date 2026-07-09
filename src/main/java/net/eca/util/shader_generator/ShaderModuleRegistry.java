@@ -93,22 +93,15 @@ public final class ShaderModuleRegistry {
             "gui.eca.shader_generator.module.basic_line",
             List.of(
                 parameter("length", "gui.eca.shader_generator.parameter.length", 0.1F, 2.0F, 0.05F, 0.8F),
-                parameter("thickness", "gui.eca.shader_generator.parameter.thickness", 0.01F, 0.5F, 0.01F, 0.08F),
-                parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F)
+                parameter("thickness", "gui.eca.shader_generator.parameter.thickness", 0.01F, 0.5F, 0.01F, 0.08F)
             ),
             (module, index, point, size) -> {
                 float halfLength = size * module.value("length") * 0.5F;
                 float thickness = size * module.value("thickness");
-                float radians = (float) Math.toRadians(module.value("rotation"));
-                String rotated = String.format(Locale.ROOT,
-                    "ecaRotate(%s, %.6f)",
-                    point,
-                    -radians
-                );
                 return String.format(Locale.ROOT,
                     "smoothstep(%.4f, 0.0, ecaSegmentDistance(%s, vec2(-%.4f, 0.0), vec2(%.4f, 0.0)))",
                     thickness,
-                    rotated,
+                    point,
                     halfLength,
                     halfLength
                 );
@@ -122,20 +115,13 @@ public final class ShaderModuleRegistry {
             "gui.eca.shader_generator.module.basic_rectangle",
             List.of(
                 parameter("width", "gui.eca.shader_generator.parameter.width", 0.1F, 2.0F, 0.05F, 1.0F),
-                parameter("height", "gui.eca.shader_generator.parameter.height", 0.1F, 2.0F, 0.05F, 0.65F),
-                parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F)
+                parameter("height", "gui.eca.shader_generator.parameter.height", 0.1F, 2.0F, 0.05F, 0.65F)
             ),
             (module, index, point, size) -> {
-                float radians = (float) Math.toRadians(module.value("rotation"));
-                String rotated = String.format(Locale.ROOT,
-                    "ecaRotate(%s, %.6f)",
-                    point,
-                    -radians
-                );
                 return String.format(Locale.ROOT,
                     "smoothstep(%.4f, 0.0, ecaBoxDistance(%s, vec2(%.4f, %.4f)))",
                     size * 0.08F,
-                    rotated,
+                    point,
                     size * module.value("width") * 0.5F,
                     size * module.value("height") * 0.5F
                 );
@@ -148,8 +134,7 @@ public final class ShaderModuleRegistry {
             "basic_polygon",
             "gui.eca.shader_generator.module.basic_polygon",
             List.of(
-                parameter("sides", "gui.eca.shader_generator.parameter.sides", 3.0F, 12.0F, 1.0F, 6.0F),
-                parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F)
+                parameter("sides", "gui.eca.shader_generator.parameter.sides", 3.0F, 12.0F, 1.0F, 6.0F)
             ),
             (module, index, point, size) -> String.format(Locale.ROOT,
                 "smoothstep(%.4f, 0.0, ecaPolygonDistance(%s, %.4f, %.1f, %.6f))",
@@ -157,7 +142,7 @@ public final class ShaderModuleRegistry {
                 point,
                 size,
                 module.value("sides"),
-                Math.toRadians(module.value("rotation"))
+                0.0F
             )
         ));
     }
@@ -168,22 +153,15 @@ public final class ShaderModuleRegistry {
             "gui.eca.shader_generator.module.basic_ellipse",
             List.of(
                 parameter("width", "gui.eca.shader_generator.parameter.width", 0.1F, 3.0F, 0.05F, 1.0F),
-                parameter("height", "gui.eca.shader_generator.parameter.height", 0.1F, 3.0F, 0.05F, 0.65F),
-                parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F)
+                parameter("height", "gui.eca.shader_generator.parameter.height", 0.1F, 3.0F, 0.05F, 0.65F)
             ),
             (module, index, point, size) -> {
-                float radians = (float) Math.toRadians(module.value("rotation"));
-                String rotated = String.format(Locale.ROOT,
-                    "ecaRotate(%s, %.6f)",
-                    point,
-                    -radians
-                );
                 return String.format(Locale.ROOT,
                     "smoothstep(1.0, 0.82, length(vec2(%s.x / (%.4f * %.4f), %s.y / (%.4f * %.4f))))",
-                    rotated,
+                    point,
                     size,
                     module.value("width"),
-                    rotated,
+                    point,
                     size,
                     module.value("height")
                 );
@@ -197,21 +175,14 @@ public final class ShaderModuleRegistry {
             "gui.eca.shader_generator.module.basic_star",
             List.of(
                 parameter("points", "gui.eca.shader_generator.parameter.points", 3.0F, 12.0F, 1.0F, 5.0F),
-                parameter("inner_ratio", "gui.eca.shader_generator.parameter.inner_ratio", 0.1F, 0.9F, 0.05F, 0.5F),
-                parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F)
+                parameter("inner_ratio", "gui.eca.shader_generator.parameter.inner_ratio", 0.1F, 0.9F, 0.05F, 0.5F)
             ),
             (module, index, point, size) -> {
                 int pts = Math.round(module.value("points"));
-                float radians = (float) Math.toRadians(module.value("rotation"));
-                String rotated = String.format(Locale.ROOT,
-                    "ecaRotate(%s, %.6f)",
-                    point,
-                    -radians
-                );
                 return String.format(Locale.ROOT,
                     "smoothstep(%.4f, 0.0, ecaStarDistance(%s, %d, %.4f, %.4f))",
                     size * 0.08F,
-                    rotated,
+                    point,
                     pts,
                     size,
                     size * module.value("inner_ratio")
@@ -281,6 +252,7 @@ public final class ShaderModuleRegistry {
         float spreadY = module.value("spread_y");
         float seed = module.value("seed");
         float duration = module.value("duration");
+        float rotation = (float) Math.toRadians(module.value("rotation"));
         StringBuilder source = new StringBuilder();
         source.append(String.format(Locale.ROOT,
             "        float effectProgress%d = ecaEffectProgress(gameTime, %.4f, %.4f);\n"
@@ -309,10 +281,11 @@ public final class ShaderModuleRegistry {
             String pointVar = "point" + moduleIndex + "_" + instance;
             String maskVar = "mask" + moduleIndex + "_" + instance;
             source.append(String.format(Locale.ROOT,
-                "        vec2 %s = effectUv - vec2(%.4f, %.4f);\n",
+                "        vec2 %s = ecaRotate(effectUv - vec2(%.4f, %.4f), %.6f);\n",
                 pointVar,
                 centerX + offsetX,
-                centerY + offsetY
+                centerY + offsetY,
+                -rotation
             ));
             source.append("        float ").append(maskVar).append(";\n");
             body.emitMask(source, pointVar, maskVar, instanceSize, module, moduleIndex, instance);
@@ -399,19 +372,17 @@ public final class ShaderModuleRegistry {
             "gui.eca.shader_generator.module.elliptical_galaxy",
             List.of(
                 parameter("axis_ratio", "gui.eca.shader_generator.parameter.axis_ratio", 0.2F, 1.0F, 0.05F, 0.6F),
-                parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F),
                 parameter("falloff", "gui.eca.shader_generator.parameter.falloff", 1.0F, 10.0F, 0.5F, 5.0F)
             ),
             (out, pointVar, maskVar, instanceSize, module, moduleIndex, instance) -> {
                 float axisRatio = module.value("axis_ratio");
-                float rotation = (float) Math.toRadians(module.value("rotation"));
                 float falloff = module.value("falloff");
                 out.append(String.format(Locale.ROOT,
-                    "        vec2 rp%d = ecaRotate(%s, %.6f);\n"
+                    "        vec2 rp%d = %s;\n"
                         + "        rp%d.x /= %.4f;\n"
                         + "        float r%d = length(rp%d) / max(%.4f, 0.001);\n"
                         + "        %s = exp(-r%d * r%d * %.4f);\n",
-                    instance, pointVar, -rotation,
+                    instance, pointVar,
                     instance, axisRatio,
                     instance, instance, instanceSize,
                     maskVar, instance, instance, falloff
@@ -846,6 +817,7 @@ public final class ShaderModuleRegistry {
         float spreadY = module.value("spread_y");
         float seed = module.value("seed");
         float duration = module.value("duration");
+        float rotation = (float) Math.toRadians(module.value("rotation"));
         StringBuilder source = new StringBuilder();
         source.append(String.format(Locale.ROOT,
             "        float effectProgress%d = ecaEffectProgress(gameTime, %.4f, %.4f);\n"
@@ -874,10 +846,11 @@ public final class ShaderModuleRegistry {
             String point = "point" + moduleIndex + "_" + instance;
             String mask = "mask" + moduleIndex + "_" + instance;
             source.append(String.format(Locale.ROOT,
-                "        vec2 %s = effectUv - vec2(%.4f, %.4f);\n",
+                "        vec2 %s = ecaRotate(effectUv - vec2(%.4f, %.4f), %.6f);\n",
                 point,
                 centerX + offsetX,
-                centerY + offsetY
+                centerY + offsetY,
+                -rotation
             ));
             source.append("        float ").append(mask).append(" = ")
                 .append(shapeEmitter.emit(module, moduleIndex, point, instanceSize))
@@ -911,6 +884,7 @@ public final class ShaderModuleRegistry {
             parameter("count", "gui.eca.shader_generator.parameter.count", 1.0F, 32.0F, 1.0F, 1.0F),
             parameter("center_x", "gui.eca.shader_generator.parameter.center_x", 0.0F, 1.0F, 0.02F, 0.5F),
             parameter("center_y", "gui.eca.shader_generator.parameter.center_y", 0.0F, 1.0F, 0.02F, 0.5F),
+            parameter("rotation", "gui.eca.shader_generator.parameter.rotation", 0.0F, 360.0F, 5.0F, 0.0F),
             parameter("spread_x", "gui.eca.shader_generator.parameter.spread_x", 0.0F, 1.0F, 0.02F, 0.0F),
             parameter("spread_y", "gui.eca.shader_generator.parameter.spread_y", 0.0F, 1.0F, 0.02F, 0.0F),
             parameter("seed", "gui.eca.shader_generator.parameter.seed", 0.0F, 1000.0F, 1.0F, 1.0F),

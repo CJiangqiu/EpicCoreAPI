@@ -218,6 +218,7 @@ public final class ShaderLayerComposer {
         float spreadX = module.value("spread_x");
         float spreadY = module.value("spread_y");
         float seed = module.value("seed");
+        float rotation = (float) Math.toRadians(module.value("rotation"));
         StringBuilder source = new StringBuilder();
         source.append(String.format(Locale.ROOT,
             "        float effectProgress%d = ecaEffectProgress(gameTime, %.4f, %.4f);\n"
@@ -236,14 +237,16 @@ public final class ShaderLayerComposer {
             float offsetY = signedRandom(seed, instance, 71.91F) * spreadY;
             float instanceSize = size * (0.75F + unitRandom(seed, instance, 41.37F) * 0.5F);
             source.append(String.format(Locale.ROOT,
-                "        vec2 imageUv%d_%d = (effectUv - vec2(%.4f, %.4f)) / %.4f + vec2(0.5);\n"
+                "        vec2 imagePoint%d_%d = ecaRotate(effectUv - vec2(%.4f, %.4f), %.6f);\n"
+                    + "        vec2 imageUv%d_%d = imagePoint%d_%d / %.4f + vec2(0.5);\n"
                     + "        if (all(greaterThanEqual(imageUv%d_%d, vec2(0.0))) && all(lessThanEqual(imageUv%d_%d, vec2(1.0)))) {\n"
                     + "            vec4 imageSample%d_%d = texture(%s, imageUv%d_%d);\n"
                     + "            imageSample%d_%d *= vec4(%.4f, %.4f, %.4f, %.4f * effectAlphaScale%d);\n"
                     + "            color = mix(color, imageSample%d_%d.rgb, imageSample%d_%d.a);\n"
                     + "            alpha = max(alpha, imageSample%d_%d.a);\n"
                     + "        }\n",
-                moduleIndex, instance, centerX + offsetX, centerY + offsetY, instanceSize,
+                moduleIndex, instance, centerX + offsetX, centerY + offsetY, -rotation,
+                moduleIndex, instance, moduleIndex, instance, instanceSize,
                 moduleIndex, instance, moduleIndex, instance,
                 moduleIndex, instance, samplerName, moduleIndex, instance,
                 moduleIndex, instance,
