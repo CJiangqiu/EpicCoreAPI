@@ -15,6 +15,7 @@ import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import net.minecraft.client.renderer.entity.RenderLayerParent;
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
 import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -42,8 +43,9 @@ public class EntityExtensionLayer<T extends LivingEntity, M extends net.minecraf
             return;
         }
 
-        RenderType renderType = layerExtension.getRenderType();
-        if (renderType == null) {
+        RenderType shaderType = layerExtension.getRenderType();
+        ResourceLocation texture = layerExtension.getTexture();
+        if (shaderType == null && texture == null) {
             return;
         }
 
@@ -53,19 +55,45 @@ public class EntityExtensionLayer<T extends LivingEntity, M extends net.minecraf
             : OverlayTexture.NO_OVERLAY;
         float alpha = layerExtension.getAlpha();
 
-        if (EcaShaderInstance.isOculusShadersActive()) {
-            // Oculus光影激活：捕获顶点数据入队列，延迟到管线合成后渲染
-            BufferBuilder builder = EntityLayerRenderQueue.acquireBuilder();
-            builder.begin(VertexFormat.Mode.QUADS, renderType.format());
-            this.getParentModel().renderToBuffer(
-                poseStack, builder, light, overlay, 1.0f, 1.0f, 1.0f, alpha
-            );
-            EntityLayerRenderQueue.enqueue(renderType, builder, builder.end());
-        } else {
-            VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
-            this.getParentModel().renderToBuffer(
-                poseStack, vertexConsumer, light, overlay, 1.0f, 1.0f, 1.0f, alpha
-            );
+        // 模式 1: 纯着色器（shaderType != null, texture == null）
+        // 模式 2: 纯纹理（shaderType == null, texture != null）
+        // 模式 3: 纹理 + 着色器叠加（shaderType != null, texture != null）
+        //         先纹理层（vanilla translucent），再着色器层（ECA shader），如 Boss 血条叠加技法
+        boolean hasTexture = texture != null;
+        boolean hasShader = shaderType != null;
+        boolean oculus = EcaShaderInstance.isOculusShadersActive();
+
+        if (hasTexture) {
+            RenderType texturedLayer = RenderType.entityTranslucent(texture);
+            if (oculus) {
+                BufferBuilder builder = EntityLayerRenderQueue.acquireBuilder();
+                builder.begin(VertexFormat.Mode.QUADS, texturedLayer.format());
+                this.getParentModel().renderToBuffer(
+                    poseStack, builder, light, overlay, 1.0f, 1.0f, 1.0f, alpha
+                );
+                EntityLayerRenderQueue.enqueue(texturedLayer, builder, builder.end());
+            } else {
+                VertexConsumer texConsumer = bufferSource.getBuffer(texturedLayer);
+                this.getParentModel().renderToBuffer(
+                    poseStack, texConsumer, light, overlay, 1.0f, 1.0f, 1.0f, alpha
+                );
+            }
+        }
+
+        if (hasShader) {
+            if (oculus) {
+                BufferBuilder builder = EntityLayerRenderQueue.acquireBuilder();
+                builder.begin(VertexFormat.Mode.QUADS, shaderType.format());
+                this.getParentModel().renderToBuffer(
+                    poseStack, builder, light, overlay, 1.0f, 1.0f, 1.0f, alpha
+                );
+                EntityLayerRenderQueue.enqueue(shaderType, builder, builder.end());
+            } else {
+                VertexConsumer shaderConsumer = bufferSource.getBuffer(shaderType);
+                this.getParentModel().renderToBuffer(
+                    poseStack, shaderConsumer, light, overlay, 1.0f, 1.0f, 1.0f, alpha
+                );
+            }
         }
     }
 

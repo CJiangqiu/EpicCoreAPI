@@ -67,7 +67,7 @@ public final class ShaderPreviewSourceCatalog {
             preset.bossBar(),
             preset.skybox(),
             preset.item(),
-            preset::entityEffect
+            preset::entityForPreview
         );
     }
 

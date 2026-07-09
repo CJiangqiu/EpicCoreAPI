@@ -554,14 +554,19 @@ public class DiamondSwordExtension extends ItemExtension {
     public float getColorKeyTolerance() {
         return 0.3f;  // RGB distance tolerance, 0.0~1.0
     }
+
+    @Override
+    public float getAlpha() {
+        return 0.8f;  // shader layer transparency, 0.0~1.0 (default 1.0 = fully opaque)
+    }
 }
 ```
 
-Note: Like entity extensions, each item can only have one extension. Duplicate registrations are rejected with an error log.
+Note: Like entity extensions, each item can only have one extension. Duplicate registrations are rejected with an error log. Both entity layer extensions (`EntityLayerExtension.getAlpha()`, default 0.5) and item extensions (`ItemExtension.getAlpha()`, default 1.0) support adjustable transparency for their shader overlay layers.
 
 ### Shader Presets
 
-This mod also provides several shader presets for the entity extension and item extension systems, which can be used directly in your extensions. Simply replace `CustomRenderTypes` in the example code with the corresponding preset name. Each preset provides 4 RenderTypes: `BOSS_BAR`, `BOSS_LAYER`, `SKYBOX` for entity extensions, and `ITEM` for item extensions.
+This mod also provides several shader presets for the entity extension and item extension systems, which can be used directly in your extensions. Simply replace `CustomRenderTypes` in the example code with the corresponding preset name. Each preset provides 4 RenderTypes: `BOSS_BAR`, `BOSS_LAYER`, `SKYBOX` for entity extensions, and `ITEM` for item extensions. Entity texture overlays are supported through `EntityLayerExtension.getTexture()` — return a texture to overlay it on the entity model, optionally combined with the shader RenderType for a texture‑plus‑shader effect (matching the boss‑bar overlay technique).
 
 Available presets:
 - `TheLastEndRenderTypes` — The Last End
@@ -657,10 +662,6 @@ public final class MyPresetRenderTypes {
     public static RenderType item() {
         return EcaPresets.item("mymod:my_nebula");
     }
-
-    public static RenderType entityEffect(ResourceLocation texture) {
-        return EcaPresets.entityEffect("mymod:my_nebula", texture);
-    }
 }
 ```
 
@@ -674,7 +675,7 @@ import net.minecraft.resources.ResourceLocation;
 ShaderPreset preset = EcaAPI.shaderPreset(new ResourceLocation("mymod", "my_nebula"));
 ```
 
-The returned `ShaderPreset` exposes five ready-made render targets: `bossBar()`, `bossLayer()`, `skybox()`, `item()`, and `entityEffect(texture)`.
+The returned `ShaderPreset` exposes four ready-made render targets: `bossBar()`, `bossLayer()`, `skybox()`, and `item()`. For entity texture overlays, use `EntityLayerExtension.getTexture()` with `bossLayer()`.
 
 ### BossShow Cinematics
 
@@ -1385,14 +1386,19 @@ public class DiamondSwordExtension extends ItemExtension {
     public float getColorKeyTolerance() {
         return 0.3f;  // RGB 距离容差，0.0~1.0
     }
+
+    @Override
+    public float getAlpha() {
+        return 0.8f;  // 着色器层透明度，0.0~1.0（默认 1.0 = 完全不透明）
+    }
 }
 ```
-注意：和实体扩展一样，每个物品只能有一个扩展，重复注册会被拒绝并输出错误日志。
+注意：和实体扩展一样，每个物品只能有一个扩展，重复注册会被拒绝并输出错误日志。实体层扩展（`EntityLayerExtension.getAlpha()`，默认 0.5）和物品扩展（`ItemExtension.getAlpha()`，默认 1.0）均支持调整着色器叠加层的透明度。
 
 
 ### 着色器预设
 
-本 Mod 还提供了一些用于实体扩展和物品扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个预设提供 4 个 RenderType：实体扩展用的 `BOSS_BAR`、`BOSS_LAYER`、`SKYBOX`，以及物品扩展用的 `ITEM`。
+本 Mod 还提供了一些用于实体扩展和物品扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个预设提供 4 个 RenderType：实体扩展用的 `BOSS_BAR`、`BOSS_LAYER`、`SKYBOX`，以及物品扩展用的 `ITEM`。实体纹理叠加通过 `EntityLayerExtension.getTexture()` 支持——返回纹理即可叠加到实体模型上，可与着色器 RenderType 组合，实现 Boss 血条同款的纹理+着色器叠加效果。
 
 可用预设：
 - `TheLastEndRenderTypes` — 终焉
@@ -1488,10 +1494,6 @@ public final class MyPresetRenderTypes {
     public static RenderType item() {
         return EcaPresets.item("mymod:my_nebula");
     }
-
-    public static RenderType entityEffect(ResourceLocation texture) {
-        return EcaPresets.entityEffect("mymod:my_nebula", texture);
-    }
 }
 ```
 
@@ -1505,7 +1507,7 @@ import net.minecraft.resources.ResourceLocation;
 ShaderPreset preset = EcaAPI.shaderPreset(new ResourceLocation("mymod", "my_nebula"));
 ```
 
-返回的 `ShaderPreset` 提供五个可直接用于扩展系统的渲染入口：`bossBar()`、`bossLayer()`、`skybox()`、`item()` 和 `entityEffect(texture)`。
+返回的 `ShaderPreset` 提供四个可直接用于扩展系统的渲染入口：`bossBar()`、`bossLayer()`、`skybox()` 和 `item()`。实体纹理叠加请通过 `EntityLayerExtension.getTexture()` 配合 `bossLayer()` 使用。
 
 ### BossShow 演出
 

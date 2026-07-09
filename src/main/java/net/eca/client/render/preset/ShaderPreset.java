@@ -6,13 +6,10 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
-/* 一个自定义预设的 5 种 RenderType 集合，由双 profile 五文件组成。
+/* 一个自定义预设的 4 种 RenderType 集合，由双 profile 五文件组成。
    BLOCK profile（<name>_block.vsh/.json）→ skybox / boss bar。
-   NEW_ENTITY profile（<name>_entity.vsh/.json）→ boss layer / item / entity effect。
-   共享 <name>.fsh。entityEffect 按纹理缓存。 */
+   NEW_ENTITY profile（<name>_entity.vsh/.json）→ boss layer / item。
+   共享 <name>.fsh。实体纹理叠加通过 EntityLayerExtension.getTexture() 支持。 */
 @OnlyIn(Dist.CLIENT)
 public final class ShaderPreset {
 
@@ -23,7 +20,6 @@ public final class ShaderPreset {
     private final RenderType bossLayer;
     private final RenderType skybox;
     private final RenderType item;
-    private final Map<ResourceLocation, RenderType> entityEffectByTexture = new ConcurrentHashMap<>();
 
     ShaderPreset(ResourceLocation id, GenericPresetShader shader) {
         this.id = id;
@@ -67,8 +63,8 @@ public final class ShaderPreset {
         return item;
     }
 
-    //实体效果叠加层：纹理相关，按纹理缓存对应的 RenderType，统一走 NEW_ENTITY profile 的 entityState
-    public RenderType entityEffect(ResourceLocation texture) {
-        return entityEffectByTexture.computeIfAbsent(texture, t -> PresetRenderTypes.entityEffect(name, entityShaderState, t));
+    // 预览系统用：带纹理绑定的实体 RenderType
+    public RenderType entityForPreview(ResourceLocation texture) {
+        return PresetRenderTypes.entityEffect(name, entityShaderState, texture);
     }
 }

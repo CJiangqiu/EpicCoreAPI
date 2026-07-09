@@ -85,6 +85,7 @@ public abstract class ItemRendererMixin {
 
         ItemRenderer itemRenderer = (ItemRenderer) (Object) this;
         boolean worldContext = eca$isWorldContext(displayContext);
+        float alpha = extension.getAlpha();
 
         if (worldContext) {
             /*
@@ -95,13 +96,14 @@ public abstract class ItemRendererMixin {
             builder.begin(VertexFormat.Mode.QUADS, extType.format());
             itemRenderer.renderModelLists(model, stack, combinedLight, combinedOverlay, poseStack, builder);
             ItemLayerRenderQueue.enqueue(extType, builder, builder.end(),
-                ckR, ckG, ckB, ckTolerance, bounds[0], bounds[1], bounds[2], bounds[3]);
+                ckR, ckG, ckB, ckTolerance, bounds[0], bounds[1], bounds[2], bounds[3], alpha);
             return;
         }
 
         // 无光影或 GUI：注入共享状态后原位再绘制一次同一个 BakedModel 的 quad 列表
         EcaShaderInstance.setLocalUvBounds(bounds[0], bounds[1], bounds[2], bounds[3]);
         EcaShaderInstance.setColorKey(ckR, ckG, ckB, ckTolerance);
+        EcaShaderInstance.setOpacity(alpha);
 
         itemRenderer.renderModelLists(model, stack, combinedLight, combinedOverlay,
                                        poseStack, bufferSource.getBuffer(extType));
@@ -113,6 +115,7 @@ public abstract class ItemRendererMixin {
 
         EcaShaderInstance.clearColorKey();
         EcaShaderInstance.clearLocalUvBounds();
+        EcaShaderInstance.clearOpacity();
     }
 
     // 判定该展示 context 是否在世界中渲染（走光影 G-buffer），GUI/NONE 不算

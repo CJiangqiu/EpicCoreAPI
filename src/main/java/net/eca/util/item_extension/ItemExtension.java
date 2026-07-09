@@ -51,6 +51,15 @@ public abstract class ItemExtension {
     }
 
     /**
+     * Returns the opacity of the item extension shader layer.
+     * 1.0 is fully opaque (default), 0.0 is fully transparent.
+     * @return alpha value in range [0, 1]
+     */
+    public float getAlpha() {
+        return 1.0f;
+    }
+
+    /**
      * Override the item's display name. Return null to keep the vanilla name.
      * Called client-side; player-set custom names (anvil) always take priority.
      */

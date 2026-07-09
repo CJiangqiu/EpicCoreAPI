@@ -36,11 +36,12 @@ public class ItemLayerRenderQueue {
 
     public static void enqueue(RenderType renderType, BufferBuilder builder, BufferBuilder.RenderedBuffer renderedBuffer,
                                float colorKeyR, float colorKeyG, float colorKeyB, float colorKeyTolerance,
-                               float uvMinU, float uvMinV, float uvScaleU, float uvScaleV) {
+                               float uvMinU, float uvMinV, float uvScaleU, float uvScaleV,
+                               float alpha) {
         Matrix4f modelViewMat = new Matrix4f(RenderSystem.getModelViewMatrix());
         Matrix4f projMat = new Matrix4f(RenderSystem.getProjectionMatrix());
         queue.add(new QueuedItemLayer(renderType, builder, renderedBuffer, modelViewMat, projMat,
-            colorKeyR, colorKeyG, colorKeyB, colorKeyTolerance, uvMinU, uvMinV, uvScaleU, uvScaleV));
+            colorKeyR, colorKeyG, colorKeyB, colorKeyTolerance, uvMinU, uvMinV, uvScaleU, uvScaleV, alpha));
     }
 
     public static void flush() {
@@ -79,6 +80,7 @@ public class ItemLayerRenderQueue {
 
             EcaShaderInstance.setColorKey(entry.colorKeyR, entry.colorKeyG, entry.colorKeyB, entry.colorKeyTolerance);
             EcaShaderInstance.setLocalUvBounds(entry.uvMinU, entry.uvMinV, entry.uvScaleU, entry.uvScaleV);
+            EcaShaderInstance.setOpacity(entry.alpha);
 
             entry.renderType.setupRenderState();
             BufferUploader.drawWithShader(entry.renderedBuffer);
@@ -88,6 +90,7 @@ public class ItemLayerRenderQueue {
             RenderSystem.applyModelViewMatrix();
             EcaShaderInstance.clearColorKey();
             EcaShaderInstance.clearLocalUvBounds();
+            EcaShaderInstance.clearOpacity();
 
             if (builderPool.size() < MAX_POOL_SIZE) {
                 builderPool.addLast(entry.builder);
@@ -108,6 +111,7 @@ public class ItemLayerRenderQueue {
         float uvMinU,
         float uvMinV,
         float uvScaleU,
-        float uvScaleV
+        float uvScaleV,
+        float alpha
     ) {}
 }

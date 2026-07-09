@@ -1402,8 +1402,8 @@ public final class EcaAPI {
      * Get a registered custom shader preset by its resource id (client only).
      * ECA auto-discovers presets from standard five-file sets under
      * {@code config/eca/shadergenerator/} or {@code assets/<namespace>/shaders/core/}.
-     * The returned object exposes five ready-made RenderTypes ({@code skybox()}, {@code bossBar()}, {@code bossLayer()}, {@code item()},
-     * {@code entityEffect(texture)}) for use in Entity/Item extensions.
+     * The returned object exposes four ready-made RenderTypes ({@code skybox()}, {@code bossBar()}, {@code bossLayer()}, {@code item()})
+     * for use in Entity/Item extensions. Entity texture overlays are handled through {@code EntityLayerExtension.getTexture()}.
      * @param id the preset resource id
      * @return the shader preset, or null if no preset is registered for the id
      */

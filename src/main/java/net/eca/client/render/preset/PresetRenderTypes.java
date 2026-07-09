@@ -82,7 +82,7 @@ public final class PresetRenderTypes {
         );
     }
 
-    public static RenderType entityEffect(String name, RenderStateShard.ShaderStateShard shaderState, ResourceLocation texture) {
+    static RenderType entityEffect(String name, RenderStateShard.ShaderStateShard shaderState, ResourceLocation texture) {
         return RenderType.create(name + "_entity_effect",
             DefaultVertexFormat.NEW_ENTITY,
             VertexFormat.Mode.QUADS,

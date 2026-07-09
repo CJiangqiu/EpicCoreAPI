@@ -45,12 +45,6 @@ public final class EcaPresets {
         return preset != null ? preset.item() : null;
     }
 
-    /** 实体效果叠加层（纹理相关） */
-    public static RenderType entityEffect(String id, ResourceLocation texture) {
-        ShaderPreset preset = resolve(id);
-        return preset != null ? preset.entityEffect(texture) : null;
-    }
-
     /** 枚举所有已注册的预设 id */
     public static Set<ResourceLocation> getPresetIds() {
         return ShaderPresetRegistry.getPresetIds();

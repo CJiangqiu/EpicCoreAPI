@@ -118,6 +118,20 @@ public class EcaShaderInstance extends ShaderInstance {
         localUvScaleV = 1.0f;
     }
 
+    // ==================== Opacity 共享状态 ====================
+    // 设置全局着色器不透明度，覆写 COLOR_MODULATOR.a。1.0 为完全不透明，0.0 为完全透明。
+    // 每一帧每个着色器实例调用 apply() 时取当前值。该值不会跨帧保留。
+
+    private static float ecaOpacity = 1.0f;
+
+    public static void setOpacity(float opacity) {
+        ecaOpacity = Math.max(0.0f, Math.min(1.0f, opacity));
+    }
+
+    public static void clearOpacity() {
+        ecaOpacity = 1.0f;
+    }
+
     public static void applyLocalUvBoundsUniforms(Uniform localUvMinUniform, Uniform localUvScaleUniform) {
         try {
             if (localUvMinUniform != null) {
@@ -154,6 +168,11 @@ public class EcaShaderInstance extends ShaderInstance {
     @Override
     public void apply() {
         super.apply();
+        // 覆写 COLOR_MODULATOR.a 为 ECA 不透明度：ColorModulator 在父类 apply() 中已按 JSON 静态值上传，
+        // 此处用 ecaOpacity 替换其 alpha 分量，使所有 ECA 着色器实例一致响应 setOpacity()。
+        if (this.COLOR_MODULATOR != null && ecaOpacity < 1.0f) {
+            this.COLOR_MODULATOR.set(1.0f, 1.0f, 1.0f, ecaOpacity);
+        }
         // Oculus的MixinShaderInstance会在super.apply()的TAIL锁定DepthColor，
         // 导致非ExtendedShader/FallbackShader的着色器无法写入颜色和深度。
         // 在此立刻解锁，使ECA着色器正常渲染。
