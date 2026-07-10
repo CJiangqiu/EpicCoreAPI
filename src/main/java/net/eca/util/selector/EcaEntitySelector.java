@@ -11,11 +11,14 @@ import net.minecraft.world.phys.AABB;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Predicate;
+
+import net.minecraft.world.phys.Vec3;
 
 public final class EcaEntitySelector {
 
@@ -198,6 +201,44 @@ public final class EcaEntitySelector {
             }
         }
         return new ArrayList<>(unique.values());
+    }
+
+    // ==================== 最近实体查询 ====================
+
+    public static Entity getNearestEntity(Level level, Vec3 pos, Predicate<Entity> filter) {
+        if (level == null || pos == null || filter == null) {
+            return null;
+        }
+        return getEntities(level, filter).stream()
+                .min(Comparator.comparingDouble(e -> e.distanceToSqr(pos)))
+                .orElse(null);
+    }
+
+    public static Entity getNearestEntity(Level level, Vec3 pos, AABB area, Predicate<Entity> filter) {
+        if (level == null || pos == null || area == null || filter == null) {
+            return null;
+        }
+        return getEntities(level, area, filter).stream()
+                .min(Comparator.comparingDouble(e -> e.distanceToSqr(pos)))
+                .orElse(null);
+    }
+
+    public static <T extends Entity> T getNearestEntity(Level level, Vec3 pos, Class<T> entityClass) {
+        if (level == null || pos == null || entityClass == null) {
+            return null;
+        }
+        return getEntities(level, entityClass).stream()
+                .min(Comparator.comparingDouble(e -> e.distanceToSqr(pos)))
+                .orElse(null);
+    }
+
+    public static <T extends Entity> T getNearestEntity(Level level, Vec3 pos, AABB area, Class<T> entityClass) {
+        if (level == null || pos == null || area == null || entityClass == null) {
+            return null;
+        }
+        return getEntities(level, area, entityClass).stream()
+                .min(Comparator.comparingDouble(e -> e.distanceToSqr(pos)))
+                .orElse(null);
     }
 
     private static Entity findEntityInServerSectionsById(ServerLevel level, int entityId) {

@@ -67,7 +67,7 @@ public class ClientRemovePacket {
             Minecraft minecraft = Minecraft.getInstance();
             ClientLevel clientLevel = minecraft.level;
             if (clientLevel != null) {
-                Entity entity = clientLevel.getEntity(msg.entityId);
+                Entity entity = ClientEntityUtil.getEntityById(clientLevel, msg.entityId);
                 if (entity != null) {
                     entity.onClientRemoval();
                     entity.invalidateCaps();

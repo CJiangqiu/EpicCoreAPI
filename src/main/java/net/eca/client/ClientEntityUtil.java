@@ -40,7 +40,11 @@ public final class ClientEntityUtil {
         if (entity != null) {
             return entity;
         }
-        return findEntityInClientSectionsById(clientLevel, entityId);
+        entity = findEntityInClientSectionsById(clientLevel, entityId);
+        if (entity != null) {
+            return entity;
+        }
+        return clientLevel.tickingEntities.active.get(entityId);
     }
 
     // 客户端按 UUID 查找实体

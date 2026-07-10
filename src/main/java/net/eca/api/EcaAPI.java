@@ -674,6 +674,57 @@ public final class EcaAPI {
         return EntityUtil.getEntities(server, filter);
     }
 
+    // 获取最近的实体（自定义筛选）
+    /**
+     * Get the nearest entity from the given position matching the filter.
+     * Uses ECA resolver so invulnerable entities are included in the search.
+     * @param level the level to query
+     * @param pos the origin position for distance comparison
+     * @param filter filter predicate
+     * @return the nearest matching entity, or null if none found
+     */
+    public static Entity getNearestEntity(Level level, Vec3 pos, Predicate<Entity> filter) {
+        return EntityUtil.getNearestEntity(level, pos, filter);
+    }
+
+    // 获取范围内最近的实体（自定义筛选）
+    /**
+     * Get the nearest entity within the given area matching the filter.
+     * @param level the level to query
+     * @param pos the origin position for distance comparison
+     * @param area query area to narrow candidates
+     * @param filter filter predicate
+     * @return the nearest matching entity, or null if none found
+     */
+    public static Entity getNearestEntity(Level level, Vec3 pos, AABB area, Predicate<Entity> filter) {
+        return EntityUtil.getNearestEntity(level, pos, area, filter);
+    }
+
+    // 获取最近的指定类型实体
+    /**
+     * Get the nearest entity of the specified type from the given position.
+     * @param level the level to query
+     * @param pos the origin position for distance comparison
+     * @param entityClass expected entity class
+     * @return the nearest entity of the given type, or null if none found
+     */
+    public static <T extends Entity> T getNearestEntity(Level level, Vec3 pos, Class<T> entityClass) {
+        return EntityUtil.getNearestEntity(level, pos, entityClass);
+    }
+
+    // 获取范围内最近的指定类型实体
+    /**
+     * Get the nearest entity of the specified type within the given area.
+     * @param level the level to query
+     * @param pos the origin position for distance comparison
+     * @param area query area to narrow candidates
+     * @param entityClass expected entity class
+     * @return the nearest entity of the given type, or null if none found
+     */
+    public static <T extends Entity> T getNearestEntity(Level level, Vec3 pos, AABB area, Class<T> entityClass) {
+        return EntityUtil.getNearestEntity(level, pos, area, entityClass);
+    }
+
     // ==================== 位置锁定系统 ====================
 
     // 锁定实体位置（当前位置）

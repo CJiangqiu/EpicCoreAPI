@@ -414,12 +414,10 @@ public class UnsafeUtil {
 
     private static void broadcastEntityRemoval(ServerLevel serverLevel, Entity entity, List<UUID> bossEventUUIDs) {
         try {
+            NetworkHandler.sendToDimension(new ClientRemovePacket(entity.getId(), bossEventUUIDs), serverLevel);
+
             ChunkMap.TrackedEntity trackedEntity = serverLevel.chunkSource.chunkMap.entityMap.get(entity.getId());
             if (trackedEntity == null) {
-                ClientRemovePacket packet = new ClientRemovePacket(entity.getId(), bossEventUUIDs);
-                for (ServerPlayer player : serverLevel.players()) {
-                    NetworkHandler.sendToPlayer(packet, player);
-                }
                 return;
             }
 
@@ -427,11 +425,9 @@ public class UnsafeUtil {
             if (seenBy.isEmpty()) return;
 
             ClientboundRemoveEntitiesPacket vanillaPacket = new ClientboundRemoveEntitiesPacket(entity.getId());
-            ClientRemovePacket customPacket = new ClientRemovePacket(entity.getId(), bossEventUUIDs);
             for (ServerPlayerConnection connection : seenBy) {
                 ServerPlayer player = connection.getPlayer();
                 player.connection.send(vanillaPacket);
-                NetworkHandler.sendToPlayer(customPacket, player);
             }
         } catch (Exception e) {
             EcaLogger.info("[UnsafeUtil] Failed to broadcast entity removal: {}", e.getMessage());

@@ -193,6 +193,26 @@ public class EntityUtil {
         return EcaEntitySelector.getEntities(server, filter);
     }
 
+    // 获取最近的实体（按包围盒过滤 + 自定义筛选条件）
+    public static Entity getNearestEntity(Level level, Vec3 pos, Predicate<Entity> filter) {
+        return EcaEntitySelector.getNearestEntity(level, pos, filter);
+    }
+
+    // 获取最近的实体（按包围盒和自定义筛选条件）
+    public static Entity getNearestEntity(Level level, Vec3 pos, AABB area, Predicate<Entity> filter) {
+        return EcaEntitySelector.getNearestEntity(level, pos, area, filter);
+    }
+
+    // 获取最近的指定类型实体
+    public static <T extends Entity> T getNearestEntity(Level level, Vec3 pos, Class<T> entityClass) {
+        return EcaEntitySelector.getNearestEntity(level, pos, entityClass);
+    }
+
+    // 获取最近的指定类型实体（按包围盒过滤）
+    public static <T extends Entity> T getNearestEntity(Level level, Vec3 pos, AABB area, Class<T> entityClass) {
+        return EcaEntitySelector.getNearestEntity(level, pos, area, entityClass);
+    }
+
     //检查实体在服务端关键容器中的存在情况
     public static Map<String, Boolean> checkEntityInContainers(ServerLevel level, UUID entityUUID) {
         Map<String, Boolean> result = checkEntityInServerContainers(level, entityUUID);
@@ -834,11 +854,12 @@ public class EntityUtil {
         }
     }
 
-    //向所有曾经追踪此实体的客户端广播移除（先传到虚空保底，再发原版包触发渲染清理，最后发自定义包清理 boss bar）
+    // 同维度广播强制清理用于覆盖追踪竞态，原版移除包仍只发送给已建立 pairing 的玩家
     private static void broadcastRemovalToSeenBy(ServerLevel serverLevel, Entity entity, List<UUID> bossEventUUIDs) {
+        NetworkHandler.sendToDimension(new ClientRemovePacket(entity.getId(), bossEventUUIDs), serverLevel);
+
         ChunkMap.TrackedEntity trackedEntity = serverLevel.chunkSource.chunkMap.entityMap.get(entity.getId());
         if (trackedEntity == null) {
-            NetworkHandler.sendToTrackingClients(new ClientRemovePacket(entity.getId(), bossEventUUIDs), entity);
             return;
         }
 
@@ -846,11 +867,9 @@ public class EntityUtil {
         if (seenBy.isEmpty()) return;
 
         ClientboundRemoveEntitiesPacket vanillaPacket = new ClientboundRemoveEntitiesPacket(entity.getId());
-        ClientRemovePacket customPacket = new ClientRemovePacket(entity.getId(), bossEventUUIDs);
         for (ServerPlayerConnection connection : seenBy) {
             ServerPlayer player = connection.getPlayer();
             player.connection.send(vanillaPacket);
-            NetworkHandler.sendToPlayer(customPacket, player);
         }
     }
 
