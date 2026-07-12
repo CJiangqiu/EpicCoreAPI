@@ -461,12 +461,21 @@ public class EntityUtil {
             }
 
             //补Section/Lookup/levelCallback基础注册
+            Entity registeredEntity = getEntity(level, entityUUID);
+            if (registeredEntity != null && registeredEntity != entity) {
+                EcaLogger.info("[EntityUtil] Revive containers skipped: UUID belongs to another active entity, uuid={}, expectedId={}, actualId={}",
+                        entityUUID, entity.getId(), registeredEntity.getId());
+                return before;
+            }
+
             if (!Boolean.TRUE.equals(before.get("EntitySectionStorage.sections"))
                     || !Boolean.TRUE.equals(before.get("EntityLookup.byUuid"))
                     || !Boolean.TRUE.equals(before.get("EntityLookup.byId"))) {
                 try {
-                    entityManager.knownUuids.remove(entityUUID);
-                    entityManager.addNewEntity(entity);
+                    if (registeredEntity == null) {
+                        entityManager.knownUuids.remove(entityUUID);
+                        entityManager.addNewEntity(entity);
+                    }
                 } catch (Exception e) {
                     entityManager.knownUuids.add(entityUUID);
                     EcaLogger.info("[EntityUtil] addNewEntity failed, uuid={}, msg={}", entityUUID, e.getMessage());
@@ -810,6 +819,20 @@ public class EntityUtil {
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to revive entity: {}", e.getMessage());
         }
+    }
+
+    static void reviveAtLastKnownPosition(LivingEntity entity, Vec3 position, float yRot, float xRot) {
+        if (entity == null || position == null) {
+            revive(entity);
+            return;
+        }
+        try {
+            entity.moveTo(position.x, position.y, position.z, yRot, xRot);
+        } catch (Exception e) {
+            EcaLogger.info("[EntityUtil] Failed to restore entity position, uuid={}, msg={}",
+                    entity.getUUID(), e.getMessage());
+        }
+        revive(entity);
     }
 
     //触发击杀成就

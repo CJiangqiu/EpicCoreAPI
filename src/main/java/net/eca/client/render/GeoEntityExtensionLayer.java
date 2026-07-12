@@ -22,11 +22,28 @@ import software.bernie.geckolib.core.animatable.GeoAnimatable;
 import software.bernie.geckolib.renderer.GeoRenderer;
 import software.bernie.geckolib.renderer.layer.GeoRenderLayer;
 
-@OnlyIn(Dist.CLIENT)
-public class GeoEntityExtensionLayer<T extends Entity & GeoAnimatable> extends GeoRenderLayer<T> {
+import java.util.function.Function;
 
-    public GeoEntityExtensionLayer(GeoRenderer<T> renderer) {
+@OnlyIn(Dist.CLIENT)
+public class GeoEntityExtensionLayer<T extends GeoAnimatable> extends GeoRenderLayer<T> {
+
+    private final GeoBoneVisibilityController boneVisibility = new GeoBoneVisibilityController();
+    private final Function<T, Entity> entityResolver;
+    private EntityLayerExtension activeExtension;
+
+    public GeoEntityExtensionLayer(GeoRenderer<T> renderer, Function<T, Entity> entityResolver) {
         super(renderer);
+        this.entityResolver = entityResolver;
+    }
+
+    @Override
+    public void preRender(PoseStack poseStack, T animatable, BakedGeoModel bakedModel, RenderType renderType,
+                          MultiBufferSource bufferSource, VertexConsumer buffer, float partialTick,
+                          int packedLight, int packedOverlay) {
+        activeExtension = findExtension(animatable);
+        if (activeExtension != null) {
+            boneVisibility.begin(bakedModel, activeExtension);
+        }
     }
 
     @Override
@@ -34,54 +51,58 @@ public class GeoEntityExtensionLayer<T extends Entity & GeoAnimatable> extends G
                        MultiBufferSource bufferSource, VertexConsumer buffer, float partialTick,
                        int packedLight, int packedOverlay) {
 
-        EntityExtension extension = EntityExtensionManager.getExtension(animatable.getType());
-        if (extension == null) return;
+        EntityLayerExtension layerExtension = activeExtension;
+        try {
+            if (layerExtension == null) return;
+            renderOverlay(poseStack, animatable, bakedModel, bufferSource, partialTick, packedLight,
+                    packedOverlay, layerExtension);
+        } finally {
+            boneVisibility.restore();
+            activeExtension = null;
+        }
+    }
 
-        LivingEntity livingAnimatable = animatable instanceof LivingEntity living ? living : null;
-        EntityLayerExtension layerExtension = EntityExtensionSafeAccess.entityLayerExtension(extension, livingAnimatable);
-        if (layerExtension == null || !layerExtension.enabled() || !layerExtension.shouldRender(livingAnimatable)) return;
+    private EntityLayerExtension findExtension(T animatable) {
+        Entity entity = entityResolver.apply(animatable);
+        if (entity == null) return null;
+        EntityExtension extension = EntityExtensionManager.getExtension(entity.getType());
+        if (extension == null) return null;
+        LivingEntity living = entity instanceof LivingEntity value ? value : null;
+        EntityLayerExtension layer = EntityExtensionSafeAccess.entityLayerExtension(extension, living);
+        return layer != null && layer.enabled() && layer.shouldRender(living) ? layer : null;
+    }
 
+    private void renderOverlay(PoseStack poseStack, T animatable, BakedGeoModel bakedModel,
+                               MultiBufferSource bufferSource, float partialTick, int packedLight,
+                               int packedOverlay, EntityLayerExtension layerExtension) {
         RenderType shaderType = layerExtension.getRenderType();
         ResourceLocation texture = layerExtension.getTexture();
         if (shaderType == null && texture == null) return;
+        boneVisibility.restrictOverlay(bakedModel, layerExtension.overlayGeoBones());
 
         int light = layerExtension.isGlow() ? 15728880 : packedLight;
         int overlay = layerExtension.isHurtOverlay() ? packedOverlay : OverlayTexture.NO_OVERLAY;
         float alpha = layerExtension.getAlpha();
-
-        boolean hasTexture = texture != null;
-        boolean hasShader = shaderType != null;
         boolean oculus = EcaShaderInstance.isOculusShadersActive();
 
-        if (hasTexture) {
-            RenderType texturedLayer = RenderType.entityTranslucent(texture);
-            if (oculus) {
-                BufferBuilder builder = EntityLayerRenderQueue.acquireBuilder();
-                builder.begin(VertexFormat.Mode.QUADS, texturedLayer.format());
-                MultiBufferSource captureSource = rt -> builder;
-                this.renderer.reRender(bakedModel, poseStack, captureSource, animatable,
-                        texturedLayer, builder, partialTick, light, overlay, 1.0f, 1.0f, 1.0f, alpha);
-                EntityLayerRenderQueue.enqueue(texturedLayer, builder, builder.end());
-            } else {
-                VertexConsumer texBuffer = bufferSource.getBuffer(texturedLayer);
-                this.renderer.reRender(bakedModel, poseStack, bufferSource, animatable,
-                        texturedLayer, texBuffer, partialTick, light, overlay, 1.0f, 1.0f, 1.0f, alpha);
-            }
-        }
+        renderPass(poseStack, animatable, bakedModel, bufferSource, partialTick, light, overlay, alpha,
+                texture == null ? null : RenderType.entityTranslucent(texture), oculus);
+        renderPass(poseStack, animatable, bakedModel, bufferSource, partialTick, light, overlay, alpha, shaderType, oculus);
+    }
 
-        if (hasShader) {
-            if (oculus) {
-                BufferBuilder builder = EntityLayerRenderQueue.acquireBuilder();
-                builder.begin(VertexFormat.Mode.QUADS, shaderType.format());
-                MultiBufferSource captureSource = rt -> builder;
-                this.renderer.reRender(bakedModel, poseStack, captureSource, animatable,
-                        shaderType, builder, partialTick, light, overlay, 1.0f, 1.0f, 1.0f, alpha);
-                EntityLayerRenderQueue.enqueue(shaderType, builder, builder.end());
-            } else {
-                VertexConsumer shaderBuffer = bufferSource.getBuffer(shaderType);
-                this.renderer.reRender(bakedModel, poseStack, bufferSource, animatable,
-                        shaderType, shaderBuffer, partialTick, light, overlay, 1.0f, 1.0f, 1.0f, alpha);
-            }
+    private void renderPass(PoseStack poseStack, T animatable, BakedGeoModel bakedModel,
+                            MultiBufferSource bufferSource, float partialTick, int light, int overlay,
+                            float alpha, RenderType type, boolean oculus) {
+        if (type == null) return;
+        if (oculus) {
+            BufferBuilder builder = EntityLayerRenderQueue.acquireBuilder();
+            builder.begin(VertexFormat.Mode.QUADS, type.format());
+            this.renderer.reRender(bakedModel, poseStack, rt -> builder, animatable, type, builder,
+                    partialTick, light, overlay, 1.0f, 1.0f, 1.0f, alpha);
+            EntityLayerRenderQueue.enqueue(type, builder, builder.end());
+        } else {
+            this.renderer.reRender(bakedModel, poseStack, bufferSource, animatable, type,
+                    bufferSource.getBuffer(type), partialTick, light, overlay, 1.0f, 1.0f, 1.0f, alpha);
         }
     }
 }

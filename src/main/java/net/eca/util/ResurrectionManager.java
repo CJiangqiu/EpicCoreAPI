@@ -4,6 +4,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.phys.Vec3;
 
 import net.minecraftforge.server.ServerLifecycleHooks;
 
@@ -41,7 +42,7 @@ public final class ResurrectionManager {
     private static final AtomicLong totalRevived = new AtomicLong(0);
     private static final AtomicLong totalChecks = new AtomicLong(0);
 
-    private static final Map<UUID, Entity> trackedEntities = new ConcurrentHashMap<>();
+    private static final Map<UUID, TrackedEntity> trackedEntities = new ConcurrentHashMap<>();
     private static final Set<UUID> inProgress = ConcurrentHashMap.newKeySet();
 
     private static volatile long pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
@@ -76,16 +77,23 @@ public final class ResurrectionManager {
 
                     int revivedThisRound = 0;
                     int checkedThisRound = 0;
-                    Map<UUID, Entity> snapshot = Map.copyOf(trackedEntities);
+                    Map<UUID, TrackedEntity> snapshot = Map.copyOf(trackedEntities);
 
-                    for (Map.Entry<UUID, Entity> entry : snapshot.entrySet()) {
+                    for (Map.Entry<UUID, TrackedEntity> entry : snapshot.entrySet()) {
                         if (!running.get()) break;
                         UUID uuid = entry.getKey();
-                        Entity entity = entry.getValue();
+                        TrackedEntity tracked = entry.getValue();
 
                         if (!inProgress.add(uuid)) continue;
                         try {
                             checkedThisRound++;
+
+                            Entity entity = EntityUtil.getEntity(server, uuid);
+                            if (entity != null) {
+                                tracked.entity = entity;
+                            } else {
+                                entity = tracked.entity;
+                            }
 
                             if (entity == null) {
                                 trackedEntities.remove(uuid);
@@ -99,8 +107,16 @@ public final class ResurrectionManager {
                                 continue;
                             }
 
+                            updateLastKnownLocation(tracked, entity);
+
                             if (entity instanceof LivingEntity living) {
-                                EntityUtil.revive(living);
+                                if (tracked.hasLastKnownLocation()
+                                        && (entity.isRemoved() || entity.getRemovalReason() != null)) {
+                                    EntityUtil.reviveAtLastKnownPosition(living, tracked.position,
+                                            tracked.yRot, tracked.xRot);
+                                } else {
+                                    EntityUtil.revive(living);
+                                }
                                 revivedThisRound++;
                             }
                         } catch (Exception e) {
@@ -158,14 +174,23 @@ public final class ResurrectionManager {
 
     public static void add(Entity entity) {
         if (entity == null) return;
-        trackedEntities.put(entity.getUUID(), entity);
+        trackedEntities.compute(entity.getUUID(), (uuid, tracked) -> {
+            if (tracked == null) {
+                return new TrackedEntity(entity);
+            }
+            tracked.entity = entity;
+            updateLastKnownLocation(tracked, entity);
+            return tracked;
+        });
         if (entity instanceof LivingEntity living && EntityUtil.RESURRECTION_TRACKED != null) {
             living.getEntityData().set(EntityUtil.RESURRECTION_TRACKED, true);
         }
     }
 
     public static void add(UUID uuid) {
-        if (uuid != null) trackedEntities.putIfAbsent(uuid, null);
+        if (uuid != null) {
+            trackedEntities.putIfAbsent(uuid, new TrackedEntity(null));
+        }
     }
 
     public static void remove(Entity entity) {
@@ -184,6 +209,18 @@ public final class ResurrectionManager {
         return uuid != null && trackedEntities.containsKey(uuid);
     }
 
+    public static void recordPosition(Entity entity) {
+        if (entity == null) {
+            return;
+        }
+        TrackedEntity tracked = trackedEntities.get(entity.getUUID());
+        if (tracked == null) {
+            return;
+        }
+        tracked.entity = entity;
+        updateLastKnownLocation(tracked, entity);
+    }
+
     public static Set<UUID> getTrackedUUIDs() {
         return Collections.unmodifiableSet(trackedEntities.keySet());
     }
@@ -199,7 +236,8 @@ public final class ResurrectionManager {
     }
 
     public static Map<String, Boolean> reviveNow(ServerLevel level, UUID uuid) {
-        Entity entity = trackedEntities.get(uuid);
+        TrackedEntity tracked = trackedEntities.get(uuid);
+        Entity entity = tracked != null ? tracked.entity : null;
         if (entity == null) entity = EntityUtil.getEntity(level, uuid);
         if (entity == null) {
             EcaLogger.info("[ResurrectionManager] reviveNow: entity not found uuid={}", uuid);
@@ -216,5 +254,37 @@ public final class ResurrectionManager {
 
     private static void sleepOneCycle() {
         LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(pollIntervalMs));
+    }
+
+    private static void updateLastKnownLocation(TrackedEntity tracked, Entity entity) {
+        if (entity == null
+                || !(entity.level() instanceof ServerLevel serverLevel)
+                || entity.isRemoved()
+                || entity.getRemovalReason() != null
+                || EntityUtil.isChangingDimension(entity)) {
+            return;
+        }
+
+        tracked.level = serverLevel;
+        tracked.position = entity.position();
+        tracked.yRot = entity.getYRot();
+        tracked.xRot = entity.getXRot();
+    }
+
+    private static final class TrackedEntity {
+        private volatile Entity entity;
+        private volatile ServerLevel level;
+        private volatile Vec3 position;
+        private volatile float yRot;
+        private volatile float xRot;
+
+        private TrackedEntity(Entity entity) {
+            this.entity = entity;
+            updateLastKnownLocation(this, entity);
+        }
+
+        private boolean hasLastKnownLocation() {
+            return level != null && position != null;
+        }
     }
 }

@@ -6,6 +6,9 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
+import java.util.Collections;
+import java.util.Set;
+
 @OnlyIn(Dist.CLIENT)
 public class EntityLayerExtension {
 
@@ -45,5 +48,23 @@ public class EntityLayerExtension {
 
     public boolean shouldRender(LivingEntity entity) {
         return true;
+    }
+
+    /**
+     * Geo 模型中需要连同子骨骼一起隐藏的骨骼名称。
+     *
+     * @return 要隐藏的 Geo 骨骼名称集合
+     */
+    public Set<String> hiddenGeoBones() {
+        return Collections.emptySet();
+    }
+
+    /**
+     * Geo 覆盖层允许重绘的根骨骼名称；空集合表示重绘完整模型。
+     *
+     * @return 要包含在 Geo 覆盖层中的根骨骼名称集合
+     */
+    public Set<String> overlayGeoBones() {
+        return Collections.emptySet();
     }
 }

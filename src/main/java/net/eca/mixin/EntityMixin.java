@@ -3,6 +3,7 @@ package net.eca.mixin;
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
+import net.eca.util.ResurrectionManager;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
@@ -111,6 +112,11 @@ public class EntityMixin {
                 }
             }
         }
+    }
+
+    @Inject(method = "setPosRaw(DDD)V", at = @At("RETURN"))
+    private void recordResurrectionPosition(double x, double y, double z, CallbackInfo ci) {
+        ResurrectionManager.recordPosition((Entity) (Object) this);
     }
 
     @Inject(method = "changeDimension*", at = @At("HEAD"))
