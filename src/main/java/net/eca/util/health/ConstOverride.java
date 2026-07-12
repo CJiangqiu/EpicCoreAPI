@@ -134,7 +134,7 @@ public final class ConstOverride {
                 targets.add(target);
             }
             if (targets.isEmpty()) {
-                if (MISS_DUMPED.add(classInternal)) {
+                if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed() && MISS_DUMPED.add(classInternal)) {
                     EcaLogger.info("[ConstOverride] transform missed class={} sites={} missed={}",
                             classInternal, sites.size(), missed);
                 }
@@ -145,7 +145,7 @@ public final class ConstOverride {
                 if (target.fallback()) fallbackCount++;
                 insertResolveCall(target.method(), target.insn());
             }
-            if (PATCH_DUMPED.add(classInternal)) {
+            if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed() && PATCH_DUMPED.add(classInternal)) {
                 EcaLogger.info("[ConstOverride] transform patched class={} sites={} patched={} fallback={} missed={}",
                         classInternal, sites.size(), targets.size(), fallbackCount, missed);
             }
@@ -237,9 +237,13 @@ public final class ConstOverride {
     // ==================== 安装(登记 + retransform 烤入) ====================
 
     /* 把树内 ConstOverrideSource 的常数点登记并对其 owner 类触发 retransform 使 patch 生效。
-       无条件安装(默认转换)；仅含 DATAFLOW 源(无 ConstOverrideSource)的树收集不到 owner 时提前返回，零开销。 */
+       强制兼容模式或配置关闭时不转换(硬门——不登记 site、不 retransform)。仅含 DATAFLOW 源(无 ConstOverrideSource)的树收集不到 owner 时提前返回，零开销。 */
     public static void install(AnalysisResult tree) {
         if (tree == null || tree.sources.isEmpty()) return;
+        // 强制兼容模式 → 跳过全部转换；配置关闭 → 不登记不 retransform
+        if (EcaConfiguration.getForceCompatibilityModeSafely()
+                || !EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                || !EcaConfiguration.getAttackSetHealthEnableConstOverrideSafely()) return;
         Set<String> ownerInternals = new HashSet<>();
         int siteCount = 0;
         for (Source s : tree.sources) {
@@ -251,26 +255,29 @@ public final class ConstOverride {
         }
         if (ownerInternals.isEmpty()) return;
         String installKey = ownerInternals + "|" + siteCount;
-        if (INSTALL_DUMPED.add(installKey)) {
+        if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed() && INSTALL_DUMPED.add(installKey)) {
             EcaLogger.info("[ConstOverride] install sites={} owners={}", siteCount, ownerInternals);
         }
         // 全部 site 登记完再逐 owner retransform：retransform 从原始字节码重跑全链，一次覆盖该类所有 site
         for (String internal : ownerInternals) {
             Class<?> owner = HealthDataflowAnalyzer.loadClass(internal);
             if (owner == null) {
-                if (INSTALL_DUMPED.add("missing:" + internal)) {
+                if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed()
+                        && INSTALL_DUMPED.add("missing:" + internal)) {
                     EcaLogger.info("[ConstOverride] install skipped: owner missing {}", internal);
                 }
                 continue;
             }
             try {
                 if (!EcaTransformerManager.retransformClass(owner)
+                        && !EcaSetHealthManager.isWarmupDiagnosticsSuppressed()
                         && INSTALL_DUMPED.add("unmodifiable:" + internal)) {
                     EcaLogger.info("[ConstOverride] install skipped: owner retransform unavailable {}", owner.getName());
                 }
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                EcaLogger.info("[ConstOverride] retransform failed owner={} msg={}", owner.getName(), t.toString());
+                if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed())
+                    EcaLogger.info("[ConstOverride] retransform failed owner={} msg={}", owner.getName(), t.toString());
             }
         }
     }

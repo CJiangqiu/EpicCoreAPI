@@ -1,11 +1,13 @@
 package net.eca.config;
 
+import net.eca.compat.FriendModCheck;
 import net.minecraftforge.common.ForgeConfigSpec;
 
 public class EcaConfiguration {
     public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
     public static final ForgeConfigSpec SPEC;
 
+    public static ForgeConfigSpec.ConfigValue<Boolean> FORCE_COMPATIBILITY_MODE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_ENABLE_RADICAL_LOGIC;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_CONST_OVERRIDE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_EXTERNAL_SCAN;
@@ -21,6 +23,14 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.IntValue BOSSSHOW_ENTITY_SELECTION_RANGE;
 
     static {
+        // Compatibility Configuration | 兼容性配置
+        FORCE_COMPATIBILITY_MODE = BUILDER
+            .comment("Force compatibility mode: when enabled, most ECA capabilities will be disabled to reduce potential compatibility issues with other mods."
+                    + " All bytecode transformations, retransforms, and dataflow warmup are skipped entirely.",
+                     "强制兼容模式：开启后，ECA 的大部分能力将会失效，用于减少可能导致的兼容问题。"
+                     + " 所有字节码转换、重转换、数据流预热均被跳过。")
+            .define("Force Compatibility Mode", false);
+
         // Attack Configuration | 攻击系统配置
         BUILDER.push("Attack");
 
@@ -117,7 +127,16 @@ public class EcaConfiguration {
         }
     }
 
+    public static boolean getForceCompatibilityModeSafely() {
+        return safeGet(FORCE_COMPATIBILITY_MODE, false);
+    }
+
     public static boolean getAttackEnableRadicalLogicSafely() {
+        // 优先级链第 1 级：强制兼容模式 → 全部关闭
+        if (getForceCompatibilityModeSafely()) return false;
+        // 优先级链第 2 级：联动 mod 存在时强制开启，无视配置
+        if (FriendModCheck.hasRadicalCompatModLoaded()) return true;
+        // 优先级链第 3 级：按配置
         return safeGet(ATTACK_ENABLE_RADICAL_LOGIC, false);
     }
 
@@ -138,6 +157,11 @@ public class EcaConfiguration {
     }
 
     public static boolean getDefenceEnableRadicalLogicSafely() {
+        // 优先级链第 1 级：强制兼容模式 → 全部关闭
+        if (getForceCompatibilityModeSafely()) return false;
+        // 优先级链第 2 级：联动 mod 存在时强制开启，无视配置
+        if (FriendModCheck.hasRadicalCompatModLoaded()) return true;
+        // 优先级链第 3 级：按配置
         return safeGet(DEFENCE_ENABLE_RADICAL_LOGIC, false);
     }
 

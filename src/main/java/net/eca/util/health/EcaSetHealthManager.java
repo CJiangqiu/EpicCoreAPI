@@ -42,6 +42,9 @@ public final class EcaSetHealthManager {
     /* 数值反演前置跳过诊断去重：每类每原因只打一次，避免每-tick 改血刷屏 */
     private static final Set<String> NUMERIC_INVERSION_SKIP_DUMPED = ConcurrentHashMap.newKeySet();
 
+    /* 预热只建立缓存和安装必要桥接；诊断留给首次真实改血，避免启动期刷屏。 */
+    private static final ThreadLocal<Boolean> WARMUP_DIAGNOSTICS_SUPPRESSED = ThreadLocal.withInitial(() -> false);
+
     /* ==================== 对外编排入口 ==================== */
 
     /* 数据流改血主入口：查 DATAFLOW_TABLE，命中失败哨兵直接放弃；命中可写结构则交 HealthDataFlow 写入；
@@ -94,9 +97,14 @@ public final class EcaSetHealthManager {
         return MethodProbe.invokeBridge(target, spec, targetHealth, rollbackRoots);
     }
 
-    /* HeadBridge 每类只烤入一次(warmup 与惰性共用)。无条件烤入——运行期是否借桥由配置双门控 + 激活态决定。 */
+    /* HeadBridge 每类只烤入一次(warmup 与惰性共用)。
+       强制兼容模式或配置关闭时不转换(硬门——不登记 spec、不 retransform)。 */
     public static void installMethodBridgeOnce(Class<?> cls) {
-        if (cls != null && METHOD_BRIDGE_INSTALLED.add(cls)) MethodProbe.installBridge(cls);
+        if (cls == null) return;
+        if (EcaConfiguration.getForceCompatibilityModeSafely()
+                || !EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                || !EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) return;
+        if (METHOD_BRIDGE_INSTALLED.add(cls)) MethodProbe.installBridge(cls);
     }
 
     /* 数值反演兜底入口：前面通道全打不穿(通常卡在自定义非可逆解码)时，从数据流逆向的死角活对象继续向下扰动原始 cell。
@@ -151,24 +159,28 @@ public final class EcaSetHealthManager {
             ar = HealthDataflowAnalyzer.analyze(cls);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            EcaLogger.info("[HealthDataflow] analyze {} threw {} => FAILED", cls.getName(), t.toString());
+            if (!isWarmupDiagnosticsSuppressed())
+                EcaLogger.info("[HealthDataflow] analyze {} threw {} => FAILED", cls.getName(), t.toString());
             return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
         }
         if (ar == null) {
-            EcaLogger.info("[HealthDataflow] analyze {} => null => FAILED", cls.getName());
+            if (!isWarmupDiagnosticsSuppressed())
+                EcaLogger.info("[HealthDataflow] analyze {} => null => FAILED", cls.getName());
             return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
         }
         HealthDataflowAnalyzer.AnalysisResult.Kind kind = ar.classify();
         boolean eligible = kind == HealthDataflowAnalyzer.AnalysisResult.Kind.DATAFLOW
                 || (kind == HealthDataflowAnalyzer.AnalysisResult.Kind.CONST_OVERRIDE && !ar.sources.isEmpty());
-        EcaLogger.info("[HealthDataflow] analyze {} => kind={} definingClass={} sources={} eligible={}",
-                cls.getName(), kind,
-                ar.definingClass != null ? ar.definingClass.getName() : "null",
-                ar.sources.size(), eligible);
+        if (!isWarmupDiagnosticsSuppressed()) {
+            EcaLogger.info("[HealthDataflow] analyze {} => kind={} definingClass={} sources={} eligible={}",
+                    cls.getName(), kind,
+                    ar.definingClass != null ? ar.definingClass.getName() : "null",
+                    ar.sources.size(), eligible);
+        }
         // 失败诊断：按 getHealth 定义类去重，打印返回表达式与各源 label，判断 10 个源是别的 mod 叠的还是 ECA 剥离残留
         if (!eligible) {
             String dc = ar.definingClass != null ? ar.definingClass.getName() : "null";
-            if (UNRESOLVED_DUMPED.add(dc)) {
+            if (!isWarmupDiagnosticsSuppressed() && UNRESOLVED_DUMPED.add(dc)) {
                 EcaLogger.info("[HealthDataflow] UNRESOLVED definingClass={} sources={}", dc, ar.sources.size());
                 int i = 0;
                 for (HealthDataflowAnalyzer.Source s : ar.sources) {
@@ -184,8 +196,10 @@ public final class EcaSetHealthManager {
     }
 
     /* 后台预热入口：FMLLoadComplete 在所有 ECA 字节码处理之后调用。
-       单条 daemon 线程跑，避免阻塞主加载线程；纯分析只读，离开主线程安全。 */
+       单条 daemon 线程跑，避免阻塞主加载线程；纯分析只读，离开主线程安全。
+       强制兼容模式下跳过预热——转换已全部禁止，数据流表无需预填。 */
     public static void startWarmup() {
+        if (EcaConfiguration.getForceCompatibilityModeSafely()) return;
         Thread t = new Thread(EcaSetHealthManager::warmupAll, "ECA-Health-Dataflow-Warmup");
         t.setDaemon(true);
         t.start();
@@ -194,24 +208,24 @@ public final class EcaSetHealthManager {
     /* 遍历已加载的 LivingEntity 子类(排除 Player 与抽象类)，逐个分析填表。
        晚加载的实体类不在此列，仍由 setHealth 时惰性补分析(computeIfAbsent 与本线程互不冲突)。 */
     private static void warmupAll() {
-        AtomicInteger analyzed = new AtomicInteger();
-        boolean enumerated = EcaTransformerManager.forEachLoadedClass(clazz -> {
-            warmupClass(clazz, analyzed);
-        });
-        if (!enumerated) {
-            boolean internalEnumerated = EcaTransformerManager.forEachLoadedInternalName(info -> {
-                if (info == null || !info.modifiable() || !info.livingEntity()) return;
-                Class<?> clazz = HealthDataflowAnalyzer.loadClass(info.internalName());
-                if (clazz == null) return;
+        WARMUP_DIAGNOSTICS_SUPPRESSED.set(true);
+        try {
+            AtomicInteger analyzed = new AtomicInteger();
+            boolean enumerated = EcaTransformerManager.forEachLoadedClass(clazz -> {
                 warmupClass(clazz, analyzed);
             });
-            if (!internalEnumerated) {
-                EcaLogger.info("[HealthDataflow] warmup skipped: loaded class enumeration unavailable");
-                return;
+            if (!enumerated) {
+                boolean internalEnumerated = EcaTransformerManager.forEachLoadedInternalName(info -> {
+                    if (info == null || !info.modifiable() || !info.livingEntity()) return;
+                    Class<?> clazz = HealthDataflowAnalyzer.loadClass(info.internalName());
+                    if (clazz == null) return;
+                    warmupClass(clazz, analyzed);
+                });
+                if (!internalEnumerated) return;
             }
+        } finally {
+            WARMUP_DIAGNOSTICS_SUPPRESSED.remove();
         }
-        EcaLogger.info("[HealthDataflow] warmup complete: analyzed {} entity classes, table size={}",
-                analyzed.get(), DATAFLOW_TABLE.size());
     }
 
     private static void warmupClass(Class<?> clazz, AtomicInteger analyzed) {
@@ -226,8 +240,13 @@ public final class EcaSetHealthManager {
             analyzed.incrementAndGet();
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            EcaLogger.info("[HealthDataflow] warmup analyze {} failed: {}", clazz.getName(), t.toString());
+            if (!isWarmupDiagnosticsSuppressed())
+                EcaLogger.info("[HealthDataflow] warmup analyze {} failed: {}", clazz.getName(), t.toString());
         }
+    }
+
+    static boolean isWarmupDiagnosticsSuppressed() {
+        return WARMUP_DIAGNOSTICS_SUPPRESSED.get();
     }
 
     /* ==================== 校验 ==================== */

@@ -303,11 +303,13 @@ public final class MethodProbe {
         if (owner == null) return;
         try {
             if (!EcaTransformerManager.retransformClass(owner)) {
-                EcaLogger.info("[MethodProbe] bridge retransform unavailable owner={}", owner.getName());
+                if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed())
+                    EcaLogger.info("[MethodProbe] bridge retransform unavailable owner={}", owner.getName());
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            EcaLogger.info("[MethodProbe] bridge retransform failed owner={} msg={}", owner.getName(), t.toString());
+            if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed())
+                EcaLogger.info("[MethodProbe] bridge retransform failed owner={} msg={}", owner.getName(), t.toString());
         }
     }
 

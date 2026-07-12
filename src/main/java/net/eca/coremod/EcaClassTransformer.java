@@ -2,6 +2,7 @@ package net.eca.coremod;
 
 import net.eca.agent.AgentLogWriter;
 import net.eca.agent.EcaAgent;
+import net.eca.config.EcaConfiguration;
 import net.eca.util.health.ConstOverride;
 import net.eca.util.health.MethodProbe;
 import org.objectweb.asm.ClassReader;
@@ -13,6 +14,9 @@ import org.objectweb.asm.Opcodes;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.List;
@@ -42,6 +46,9 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     private static final String LIVING_ENTITY = "net/minecraft/world/entity/LivingEntity";
     private static final String ENTITY        = "net/minecraft/world/entity/Entity";
 
+    /* 必须在注册 Transformer 前从磁盘读取，避免类加载回调进入 ForgeConfigSpec 而与 ModuleClassLoader 死锁。 */
+    private static final boolean FORCE_COMPATIBILITY_MODE = readForceCompatibilityMode();
+
     private static volatile int transformCount = 0;
 
     // 收集阶段预计算：哪些类名是 LivingEntity 子类
@@ -55,9 +62,10 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
     /* 供 JVM TI 原生回调调用的静态入口——绕过 InstrumentationImpl，直接访问变换逻辑。
        JVM TI 回调无法提供 ClassLoader/ProtectionDomain/classBeingRedefined，
-       但内部逻辑仅依赖 className 和字节码。 */
+       但内部逻辑仅依赖 className 和字节码。强制兼容模式下跳过全部转换。 */
     public static byte[] transformStatic(String className, byte[] classfileBuffer) {
         if (className == null) return null;
+        if (FORCE_COMPATIBILITY_MODE) return null;
         // 实体健康 hook 目标（LivingEntity/Entity 及已知子类）绕过 net.minecraft 系统保护，只施加 HEAD hook
         if (isHealthHookTarget(className) && TransformerWhitelist.isSystemProtectedInternal(className)) {
             try {
@@ -104,8 +112,10 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         EcaTransformerManager.registerClassTransformer();
     }
 
-    //注册 Transformer 并重转换已加载的类。须在 mod 加载完成后（线程池空闲）调用，避免并发 retransform 死锁
+    /* 注册 Transformer 并重转换已加载的类。须在 mod 加载完成后（线程池空闲）调用，避免并发 retransform 死锁。
+       强制兼容模式下跳过全部重转换。 */
     public static void init() {
+        if (EcaConfiguration.getForceCompatibilityModeSafely()) return;
         EcaTransformerManager.applyLoadCompleteTransforms();
     }
 
@@ -143,6 +153,34 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
         //注册永久捕获器排在链尾，之后所有类加载/retransform 自动缓存最终字节码
         RuntimeBytecodeProvider.registerPermanentCapture(inst);
+    }
+
+    private static boolean readForceCompatibilityMode() {
+        Path configPath = Paths.get("config", "eca.toml");
+        try {
+            if (!Files.exists(configPath)) return false;
+
+            for (String rawLine : Files.readAllLines(configPath)) {
+                String line = rawLine;
+                int comment = line.indexOf('#');
+                if (comment >= 0) line = line.substring(0, comment);
+                line = line.trim();
+
+                int equals = line.indexOf('=');
+                if (equals < 0) continue;
+
+                String key = line.substring(0, equals).trim();
+                if (key.startsWith("\"") && key.endsWith("\"") && key.length() >= 2) {
+                    key = key.substring(1, key.length() - 1);
+                }
+                if ("Force Compatibility Mode".equals(key)) {
+                    return Boolean.parseBoolean(line.substring(equals + 1).trim());
+                }
+            }
+        } catch (Throwable t) {
+            AgentLogWriter.info("[EcaClassTransformer] Failed to read " + configPath + ": " + t.getMessage());
+        }
+        return false;
     }
 
     //重转换已加载的类（Entity/LivingEntity 子类 + Entity/LivingEntity 自身 + DisplayWindow）
@@ -260,6 +298,9 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                             ProtectionDomain protectionDomain, byte[] classfileBuffer) {
         if (className == null) return null;
+
+        // 强制兼容模式：跳过全部字节码转换
+        if (FORCE_COMPATIBILITY_MODE) return null;
 
         // 白名单内的特殊目标：DisplayWindow 渐变背景
         if (LoadingScreenTransformer.ENABLED &&

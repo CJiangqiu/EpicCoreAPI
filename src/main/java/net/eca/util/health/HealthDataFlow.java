@@ -80,14 +80,14 @@ public final class HealthDataFlow {
         try {
             byte[] runtime = net.eca.coremod.RuntimeBytecodeProvider.get(clazz);
             if (runtime != null) {
-                if (BYTES_SOURCE_DUMPED.add(clazz.getName()))
+                if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed() && BYTES_SOURCE_DUMPED.add(clazz.getName()))
                     EcaLogger.info("[HealthDataflow] bytes for {} <- RuntimeBytecodeProvider(runtime,{}B)", clazz.getName(), runtime.length);
                 return runtime;
             }
         } catch (Throwable ignored) {
             if (ignored instanceof VirtualMachineError e) throw e;
         }
-        if (BYTES_SOURCE_DUMPED.add(clazz.getName()))
+        if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed() && BYTES_SOURCE_DUMPED.add(clazz.getName()))
             EcaLogger.info("[HealthDataflow] bytes for {} <- DISK fallback (runtime capture MISSING)", clazz.getName());
         return HealthDataflowAnalyzer.defaultClassBytes(clazz);
     }
@@ -102,8 +102,9 @@ public final class HealthDataFlow {
     public static boolean write(AnalysisResult tree, LivingEntity entity, float target) {
         if (tree == null || entity == null) return false;
         Class<?> cls = entity.getClass();
-        if (FIRST_WRITE_DUMPED.add(cls.getName())) dumpAnalysisStructure(cls, tree, target);
-        return writeViaSources(cls, tree, entity, target,
+        boolean firstWrite = FIRST_WRITE_DUMPED.add(cls.getName());
+        if (firstWrite) dumpAnalysisStructure(cls, tree, target);
+        return writeViaSources(cls, tree, entity, target, firstWrite,
                 (verifiedEntity, verifiedTarget, sink) -> EcaSetHealthManager.verify(verifiedEntity, verifiedTarget));
     }
 
@@ -112,8 +113,9 @@ public final class HealthDataFlow {
     public static boolean writeExternal(AnalysisResult tree, LivingEntity entity, float target) {
         if (tree == null || entity == null) return false;
         Class<?> cls = entity.getClass();
-        if (FIRST_WRITE_DUMPED.add(cls.getName())) dumpAnalysisStructure(cls, tree, target);
-        return writeViaSources(cls, tree, entity, target,
+        boolean firstWrite = FIRST_WRITE_DUMPED.add(cls.getName());
+        if (firstWrite) dumpAnalysisStructure(cls, tree, target);
+        return writeViaSources(cls, tree, entity, target, firstWrite,
                 (verifiedEntity, verifiedTarget, sink) ->
                         HealthDataflowAnalyzer.verifyExternalDataflow(tree.returnExpr, verifiedEntity, verifiedTarget, sink));
     }
@@ -147,7 +149,7 @@ public final class HealthDataFlow {
     /* 逐个验证候选 Source，单点未命中再联合写入(应对双源防御)，失败回滚原值。
        仅在缓存失败树时打印一次诊断，避免每-tick 改血刷屏。 */
     public static boolean writeViaSources(Class<?> cls, AnalysisResult ar, LivingEntity entity, float expected,
-                                          HealthVerifier verifier) {
+                                          boolean logSuccess, HealthVerifier verifier) {
         EvalContext ctx = HealthDataflowAnalyzer.newContext(entity);
         List<String> diag = new ArrayList<>();
         List<PreparedSourceWrite> solvedWrites = new ArrayList<>();
@@ -167,8 +169,10 @@ public final class HealthDataFlow {
                 continue;
             }
             if (verifier.verify(entity, expected, sink)) {
-                EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}",
-                        cls.getName(), sink.label, solved.value(), expected);
+                if (logSuccess) {
+                    EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}",
+                            cls.getName(), sink.label, solved.value(), expected);
+                }
                 return true;
             }
 
@@ -177,7 +181,7 @@ public final class HealthDataFlow {
                     + " verify=FAIL restore=" + (restored ? "OK" : "FAIL"));
         }
 
-        if (writeAllSources(solvedWrites, entity, expected, diag, verifier)) return true;
+        if (writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) return true;
 
         if (FAIL_DUMPED.add(cls.getName())) {
             EcaLogger.warn("[HealthDataflow] setHealth failed entity={} expected={} sink results:", cls.getName(), expected);
@@ -189,7 +193,7 @@ public final class HealthDataFlow {
     /* ≥2 个可解 Source 时联合写入(应对需同时写多处的双源防御)，失败逆序回滚。
        writes 由单源循环收集，其 snapshot 均为原值(循环对每次尝试都已回滚)，故回滚即复原。 */
     private static boolean writeAllSources(List<PreparedSourceWrite> writes, LivingEntity entity, float expected,
-                                           List<String> diag, HealthVerifier verifier) {
+                                           List<String> diag, HealthVerifier verifier, boolean logSuccess) {
         if (writes.size() < 2) return false;
 
         boolean wroteAll = true;
@@ -200,8 +204,10 @@ public final class HealthDataFlow {
             }
         }
         if (wroteAll && verifier.verify(entity, expected, null)) {
-            EcaLogger.info("[HealthDataflow] setHealth success entity={} sink=all-sources expected={}",
-                    entity.getClass().getName(), expected);
+            if (logSuccess) {
+                EcaLogger.info("[HealthDataflow] setHealth success entity={} sink=all-sources expected={}",
+                        entity.getClass().getName(), expected);
+            }
             return true;
         }
 
