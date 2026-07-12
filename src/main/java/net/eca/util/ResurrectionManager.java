@@ -92,7 +92,15 @@ public final class ResurrectionManager {
                             if (entity != null) {
                                 tracked.entity = entity;
                             } else {
-                                entity = tracked.entity;
+                                Entity cachedEntity = tracked.entity;
+                                if (cachedEntity != null
+                                        && cachedEntity.level() instanceof ServerLevel cachedLevel
+                                        && cachedLevel.getServer() == server) {
+                                    entity = cachedEntity;
+                                } else {
+                                    trackedEntities.remove(uuid, tracked);
+                                    continue;
+                                }
                             }
 
                             if (entity == null) {
