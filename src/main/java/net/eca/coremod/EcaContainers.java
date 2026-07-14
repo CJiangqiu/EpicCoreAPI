@@ -642,6 +642,21 @@ public final class EcaContainers {
             }
             super.clear();
         }
+
+        // EntitySectionStorage 遍历期间可能因实体复活重入修改分区表，使用快照避免 fastutil 迭代器状态损坏。
+        @Override
+        public ObjectCollection<V> values() {
+            ObjectArrayList<V> snapshot = new ObjectArrayList<>(size);
+            if (containsNullKey) {
+                snapshot.add(value[n]);
+            }
+            for (int index = n; index-- != 0;) {
+                if (key[index] != 0L) {
+                    snapshot.add(value[index]);
+                }
+            }
+            return snapshot;
+        }
     }
 
     public static class EcaLongAVLTreeSet extends LongAVLTreeSet {
