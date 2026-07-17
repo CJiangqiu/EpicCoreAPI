@@ -4,6 +4,8 @@ import net.eca.client.ClientEntityUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.network.NetworkEvent;
 
 import java.util.LinkedHashMap;
@@ -31,7 +33,15 @@ public class EntityContainerCheckRequestPacket {
     }
 
     public static void handle(EntityContainerCheckRequestPacket msg, Supplier<NetworkEvent.Context> ctx) {
-        ctx.get().enqueueWork(() -> {
+        NetworkEvent.Context context = ctx.get();
+        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                Dist.CLIENT, () -> () -> ClientHandler.apply(msg)));
+        context.setPacketHandled(true);
+    }
+
+    // 客户端引用隔离在独立内部类中，避免专用服务端在类校验阶段加载 ClientLevel
+    private static final class ClientHandler {
+        private static void apply(EntityContainerCheckRequestPacket msg) {
             Map<String, Boolean> result = new LinkedHashMap<>();
             Minecraft minecraft = Minecraft.getInstance();
             ClientLevel clientLevel = minecraft.level;
@@ -46,7 +56,6 @@ public class EntityContainerCheckRequestPacket {
                 result.put("ClientEntity.levelCallback", false);
             }
             NetworkHandler.sendToServer(new EntityContainerCheckResponsePacket(msg.requestId, msg.entityUuid, result));
-        });
-        ctx.get().setPacketHandled(true);
+        }
     }
 }

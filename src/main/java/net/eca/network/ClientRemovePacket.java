@@ -8,6 +8,8 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.EntityInLevelCallback;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.network.NetworkEvent;
 
 import java.util.ArrayList;
@@ -63,7 +65,15 @@ public class ClientRemovePacket {
      * @param ctx the network context
      */
     public static void handle(ClientRemovePacket msg, Supplier<NetworkEvent.Context> ctx) {
-        ctx.get().enqueueWork(() -> {
+        NetworkEvent.Context context = ctx.get();
+        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                Dist.CLIENT, () -> () -> ClientHandler.apply(msg)));
+        context.setPacketHandled(true);
+    }
+
+    // 客户端引用隔离在独立内部类中，避免专用服务端在类校验阶段加载 ClientLevel
+    private static final class ClientHandler {
+        private static void apply(ClientRemovePacket msg) {
             Minecraft minecraft = Minecraft.getInstance();
             ClientLevel clientLevel = minecraft.level;
             if (clientLevel != null) {
@@ -82,19 +92,18 @@ public class ClientRemovePacket {
 
                 removeBossOverlayEntries(minecraft, msg.bossEventUUIDs);
             }
-        });
-        ctx.get().setPacketHandled(true);
-    }
+        }
 
-    private static void removeBossOverlayEntries(Minecraft minecraft, List<UUID> bossEventUUIDs) {
-        if (bossEventUUIDs.isEmpty()) return;
-        try {
-            BossHealthOverlay bossOverlay = minecraft.gui.getBossOverlay();
-            for (UUID uuid : bossEventUUIDs) {
-                bossOverlay.events.remove(uuid);
+        private static void removeBossOverlayEntries(Minecraft minecraft, List<UUID> bossEventUUIDs) {
+            if (bossEventUUIDs.isEmpty()) return;
+            try {
+                BossHealthOverlay bossOverlay = minecraft.gui.getBossOverlay();
+                for (UUID uuid : bossEventUUIDs) {
+                    bossOverlay.events.remove(uuid);
+                }
+            } catch (Exception e) {
+                EcaLogger.info("[ClientRemovePacket] Failed to remove boss overlay entries: {}", e.getMessage());
             }
-        } catch (Exception e) {
-            EcaLogger.info("[ClientRemovePacket] Failed to remove boss overlay entries: {}", e.getMessage());
         }
     }
 }
