@@ -305,5 +305,6 @@
   "gui.eca.shader_generator.status.element_copied": "Element copied",
   "gui.eca.shader_generator.status.layer_copied": "Layer copied",
   "gui.eca.shader_generator.status.element_pasted": "Element pasted",
-  "gui.eca.shader_generator.status.layer_pasted": "Layer pasted"
+  "gui.eca.shader_generator.status.layer_pasted": "Layer pasted",
+  "message.eca.faction.cannot_attack_friendly": "You cannot attack friendly factions!"
 }

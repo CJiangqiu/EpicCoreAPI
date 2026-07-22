@@ -1,6 +1,7 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
+import net.eca.client.FactionGlowData;
 import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.eca.util.ResurrectionManager;
@@ -177,6 +178,24 @@ public class EntityMixin {
         }
         if (!FactionUtil.canAttack(self, other)) {
             cir.setReturnValue(true);
+        }
+    }
+
+    // 阵营发光：将阵营发光映射中的实体标记为 glowing，复用原版队伍描边渲染
+    @Inject(method = "isCurrentlyGlowing", at = @At("HEAD"), cancellable = true)
+    private void eca$factionGlow(CallbackInfoReturnable<Boolean> cir) {
+        Entity self = (Entity) (Object) this;
+        if (self.level().isClientSide() && FactionGlowData.isGlowing(self.getId())) {
+            cir.setReturnValue(true);
+        }
+    }
+
+    // 阵营发光：覆盖发光的描边颜色为对应阵营关系颜色
+    @Inject(method = "getTeamColor", at = @At("HEAD"), cancellable = true)
+    private void eca$factionGlowColor(CallbackInfoReturnable<Integer> cir) {
+        Entity self = (Entity) (Object) this;
+        if (self.level().isClientSide() && FactionGlowData.isGlowing(self.getId())) {
+            cir.setReturnValue(FactionGlowData.getColor(self.getId()));
         }
     }
 

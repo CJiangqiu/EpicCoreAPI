@@ -22,6 +22,18 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.IntValue BOSSSHOW_RANGE_SCAN_INTERVAL_TICKS;
     public static ForgeConfigSpec.IntValue BOSSSHOW_ENTITY_SELECTION_RANGE;
 
+    // Faction Configuration | 阵营系统配置
+    public static ForgeConfigSpec.BooleanValue FACTION_ACTION_BAR_MESSAGES;
+    public static ForgeConfigSpec.BooleanValue FACTION_GLOW_ENABLED;
+    public static ForgeConfigSpec.IntValue FACTION_GLOW_RANGE;
+    public static ForgeConfigSpec.IntValue FACTION_GLOW_UPDATE_INTERVAL_TICKS;
+    public static ForgeConfigSpec.ConfigValue<String> FACTION_GLOW_HOSTILE_COLOR;
+    public static ForgeConfigSpec.ConfigValue<String> FACTION_GLOW_FRIENDLY_COLOR;
+    public static ForgeConfigSpec.ConfigValue<String> FACTION_GLOW_NEUTRAL_COLOR;
+    public static ForgeConfigSpec.ConfigValue<String> FACTION_GLOW_SAME_FACTION_COLOR;
+    public static ForgeConfigSpec.BooleanValue FACTION_ALERT_ENABLED;
+    public static ForgeConfigSpec.IntValue FACTION_ALERT_RANGE;
+
     static {
         // Compatibility Configuration | 兼容性配置
         FORCE_COMPATIBILITY_MODE = BUILDER
@@ -115,6 +127,64 @@ public class EcaConfiguration {
 
         BUILDER.pop();
 
+        // Faction Configuration | 阵营系统配置
+        BUILDER.push("Faction");
+
+        FACTION_ACTION_BAR_MESSAGES = BUILDER
+            .comment("Show an action-bar message when a player attempts to attack a same-faction or friendly entity.",
+                     "玩家尝试攻击同阵营或友好阵营实体时，在动作栏显示提示消息。")
+            .define("Action Bar Messages", true);
+
+        FACTION_GLOW_ENABLED = BUILDER
+            .comment("Enable faction-based entity glow outlines. Entities within range glow with a color that " +
+                     "reflects their faction relation to the observing player. Disabled by default to reduce " +
+                     "server-side scanning overhead.",
+                     "启用阵营实体发光描边：范围内实体根据与观察玩家的阵营关系显示不同颜色发光。" +
+                     "默认关闭以减少服务端扫描性能损耗。")
+            .define("Entity Glow Enabled", false);
+
+        FACTION_GLOW_RANGE = BUILDER
+            .comment("Maximum range (in blocks) for faction glow scanning.",
+                     "阵营发光扫描的最大范围（方块）。")
+            .defineInRange("Entity Glow Range", 32, 2, 128);
+
+        FACTION_GLOW_UPDATE_INTERVAL_TICKS = BUILDER
+            .comment("Interval (in ticks) between faction glow scans for each player.",
+                     "每位玩家阵营发光扫描的间隔（tick）。")
+            .defineInRange("Glow Update Interval Ticks", 20, 5, 200);
+
+        FACTION_GLOW_HOSTILE_COLOR = BUILDER
+            .comment("ARGB hex color for entities in a hostile faction (e.g. \"FFFF0000\" for red).",
+                     "敌对阵营实体的发光颜色，ARGB 十六进制（如 \"FFFF0000\" 红色）。")
+            .define("Hostile Glow Color", "FFFF0000");
+
+        FACTION_GLOW_FRIENDLY_COLOR = BUILDER
+            .comment("ARGB hex color for entities in a friendly (allied but different) faction (e.g. \"FF0000FF\" for blue).",
+                     "友好阵营（不同阵营但结盟）实体的发光颜色，ARGB 十六进制（如 \"FF0000FF\" 蓝色）。")
+            .define("Friendly Glow Color", "FF0000FF");
+
+        FACTION_GLOW_NEUTRAL_COLOR = BUILDER
+            .comment("ARGB hex color for entities in a neutral faction (e.g. \"FFFFFF00\" for yellow).",
+                     "中立阵营实体的发光颜色，ARGB 十六进制（如 \"FFFFFF00\" 黄色）。")
+            .define("Neutral Glow Color", "FFFFFF00");
+
+        FACTION_GLOW_SAME_FACTION_COLOR = BUILDER
+            .comment("ARGB hex color for entities in the same faction (e.g. \"FF00FF00\" for green).",
+                     "同阵营实体的发光颜色，ARGB 十六进制（如 \"FF00FF00\" 绿色）。")
+            .define("Same Faction Glow Color", "FF00FF00");
+
+        FACTION_ALERT_ENABLED = BUILDER
+            .comment("When enabled, attacking a faction member causes nearby same-faction mobs to target the attacker.",
+                     "开启后，攻击阵营成员会导致附近同阵营生物将攻击者设为目标。")
+            .define("Alert Enabled", true);
+
+        FACTION_ALERT_RANGE = BUILDER
+            .comment("Maximum range (in blocks) for faction alert — how far away allies will respond to an attack.",
+                     "阵营求援最大范围（方块）：友方实体响应攻击的最大距离。")
+            .defineInRange("Alert Range", 32, 2, 128);
+
+        BUILDER.pop();
+
         SPEC = BUILDER.build();
     }
 
@@ -191,6 +261,66 @@ public class EcaConfiguration {
 
     public static int getBossShowEntitySelectionRangeSafely() {
         return safeGet(BOSSSHOW_ENTITY_SELECTION_RANGE, 64);
+    }
+
+    // Faction Configuration Safe Access Methods | 阵营系统安全访问方法
+
+    public static boolean getFactionActionBarMessagesSafely() {
+        return safeGet(FACTION_ACTION_BAR_MESSAGES, true);
+    }
+
+    public static boolean getFactionGlowEnabledSafely() {
+        return safeGet(FACTION_GLOW_ENABLED, false);
+    }
+
+    public static int getFactionGlowRangeSafely() {
+        return safeGet(FACTION_GLOW_RANGE, 32);
+    }
+
+    public static int getFactionGlowUpdateIntervalTicksSafely() {
+        return safeGet(FACTION_GLOW_UPDATE_INTERVAL_TICKS, 20);
+    }
+
+    public static String getFactionGlowHostileColorSafely() {
+        return safeGet(FACTION_GLOW_HOSTILE_COLOR, "FFFF0000");
+    }
+
+    public static String getFactionGlowFriendlyColorSafely() {
+        return safeGet(FACTION_GLOW_FRIENDLY_COLOR, "FF00FF00");
+    }
+
+    public static String getFactionGlowNeutralColorSafely() {
+        return safeGet(FACTION_GLOW_NEUTRAL_COLOR, "FFFFFF00");
+    }
+
+    public static String getFactionGlowSameFactionColorSafely() {
+        return safeGet(FACTION_GLOW_SAME_FACTION_COLOR, "FF00FF00");
+    }
+
+    public static boolean getFactionAlertEnabledSafely() {
+        return safeGet(FACTION_ALERT_ENABLED, true);
+    }
+
+    public static int getFactionAlertRangeSafely() {
+        return safeGet(FACTION_ALERT_RANGE, 32);
+    }
+
+    // 将配置中的十六进制颜色字符串解析为 ARGB int
+    /**
+     * Parse a config hex color string (e.g. "FFFF0000") to an ARGB int.
+     * Returns the fallback if parsing fails.
+     *
+     * @param hexStr   the hex color string
+     * @param fallback fallback ARGB int
+     * @return parsed ARGB int
+     */
+    public static int parseHexColor(String hexStr, int fallback) {
+        if (hexStr == null || hexStr.isEmpty()) return fallback;
+        try {
+            return (int) Long.parseLong(hexStr, 16);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
 }

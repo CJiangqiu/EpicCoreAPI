@@ -1842,5 +1842,24 @@ public final class EcaAPI {
         return FactionManager.canHarm(source, target);
     }
 
+    // ==================== 阵营求援 ====================
+
+    // 阵营求援：附近同阵营生物将攻击者设为目标
+    /**
+     * Alert nearby same-faction mobs to target an attacker.
+     * Called when a faction member is hurt by a non-friendly source.
+     * Only affects {@link net.minecraft.world.entity.Mob} entities without an existing target,
+     * within {@code FACTION_ALERT_RANGE} blocks of the victim.
+     *
+     * @param factionId the victim's faction id
+     * @param attacker  the entity that attacked
+     * @param victim    the entity that was attacked
+     * @param level     the level to search for allies
+     */
+    public static void alertFactionMembers(String factionId, Entity attacker, Entity victim,
+                                           Level level) {
+        FactionManager.alertFactionMembers(factionId, attacker, victim, level);
+    }
+
     private EcaAPI() {}
 }

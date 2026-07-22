@@ -305,5 +305,6 @@
   "gui.eca.shader_generator.status.element_copied": "已复制元素",
   "gui.eca.shader_generator.status.layer_copied": "已复制图层",
   "gui.eca.shader_generator.status.element_pasted": "已粘贴元素",
-  "gui.eca.shader_generator.status.layer_pasted": "已粘贴图层"
+  "gui.eca.shader_generator.status.layer_pasted": "已粘贴图层",
+  "message.eca.faction.cannot_attack_friendly": "你不能攻击友方阵营！"
 }

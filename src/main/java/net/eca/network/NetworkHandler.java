@@ -144,6 +144,12 @@ public class NetworkHandler {
                 .decoder(SetHealthClientSyncPacket::decode)
                 .consumerMainThread(SetHealthClientSyncPacket::handle)
                 .add();
+
+        CHANNEL.messageBuilder(FactionGlowSyncPacket.class, id(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(FactionGlowSyncPacket::encode)
+                .decoder(FactionGlowSyncPacket::decode)
+                .consumerMainThread(FactionGlowSyncPacket::handle)
+                .add();
     }
 
     /**

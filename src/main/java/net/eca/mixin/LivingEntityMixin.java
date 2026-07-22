@@ -5,8 +5,11 @@ import net.eca.config.EcaConfiguration;
 import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
+import net.eca.util.faction.FactionManager;
+import net.eca.util.faction.FactionRelation;
 import net.eca.util.faction.FactionUtil;
 import net.eca.util.health.HealthLockManager;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.effect.MobEffectCategory;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.nbt.CompoundTag;
@@ -16,6 +19,7 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -218,10 +222,16 @@ LivingEntityMixin {
             cir.setReturnValue(false);
             return;
         }
-        // 阵营保护：攻击者与目标同阵营或友好关系时取消伤害
+        // 阵营保护：攻击者与目标同阵营或友好关系时取消伤害并提示
         Entity attacker = source.getEntity();
-        if (attacker != null && !FactionUtil.canAttack(attacker, self)) {
-            cir.setReturnValue(false);
+        if (attacker != null) {
+            if (eca$checkFactionBlock(attacker, self)) {
+                cir.setReturnValue(false);
+                return;
+            }
+            if (!FactionUtil.canAttack(attacker, self)) {
+                cir.setReturnValue(false);
+            }
         }
     }
 
@@ -235,6 +245,26 @@ LivingEntityMixin {
         }
     }
 
+    // 阵营求援：伤害实际生效后，通知附近同阵营生物将攻击者设为目标
+    @Inject(method = "hurt", at = @At("RETURN"))
+    private void eca$factionAlertOnHurt(DamageSource source, float amount, CallbackInfoReturnable<Boolean> cir) {
+        if (!cir.getReturnValue()) return; // 伤害被取消则不触发
+        LivingEntity self = (LivingEntity) (Object) this;
+        if (self.level().isClientSide) return;
+
+        Entity attacker = source.getEntity();
+        if (attacker == null || attacker == self) return;
+
+        String factionId = FactionManager.getFactionId(self);
+        if (factionId == null) return;
+
+        // 仅对敌对/中立的攻击者触发求援（同阵营和友好不触发）
+        FactionRelation rel = FactionManager.getEffectiveRelation(attacker, self);
+        if (rel == FactionRelation.SAME_FACTION || rel == FactionRelation.FRIENDLY) return;
+
+        FactionManager.alertFactionMembers(factionId, attacker, self, self.level());
+    }
+
     @Inject(method = "actuallyHurt", at = @At("HEAD"), cancellable = true)
     private void onActuallyHurt(DamageSource source, float amount, CallbackInfo ci) {
         LivingEntity self = (LivingEntity) (Object) this;
@@ -245,8 +275,14 @@ LivingEntityMixin {
         }
         // 阵营保护：兜底拦截绕过 hurt 直接调用 actuallyHurt 的路径
         Entity attacker = source.getEntity();
-        if (attacker != null && !FactionUtil.canAttack(attacker, self)) {
-            ci.cancel();
+        if (attacker != null) {
+            if (eca$checkFactionBlock(attacker, self)) {
+                ci.cancel();
+                return;
+            }
+            if (!FactionUtil.canAttack(attacker, self)) {
+                ci.cancel();
+            }
         }
     }
 
@@ -310,6 +346,31 @@ LivingEntityMixin {
         Float locked = HealthLockManager.getLock(self);
         if (EcaAPI.isInvulnerable(self) || (locked != null && locked > 0.0f)) {
             cir.setReturnValue(true);
+        }
+    }
+
+    // ==================== 阵营 Action Bar 消息 ====================
+
+    // 检查阵营关系并发送动作栏提示；返回 true 表示应取消攻击
+    private static boolean eca$checkFactionBlock(Entity attacker, LivingEntity target) {
+        if (FactionManager.areSameFaction(attacker, target)) {
+            eca$sendFactionActionBar(attacker, target);
+            return true;
+        }
+        if (FactionManager.getEffectiveRelation(attacker, target) == FactionRelation.FRIENDLY) {
+            eca$sendFactionActionBar(attacker, target);
+            return true;
+        }
+        return false;
+    }
+
+    // 向攻击者玩家发送动作栏阵营提示
+    private static void eca$sendFactionActionBar(Entity attacker, Entity target) {
+        if (!target.level().isClientSide
+                && attacker instanceof Player player
+                && EcaConfiguration.getFactionActionBarMessagesSafely()) {
+            player.displayClientMessage(
+                    Component.translatable("message.eca.faction.cannot_attack_friendly"), true);
         }
     }
 

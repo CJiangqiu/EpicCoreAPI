@@ -1,9 +1,12 @@
 package net.eca.util.faction;
 
+import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.level.Level;
 
 import java.util.*;
@@ -328,6 +331,38 @@ public class FactionManager {
         if (factionId == null || level == null) return;
         for (Entity entity : getFactionMembers(level, factionId)) {
             leaveFaction(entity);
+        }
+    }
+
+    // 阵营求援：当阵营成员被非友方攻击时，附近同阵营生物将攻击者设为目标
+    /**
+     * Alert nearby same-faction mobs to target an attacker.
+     * Called when a faction member is hurt by a non-friendly source.
+     * Only affects {@link Mob} entities without an existing target,
+     * within {@code FACTION_ALERT_RANGE} blocks of the victim.
+     *
+     * @param factionId the victim's faction id
+     * @param attacker  the entity that attacked (must be a LivingEntity to be set as target)
+     * @param victim    the entity that was attacked
+     * @param level     the level to search for allies
+     */
+    public static void alertFactionMembers(String factionId, Entity attacker, Entity victim, Level level) {
+        if (factionId == null || attacker == null || victim == null || level == null) return;
+        if (!(attacker instanceof LivingEntity livingAttacker)) return;
+        if (!EcaConfiguration.getFactionAlertEnabledSafely()) return;
+
+        int range = EcaConfiguration.getFactionAlertRangeSafely();
+        double rangeSq = (double) range * range;
+
+        for (Entity entity : getFactionMembers(level, factionId)) {
+            if (entity == victim) continue;
+            if (!(entity instanceof Mob mob)) continue;
+            // 已有目标的实体不打断其当前战斗
+            if (mob.getTarget() != null) continue;
+            // 仅在受害者附近范围内的盟友响应
+            if (entity.distanceToSqr(victim) > rangeSq) continue;
+
+            mob.setTarget(livingAttacker);
         }
     }
 
