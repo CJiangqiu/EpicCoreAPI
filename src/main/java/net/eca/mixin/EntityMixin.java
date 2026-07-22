@@ -4,6 +4,8 @@ import net.eca.api.EcaAPI;
 import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.eca.util.ResurrectionManager;
+import net.eca.util.faction.FactionManager;
+import net.eca.util.faction.FactionUtil;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
@@ -163,6 +165,19 @@ public class EntityMixin {
         tag.putString(Entity.ID_TAG, encodeId);
         entity.saveWithoutId(tag);
         cir.setReturnValue(true);
+    }
+
+    // 阵营系统：同阵营或友好阵营视为盟友，使原版 AI（僵尸猪人、狼、目标选择器等）自动尊重 ECA 阵营
+    @Inject(method = "isAlliedTo", at = @At("HEAD"), cancellable = true)
+    private void eca$checkFactionAllied(Entity other, CallbackInfoReturnable<Boolean> cir) {
+        Entity self = (Entity) (Object) this;
+        if (FactionManager.areSameFaction(self, other)) {
+            cir.setReturnValue(true);
+            return;
+        }
+        if (!FactionUtil.canAttack(self, other)) {
+            cir.setReturnValue(true);
+        }
     }
 
 }

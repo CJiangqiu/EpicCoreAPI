@@ -27,6 +27,9 @@ import net.eca.util.bossshow.BossShowPlaybackTracker;
 import net.eca.util.bossshow.Trigger;
 import net.eca.util.filter.FilterManager;
 import net.eca.util.filter.FilterType;
+import net.eca.util.faction.Faction;
+import net.eca.util.faction.FactionManager;
+import net.eca.util.faction.FactionRelation;
 import net.eca.util.spawn_ban.SpawnBanManager;
 import net.eca.client.render.preset.ShaderPreset;
 import net.eca.client.render.preset.ShaderPresetRegistry;
@@ -61,6 +64,11 @@ public final class EcaAPI {
     // 清除快速路径条目（供 EntityUtil 内部清理调用）
     public static void clearInvulnerableFastPath(int entityId) {
         INVULNERABLE_IDS.remove(entityId);
+    }
+
+    // 恢复快速路径条目（由 LivingEntityMixin.readAdditionalSaveData 调用，确保重启后快速路径不为空）
+    public static void restoreInvulnerableFastPath(int entityId) {
+        INVULNERABLE_IDS.add(entityId);
     }
 
     // 锁定血量
@@ -1614,6 +1622,224 @@ public final class EcaAPI {
      */
     public static Map<String, Boolean> reviveResurrectionTarget(ServerLevel level, Entity entity) {
         return entity != null ? ResurrectionManager.reviveNow(level, entity.getUUID()) : Collections.emptyMap();
+    }
+
+    // ==================== 阵营系统 ====================
+
+    // 创建阵营（内存）
+    /**
+     * Create and register a new faction (memory only, no persistence).
+     * 创建一个新阵营（仅内存，不持久化）。
+     */
+    public static Faction createFaction(String id, String displayName, int color) {
+        if (id == null || id.isEmpty()) {
+            throw new IllegalArgumentException("Faction id cannot be null or empty");
+        }
+        if (displayName == null || displayName.isEmpty()) {
+            throw new IllegalArgumentException("Faction displayName cannot be null or empty");
+        }
+        Faction faction = new Faction(id, displayName, color);
+        FactionManager.registerFaction(faction);
+        return faction;
+    }
+
+    // 创建阵营（持久化）
+    /**
+     * Create and register a new faction, persisted to world SavedData.
+     * 创建一个新阵营并持久化到世界存档。
+     *
+     * @param id          unique faction identifier
+     * @param displayName human-readable display name
+     * @param color       ARGB color for UI display
+     * @param level       the server level for persistence
+     * @return the created Faction instance
+     */
+    public static Faction createFaction(String id, String displayName, int color, Level level) {
+        Faction faction = createFaction(id, displayName, color);
+        if (level != null) {
+            FactionManager.registerFaction(faction, level);
+        }
+        return faction;
+    }
+
+    // 删除阵营（内存）
+    /**
+     * Remove a faction definition (memory only).
+     * 删除一个阵营定义（仅内存，不持久化）。
+     */
+    public static boolean removeFaction(String factionId) {
+        return FactionManager.unregisterFaction(factionId);
+    }
+
+    // 删除阵营（持久化）
+    /**
+     * Remove a faction definition, persisted to world SavedData.
+     * 删除一个阵营定义并持久化。
+     */
+    public static boolean removeFaction(String factionId, Level level) {
+        return FactionManager.unregisterFaction(factionId, level);
+    }
+
+    // 获取阵营定义
+    /**
+     * Get a faction definition by its id.
+     * 根据 ID 获取阵营定义。
+     *
+     * @param factionId the faction id
+     * @return the Faction, or null if not registered
+     */
+    public static Faction getFaction(String factionId) {
+        return FactionManager.getFaction(factionId);
+    }
+
+    // 获取全部阵营
+    /**
+     * Get all registered factions.
+     * 获取所有已注册的阵营。
+     *
+     * @return unmodifiable map of faction id → Faction
+     */
+    public static Map<String, Faction> getAllFactions() {
+        return FactionManager.getAllFactions();
+    }
+
+    // 实体加入阵营
+    /**
+     * Bind an entity to a faction. If the faction is not registered yet, a warning is
+     * logged but the binding still takes effect (the faction can be registered later).
+     * 将实体加入指定阵营。
+     *
+     * @param entity    the entity
+     * @param factionId the target faction id
+     */
+    public static void joinFaction(Entity entity, String factionId) {
+        FactionManager.joinFaction(entity, factionId);
+    }
+
+    // 实体退出阵营
+    /**
+     * Remove an entity from its current faction. No-op if the entity had no faction.
+     * 将实体从当前阵营中移除。
+     *
+     * @param entity the entity
+     */
+    public static void leaveFaction(Entity entity) {
+        FactionManager.leaveFaction(entity);
+    }
+
+    // 获取实体所属阵营 ID
+    /**
+     * Get the faction id an entity belongs to.
+     * 获取实体所属的阵营 ID。
+     *
+     * @param entity the entity
+     * @return faction id, or null if the entity has no faction
+     */
+    public static String getEntityFaction(Entity entity) {
+        return FactionManager.getFactionId(entity);
+    }
+
+    // 判断是否同阵营
+    /**
+     * Check whether two entities belong to the same faction.
+     * Both entities must have a faction; if either has none, returns false.
+     * 判断两个实体是否属于同一阵营。
+     *
+     * @param a first entity
+     * @param b second entity
+     * @return true if both belong to the same faction
+     */
+    public static boolean areSameFaction(Entity a, Entity b) {
+        return FactionManager.areSameFaction(a, b);
+    }
+
+    // 获取阵营内全部实体
+    /**
+     * Get all entities in the given level that belong to the specified faction.
+     * This is an O(n) scan — avoid calling every tick.
+     * 获取指定维度中属于该阵营的所有实体（O(n) 扫描）。
+     *
+     * @param level     the level to scan
+     * @param factionId the faction id
+     * @return list of faction members (may be empty)
+     */
+    public static List<Entity> getFactionMembers(Level level, String factionId) {
+        return FactionManager.getFactionMembers(level, factionId);
+    }
+
+    // 移除阵营内全部实体
+    /**
+     * Remove all entities in the given level from the specified faction.
+     * 将指定维度中该阵营的所有实体移出阵营。
+     *
+     * @param factionId the faction id
+     * @param level     the level to scan
+     */
+    public static void kickAllFromFaction(String factionId, Level level) {
+        FactionManager.kickAll(factionId, level);
+    }
+
+    // 设置阵营间关系（内存）
+    /**
+     * Set the relation that faction A has toward faction B (memory only).
+     * 设置阵营 A 对阵营 B 的关系（仅内存，不持久化）。
+     */
+    public static void setFactionRelation(String factionAId, String factionBId, FactionRelation relation) {
+        FactionManager.setFactionRelation(factionAId, factionBId, relation);
+    }
+
+    // 设置阵营间关系（持久化）
+    /**
+     * Set the relation that faction A has toward faction B, persisted to SavedData.
+     * 设置阵营 A 对阵营 B 的关系并持久化。
+     */
+    public static void setFactionRelation(String factionAId, String factionBId, FactionRelation relation,
+                                          Level level) {
+        FactionManager.setFactionRelation(factionAId, factionBId, relation, level);
+    }
+
+    // 查询阵营间关系
+    /**
+     * Get the explicitly configured relation from faction A to faction B.
+     * Returns null if no explicit override has been set — use
+     * {@link FactionManager#getEffectiveRelation} for the fully resolved relation.
+     * 查询阵营 A 对阵营 B 的显式关系覆盖。
+     *
+     * @param factionAId the source faction id
+     * @param factionBId the target faction id
+     * @return the relation, or null if not set
+     */
+    public static FactionRelation getFactionRelation(String factionAId, String factionBId) {
+        return FactionManager.getFactionRelation(factionAId, factionBId);
+    }
+
+    // 查询实体间有效关系
+    /**
+     * Resolve the effective faction relation from entity {@code source}'s perspective
+     * toward entity {@code target}. This determines whether {@code source} may harm or
+     * target {@code target} under faction rules.
+     * 查询 source 实体对 target 实体的有效阵营关系。
+     *
+     * @param source the source entity (attacker / targeter)
+     * @param target the target entity
+     * @return the effective FactionRelation
+     */
+    public static FactionRelation getEffectiveFactionRelation(Entity source, Entity target) {
+        return FactionManager.getEffectiveRelation(source, target);
+    }
+
+    // 判断是否可攻击
+    /**
+     * Shortcut: returns true if faction rules permit {@code source} to harm {@code target}.
+     * Returns false for SAME_FACTION and FRIENDLY relations.
+     * 判断阵营规则是否允许 source 伤害 target。
+     *
+     * @param source the attacker
+     * @param target the target
+     * @return false if faction rules prevent harm
+     */
+    public static boolean canHarm(Entity source, Entity target) {
+        return FactionManager.canHarm(source, target);
     }
 
     private EcaAPI() {}

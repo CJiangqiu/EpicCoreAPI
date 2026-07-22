@@ -30,6 +30,7 @@ public class EcaCommand {
                 .then(ShaderGeneratorCommand.registerSubCommand())
                 .then(FilterCommand.registerSubCommand())
                 .then(ResurrectionCommand.registerSubCommand())
+                .then(FactionCommand.registerSubCommand())
         );
     }
 }

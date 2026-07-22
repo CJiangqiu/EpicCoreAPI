@@ -56,12 +56,16 @@ import java.util.function.Predicate;
 //实体工具类
 public class EntityUtil {
 
-    //EntityDataAccessor 血量锁定（神秘文本血）+ 禁疗 + 无敌状态 + 最大生命值锁定
+    //EntityDataAccessor 血量锁定（三字段加密）+ 禁疗 + 无敌状态 + 最大生命值锁定（三字段加密）
     public static EntityDataAccessor<String> HEALTH_LOCK_VALUE;
+    public static EntityDataAccessor<String> HEALTH_LOCK_KEY;
+    public static EntityDataAccessor<String> HEALTH_LOCK_CHECK;
     public static EntityDataAccessor<String> HEAL_BAN_VALUE;
     public static EntityDataAccessor<Boolean> INVULNERABLE;
     public static EntityDataAccessor<Boolean> RESURRECTION_TRACKED;
     public static EntityDataAccessor<String> MAX_HEALTH_LOCK_VALUE;
+    public static EntityDataAccessor<String> MAX_HEALTH_LOCK_KEY;
+    public static EntityDataAccessor<String> MAX_HEALTH_LOCK_CHECK;
 
     //正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
@@ -637,10 +641,14 @@ public class EntityUtil {
         if (ecaDataIdsInitialized) return;
         ecaDataIdsInitialized = true;
         if (HEALTH_LOCK_VALUE != null) ECA_DATA_IDS.add(HEALTH_LOCK_VALUE.getId());
+        if (HEALTH_LOCK_KEY != null) ECA_DATA_IDS.add(HEALTH_LOCK_KEY.getId());
+        if (HEALTH_LOCK_CHECK != null) ECA_DATA_IDS.add(HEALTH_LOCK_CHECK.getId());
         if (HEAL_BAN_VALUE != null) ECA_DATA_IDS.add(HEAL_BAN_VALUE.getId());
         if (INVULNERABLE != null) ECA_DATA_IDS.add(INVULNERABLE.getId());
         if (RESURRECTION_TRACKED != null) ECA_DATA_IDS.add(RESURRECTION_TRACKED.getId());
         if (MAX_HEALTH_LOCK_VALUE != null) ECA_DATA_IDS.add(MAX_HEALTH_LOCK_VALUE.getId());
+        if (MAX_HEALTH_LOCK_KEY != null) ECA_DATA_IDS.add(MAX_HEALTH_LOCK_KEY.getId());
+        if (MAX_HEALTH_LOCK_CHECK != null) ECA_DATA_IDS.add(MAX_HEALTH_LOCK_CHECK.getId());
     }
 
     // 清除外部 mod 注入的 Float 类型实体数据（ID > vanillaMaxId ）
