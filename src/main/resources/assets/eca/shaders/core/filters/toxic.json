@@ -4,8 +4,8 @@
     "srcrgb": "one",
     "dstrgb": "zero"
   },
-  "vertex": "eca:eca_rain",
-  "fragment": "eca:eca_rain",
+  "vertex": "eca:filters/toxic",
+  "fragment": "eca:filters/toxic",
   "attributes": [
     "Position",
     "UV0"

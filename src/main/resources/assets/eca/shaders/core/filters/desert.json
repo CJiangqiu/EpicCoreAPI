@@ -4,16 +4,15 @@
     "srcrgb": "one",
     "dstrgb": "zero"
   },
-  "vertex": "eca:eca_spotlight",
-  "fragment": "eca:eca_spotlight",
+  "vertex": "eca:filters/desert",
+  "fragment": "eca:filters/desert",
   "attributes": [
     "Position",
     "UV0"
   ],
   "samplers": [
     { "name": "Sampler0" },
-    { "name": "Sampler1" },
-    { "name": "Sampler2" }
+    { "name": "Sampler1" }
   ],
   "uniforms": [
     {
@@ -33,6 +32,12 @@
       "type": "float",
       "count": 2,
       "values": [1.0, 1.0]
+    },
+    {
+      "name": "Time",
+      "type": "float",
+      "count": 1,
+      "values": [0.0]
     }
   ]
 }

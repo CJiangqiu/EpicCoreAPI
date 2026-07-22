@@ -4,15 +4,17 @@
     "srcrgb": "one",
     "dstrgb": "zero"
   },
-  "vertex": "eca:eca_sketch",
-  "fragment": "eca:eca_sketch",
+  "vertex": "eca:filters/cosmos",
+  "fragment": "eca:filters/cosmos",
   "attributes": [
     "Position",
     "UV0"
   ],
   "samplers": [
     { "name": "Sampler0" },
-    { "name": "Sampler1" }
+    { "name": "Sampler1" },
+    { "name": "Sampler2" },
+    { "name": "Sampler3" }
   ],
   "uniforms": [
     {
@@ -28,10 +30,28 @@
       "values": [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
     },
     {
+      "name": "InvViewProjMat",
+      "type": "matrix4x4",
+      "count": 16,
+      "values": [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
+    },
+    {
+      "name": "CameraPos",
+      "type": "float",
+      "count": 3,
+      "values": [0.0, 0.0, 0.0]
+    },
+    {
       "name": "ScreenSize",
       "type": "float",
       "count": 2,
       "values": [1.0, 1.0]
+    },
+    {
+      "name": "Time",
+      "type": "float",
+      "count": 1,
+      "values": [0.0]
     }
   ]
 }

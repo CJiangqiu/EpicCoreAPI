@@ -512,7 +512,7 @@ public final class ShaderModuleRegistry {
         ));
     }
 
-    /* 星云薄雾：cosmos.fsh nebulaDust() / eca_cosmos.fsh nebula()，FBM 噪声密度场 + 旋流 + 径向衰减 */
+    /* 星云薄雾：cosmos.fsh nebulaDust() / filters/cosmos.fsh nebula()，FBM 噪声密度场 + 旋流 + 径向衰减 */
     private static void registerNebulaHaze() {
         register(fieldModule(
             "nebula_haze",

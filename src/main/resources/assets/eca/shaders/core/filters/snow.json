@@ -4,8 +4,8 @@
     "srcrgb": "one",
     "dstrgb": "zero"
   },
-  "vertex": "eca:eca_toxic",
-  "fragment": "eca:eca_toxic",
+  "vertex": "eca:filters/snow",
+  "fragment": "eca:filters/snow",
   "attributes": [
     "Position",
     "UV0"

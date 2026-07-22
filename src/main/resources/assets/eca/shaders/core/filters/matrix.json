@@ -4,8 +4,8 @@
     "srcrgb": "one",
     "dstrgb": "zero"
   },
-  "vertex": "eca:eca_desert",
-  "fragment": "eca:eca_desert",
+  "vertex": "eca:filters/matrix",
+  "fragment": "eca:filters/matrix",
   "attributes": [
     "Position",
     "UV0"

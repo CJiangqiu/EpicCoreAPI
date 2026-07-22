@@ -4,8 +4,8 @@
     "srcrgb": "one",
     "dstrgb": "zero"
   },
-  "vertex": "eca:eca_snow",
-  "fragment": "eca:eca_snow",
+  "vertex": "eca:filters/sketch",
+  "fragment": "eca:filters/sketch",
   "attributes": [
     "Position",
     "UV0"
@@ -32,12 +32,6 @@
       "type": "float",
       "count": 2,
       "values": [1.0, 1.0]
-    },
-    {
-      "name": "Time",
-      "type": "float",
-      "count": 1,
-      "values": [0.0]
     }
   ]
 }
