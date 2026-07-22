@@ -7,6 +7,7 @@ import net.eca.network.EntityExtensionActiveTypePacket;
 import net.eca.network.EntityExtensionBossEventTypePacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
+import net.eca.util.faction.FactionManager;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
@@ -133,6 +134,12 @@ public final class EntityExtensionManager {
             EntityUtil.cleanupBossBar(entity);
         }
 
+        // 自动加入阵营
+        String factionId = extension.getFactionId();
+        if (factionId != null && !factionId.isEmpty()) {
+            FactionManager.joinFaction(entity, factionId);
+        }
+
         ResourceKey<Level> dimension = level.dimension();
         DimensionState state = DIMENSION_STATES.computeIfAbsent(dimension, k -> new DimensionState());
 
@@ -180,6 +187,13 @@ public final class EntityExtensionManager {
         EntityExtension extension = REGISTRY.get(type);
         if (extension != null) {
             removeBossEventTypeMappings(entity, state);
+
+            // 自动退出阵营（可选：仅在 getFactionId 匹配时退出，防止外部 API 加入的阵营被意外清除）
+            String factionId = extension.getFactionId();
+            if (factionId != null && !factionId.isEmpty()
+                    && factionId.equals(FactionManager.getFactionId(entity))) {
+                FactionManager.leaveFaction(entity);
+            }
         }
         removeCustomBossEvent(entity.getUUID(), state);
 

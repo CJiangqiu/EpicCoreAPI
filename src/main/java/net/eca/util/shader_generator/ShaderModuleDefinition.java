@@ -39,6 +39,7 @@ public record ShaderModuleDefinition(
         BASIC("gui.eca.shader_generator.effects.category.basic"),
         STARRY_SKY("gui.eca.shader_generator.effects.category.starry_sky"),
         MAGIC("gui.eca.shader_generator.effects.category.magic"),
+        ENVIRONMENT("gui.eca.shader_generator.effects.category.environment"),
         /* IMAGE 不在效果下拉中作为分类按钮展示，image_element 作为直接条目出现 */
         IMAGE("gui.eca.shader_generator.effects.category.image");
 

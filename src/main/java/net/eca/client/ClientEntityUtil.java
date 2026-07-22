@@ -1,12 +1,17 @@
 package net.eca.client;
 
 import net.eca.api.EcaAPI;
+import net.eca.network.EntityContainerCheckResponsePacket;
+import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.util.selector.EcaEntitySelector;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.BossHealthOverlay;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.entity.EntityInLevelCallback;
@@ -171,6 +176,73 @@ public final class ClientEntityUtil {
         }
 
         return result;
+    }
+
+    // 处理 ClientRemovePacket 的客户端移除逻辑
+    public static void handleClientRemove(int entityId, List<UUID> bossEventUUIDs) {
+        Minecraft minecraft = Minecraft.getInstance();
+        ClientLevel clientLevel = minecraft.level;
+        if (clientLevel != null) {
+            Entity entity = getEntityById(clientLevel, entityId);
+            if (entity != null) {
+                entity.onClientRemoval();
+                entity.invalidateCaps();
+                entity.setRemoved(Entity.RemovalReason.DISCARDED);
+                entity.stopRiding();
+                entity.onRemovedFromWorld();
+                entity.levelCallback = EntityInLevelCallback.NULL;
+                removeFromClientContainers(clientLevel, entity);
+            } else {
+                EcaLogger.debug("[ClientRemovePacket] Client entity removal: entity not found (ID: {})", entityId);
+            }
+
+            removeBossOverlayEntries(minecraft, bossEventUUIDs);
+        }
+    }
+
+    private static void removeBossOverlayEntries(Minecraft minecraft, List<UUID> bossEventUUIDs) {
+        if (bossEventUUIDs.isEmpty()) return;
+        try {
+            BossHealthOverlay bossOverlay = minecraft.gui.getBossOverlay();
+            for (UUID uuid : bossEventUUIDs) {
+                bossOverlay.events.remove(uuid);
+            }
+        } catch (Exception e) {
+            EcaLogger.info("[ClientRemovePacket] Failed to remove boss overlay entries: {}", e.getMessage());
+        }
+    }
+
+    // 处理 EntityContainerCheckRequestPacket 的客户端检查逻辑
+    public static void handleContainerCheckRequest(UUID requestId, UUID entityUuid) {
+        Map<String, Boolean> result = new LinkedHashMap<>();
+        Minecraft minecraft = Minecraft.getInstance();
+        ClientLevel clientLevel = minecraft.level;
+        if (clientLevel != null) {
+            result.putAll(checkEntityInClientContainers(clientLevel, entityUuid));
+        } else {
+            result.put("ClientLevel.getEntity(uuid)", false);
+            result.put("ClientEntityStorage.entityLookup.byUuid", false);
+            result.put("ClientEntityStorage.entityLookup.byId", false);
+            result.put("ClientLevel.tickingEntities", false);
+            result.put("ClientEntityStorage.sectionStorage", false);
+            result.put("ClientEntity.levelCallback", false);
+        }
+        NetworkHandler.sendToServer(new EntityContainerCheckResponsePacket(requestId, entityUuid, result));
+    }
+
+    // 处理 SetHealthClientSyncPacket 的客户端血条同步
+    public static void syncHealthFromServer(int entityId, float health) {
+        ClientLevel level = Minecraft.getInstance().level;
+        if (level == null) return;
+        Entity entity = level.getEntity(entityId);
+        if (entity instanceof LivingEntity living) {
+            EntityUtil.setHealthFromSync(living, health);
+        }
+    }
+
+    // 打开 ShaderGenerator 编辑屏幕
+    public static void openShaderGeneratorScreen() {
+        net.eca.client.gui.ShaderGeneratorScreen.open();
     }
 
     // 客户端底层容器清除

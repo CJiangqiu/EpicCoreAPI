@@ -28,6 +28,18 @@ public final class ShaderModuleRegistry {
         registerEnergyRing();
         registerMeteor();
         registerNebulaHaze();
+        registerBlackHole();
+        registerLightning();
+        registerAurora();
+        registerFireflies();
+        registerWaterBubbles();
+        registerToxicBubbles();
+        registerRainStreaks();
+        registerSnowfall();
+        registerFallingLeaves();
+        registerMagmaDebris();
+        registerDustHaze();
+        registerDigitalRain();
         registerRune();
         registerPlanetSymbol();
     }
@@ -314,12 +326,43 @@ public final class ShaderModuleRegistry {
         List<ShaderModuleDefinition.Parameter> specificParameters,
         FieldBody body
     ) {
+        return fieldModule(
+            id,
+            displayName,
+            ShaderModuleDefinition.Category.STARRY_SKY,
+            specificParameters,
+            body
+        );
+    }
+
+    private static ShaderModuleDefinition environmentFieldModule(
+        String id,
+        String displayName,
+        List<ShaderModuleDefinition.Parameter> specificParameters,
+        FieldBody body
+    ) {
+        return fieldModule(
+            id,
+            displayName,
+            ShaderModuleDefinition.Category.ENVIRONMENT,
+            specificParameters,
+            body
+        );
+    }
+
+    private static ShaderModuleDefinition fieldModule(
+        String id,
+        String displayName,
+        ShaderModuleDefinition.Category category,
+        List<ShaderModuleDefinition.Parameter> specificParameters,
+        FieldBody body
+    ) {
         List<ShaderModuleDefinition.Parameter> parameters = new ArrayList<>(commonParameters());
         parameters.addAll(specificParameters);
         return new ShaderModuleDefinition(
             id,
             displayName,
-            ShaderModuleDefinition.Category.STARRY_SKY,
+            category,
             parameters,
             (module, moduleIndex) -> emitFieldInstances(module, moduleIndex, body)
         );
@@ -556,6 +599,363 @@ public final class ShaderModuleRegistry {
                     maskVar, instance, swirlStrength, swirlStrength, instance
                 ));
             }
+        ));
+    }
+
+    private static void registerBlackHole() {
+        List<ShaderModuleDefinition.Parameter> parameters = new ArrayList<>(blackHoleParameters());
+        parameters.addAll(List.of(
+            parameter("disk_r", "gui.eca.shader_generator.parameter.disk_r", 0.0F, 1.0F, 0.05F, 0.55F),
+            parameter("disk_g", "gui.eca.shader_generator.parameter.disk_g", 0.0F, 1.0F, 0.05F, 0.20F),
+            parameter("disk_b", "gui.eca.shader_generator.parameter.disk_b", 0.0F, 1.0F, 0.05F, 0.85F),
+            parameter("photon_r", "gui.eca.shader_generator.parameter.photon_r", 0.0F, 1.0F, 0.05F, 0.85F),
+            parameter("photon_g", "gui.eca.shader_generator.parameter.photon_g", 0.0F, 1.0F, 0.05F, 0.60F),
+            parameter("photon_b", "gui.eca.shader_generator.parameter.photon_b", 0.0F, 1.0F, 0.05F, 1.00F),
+            parameter("disk_thickness", "gui.eca.shader_generator.parameter.disk_thickness", 0.1F, 1.0F, 0.05F, 0.45F),
+            parameter("disk_tilt", "gui.eca.shader_generator.parameter.disk_tilt", 1.0F, 8.0F, 0.1F, 3.5F),
+            parameter("disk_rotation_speed", "gui.eca.shader_generator.parameter.disk_rotation_speed", -4.0F, 4.0F, 0.1F, 0.75F),
+            parameter("edge_softness", "gui.eca.shader_generator.parameter.edge_softness", 0.01F, 0.5F, 0.01F, 0.10F)
+        ));
+        register(new ShaderModuleDefinition(
+            "black_hole",
+            "gui.eca.shader_generator.module.black_hole",
+            ShaderModuleDefinition.Category.STARRY_SKY,
+            parameters,
+            ShaderModuleRegistry::emitBlackHoleInstances
+        ));
+    }
+
+    /* ========== 环境模块 ========== */
+
+    private static void registerLightning() {
+        register(environmentFieldModule(
+            "lightning",
+            "gui.eca.shader_generator.module.lightning",
+            List.of(
+                parameter("segments", "gui.eca.shader_generator.parameter.segments", 4.0F, 16.0F, 1.0F, 10.0F),
+                parameter("jitter", "gui.eca.shader_generator.parameter.jitter", 0.0F, 1.0F, 0.05F, 0.5F),
+                parameter("branch_strength", "gui.eca.shader_generator.parameter.branch_strength", 0.0F, 1.0F, 0.05F, 0.45F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> {
+                int segments = Math.round(module.value("segments"));
+                float jitter = module.value("jitter");
+                float branchStrength = module.value("branch_strength");
+                out.append(String.format(Locale.ROOT,
+                    "        vec2 lightningPos%d_%d = vec2(0.0, %.4f);\n"
+                        + "        float lightningMask%d_%d = 0.0;\n",
+                    moduleIndex, instance, size * 0.7F, moduleIndex, instance
+                ));
+                for (int segment = 0; segment < segments; segment++) {
+                    float progress = (float) segment / segments;
+                    out.append(String.format(Locale.ROOT,
+                        "        float lightningOffset%d_%d_%d = (ecaHash(vec2(%.4f, %.4f)) - 0.5) * %.4f;\n"
+                            + "        vec2 lightningNext%d_%d_%d = lightningPos%d_%d + vec2(lightningOffset%d_%d_%d, -%.4f);\n"
+                            + "        float lightningDistance%d_%d_%d = ecaSegmentDistance(%s, lightningPos%d_%d, lightningNext%d_%d_%d);\n"
+                            + "        lightningMask%d_%d += (smoothstep(%.4f, 0.0, lightningDistance%d_%d_%d) * 0.75\n"
+                            + "            + smoothstep(%.4f, 0.0, lightningDistance%d_%d_%d)) * %.4f;\n",
+                        moduleIndex, instance, segment, module.value("seed") + instance * 13.7F, segment * 7.13F,
+                        size * 0.85F * jitter,
+                        moduleIndex, instance, segment, moduleIndex, instance, moduleIndex, instance, segment,
+                        size * 0.17F,
+                        moduleIndex, instance, segment, point, moduleIndex, instance, moduleIndex, instance, segment,
+                        moduleIndex, instance, size * 0.11F, moduleIndex, instance, segment,
+                        size * 0.035F, moduleIndex, instance, segment, 1.0F - progress * 0.45F
+                    ));
+                    if (segment > 1 && segment < segments - 2) {
+                        out.append(String.format(Locale.ROOT,
+                            "        if (ecaHash(vec2(%.4f, %.4f)) > 0.68) {\n"
+                                + "            vec2 lightningBranch%d_%d_%d = lightningPos%d_%d + vec2(%.4f, -%.4f);\n"
+                                + "            float lightningBranchDistance%d_%d_%d = ecaSegmentDistance(%s, lightningPos%d_%d, lightningBranch%d_%d_%d);\n"
+                                + "            lightningMask%d_%d += smoothstep(%.4f, 0.0, lightningBranchDistance%d_%d_%d) * %.4f;\n"
+                                + "        }\n",
+                            module.value("seed") + instance * 3.1F, segment * 5.23F,
+                            moduleIndex, instance, segment, moduleIndex, instance,
+                            size * (segment % 2 == 0 ? 0.55F : -0.55F) * jitter,
+                            size * 0.34F,
+                            moduleIndex, instance, segment, point, moduleIndex, instance, moduleIndex, instance, segment,
+                            moduleIndex, instance, size * 0.06F, moduleIndex, instance, segment, branchStrength
+                        ));
+                    }
+                    out.append(String.format(Locale.ROOT,
+                        "        lightningPos%d_%d = lightningNext%d_%d_%d;\n",
+                        moduleIndex, instance, moduleIndex, instance, segment
+                    ));
+                }
+                out.append(String.format(Locale.ROOT,
+                    "        %s = clamp(lightningMask%d_%d, 0.0, 1.0);\n",
+                    mask, moduleIndex, instance
+                ));
+            }
+        ));
+    }
+
+    private static void registerAurora() {
+        register(environmentFieldModule(
+            "aurora",
+            "gui.eca.shader_generator.module.aurora",
+            List.of(
+                parameter("frequency", "gui.eca.shader_generator.parameter.frequency", 0.5F, 12.0F, 0.1F, 3.0F),
+                parameter("thickness", "gui.eca.shader_generator.parameter.thickness", 0.05F, 1.0F, 0.05F, 0.28F),
+                parameter("flow_speed", "gui.eca.shader_generator.parameter.flow_speed", 0.0F, 4.0F, 0.05F, 0.45F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> out.append(String.format(Locale.ROOT,
+                "        vec2 auroraPoint%d_%d = %s / max(%.4f, 0.001);\n"
+                    + "        float auroraTime%d_%d = gameTime * 1200.0 * %.4f;\n"
+                    + "        float auroraWave%d_%d = sin(auroraPoint%d_%d.x * %.4f + auroraTime%d_%d) * 0.32\n"
+                    + "            + sin(auroraPoint%d_%d.x * %.4f + auroraTime%d_%d * 1.7 + %.4f) * 0.16\n"
+                    + "            + (ecaFbm(vec2(auroraPoint%d_%d.x + auroraTime%d_%d * 0.2, %.4f), 4) - 0.5) * 0.45;\n"
+                    + "        float auroraBand%d_%d = exp(-pow(auroraPoint%d_%d.y - auroraWave%d_%d, 2.0) / %.6f);\n"
+                    + "        float auroraShimmer%d_%d = 0.65 + ecaNoise(auroraPoint%d_%d * 7.0 + auroraTime%d_%d);\n"
+                    + "        %s = auroraBand%d_%d * auroraShimmer%d_%d;\n",
+                moduleIndex, instance, point, size,
+                moduleIndex, instance, module.value("flow_speed"),
+                moduleIndex, instance, moduleIndex, instance, module.value("frequency"), moduleIndex, instance,
+                moduleIndex, instance, module.value("frequency") * 2.2F, moduleIndex, instance,
+                module.value("seed") + instance * 2.7F,
+                moduleIndex, instance, moduleIndex, instance, module.value("seed") + instance * 11.0F,
+                moduleIndex, instance, moduleIndex, instance, moduleIndex, instance,
+                module.value("thickness") * module.value("thickness") * 2.0F,
+                moduleIndex, instance, moduleIndex, instance, moduleIndex, instance,
+                mask, moduleIndex, instance, moduleIndex, instance
+            ))
+        ));
+    }
+
+    private static void registerFireflies() {
+        register(environmentFieldModule(
+            "fireflies",
+            "gui.eca.shader_generator.module.fireflies",
+            List.of(
+                parameter("wander", "gui.eca.shader_generator.parameter.wander", 0.0F, 1.0F, 0.05F, 0.35F),
+                parameter("glow_strength", "gui.eca.shader_generator.parameter.glow_strength", 0.1F, 3.0F, 0.1F, 1.2F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> out.append(String.format(Locale.ROOT,
+                "        float fireflyTime%d_%d = gameTime * 1200.0 * (0.8 + ecaHash(vec2(%.4f, %.4f)) * 0.6);\n"
+                    + "        vec2 fireflyDrift%d_%d = vec2(sin(fireflyTime%d_%d * 0.7), cos(fireflyTime%d_%d * 0.5)) * %.4f;\n"
+                    + "        float fireflyDistance%d_%d = length(%s - fireflyDrift%d_%d);\n"
+                    + "        float fireflyBlink%d_%d = smoothstep(0.0, 1.0, 0.3 + 0.7 * sin(fireflyTime%d_%d * 1.3 + %.4f));\n"
+                    + "        %s = smoothstep(%.4f, %.4f, fireflyDistance%d_%d) * fireflyBlink%d_%d * %.4f;\n",
+                moduleIndex, instance, module.value("seed") + instance * 1.37F, instance * 7.13F,
+                moduleIndex, instance, moduleIndex, instance, moduleIndex, instance,
+                size * module.value("wander"),
+                moduleIndex, instance, point, moduleIndex, instance,
+                moduleIndex, instance, moduleIndex, instance, module.value("seed") + instance * 6.28F,
+                mask, size * 1.1F, size * 0.18F, moduleIndex, instance, moduleIndex, instance,
+                module.value("glow_strength")
+            ))
+        ));
+    }
+
+    private static void registerWaterBubbles() {
+        register(environmentFieldModule(
+            "water_bubbles",
+            "gui.eca.shader_generator.module.water_bubbles",
+            List.of(
+                parameter("rise_speed", "gui.eca.shader_generator.parameter.rise_speed", 0.0F, 3.0F, 0.05F, 0.55F),
+                parameter("sway_amount", "gui.eca.shader_generator.parameter.sway_amount", 0.0F, 1.0F, 0.05F, 0.3F),
+                parameter("ring_thickness", "gui.eca.shader_generator.parameter.ring_thickness", 0.02F, 0.5F, 0.01F, 0.12F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> out.append(String.format(Locale.ROOT,
+                "        float waterBubblePhase%d_%d = fract(gameTime * 1200.0 * %.4f + ecaHash(vec2(%.4f, %.4f)));\n"
+                    + "        vec2 waterBubbleCenter%d_%d = vec2(sin(gameTime * 1200.0 * 1.5 + %.4f) * %.4f,\n"
+                    + "            (waterBubblePhase%d_%d - 0.5) * %.4f);\n"
+                    + "        float waterBubbleRadius%d_%d = %.4f;\n"
+                    + "        float waterBubbleDistance%d_%d = length(%s - waterBubbleCenter%d_%d);\n"
+                    + "        float waterBubbleRing%d_%d = smoothstep(%.4f, 0.0, abs(waterBubbleDistance%d_%d - waterBubbleRadius%d_%d));\n"
+                    + "        %s = waterBubbleRing%d_%d * (0.65 + 0.35 * smoothstep(waterBubbleRadius%d_%d, 0.0, waterBubbleDistance%d_%d));\n",
+                moduleIndex, instance, module.value("rise_speed") * 0.001F,
+                module.value("seed") + instance * 3.3F, instance * 5.7F,
+                moduleIndex, instance, module.value("seed") + instance * 10.0F,
+                size * module.value("sway_amount"), moduleIndex, instance, size * 2.6F,
+                moduleIndex, instance, size * 0.48F,
+                moduleIndex, instance, point, moduleIndex, instance,
+                moduleIndex, instance, size * module.value("ring_thickness"), moduleIndex, instance, moduleIndex, instance,
+                mask, moduleIndex, instance, moduleIndex, instance, moduleIndex, instance
+            ))
+        ));
+    }
+
+    private static void registerToxicBubbles() {
+        register(environmentFieldModule(
+            "toxic_bubbles",
+            "gui.eca.shader_generator.module.toxic_bubbles",
+            List.of(
+                parameter("rise_speed", "gui.eca.shader_generator.parameter.rise_speed", 0.0F, 3.0F, 0.05F, 0.45F),
+                parameter("sway_amount", "gui.eca.shader_generator.parameter.sway_amount", 0.0F, 1.0F, 0.05F, 0.25F),
+                parameter("glow_strength", "gui.eca.shader_generator.parameter.glow_strength", 0.1F, 3.0F, 0.1F, 1.4F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> {
+                float seed = module.value("seed");
+                out.append(String.format(Locale.ROOT,
+                    "        float toxicLife%d_%d = 3.0 + ecaHash(vec2(%.4f, %.4f)) * 3.0;\n",
+                    moduleIndex, instance, seed + instance * 7.1F, instance * 2.9F
+                ));
+                out.append(String.format(Locale.ROOT,
+                    "        float toxicAge%d_%d = fract(gameTime * 1200.0 * %.4f / toxicLife%d_%d + ecaHash(vec2(%.4f, %.4f)));\n",
+                    moduleIndex, instance, module.value("rise_speed") * 0.001F, moduleIndex, instance,
+                    seed + instance * 4.3F, instance * 8.2F
+                ));
+                out.append(String.format(Locale.ROOT,
+                    "        float toxicFade%d_%d = smoothstep(0.0, 0.12, toxicAge%d_%d)\n"
+                        + "            * (1.0 - smoothstep(0.7, 1.0, toxicAge%d_%d));\n",
+                    moduleIndex, instance, moduleIndex, instance, moduleIndex, instance
+                ));
+                out.append(String.format(Locale.ROOT,
+                    "        vec2 toxicCenter%d_%d = vec2(sin(toxicAge%d_%d * 6.2831853 + %.4f) * %.4f,\n"
+                        + "            (toxicAge%d_%d - 0.5) * %.4f);\n",
+                    moduleIndex, instance, moduleIndex, instance, seed + instance,
+                    size * module.value("sway_amount"), moduleIndex, instance, size * 2.4F
+                ));
+                out.append(String.format(Locale.ROOT,
+                    "        float toxicDistance%d_%d = length(%s - toxicCenter%d_%d);\n"
+                        + "        %s = pow(smoothstep(%.4f, 0.0, toxicDistance%d_%d), 2.0) * toxicFade%d_%d * %.4f;\n",
+                    moduleIndex, instance, point, moduleIndex, instance,
+                    mask, size * 0.7F, moduleIndex, instance, moduleIndex, instance, module.value("glow_strength")
+                ));
+            }
+        ));
+    }
+
+    private static void registerRainStreaks() {
+        register(environmentFieldModule(
+            "rain_streaks",
+            "gui.eca.shader_generator.module.rain_streaks",
+            List.of(
+                parameter("fall_speed", "gui.eca.shader_generator.parameter.fall_speed", 0.0F, 4.0F, 0.05F, 1.2F),
+                parameter("streak_length", "gui.eca.shader_generator.parameter.streak_length", 0.1F, 2.0F, 0.05F, 0.65F),
+                parameter("streak_width", "gui.eca.shader_generator.parameter.streak_width", 0.01F, 0.5F, 0.01F, 0.08F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> out.append(String.format(Locale.ROOT,
+                "        float rainPhase%d_%d = fract(gameTime * 1200.0 * %.4f + %.4f);\n"
+                    + "        vec2 rainCenter%d_%d = vec2(sin(rainPhase%d_%d * 9.0 + %.4f) * %.4f,\n"
+                    + "            (rainPhase%d_%d - 0.5) * %.4f);\n"
+                    + "        %s = smoothstep(%.4f, 0.0, ecaSegmentDistance(%s, rainCenter%d_%d,\n"
+                    + "            rainCenter%d_%d + vec2(%.4f, %.4f)));\n",
+                moduleIndex, instance, module.value("fall_speed") * 0.001F, module.value("seed") + instance * 3.7F,
+                moduleIndex, instance, moduleIndex, instance, module.value("seed") + instance, size * 0.20F,
+                moduleIndex, instance, size * 2.5F,
+                mask, size * module.value("streak_width"), point, moduleIndex, instance,
+                moduleIndex, instance, size * 0.05F, size * module.value("streak_length")
+            ))
+        ));
+    }
+
+    private static void registerSnowfall() {
+        register(environmentFieldModule(
+            "snowfall",
+            "gui.eca.shader_generator.module.snowfall",
+            List.of(
+                parameter("fall_speed", "gui.eca.shader_generator.parameter.fall_speed", 0.0F, 3.0F, 0.05F, 0.38F),
+                parameter("wind_amount", "gui.eca.shader_generator.parameter.wind_amount", 0.0F, 1.0F, 0.05F, 0.22F),
+                parameter("flake_softness", "gui.eca.shader_generator.parameter.flake_softness", 0.1F, 1.0F, 0.05F, 0.65F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> out.append(String.format(Locale.ROOT,
+                "        float snowPhase%d_%d = fract(gameTime * 1200.0 * %.4f + %.4f);\n"
+                    + "        vec2 snowCenter%d_%d = vec2(sin(snowPhase%d_%d * 8.0 + %.4f) * %.4f,\n"
+                    + "            (snowPhase%d_%d - 0.5) * %.4f);\n"
+                    + "        float snowDistance%d_%d = length(%s - snowCenter%d_%d);\n"
+                    + "        %s = pow(smoothstep(%.4f, %.4f, snowDistance%d_%d), %.4f);\n",
+                moduleIndex, instance, module.value("fall_speed") * 0.001F, module.value("seed") + instance * 6.1F,
+                moduleIndex, instance, moduleIndex, instance, module.value("seed") + instance, size * module.value("wind_amount"),
+                moduleIndex, instance, size * 2.4F,
+                moduleIndex, instance, point, moduleIndex, instance,
+                mask, size, size * (1.0F - module.value("flake_softness") * 0.75F), moduleIndex, instance,
+                1.0F + module.value("flake_softness") * 2.0F
+            ))
+        ));
+    }
+
+    private static void registerFallingLeaves() {
+        register(environmentFieldModule(
+            "falling_leaves",
+            "gui.eca.shader_generator.module.falling_leaves",
+            List.of(
+                parameter("fall_speed", "gui.eca.shader_generator.parameter.fall_speed", 0.0F, 3.0F, 0.05F, 0.30F),
+                parameter("flutter", "gui.eca.shader_generator.parameter.flutter", 0.0F, 1.0F, 0.05F, 0.55F),
+                parameter("leaf_width", "gui.eca.shader_generator.parameter.leaf_width", 0.2F, 2.0F, 0.05F, 0.75F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> out.append(String.format(Locale.ROOT,
+                "        float leafPhase%d_%d = fract(gameTime * 1200.0 * %.4f + %.4f);\n"
+                    + "        float leafAngle%d_%d = leafPhase%d_%d * 10.0 + %.4f;\n"
+                    + "        vec2 leafCenter%d_%d = vec2(sin(leafAngle%d_%d) * %.4f, (leafPhase%d_%d - 0.5) * %.4f);\n"
+                    + "        vec2 leafPoint%d_%d = ecaRotate(%s - leafCenter%d_%d, leafAngle%d_%d * %.4f);\n"
+                    + "        %s = smoothstep(1.0, 0.72, length(vec2(leafPoint%d_%d.x / %.4f, leafPoint%d_%d.y / %.4f)));\n",
+                moduleIndex, instance, module.value("fall_speed") * 0.001F, module.value("seed") + instance * 8.3F,
+                moduleIndex, instance, moduleIndex, instance, module.value("seed") + instance,
+                moduleIndex, instance, moduleIndex, instance, size * module.value("flutter"), moduleIndex, instance, size * 2.3F,
+                moduleIndex, instance, point, moduleIndex, instance, moduleIndex, instance, module.value("flutter"),
+                mask, moduleIndex, instance, size * module.value("leaf_width"), moduleIndex, instance, size
+            ))
+        ));
+    }
+
+    private static void registerMagmaDebris() {
+        register(environmentFieldModule(
+            "magma_debris",
+            "gui.eca.shader_generator.module.magma_debris",
+            List.of(
+                parameter("drift_speed", "gui.eca.shader_generator.parameter.drift_speed", 0.0F, 3.0F, 0.05F, 0.35F),
+                parameter("fragment_sides", "gui.eca.shader_generator.parameter.fragment_sides", 3.0F, 8.0F, 1.0F, 5.0F),
+                parameter("glow_strength", "gui.eca.shader_generator.parameter.glow_strength", 0.1F, 3.0F, 0.1F, 1.25F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> out.append(String.format(Locale.ROOT,
+                "        vec2 magmaPoint%d_%d = %s - vec2(sin(gameTime * 1200.0 * %.4f + %.4f) * %.4f,\n"
+                    + "            cos(gameTime * 1200.0 * %.4f + %.4f) * %.4f);\n"
+                    + "        float magmaDistance%d_%d = ecaPolygonDistance(magmaPoint%d_%d, %.4f, %.1f, %.4f);\n"
+                    + "        %s = smoothstep(%.4f, 0.0, magmaDistance%d_%d) * %.4f;\n",
+                moduleIndex, instance, point, module.value("drift_speed") * 0.001F, module.value("seed") + instance,
+                size * 0.35F, module.value("drift_speed") * 0.0007F, module.value("seed") + instance * 2.3F, size * 0.25F,
+                moduleIndex, instance, moduleIndex, instance, size, module.value("fragment_sides"), module.value("seed"),
+                mask, size * 0.12F, moduleIndex, instance, module.value("glow_strength")
+            ))
+        ));
+    }
+
+    private static void registerDustHaze() {
+        register(environmentFieldModule(
+            "dust_haze",
+            "gui.eca.shader_generator.module.dust_haze",
+            List.of(
+                parameter("flow_speed", "gui.eca.shader_generator.parameter.flow_speed", 0.0F, 4.0F, 0.05F, 0.42F),
+                parameter("density", "gui.eca.shader_generator.parameter.density", 0.1F, 3.0F, 0.05F, 1.0F),
+                parameter("haze_softness", "gui.eca.shader_generator.parameter.haze_softness", 0.1F, 1.0F, 0.05F, 0.65F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> out.append(String.format(Locale.ROOT,
+                "        vec2 dustPoint%d_%d = %s + vec2(gameTime * 1200.0 * %.4f, 0.0);\n"
+                    + "        float dustNoise%d_%d = ecaFbm(dustPoint%d_%d / max(%.4f, 0.001) + %.4f, 4);\n"
+                    + "        float dustCloud%d_%d = smoothstep(%.4f, %.4f, dustNoise%d_%d);\n"
+                    + "        %s = dustCloud%d_%d * %.4f;\n",
+                moduleIndex, instance, point, module.value("flow_speed") * 0.001F,
+                moduleIndex, instance, moduleIndex, instance, size * 2.2F, module.value("seed") + instance,
+                moduleIndex, instance, 1.0F - module.value("haze_softness"), 1.0F - module.value("haze_softness") * 0.35F,
+                moduleIndex, instance, mask, moduleIndex, instance, module.value("density")
+            ))
+        ));
+    }
+
+    private static void registerDigitalRain() {
+        register(environmentFieldModule(
+            "digital_rain",
+            "gui.eca.shader_generator.module.digital_rain",
+            List.of(
+                parameter("fall_speed", "gui.eca.shader_generator.parameter.fall_speed", 0.0F, 4.0F, 0.05F, 0.85F),
+                parameter("trail_length", "gui.eca.shader_generator.parameter.trail_length", 0.1F, 2.0F, 0.05F, 0.70F),
+                parameter("glyph_width", "gui.eca.shader_generator.parameter.glyph_width", 0.01F, 0.5F, 0.01F, 0.10F)
+            ),
+            (out, point, mask, size, module, moduleIndex, instance) -> out.append(String.format(Locale.ROOT,
+                "        float digitalPhase%d_%d = fract(gameTime * 1200.0 * %.4f + %.4f);\n"
+                    + "        vec2 digitalHead%d_%d = vec2(0.0, (digitalPhase%d_%d - 0.5) * %.4f);\n"
+                    + "        float digitalLine%d_%d = smoothstep(%.4f, 0.0, ecaSegmentDistance(%s, digitalHead%d_%d,\n"
+                    + "            digitalHead%d_%d + vec2(0.0, %.4f)));\n"
+                    + "        float digitalBlink%d_%d = 0.45 + 0.55 * sin(gameTime * 1200.0 * 4.0 + %.4f);\n"
+                    + "        %s = digitalLine%d_%d * digitalBlink%d_%d;\n",
+                moduleIndex, instance, module.value("fall_speed") * 0.001F, module.value("seed") + instance * 4.1F,
+                moduleIndex, instance, moduleIndex, instance, size * 2.5F,
+                moduleIndex, instance, size * module.value("glyph_width"), point, moduleIndex, instance,
+                moduleIndex, instance, size * module.value("trail_length"),
+                moduleIndex, instance, module.value("seed") + instance,
+                mask, moduleIndex, instance, moduleIndex, instance
+            ))
         ));
     }
 
@@ -872,6 +1272,77 @@ public final class ShaderModuleRegistry {
             ));
         }
         return source.toString();
+    }
+
+    private static String emitBlackHoleInstances(ShaderModuleInstance module, int moduleIndex) {
+        int count = Math.max(1, Math.round(module.value("count")));
+        float size = module.value("size");
+        float centerX = module.value("center_x");
+        float centerY = module.value("center_y");
+        float spreadX = module.value("spread_x");
+        float spreadY = module.value("spread_y");
+        float seed = module.value("seed");
+        float rotation = (float) Math.toRadians(module.value("rotation"));
+        StringBuilder source = new StringBuilder();
+        source.append(String.format(Locale.ROOT,
+            "        float effectProgress%d = ecaEffectProgress(gameTime, %.4f, %.4f);\n"
+                + "        float effectAlphaScale%d = effectProgress%d < 0.0 ? 0.0 : %.4f + %.4f * effectProgress%d;\n",
+            moduleIndex, module.value("duration"), module.value("repeat_interval"),
+            moduleIndex, moduleIndex, module.value("start_alpha"),
+            module.value("end_alpha") - module.value("start_alpha"), moduleIndex
+        ));
+        for (int instance = 0; instance < count; instance++) {
+            float spreadFactor = count == 1 ? 0.0F : (float) instance / (count - 1);
+            float offsetX = signedRandom(seed, instance, 17.13F)
+                * (spreadX > 0.001F ? spreadX : size) * spreadFactor;
+            float offsetY = signedRandom(seed, instance, 71.91F)
+                * (spreadY > 0.001F ? spreadY : size) * spreadFactor;
+            float instanceSize = size * (0.75F + unitRandom(seed, instance, 41.37F) * 0.5F);
+            float horizonRadius = instanceSize * 0.68F;
+            float outerRadius = instanceSize * (1.4F + module.value("disk_thickness"));
+            String suffix = moduleIndex + "_" + instance;
+            source.append(String.format(Locale.ROOT,
+                "        vec2 blackHolePoint%s = ecaRotate(effectUv - vec2(%.4f, %.4f), %.6f);\n"
+                    + "        float blackHoleDistance%s = length(blackHolePoint%s);\n"
+                    + "        float eventHorizon%s = 1.0 - smoothstep(%.4f, %.4f, blackHoleDistance%s);\n"
+                    + "        vec2 diskPoint%s = vec2(blackHolePoint%s.x, blackHolePoint%s.y * %.4f);\n"
+                    + "        float diskDistance%s = length(diskPoint%s);\n"
+                    + "        float accretionDisk%s = smoothstep(%.4f, %.4f, diskDistance%s)\n"
+                    + "            * (1.0 - smoothstep(%.4f, %.4f, diskDistance%s));\n"
+                    + "        float diskFlow%s = 0.65 + 0.35 * sin(atan(diskPoint%s.y, diskPoint%s.x) * 6.0\n"
+                    + "            + diskDistance%s * 8.0 + gameTime * 1200.0 * %.4f);\n"
+                    + "        float photonRing%s = exp(-pow(blackHoleDistance%s - %.4f, 2.0) / %.6f);\n"
+                    + "        float blackHoleAlpha%s = effectAlphaScale%d * %.4f;\n"
+                    + "        color += vec3(%.4f, %.4f, %.4f) * eventHorizon%s * blackHoleAlpha%s;\n"
+                    + "        color += vec3(%.4f, %.4f, %.4f) * accretionDisk%s * diskFlow%s * blackHoleAlpha%s;\n"
+                    + "        color += vec3(%.4f, %.4f, %.4f) * photonRing%s * blackHoleAlpha%s;\n"
+                    + "        alpha = max(alpha, max(eventHorizon%s, max(accretionDisk%s, photonRing%s)) * blackHoleAlpha%s);\n",
+                suffix, centerX + offsetX, centerY + offsetY, -rotation,
+                suffix, suffix,
+                suffix, horizonRadius, horizonRadius + instanceSize * module.value("edge_softness"), suffix,
+                suffix, suffix, suffix, module.value("disk_tilt"),
+                suffix, suffix,
+                suffix, horizonRadius, horizonRadius + instanceSize * 0.12F, suffix,
+                outerRadius - instanceSize * 0.18F, outerRadius, suffix,
+                suffix, suffix, suffix, suffix, module.value("disk_rotation_speed"),
+                suffix, suffix, horizonRadius, instanceSize * 0.012F,
+                suffix, moduleIndex, module.value("color_a"),
+                module.value("color_r"), module.value("color_g"), module.value("color_b"), suffix, suffix,
+                module.value("disk_r"), module.value("disk_g"), module.value("disk_b"), suffix, suffix, suffix,
+                module.value("photon_r"), module.value("photon_g"), module.value("photon_b"), suffix, suffix,
+                suffix, suffix, suffix, suffix
+            ));
+        }
+        return source.toString();
+    }
+
+    private static List<ShaderModuleDefinition.Parameter> blackHoleParameters() {
+        List<ShaderModuleDefinition.Parameter> parameters = new ArrayList<>(commonParameters());
+        parameters.set(0, parameter("color_r", "gui.eca.shader_generator.parameter.horizon_r", 0.0F, 1.0F, 0.05F, 0.01F));
+        parameters.set(1, parameter("color_g", "gui.eca.shader_generator.parameter.horizon_g", 0.0F, 1.0F, 0.05F, 0.005F));
+        parameters.set(2, parameter("color_b", "gui.eca.shader_generator.parameter.horizon_b", 0.0F, 1.0F, 0.05F, 0.02F));
+        parameters.set(3, parameter("color_a", "gui.eca.shader_generator.parameter.horizon_a", 0.0F, 1.0F, 0.05F, 1.0F));
+        return parameters;
     }
 
     private static List<ShaderModuleDefinition.Parameter> commonParameters() {

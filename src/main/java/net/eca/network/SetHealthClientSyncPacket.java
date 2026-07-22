@@ -1,11 +1,7 @@
 package net.eca.network;
 
-import net.eca.util.EntityUtil;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.multiplayer.ClientLevel;
+import net.eca.client.ClientEntityUtil;
 import net.minecraft.network.FriendlyByteBuf;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.network.NetworkEvent;
@@ -38,19 +34,15 @@ public final class SetHealthClientSyncPacket {
 
     public static void handle(SetHealthClientSyncPacket msg, Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context context = ctx.get();
-        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
-                Dist.CLIENT, () -> () -> ClientHandler.apply(msg.entityId, msg.health)));
+        context.enqueueWork(() ->
+                DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> ClientHandlerRef.apply(msg.entityId, msg.health)));
         context.setPacketHandled(true);
     }
 
-    private static final class ClientHandler {
-        private static void apply(int entityId, float health) {
-            ClientLevel level = Minecraft.getInstance().level;
-            if (level == null) return;
-            Entity entity = level.getEntity(entityId);
-            if (entity instanceof LivingEntity living) {
-                EntityUtil.setHealthFromSync(living, health);
-            }
+    // 客户端引用委托给 @OnlyIn(Dist.CLIENT) 的 ClientEntityUtil
+    private static final class ClientHandlerRef {
+        static void apply(int entityId, float health) {
+            ClientEntityUtil.syncHealthFromServer(entityId, health);
         }
     }
 }

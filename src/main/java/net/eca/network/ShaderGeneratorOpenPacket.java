@@ -1,6 +1,6 @@
 package net.eca.network;
 
-import net.eca.client.gui.ShaderGeneratorScreen;
+import net.eca.client.ClientEntityUtil;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.DistExecutor;
@@ -22,16 +22,15 @@ public final class ShaderGeneratorOpenPacket {
         Supplier<NetworkEvent.Context> contextSupplier
     ) {
         NetworkEvent.Context context = contextSupplier.get();
-        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
-            Dist.CLIENT,
-            () -> ClientHandler::open
-        ));
+        context.enqueueWork(() ->
+                DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> ClientHandlerRef::open));
         context.setPacketHandled(true);
     }
 
-    private static final class ClientHandler {
-        private static void open() {
-            ShaderGeneratorScreen.open();
+    // 客户端引用委托给 @OnlyIn(Dist.CLIENT) 的 ClientEntityUtil
+    private static final class ClientHandlerRef {
+        static void open() {
+            ClientEntityUtil.openShaderGeneratorScreen();
         }
     }
 }

@@ -1,13 +1,7 @@
 package net.eca.network;
 
 import net.eca.client.ClientEntityUtil;
-import net.eca.util.EcaLogger;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.components.BossHealthOverlay;
-import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.network.FriendlyByteBuf;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.network.NetworkEvent;
@@ -66,44 +60,15 @@ public class ClientRemovePacket {
      */
     public static void handle(ClientRemovePacket msg, Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context context = ctx.get();
-        context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
-                Dist.CLIENT, () -> () -> ClientHandler.apply(msg)));
+        context.enqueueWork(() ->
+                DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> ClientHandlerRef.apply(msg)));
         context.setPacketHandled(true);
     }
 
-    // 客户端引用隔离在独立内部类中，避免专用服务端在类校验阶段加载 ClientLevel
-    private static final class ClientHandler {
-        private static void apply(ClientRemovePacket msg) {
-            Minecraft minecraft = Minecraft.getInstance();
-            ClientLevel clientLevel = minecraft.level;
-            if (clientLevel != null) {
-                Entity entity = ClientEntityUtil.getEntityById(clientLevel, msg.entityId);
-                if (entity != null) {
-                    entity.onClientRemoval();
-                    entity.invalidateCaps();
-                    entity.setRemoved(Entity.RemovalReason.DISCARDED);
-                    entity.stopRiding();
-                    entity.onRemovedFromWorld();
-                    entity.levelCallback = EntityInLevelCallback.NULL;
-                    ClientEntityUtil.removeFromClientContainers(clientLevel, entity);
-                } else {
-                    EcaLogger.debug("[ClientRemovePacket] Client entity removal: entity not found (ID: {})", msg.entityId);
-                }
-
-                removeBossOverlayEntries(minecraft, msg.bossEventUUIDs);
-            }
-        }
-
-        private static void removeBossOverlayEntries(Minecraft minecraft, List<UUID> bossEventUUIDs) {
-            if (bossEventUUIDs.isEmpty()) return;
-            try {
-                BossHealthOverlay bossOverlay = minecraft.gui.getBossOverlay();
-                for (UUID uuid : bossEventUUIDs) {
-                    bossOverlay.events.remove(uuid);
-                }
-            } catch (Exception e) {
-                EcaLogger.info("[ClientRemovePacket] Failed to remove boss overlay entries: {}", e.getMessage());
-            }
+    // 客户端引用隔离在独立内部类中，实际逻辑委托给 @OnlyIn(Dist.CLIENT) 的 ClientEntityUtil
+    private static final class ClientHandlerRef {
+        static void apply(ClientRemovePacket msg) {
+            ClientEntityUtil.handleClientRemove(msg.entityId, msg.bossEventUUIDs);
         }
     }
 }

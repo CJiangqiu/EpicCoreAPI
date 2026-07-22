@@ -70,6 +70,20 @@ public final class ShaderProjectCodec {
             layersArray.add(layerObj);
         }
         root.add("layers", layersArray);
+
+        JsonArray outputEffectsArray = new JsonArray();
+        for (ShaderOutputEffectInstance effect : project.outputEffects()) {
+            JsonObject effectObj = new JsonObject();
+            effectObj.addProperty("definition", effect.definition().id());
+            effectObj.addProperty("enabled", effect.enabled());
+            JsonObject valuesObj = new JsonObject();
+            for (var entry : effect.values().entrySet()) {
+                valuesObj.addProperty(entry.getKey(), entry.getValue());
+            }
+            effectObj.add("values", valuesObj);
+            outputEffectsArray.add(effectObj);
+        }
+        root.add("output_effects", outputEffectsArray);
         return GSON.toJson(root) + "\n";
     }
 
@@ -132,6 +146,33 @@ public final class ShaderProjectCodec {
                     }
                 }
                 layer.getElementsInternal().add(element);
+            }
+        }
+        if (root.has("output_effects")) {
+            JsonArray outputEffectsArray = root.getAsJsonArray("output_effects");
+            for (int index = 0; index < outputEffectsArray.size(); index++) {
+                JsonObject effectObj = outputEffectsArray.get(index).getAsJsonObject();
+                ShaderOutputEffectDefinition definition = ShaderOutputEffectRegistry.get(
+                    effectObj.get("definition").getAsString()
+                );
+                if (definition == null) {
+                    EcaLogger.warn("Unknown shader output effect definition: {} - skipping",
+                        effectObj.get("definition").getAsString());
+                    continue;
+                }
+                ShaderOutputEffectInstance effect = definition.createInstance();
+                if (effectObj.has("enabled")) {
+                    effect.setEnabled(effectObj.get("enabled").getAsBoolean());
+                }
+                JsonObject valuesObj = effectObj.getAsJsonObject("values");
+                for (var entry : valuesObj.entrySet()) {
+                    try {
+                        effect.setValue(entry.getKey(), entry.getValue().getAsFloat());
+                    } catch (IllegalArgumentException ignored) {
+                        // Removed parameters must not prevent older projects from loading.
+                    }
+                }
+                loaded.getOutputEffectsInternal().add(effect);
             }
         }
         if (loaded.layers().isEmpty()) {

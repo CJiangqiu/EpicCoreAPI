@@ -13,6 +13,9 @@ import net.eca.util.shader_generator.ShaderLayer;
 import net.eca.util.shader_generator.ShaderModuleDefinition;
 import net.eca.util.shader_generator.ShaderModuleInstance;
 import net.eca.util.shader_generator.ShaderModuleRegistry;
+import net.eca.util.shader_generator.ShaderOutputEffectDefinition;
+import net.eca.util.shader_generator.ShaderOutputEffectInstance;
+import net.eca.util.shader_generator.ShaderOutputEffectRegistry;
 import net.eca.util.shader_generator.ShaderProject;
 import net.eca.util.shader_generator.ShaderProjectCodec;
 import net.eca.util.shader_generator.ShaderProjectCodec.ProjectRef;
@@ -28,6 +31,8 @@ import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.util.tinyfd.TinyFileDialogs;
 import org.joml.Quaternionf;
@@ -41,6 +46,7 @@ import java.util.Set;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicLong;
 
+@OnlyIn(Dist.CLIENT)
 public final class ShaderGeneratorScreen extends Screen {
 
     private static final AtomicLong PREVIEW_REVISION = new AtomicLong();
@@ -57,6 +63,10 @@ public final class ShaderGeneratorScreen extends Screen {
     private static final int PROJECT_ROW_Y = 2;
     private static final int MAX_UNDO = 50;
     private static final int LAYER_ROW_HEIGHT = 22;
+    private static final int OUTPUT_EFFECT_ROW_HEIGHT = 22;
+    private static final int SCROLLBAR_WIDTH = 5;
+    private static final int RIGHT_PANEL_GAP = 12;
+    private static final int OUTPUT_EFFECT_PANEL_MIN_HEIGHT = 126;
     /* 画布视图缩放范围与滚轮步进；手柄尺寸(像素)与旋转手柄距选框上沿的偏移 */
     private static final double CANVAS_ZOOM_MIN = 0.25;
     private static final double CANVAS_ZOOM_MAX = 8.0;
@@ -84,6 +94,7 @@ public final class ShaderGeneratorScreen extends Screen {
     private final List<ShaderCompositionProject> redoStack = new ArrayList<>();
     private final List<LayerRowVisual> visibleLayerRows = new ArrayList<>();
     private final List<ElementRowVisual> visibleElementRows = new ArrayList<>();
+    private final List<OutputEffectRowVisual> visibleOutputEffectRows = new ArrayList<>();
     private List<ShaderPreviewSource> registeredSources = List.of();
     private GeneratedShaderPreview generatedPreview;
     private ShaderPreviewTarget previewTarget = ShaderPreviewTarget.PLANE;
@@ -105,6 +116,11 @@ public final class ShaderGeneratorScreen extends Screen {
     private boolean elementParamView;
     private int elementScroll;
     private int paramScroll;
+    private int outputEffectScroll;
+    private int outputEffectListTop;
+    private int outputEffectListBottom;
+    private int outputEffectVisibleRows = 1;
+    private ScrollbarTarget scrollbarDragTarget = ScrollbarTarget.NONE;
     /* 画布直接操纵：拖动选中图层内某元素改其 center_x/center_y */
     private int draggingElementIndex = -1;
     private double dragOffsetX;
@@ -134,7 +150,7 @@ public final class ShaderGeneratorScreen extends Screen {
     private boolean pendingLayerNameFocus;
     private int lastLayerNameClickIndex = -1;
     private long lastLayerNameClickTime;
-    /* 下拉菜单: -1=无, 0=文件, 1=编辑, 2=图层, 3=预览视图, 4=效果 */
+    /* 下拉菜单: -1=无, 0=文件, 1=编辑, 2=图层, 3=预览视图, 4=元素, 5=效果 */
     private int openDropdown = -1;
     private int dropdownFirstWidgetIndex = -1;
     private int dropdownLastWidgetIndex = -1;
@@ -219,6 +235,7 @@ public final class ShaderGeneratorScreen extends Screen {
             rightPanelMode = RightPanelMode.LAYER_LIST;
             addLayerListPanel();
         }
+        addOutputEffectPanel();
         addMenuBar();
         if (generatedPreview == null) {
             compileCurrentProject();
@@ -235,7 +252,8 @@ public final class ShaderGeneratorScreen extends Screen {
         x = addMenuButton(x, "gui.eca.shader_generator.menu.file", 0, 56);
         x = addMenuButton(x, "gui.eca.shader_generator.menu.edit", 1, 56);
         x = addMenuButton(x, "gui.eca.shader_generator.menu.layer", 2, 56);
-        x = addMenuButton(x, "gui.eca.shader_generator.menu.effects", 4, 88);
+        x = addMenuButton(x, "gui.eca.shader_generator.menu.elements", 4, 56);
+        x = addMenuButton(x, "gui.eca.shader_generator.menu.effects", 5, 56);
         addMenuButton(x, "gui.eca.shader_generator.menu.preview_view", 3, 76);
 
         Component compileLabel = Component.translatable(dirty
@@ -290,6 +308,7 @@ public final class ShaderGeneratorScreen extends Screen {
             case 2 -> addLayerDropdown();
             case 3 -> addViewDropdown();
             case 4 -> addEffectDropdown();
+            case 5 -> addOutputEffectDropdown();
         }
     }
 
@@ -401,7 +420,7 @@ public final class ShaderGeneratorScreen extends Screen {
         }
     }
 
-    /* 着色器效果：基础/星空/魔法点击展开效果列表，自定义直接进入详情编辑 */
+    /* 元素：基础/星空/魔法点击展开列表，自定义直接进入详情编辑 */
     private void addEffectDropdown() {
         int mx = 180;
         int y = MENU_Y + MENU_ITEM_H + 2;
@@ -462,6 +481,42 @@ public final class ShaderGeneratorScreen extends Screen {
         openEffectDetails(definition);
     }
 
+    private void addOutputEffectDropdown() {
+        int mx = 238;
+        int y = MENU_Y + MENU_ITEM_H + 2;
+        int width = 176;
+        List<ShaderOutputEffectDefinition> definitions = ShaderOutputEffectRegistry.all();
+        int row = 0;
+        for (ShaderOutputEffectDefinition definition : definitions) {
+            if (outputEffectIndex(definition.id()) >= 0) {
+                continue;
+            }
+            dropdownOption(mx, y + row * MENU_ITEM_H, width,
+                Component.translatable(definition.displayName()), () -> {
+                openDropdown = -1;
+                selectOutputEffect(definition);
+            });
+            row++;
+        }
+    }
+
+    private void selectOutputEffect(ShaderOutputEffectDefinition definition) {
+        int index = outputEffectIndex(definition.id());
+        ShaderOutputEffectInstance effect = index >= 0
+            ? project.outputEffects().get(index)
+            : definition.createInstance();
+        openOutputEffectDetails(effect, index);
+    }
+
+    private int outputEffectIndex(String definitionId) {
+        for (int index = 0; index < project.outputEffects().size(); index++) {
+            if (project.outputEffects().get(index).definition().id().equals(definitionId)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
     private void dropdownOption(int x, int y, int w, Component label, Runnable action) {
         addRenderableWidget(Button.builder(label, btn -> action.run())
             .bounds(x, y, w, MENU_ITEM_H).build());
@@ -496,6 +551,9 @@ public final class ShaderGeneratorScreen extends Screen {
             panningCanvas = true;
             return true;
         }
+        if (button == 0 && openDropdown < 0 && beginScrollbarDrag(mx, my)) {
+            return true;
+        }
         if (button == 0 && handleCanvasClick(mx, my)) {
             return true;
         }
@@ -504,6 +562,10 @@ public final class ShaderGeneratorScreen extends Screen {
 
     @Override
     public boolean mouseDragged(double mx, double my, int button, double dragX, double dragY) {
+        if (button == 0 && scrollbarDragTarget != ScrollbarTarget.NONE) {
+            updateScrollbarScroll(my);
+            return true;
+        }
         if (button == 2 && panningCanvas) {
             canvasPanX += dragX;
             canvasPanY += dragY;
@@ -522,6 +584,10 @@ public final class ShaderGeneratorScreen extends Screen {
 
     @Override
     public boolean mouseReleased(double mx, double my, int button) {
+        if (button == 0 && scrollbarDragTarget != ScrollbarTarget.NONE) {
+            scrollbarDragTarget = ScrollbarTarget.NONE;
+            return true;
+        }
         if (button == 2 && panningCanvas) {
             panningCanvas = false;
             return true;
@@ -694,6 +760,15 @@ public final class ShaderGeneratorScreen extends Screen {
         int panelRight = this.width - 8;
         if (openDropdown < 0 && mouseX >= panelLeft && mouseX < panelRight) {
             int direction = delta > 0.0 ? -1 : 1;
+            if (mouseY >= outputEffectListTop && mouseY < outputEffectListBottom) {
+                int maxScroll = Math.max(0, project.outputEffects().size() - outputEffectVisibleRows);
+                int next = Math.max(0, Math.min(maxScroll, outputEffectScroll + direction));
+                if (next != outputEffectScroll) {
+                    outputEffectScroll = next;
+                    rebuildWidgets();
+                }
+                return true;
+            }
             /* 图层列表滚动（仅列表模式） */
             if (rightPanelMode == RightPanelMode.LAYER_LIST
                 && mouseY >= layerListTop && mouseY < layerListBottom) {
@@ -731,7 +806,81 @@ public final class ShaderGeneratorScreen extends Screen {
         return super.mouseScrolled(mouseX, mouseY, delta);
     }
 
+    private boolean beginScrollbarDrag(double mouseX, double mouseY) {
+        ScrollbarGeometry upper = upperScrollbarGeometry();
+        if (isInsideScrollbar(upper, mouseX, mouseY)) {
+            scrollbarDragTarget = ScrollbarTarget.UPPER;
+            updateScrollbarScroll(mouseY);
+            return true;
+        }
+        ScrollbarGeometry output = outputEffectScrollbarGeometry();
+        if (isInsideScrollbar(output, mouseX, mouseY)) {
+            scrollbarDragTarget = ScrollbarTarget.OUTPUT_EFFECTS;
+            updateScrollbarScroll(mouseY);
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isInsideScrollbar(ScrollbarGeometry geometry, double mouseX, double mouseY) {
+        return geometry != null
+            && mouseX >= geometry.x() && mouseX <= geometry.x() + SCROLLBAR_WIDTH
+            && mouseY >= geometry.top() && mouseY <= geometry.bottom();
+    }
+
+    private void updateScrollbarScroll(double mouseY) {
+        ScrollbarGeometry geometry = scrollbarDragTarget == ScrollbarTarget.UPPER
+            ? upperScrollbarGeometry()
+            : outputEffectScrollbarGeometry();
+        if (geometry == null) {
+            return;
+        }
+        int maxScroll = Math.max(0, geometry.total() - geometry.visible());
+        int travel = Math.max(1, geometry.bottom() - geometry.top()
+            - (geometry.thumbBottom() - geometry.thumbTop()));
+        double fraction = (mouseY - geometry.top() - (geometry.thumbBottom() - geometry.thumbTop()) * 0.5) / travel;
+        int next = Mth.clamp((int) Math.round(fraction * maxScroll), 0, maxScroll);
+        if (scrollbarDragTarget == ScrollbarTarget.OUTPUT_EFFECTS) {
+            if (next != outputEffectScroll) {
+                outputEffectScroll = next;
+                rebuildWidgets();
+            }
+            return;
+        }
+        if (rightPanelMode == RightPanelMode.LAYER_LIST) {
+            if (next != layerScroll) {
+                layerScroll = next;
+                rebuildWidgets();
+            }
+            return;
+        }
+        if (elementParamView) {
+            if (next != paramScroll) {
+                paramScroll = next;
+                rebuildWidgets();
+            }
+        } else if (next != elementScroll) {
+            elementScroll = next;
+            rebuildWidgets();
+        }
+    }
+
     /* ---------- right: layer stack ---------- */
+
+    private int rightPanelBottom() {
+        return this.height - BOTTOM_HEIGHT - 8;
+    }
+
+    private int outputEffectPanelTop() {
+        int available = rightPanelBottom() - (TOP_HEIGHT + 20);
+        int height = Math.max(OUTPUT_EFFECT_PANEL_MIN_HEIGHT, available * 2 / 5);
+        height = Math.min(height, Math.max(OUTPUT_EFFECT_PANEL_MIN_HEIGHT, available - 72));
+        return rightPanelBottom() - height;
+    }
+
+    private int upperPanelBottom() {
+        return outputEffectPanelTop() - RIGHT_PANEL_GAP;
+    }
 
     /* LAYER_LIST 模式：图层列表独占整条右栏，带滚动 */
     private void addLayerListPanel() {
@@ -739,7 +888,7 @@ public final class ShaderGeneratorScreen extends Screen {
         int y = TOP_HEIGHT + 20;
         int lw = RIGHT_WIDTH - 16;
         List<ShaderLayer> layers = project.layers();
-        int panelBottom = this.height - BOTTOM_HEIGHT - 8;
+        int panelBottom = upperPanelBottom();
 
         layerListTop = y;
         layerListBottom = panelBottom;
@@ -752,7 +901,7 @@ public final class ShaderGeneratorScreen extends Screen {
         for (int di = layerScroll; di < endIdx; di++) {
             int li = layers.size() - 1 - di;
             int rowY = layerListTop + (di - layerScroll) * LAYER_ROW_HEIGHT;
-            addLayerRow(px, rowY, lw, layers.get(li), li);
+            addLayerRow(px, rowY, lw - SCROLLBAR_WIDTH - 2, layers.get(li), li);
         }
     }
 
@@ -835,9 +984,9 @@ public final class ShaderGeneratorScreen extends Screen {
         }
         visibleLayerRows.clear();
         int x = this.width - RIGHT_WIDTH + 8;
-        int w = RIGHT_WIDTH - 16;
+        int w = RIGHT_WIDTH - 16 - SCROLLBAR_WIDTH - 2;
         int y = TOP_HEIGHT + 20;
-        int panelBottom = this.height - BOTTOM_HEIGHT - 8;
+        int panelBottom = upperPanelBottom();
 
         addRenderableWidget(Button.builder(
             Component.translatable("gui.eca.shader_generator.layer.back"),
@@ -866,6 +1015,75 @@ public final class ShaderGeneratorScreen extends Screen {
         inspectorTop = y + 24;
         inspectorBottom = panelBottom;
         addInspectorPanel();
+    }
+
+    private void addOutputEffectPanel() {
+        int x = this.width - RIGHT_WIDTH + 8;
+        int w = RIGHT_WIDTH - 16;
+        int top = outputEffectPanelTop();
+        int bottom = rightPanelBottom();
+        int listWidth = w - SCROLLBAR_WIDTH - 2;
+
+        addRenderableWidget(Button.builder(
+            Component.translatable("gui.eca.shader_generator.output_effect.add"),
+            button -> {
+                openDropdown = 5;
+                rebuildWidgets();
+            }
+        ).bounds(x, top + 18, listWidth, 18).build());
+
+        outputEffectListTop = top + 42;
+        outputEffectListBottom = bottom;
+        outputEffectVisibleRows = Math.max(1,
+            (outputEffectListBottom - outputEffectListTop) / OUTPUT_EFFECT_ROW_HEIGHT);
+        int maxScroll = Math.max(0, project.outputEffects().size() - outputEffectVisibleRows);
+        outputEffectScroll = Math.max(0, Math.min(outputEffectScroll, maxScroll));
+        visibleOutputEffectRows.clear();
+
+        int end = Math.min(project.outputEffects().size(), outputEffectScroll + outputEffectVisibleRows);
+        for (int index = outputEffectScroll; index < end; index++) {
+            int rowY = outputEffectListTop + (index - outputEffectScroll) * OUTPUT_EFFECT_ROW_HEIGHT;
+            addOutputEffectRow(x, rowY, listWidth, project.outputEffects().get(index), index);
+        }
+    }
+
+    private void addOutputEffectRow(
+        int x,
+        int y,
+        int width,
+        ShaderOutputEffectInstance effect,
+        int effectIndex
+    ) {
+        int color = outputEffectColor(effect.definition().stage());
+        visibleOutputEffectRows.add(new OutputEffectRowVisual(x, y, width, 18, effectIndex, color));
+        addRenderableWidget(Button.builder(Component.literal(effect.enabled() ? "●" : "○"),
+            button -> toggleOutputEffect(effectIndex))
+            .bounds(x + 3, y, 18, 18).build());
+        addRenderableWidget(Button.builder(Component.literal("↑"),
+            button -> moveOutputEffect(effectIndex, -1))
+            .bounds(x + 23, y, 18, 18).build());
+        addRenderableWidget(Button.builder(Component.literal("↓"),
+            button -> moveOutputEffect(effectIndex, 1))
+            .bounds(x + 43, y, 18, 18).build());
+        addRenderableWidget(Button.builder(
+            Component.translatable(effect.definition().displayName()),
+            button -> openOutputEffectDetails(effect, effectIndex)
+        ).bounds(x + 63, y, Math.max(42, width - 131), 18).build());
+        addRenderableWidget(Button.builder(
+            Component.translatable("gui.eca.shader_generator.output_effect.edit"),
+            button -> openOutputEffectDetails(effect, effectIndex)
+        ).bounds(x + width - 64, y, 42, 18).build());
+        addRenderableWidget(Button.builder(Component.literal("×"),
+            button -> removeOutputEffect(effectIndex))
+            .bounds(x + width - 20, y, 18, 18).build());
+    }
+
+    private static int outputEffectColor(ShaderOutputEffectDefinition.Stage stage) {
+        return switch (stage) {
+            case UV -> 0xFF3BC9DB;
+            case RESAMPLE -> 0xFFFFA94D;
+            case COLOR -> 0xFF9B6DFF;
+        };
     }
 
     private void enterLayerDetail(int layerIndex) {
@@ -973,7 +1191,7 @@ public final class ShaderGeneratorScreen extends Screen {
             return;
         }
         int x = this.width - RIGHT_WIDTH + 8;
-        int w = RIGHT_WIDTH - 16;
+        int w = RIGHT_WIDTH - 16 - SCROLLBAR_WIDTH - 2;
         if (elementParamView && selectedElementInLayer(layer) != null) {
             addElementParamInspector(layer, x, w);
         } else {
@@ -1438,6 +1656,77 @@ public final class ShaderGeneratorScreen extends Screen {
         rebuildWidgets();
     }
 
+    private void openOutputEffectDetails(ShaderOutputEffectInstance effect, int existingIndex) {
+        minecraft.setScreen(new ShaderOutputEffectDetailsScreen(
+            this,
+            this,
+            effect,
+            updatedEffect -> {
+                pushUndo();
+                if (existingIndex >= 0) {
+                    project.replaceOutputEffect(existingIndex, updatedEffect);
+                    markDirty("gui.eca.shader_generator.status.output_effect_changed",
+                        Component.translatable(updatedEffect.definition().displayName()));
+                } else {
+                    project.addOutputEffect(updatedEffect);
+                    markDirty("gui.eca.shader_generator.status.output_effect_added",
+                        Component.translatable(updatedEffect.definition().displayName()));
+                }
+                rebuildWidgets();
+            },
+            existingIndex < 0 ? null : () -> {
+                pushUndo();
+                project.removeOutputEffect(existingIndex);
+                markDirty("gui.eca.shader_generator.status.output_effect_removed",
+                    Component.translatable(effect.definition().displayName()));
+                rebuildWidgets();
+            }
+        ));
+    }
+
+    private void toggleOutputEffect(int index) {
+        if (index < 0 || index >= project.outputEffects().size()) {
+            return;
+        }
+        pushUndo();
+        ShaderOutputEffectInstance effect = project.outputEffects().get(index);
+        effect.setEnabled(!effect.enabled());
+        markDirty("gui.eca.shader_generator.status.output_effect_changed",
+            Component.translatable(effect.definition().displayName()));
+        rebuildWidgets();
+    }
+
+    private void removeOutputEffect(int index) {
+        if (index < 0 || index >= project.outputEffects().size()) {
+            return;
+        }
+        ShaderOutputEffectInstance effect = project.outputEffects().get(index);
+        pushUndo();
+        project.removeOutputEffect(index);
+        markDirty("gui.eca.shader_generator.status.output_effect_removed",
+            Component.translatable(effect.definition().displayName()));
+        rebuildWidgets();
+    }
+
+    private void moveOutputEffect(int index, int direction) {
+        if (index < 0 || index >= project.outputEffects().size() || direction == 0) {
+            return;
+        }
+        ShaderOutputEffectDefinition.Stage stage = project.outputEffects().get(index).definition().stage();
+        int candidate = index + direction;
+        while (candidate >= 0 && candidate < project.outputEffects().size()) {
+            if (project.outputEffects().get(candidate).definition().stage() == stage) {
+                pushUndo();
+                project.moveOutputEffect(index, candidate - index);
+                markDirty("gui.eca.shader_generator.status.output_effect_changed",
+                    Component.translatable(project.outputEffects().get(candidate).definition().displayName()));
+                rebuildWidgets();
+                return;
+            }
+            candidate += direction;
+        }
+    }
+
     private void openProjectDetails(boolean rename) {
         if (rename && (projectModId == null || projectShaderName == null)) {
             statusError = true;
@@ -1725,6 +2014,9 @@ public final class ShaderGeneratorScreen extends Screen {
         if (rightPanelMode == RightPanelMode.LAYER_LIST) {
             drawLayerRows(g);
         }
+        drawOutputEffectRows(g);
+        drawUpperScrollbar(g);
+        drawOutputEffectScrollbar(g);
 
         Component projectLabel = currentProjectRef() == null
             ? Component.translatable("gui.eca.shader_generator.project.unnamed")
@@ -1749,6 +2041,12 @@ public final class ShaderGeneratorScreen extends Screen {
             : Component.translatable("gui.eca.shader_generator.panel.layers");
         g.drawString(this.font, panelLabel,
             this.width - RIGHT_WIDTH + 8, TOP_HEIGHT + 4, 0xFFBFC4CC, false);
+        int effectHeaderTop = outputEffectPanelTop();
+        int panelLeft = this.width - RIGHT_WIDTH + 8;
+        g.fill(panelLeft, effectHeaderTop - RIGHT_PANEL_GAP / 2,
+            this.width - 8, effectHeaderTop - RIGHT_PANEL_GAP / 2 + 1, BORDER_COLOR);
+        g.drawString(this.font, Component.translatable("gui.eca.shader_generator.panel.effects"),
+            panelLeft, effectHeaderTop + 4, 0xFFBFC4CC, false);
         if (rightPanelMode == RightPanelMode.LAYER_DETAIL) {
             drawInspector(g);
         }
@@ -2169,6 +2467,12 @@ public final class ShaderGeneratorScreen extends Screen {
         LAYER_DETAIL
     }
 
+    private enum ScrollbarTarget {
+        NONE,
+        UPPER,
+        OUTPUT_EFFECTS
+    }
+
     private record PreviewRect(int left, int top, int right, int bottom) {
 
         boolean contains(double mouseX, double mouseY) {
@@ -2208,6 +2512,73 @@ public final class ShaderGeneratorScreen extends Screen {
                 );
             }
         }
+    }
+
+    private void drawOutputEffectRows(GuiGraphics graphics) {
+        for (OutputEffectRowVisual row : visibleOutputEffectRows) {
+            int background = 0x33000000 | (row.color() & 0x00FFFFFF);
+            graphics.fill(row.x(), row.y(), row.x() + row.width(), row.y() + row.height(), background);
+            graphics.fill(row.x(), row.y(), row.x() + 4, row.y() + row.height(), row.color());
+        }
+        if (project.outputEffects().isEmpty()) {
+            int x = this.width - RIGHT_WIDTH + 8;
+            graphics.drawCenteredString(this.font,
+                Component.translatable("gui.eca.shader_generator.output_effect.empty"),
+                x + (RIGHT_WIDTH - 16) / 2, outputEffectListTop + 6, 0xFF9DA3AC);
+        }
+    }
+
+    private void drawUpperScrollbar(GuiGraphics graphics) {
+        ScrollbarGeometry geometry = upperScrollbarGeometry();
+        drawScrollbar(graphics, geometry);
+    }
+
+    private void drawOutputEffectScrollbar(GuiGraphics graphics) {
+        drawScrollbar(graphics, outputEffectScrollbarGeometry());
+    }
+
+    private void drawScrollbar(GuiGraphics graphics, ScrollbarGeometry geometry) {
+        if (geometry == null) {
+            return;
+        }
+        graphics.fill(geometry.x(), geometry.top(), geometry.x() + SCROLLBAR_WIDTH,
+            geometry.bottom(), 0x55212428);
+        graphics.fill(geometry.x(), geometry.thumbTop(), geometry.x() + SCROLLBAR_WIDTH,
+            geometry.thumbBottom(), 0xFF8B9098);
+    }
+
+    private ScrollbarGeometry upperScrollbarGeometry() {
+        if (rightPanelMode == RightPanelMode.LAYER_LIST) {
+            return scrollbarGeometry(layerListTop, layerListBottom, project.layers().size(),
+                visibleLayerRowCount, layerScroll);
+        }
+        ShaderLayer layer = selectedLayer();
+        if (layer == null) {
+            return null;
+        }
+        int total = elementParamView && selectedElementInLayer(layer) != null
+            ? visibleParameters(selectedElementInLayer(layer)).size()
+            : layer.elements().size();
+        int scroll = elementParamView ? paramScroll : elementScroll;
+        return scrollbarGeometry(inspectorListTop, inspectorListBottom, total, inspectorVisibleRows, scroll);
+    }
+
+    private ScrollbarGeometry outputEffectScrollbarGeometry() {
+        return scrollbarGeometry(outputEffectListTop, outputEffectListBottom,
+            project.outputEffects().size(), outputEffectVisibleRows, outputEffectScroll);
+    }
+
+    private ScrollbarGeometry scrollbarGeometry(int top, int bottom, int total, int visible, int scroll) {
+        if (bottom <= top || total <= visible) {
+            return null;
+        }
+        int trackHeight = bottom - top;
+        int thumbHeight = Math.max(14, trackHeight * visible / Math.max(total, 1));
+        thumbHeight = Math.min(trackHeight, thumbHeight);
+        int maxScroll = Math.max(1, total - visible);
+        int thumbTop = top + (trackHeight - thumbHeight) * scroll / maxScroll;
+        return new ScrollbarGeometry(this.width - 8 - SCROLLBAR_WIDTH, top, bottom,
+            thumbTop, thumbTop + thumbHeight, total, visible);
     }
 
     private void drawDropdownBackground(GuiGraphics g) {
@@ -2450,6 +2821,25 @@ public final class ShaderGeneratorScreen extends Screen {
         int height,
         int elementIndex,
         int color
+    ) {}
+
+    private record OutputEffectRowVisual(
+        int x,
+        int y,
+        int width,
+        int height,
+        int effectIndex,
+        int color
+    ) {}
+
+    private record ScrollbarGeometry(
+        int x,
+        int top,
+        int bottom,
+        int thumbTop,
+        int thumbBottom,
+        int total,
+        int visible
     ) {}
 
 }

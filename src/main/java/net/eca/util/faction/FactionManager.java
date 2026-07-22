@@ -1,5 +1,6 @@
 package net.eca.util.faction;
 
+import net.eca.api.RegisterFaction;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
@@ -8,6 +9,8 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.level.Level;
+import net.minecraftforge.fml.ModList;
+import net.minecraftforge.forgespi.language.IModInfo;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,8 +38,11 @@ public class FactionManager {
     private static final Map<Entity, String> ENTITY_FACTION_CACHE =
             Collections.synchronizedMap(new WeakHashMap<>());
 
-    // 阵营定义注册表
+    // 阵营定义注册表（id → Faction 静态数据）
     private static final Map<String, Faction> FACTIONS = new ConcurrentHashMap<>();
+
+    // 阵营定义对象注册表（id → FactionDefinition，用于条件查询）
+    private static final Map<String, FactionDefinition> FACTION_DEFINITIONS = new ConcurrentHashMap<>();
 
     // UUID → factionId 持久化映射（由 SavedData 加载和写入）
     private static final Map<UUID, String> PERSISTENT_MEMBERS = new ConcurrentHashMap<>();
@@ -186,6 +192,92 @@ public class FactionManager {
      */
     public static boolean isFactionRegistered(String factionId) {
         return factionId != null && FACTIONS.containsKey(factionId);
+    }
+
+    // 获取阵营定义对象（用于条件查询）
+    /**
+     * Get the FactionDefinition for a registered faction, if any.
+     * Factions created via the API or commands won't have a definition instance.
+     *
+     * @param factionId the faction id
+     * @return the definition, or null if none
+     */
+    public static FactionDefinition getFactionDefinition(String factionId) {
+        if (factionId == null) return null;
+        return FACTION_DEFINITIONS.get(factionId);
+    }
+
+    // ==================== 注解扫描 ====================
+
+    // 扫描全部 mod 的 @RegisterFaction 注解，实例化并注册阵营
+    /**
+     * Scan all loaded mods for classes annotated with {@link RegisterFaction},
+     * instantiate each {@link FactionDefinition}, and register the resulting faction.
+     * Duplicate ids are logged and skipped (first registration wins).
+     * Called once during {@code FMLLoadCompleteEvent}, before entity extension scanning.
+     */
+    public static void scanAndRegisterAll() {
+        ModList.get().forEachModFile(modFile -> {
+            for (IModInfo modInfo : modFile.getModInfos()) {
+                modFile.getScanResult().getAnnotations().forEach(annotationData -> {
+                    if (RegisterFaction.class.getName().equals(annotationData.annotationType().getClassName())) {
+                        String className = annotationData.clazz().getClassName();
+                        try {
+                            Class<?> clazz = Class.forName(className, true,
+                                    Thread.currentThread().getContextClassLoader());
+                            registerFromDefinitionClass(clazz);
+                        } catch (ClassNotFoundException e) {
+                            EcaLogger.error("[Faction] Failed to load faction definition class {}: {}",
+                                    className, e.getMessage());
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    private static void registerFromDefinitionClass(Class<?> clazz) {
+        if (!FactionDefinition.class.isAssignableFrom(clazz)) {
+            EcaLogger.error("[Faction] Class {} is annotated with @RegisterFaction but does not extend FactionDefinition",
+                    clazz.getName());
+            return;
+        }
+
+        FactionDefinition def;
+        try {
+            def = (FactionDefinition) clazz.getDeclaredConstructor().newInstance();
+        } catch (Exception e) {
+            EcaLogger.error("[Faction] Failed to instantiate FactionDefinition {}: {}", clazz.getName(), e.getMessage());
+            return;
+        }
+
+        String id = def.getId();
+        if (id == null || id.isEmpty()) {
+            EcaLogger.error("[Faction] FactionDefinition {} returned null or empty id — skipping",
+                    clazz.getName());
+            return;
+        }
+
+        if (FACTIONS.containsKey(id)) {
+            EcaLogger.error("[Faction] Duplicate faction id '{}' from {} — already registered, skipping",
+                    id, clazz.getName());
+            return;
+        }
+
+        // 创建 Faction 并填入预设关系
+        Faction faction = new Faction(id, def.getDisplayName(), def.getColor(), def.getStaticDefaultRelation());
+        for (String target : def.getHostileTo()) {
+            faction.setRelation(target, FactionRelation.HOSTILE);
+        }
+        for (String target : def.getFriendlyTo()) {
+            faction.setRelation(target, FactionRelation.FRIENDLY);
+        }
+        for (String target : def.getNeutralTo()) {
+            faction.setRelation(target, FactionRelation.NEUTRAL);
+        }
+
+        FACTIONS.put(id, faction);
+        FACTION_DEFINITIONS.put(id, def);
     }
 
     // ==================== 实体-阵营绑定 ====================
@@ -387,12 +479,12 @@ public class FactionManager {
      * 查询两个实体之间的有效关系（用于判断是否可攻击/设目标）。
      *
      * 优先级：
-     *   1. 同阵营                     → SAME_FACTION
-     *   2. 双方都有阵营 + A 对 B 有覆盖 → 返回覆盖值
-     *   3. 双方都有阵营 + B 对 A 有覆盖 → 返回覆盖值（对称回退）
-     *   4. A 有阵营、B 无阵营           → A.defaultRelation
-     *   5. A 无阵营、B 有阵营           → 逆向 B.defaultRelation
-     *   6. 双方都无阵营                 → NEUTRAL
+     *   1. 同阵营                              → SAME_FACTION
+     *   2. FactionDefinition.getRelation() 条件 → 非 null 即返回
+     *   3. Faction 静态 hostileTo/friendlyTo/neutralTo
+     *   4. 对称回退（B 的 FactionDefinition + B 的 Faction 静态表；但 B 的 DEFAULT 不在此环节对称）
+     *   5. FactionDefinition.getDefaultRelation() 条件 → 非 null 即返回
+     *   6. Faction 静态 defaultRelation
      */
     /**
      * Resolve the effective relation from entity {@code a}'s perspective toward entity {@code b}.
@@ -408,43 +500,73 @@ public class FactionManager {
         String factionA = getFactionId(a);
         String factionB = getFactionId(b);
 
-        // 同阵营
+        // 1. 同阵营
         if (factionA != null && factionA.equals(factionB)) {
             return FactionRelation.SAME_FACTION;
         }
 
-        // 双方都有阵营 → 查关系覆盖
+        // 2. 双方都有阵营 → 条件方法 + 静态关系表 + 对称回退
         if (factionA != null && factionB != null) {
+            // 2a. A 的 FactionDefinition 条件方法
+            FactionDefinition defA = FACTION_DEFINITIONS.get(factionA);
+            if (defA != null) {
+                LivingEntity selfA = (a instanceof LivingEntity) ? (LivingEntity) a : null;
+                FactionRelation dyn = defA.getRelation(selfA, b);
+                if (dyn != null) return dyn;
+            }
+
+            // 2b. A 的 Faction 静态关系表
             Faction fA = FACTIONS.get(factionA);
             if (fA != null) {
                 FactionRelation rel = fA.getRelation(factionB);
                 if (rel != null) return rel;
             }
-            // 对称回退：B 对 A 的覆盖
+
+            // 2c. 对称回退：B 的条件方法 + B 的静态表（但 B 的 default 不在此环节对称）
+            FactionDefinition defB = FACTION_DEFINITIONS.get(factionB);
+            if (defB != null) {
+                LivingEntity selfB = (b instanceof LivingEntity) ? (LivingEntity) b : null;
+                FactionRelation dyn = defB.getRelation(selfB, a);
+                if (dyn != null) return dyn;
+            }
+
             Faction fB = FACTIONS.get(factionB);
             if (fB != null) {
                 FactionRelation rel = fB.getRelation(factionA);
                 if (rel != null) return rel;
             }
+
             // 双方都有阵营但无覆盖 → 默认敌对
             return FactionRelation.HOSTILE;
         }
 
-        // A 有阵营，B 无阵营 → A 的 defaultRelation
+        // 3. A 有阵营，B 无阵营 → A 的 defaultRelation（条件优先，静态回退）
         if (factionA != null) {
+            FactionDefinition defA = FACTION_DEFINITIONS.get(factionA);
+            if (defA != null) {
+                LivingEntity selfA = (a instanceof LivingEntity) ? (LivingEntity) a : null;
+                FactionRelation dyn = defA.getDefaultRelation(selfA, b);
+                if (dyn != null) return dyn;
+            }
             Faction fA = FACTIONS.get(factionA);
             if (fA != null) return fA.getDefaultRelation();
             return FactionRelation.HOSTILE;
         }
 
-        // A 无阵营，B 有阵营 → 逆向 B 的 defaultRelation
+        // 4. A 无阵营，B 有阵营 → 逆向 B 的 defaultRelation（条件优先，静态回退）
         if (factionB != null) {
+            FactionDefinition defB = FACTION_DEFINITIONS.get(factionB);
+            if (defB != null) {
+                LivingEntity selfB = (b instanceof LivingEntity) ? (LivingEntity) b : null;
+                FactionRelation dyn = defB.getDefaultRelation(selfB, a);
+                if (dyn != null) return dyn;
+            }
             Faction fB = FACTIONS.get(factionB);
             if (fB != null) return fB.getDefaultRelation();
             return FactionRelation.HOSTILE;
         }
 
-        // 双方都无阵营
+        // 5. 双方都无阵营
         return FactionRelation.NEUTRAL;
     }
 

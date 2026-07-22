@@ -1,12 +1,10 @@
 package net.eca.network;
 
-import com.mojang.blaze3d.shaders.FogShape;
 import net.eca.util.entity_extension.CombatMusicExtension;
 import net.eca.util.entity_extension.EntityExtensionClientState;
 import net.eca.util.entity_extension.GlobalEffectRegistry;
 import net.eca.util.entity_extension.GlobalFogExtension;
 import net.eca.util.entity_extension.GlobalSkyboxExtension;
-import net.minecraft.client.renderer.RenderType;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.sounds.SoundSource;
@@ -204,8 +202,8 @@ public class EntityExtensionOverridePacket {
 
         public GlobalFogExtension toExtension() {
             FogData self = this;
-            FogShape shape = (fogShapeOrdinal >= 0 && fogShapeOrdinal < FogShape.values().length)
-                ? FogShape.values()[fogShapeOrdinal] : FogShape.CYLINDER;
+            com.mojang.blaze3d.shaders.FogShape shape = (fogShapeOrdinal >= 0 && fogShapeOrdinal < com.mojang.blaze3d.shaders.FogShape.values().length)
+                ? com.mojang.blaze3d.shaders.FogShape.values()[fogShapeOrdinal] : com.mojang.blaze3d.shaders.FogShape.CYLINDER;
             return new GlobalFogExtension() {
                 @Override public boolean enabled() { return true; }
                 @Override public boolean globalMode() { return self.globalMode; }
@@ -217,7 +215,7 @@ public class EntityExtensionOverridePacket {
                 @Override public float terrainFogEnd(float rd) { return rd * self.terrainEndFactor; }
                 @Override public float skyFogStart(float rd) { return rd * self.skyStartFactor; }
                 @Override public float skyFogEnd(float rd) { return rd * self.skyEndFactor; }
-                @Override public FogShape fogShape() { return shape; }
+                @Override public com.mojang.blaze3d.shaders.FogShape fogShape() { return shape; }
             };
         }
     }
@@ -291,7 +289,7 @@ public class EntityExtensionOverridePacket {
                 @Override public boolean enableTexture() { return self.enableTexture; }
                 @Override public ResourceLocation texture() { return self.texture; }
                 @Override public boolean enableShader() { return self.enableShader; }
-                @Override public RenderType shaderRenderType() {
+                @Override public net.minecraft.client.renderer.RenderType shaderRenderType() {
                     return GlobalEffectRegistry.getSkyboxPreset(self.shaderPresetId);
                 }
                 @Override public float alpha() { return self.alpha; }

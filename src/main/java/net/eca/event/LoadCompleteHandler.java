@@ -12,6 +12,7 @@ import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.health.HealthDataFlow;
 import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.faction.FactionManager;
 import net.eca.util.item_extension.ItemExtensionManager;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
 import net.minecraftforge.fml.loading.FMLEnvironment;
@@ -59,7 +60,9 @@ public final class LoadCompleteHandler {
     public void onLoadComplete(FMLLoadCompleteEvent event) {
         EcaMod.setLoadComplete(true);
 
-        // 扫描并注册 Entity Extensions、Item Extensions、BossShow
+        // 扫描并注册 Faction Definitions、Entity Extensions、Item Extensions、BossShow
+        // 阵营必须先于 EntityExtension 扫描，因为 EntityExtension 可能引用 @RegisterFaction 注册的阵营
+        event.enqueueWork(FactionManager::scanAndRegisterAll);
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
         // Item Extension 系统纯客户端：ItemExtensionManager 标记 @OnlyIn(Dist.CLIENT)，
         // 在专用服务端形成该方法引用会触发 RuntimeDistCleaner 崩溃

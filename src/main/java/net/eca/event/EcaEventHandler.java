@@ -170,6 +170,11 @@ public class EcaEventHandler {
 
         Map<Integer, Integer> glowMap = new HashMap<>();
         for (LivingEntity entity : nearby) {
+            // 只对属于某个阵营的实体发光，无阵营生物（猪、牛等）不发光
+            String entityFaction = FactionManager.getFactionId(entity);
+            if (entityFaction == null) {
+                continue;
+            }
             FactionRelation rel = FactionManager.getEffectiveRelation(player, entity);
             int color;
             switch (rel) {
@@ -183,10 +188,6 @@ public class EcaEventHandler {
                     color = hostileColor;
                     break;
                 case NEUTRAL:
-                    // 双方均无阵营则跳过，不发光
-                    if (playerFaction == null && FactionManager.getFactionId(entity) == null) {
-                        continue;
-                    }
                     color = neutralColor;
                     break;
                 default:

@@ -11,7 +11,8 @@ public record ShaderProject(
     String path,
     String fragmentBody,
     Set<Capability> capabilities,
-    List<TextureBinding> textures
+    List<TextureBinding> textures,
+    List<ShaderOutputEffectInstance> outputEffects
 ) {
 
     private static final Pattern NAMESPACE_PATTERN = Pattern.compile("[a-z0-9_.-]+");
@@ -29,6 +30,7 @@ public record ShaderProject(
         }
         capabilities = immutableCapabilities(capabilities);
         textures = textures == null ? List.of() : List.copyOf(textures);
+        outputEffects = outputEffects == null ? List.of() : List.copyOf(outputEffects);
     }
 
     public String resourceId() {

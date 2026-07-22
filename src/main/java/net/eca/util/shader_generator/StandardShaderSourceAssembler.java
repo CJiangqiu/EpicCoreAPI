@@ -1,6 +1,7 @@
 package net.eca.util.shader_generator;
 
 import java.util.Set;
+import java.util.List;
 
 public final class StandardShaderSourceAssembler {
 
@@ -86,8 +87,22 @@ public final class StandardShaderSourceAssembler {
             .append("in vec3 skyDir;\n\n")
             .append("out vec4 fragColor;\n\n")
             .append(project.fragmentBody().strip())
-            .append("\n\n")
-            .append("void main() {\n");
+            .append("\n\n");
+
+        if (usesEffect(project.outputEffects(), "hue_cycle")) {
+            source.append("vec3 ecaHueRotate(vec3 color, float angle) {\n")
+                .append("    float sine = sin(angle);\n")
+                .append("    float cosine = cos(angle);\n")
+                .append("    mat3 rotation = mat3(\n")
+                .append("        0.299 + 0.701 * cosine + 0.168 * sine, 0.587 - 0.587 * cosine + 0.330 * sine, 0.114 - 0.114 * cosine - 0.497 * sine,\n")
+                .append("        0.299 - 0.299 * cosine - 0.328 * sine, 0.587 + 0.413 * cosine + 0.035 * sine, 0.114 - 0.114 * cosine + 0.292 * sine,\n")
+                .append("        0.299 - 0.300 * cosine + 1.250 * sine, 0.587 - 0.588 * cosine - 1.050 * sine, 0.114 + 0.886 * cosine - 0.203 * sine\n")
+                .append("    );\n")
+                .append("    return clamp(rotation * color, vec3(0.0), vec3(1.0));\n")
+                .append("}\n\n");
+        }
+
+        source.append("void main() {\n");
 
         if (colorKey) {
             source.append("    if (ColorKeyColor.a > 0.5) {\n")
@@ -102,6 +117,8 @@ public final class StandardShaderSourceAssembler {
         if (localUvBounds) {
             source.append("    effectUv = (texCoord0 - LocalUvMin) * LocalUvScale;\n");
         }
+
+        appendEffects(source, project.outputEffects(), ShaderOutputEffectDefinition.Stage.UV);
 
         source.append("    vec3 effectDirection = normalize(skyDir);\n");
         if (cameraOrientation) {
@@ -121,10 +138,40 @@ public final class StandardShaderSourceAssembler {
                 .append("    );\n");
         }
 
-        source.append("    vec4 effectColor = renderEffect(effectUv, effectDirection, GameTime);\n")
-            .append("    fragColor = effectColor * vertexColor * ColorModulator;\n")
+        source.append("    vec4 effectColor = renderEffect(effectUv, effectDirection, GameTime);\n");
+        appendEffects(source, project.outputEffects(), ShaderOutputEffectDefinition.Stage.RESAMPLE);
+        appendEffects(source, project.outputEffects(), ShaderOutputEffectDefinition.Stage.COLOR);
+        source.append("    fragColor = effectColor * vertexColor * ColorModulator;\n")
             .append("}\n");
         return source.toString();
+    }
+
+    private static void appendEffects(
+        StringBuilder source,
+        List<ShaderOutputEffectInstance> effects,
+        ShaderOutputEffectDefinition.Stage stage
+    ) {
+        if (effects == null) {
+            return;
+        }
+        for (int index = 0; index < effects.size(); index++) {
+            ShaderOutputEffectInstance effect = effects.get(index);
+            if (effect.enabled() && effect.definition().stage() == stage) {
+                source.append(effect.definition().emitter().emit(effect, index));
+            }
+        }
+    }
+
+    private static boolean usesEffect(List<ShaderOutputEffectInstance> effects, String id) {
+        if (effects == null) {
+            return false;
+        }
+        for (ShaderOutputEffectInstance effect : effects) {
+            if (effect.enabled() && effect.definition().id().equals(id)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean includes(
