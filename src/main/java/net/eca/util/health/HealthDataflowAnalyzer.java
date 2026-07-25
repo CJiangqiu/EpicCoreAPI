@@ -1973,6 +1973,121 @@ public final class HealthDataflowAnalyzer {
         return AnalysisResult.of(stripped, owner);
     }
 
+    /* ==================== 外部扫描：布尔死亡门控识别 ====================
+       有些实体 getHealth 是常量诱饵、setHealth 空操作，生死由一个"编码布尔字段"门控(如紫悦 isDeadOrDying=decodeBool(_twilightDone)，
+       die()/remove() 也 gate 在它上)。这类门控不是可扣血量，外部扫描的浮点比较/写入点提取抓不到。
+       这里识别 isDeadOrDying/isAlive 里"GETFIELD this.F -> INVOKESTATIC decoder(F)Z"且同类存在编解码对偶 encoder 的模式，
+       交出 门控字段+编码器+解码器+死亡值，供击杀时把门控翻正。只看各方法自身指令、不互相内联，规避 isAlive<->isDeadOrDying 耦合成环。 */
+
+    public record DeathGate(Field field, Method encoder, Method decoder, boolean deathValue) {}
+
+    private static final DeathGate NO_DEATH_GATE = new DeathGate(null, null, null, false);
+    private static final Map<Class<?>, DeathGate> DEATH_GATE_CACHE = new ConcurrentHashMap<>();
+
+    // 分析实体的死亡门控；无门控返回 null(以 NO_DEATH_GATE 哨兵缓存，避免反复分析)。
+    public static DeathGate analyzeDeathGate(Class<?> entityClass) {
+        if (entityClass == null) return null;
+        DeathGate cached = DEATH_GATE_CACHE.get(entityClass);
+        if (cached != null) return cached == NO_DEATH_GATE ? null : cached;
+        DeathGate gate = detectDeathGate(entityClass);
+        DEATH_GATE_CACHE.put(entityClass, gate != null ? gate : NO_DEATH_GATE);
+        return gate;
+    }
+
+    private static DeathGate detectDeathGate(Class<?> entityClass) {
+        // isDeadOrDying 返回 true 即死 → 死亡值 true；isAlive 返回 true 即活 → 死亡值 false
+        DeathGate gate = detectDeathGateMethod(entityClass, IS_DEAD_OR_DYING, true);
+        if (gate != null) return gate;
+        return detectDeathGateMethod(entityClass, IS_ALIVE, false);
+    }
+
+    private static DeathGate detectDeathGateMethod(Class<?> entityClass, McMethod method, boolean deathValue) {
+        ClassAndMethod target = findMethodOwner(entityClass, method);
+        if (target == null) return null;
+        try {
+            byte[] bytes = classBytes(target.owner());
+            if (bytes == null) return null;
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, 0);
+            MethodNode mn = null;
+            for (MethodNode m : cn.methods) {
+                if (m.name.equals(target.name()) && m.desc.equals(method.desc())) { mn = m; break; }
+            }
+            if (mn == null || mn.instructions.size() == 0) return null;
+            for (AbstractInsnNode in : mn.instructions) {
+                if (in.getOpcode() != Opcodes.INVOKESTATIC) continue;
+                MethodInsnNode call = (MethodInsnNode) in;
+                Type ret = Type.getReturnType(call.desc);
+                Type[] args = Type.getArgumentTypes(call.desc);
+                // 解码器签名：单个对象入参(编码值) -> boolean
+                if (ret.getSort() != Type.BOOLEAN || args.length != 1 || args[0].getSort() != Type.OBJECT) continue;
+                FieldInsnNode feeder = findFeedingGetField(in);
+                if (feeder == null || Type.getType(feeder.desc).getSort() != Type.OBJECT) continue;
+                Class<?> fieldOwner = loadClass(feeder.owner);
+                Class<?> decoderOwner = loadClass(call.owner);
+                if (fieldOwner == null || decoderOwner == null) continue;
+                Field field = findFieldInHierarchy(fieldOwner, feeder.name);
+                if (field == null) continue;
+                Method decoder = findStaticUnary(decoderOwner, call.name, typeToClass(args[0]));
+                // 必须存在编解码对偶 encoder((decoder返回) -> (decoder入参))，否则视为普通布尔调用而非门控(滤除原版 this.dead 等误报)
+                Method encoder = findCodecEncoder(decoderOwner, typeToClass(ret), typeToClass(args[0]));
+                if (decoder == null || encoder == null) continue;
+                field.setAccessible(true);
+                return new DeathGate(field, encoder, decoder, deathValue);
+            }
+        } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
+        return null;
+    }
+
+    // 从 INVOKESTATIC 向前找喂入其参数的 GETFIELD(只越过 ALOAD/DUP/CHECKCAST 等无害指令)，限定接收者为 this(ALOAD_0)。
+    private static FieldInsnNode findFeedingGetField(AbstractInsnNode from) {
+        AbstractInsnNode cur = from.getPrevious();
+        int hops = 0;
+        while (cur != null && hops++ < 8) {
+            int op = cur.getOpcode();
+            if (op == Opcodes.GETFIELD) return (FieldInsnNode) cur;
+            if (op == Opcodes.ALOAD || op == Opcodes.DUP || op == Opcodes.DUP_X1
+                    || op == Opcodes.DUP2 || op == Opcodes.CHECKCAST || op == -1) {
+                cur = cur.getPrevious();
+                continue;
+            }
+            return null;
+        }
+        return null;
+    }
+
+    // owner 内静态单参方法，参数类型恰为 paramType。
+    private static Method findStaticUnary(Class<?> owner, String name, Class<?> paramType) {
+        for (Method m : owner.getDeclaredMethods()) {
+            if (!Modifier.isStatic(m.getModifiers()) || !m.getName().equals(name) || m.getParameterCount() != 1) continue;
+            if (m.getParameterTypes()[0] == paramType) { m.setAccessible(true); return m; }
+        }
+        return null;
+    }
+
+    // owner 内静态编解码对偶的编码器：参数类型=解码器返回、返回类型=解码器入参(如 decodeBool(String)Z 配 encodeBool(Z)String)。
+    private static Method findCodecEncoder(Class<?> owner, Class<?> paramType, Class<?> returnType) {
+        for (Method m : owner.getDeclaredMethods()) {
+            if (!Modifier.isStatic(m.getModifiers()) || m.getParameterCount() != 1) continue;
+            if (m.getParameterTypes()[0] == paramType && m.getReturnType() == returnType) { m.setAccessible(true); return m; }
+        }
+        return null;
+    }
+
+    private static Class<?> typeToClass(Type t) {
+        return switch (t.getSort()) {
+            case Type.BOOLEAN -> boolean.class;
+            case Type.BYTE -> byte.class;
+            case Type.CHAR -> char.class;
+            case Type.SHORT -> short.class;
+            case Type.INT -> int.class;
+            case Type.LONG -> long.class;
+            case Type.FLOAT -> float.class;
+            case Type.DOUBLE -> double.class;
+            default -> loadClass(t.getInternalName());
+        };
+    }
+
     private static Expr analyzeComparisonMethod(Class<?> owner, String name, String desc,
                                                 TaintValue[] seedLocals, AnalysisCtx context, int depth) {
         if (owner == null || owner.getClassLoader() == null || depth >= context.maxDepth) return null;

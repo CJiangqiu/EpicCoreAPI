@@ -109,6 +109,33 @@ public final class EcaSetHealthManager {
         return success;
     }
 
+    /* 死亡门控兜底：getHealth 是常量诱饵、setHealth 空操作、生死由"编码布尔字段"门控的实体(如紫悦 isDeadOrDying=decodeBool(_twilightDone)，
+       die()/remove() 也 gate 其上)，改血各通道全打不穿。仅斩杀意图(target≤0)触发：用实体自身 encoder 把门控字段翻成"死亡值"，
+       解码回读校验；翻正后实体自身被 gate 的 die()/remove() 解锁，由调用方 kill 流程完成击杀与掉落。 */
+    public static boolean applyDeathGate(LivingEntity target, float targetHealth) {
+        if (target == null || targetHealth > 0.0f) return false;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) return false;
+        Class<?> cls = target.getClass();
+        HealthDataflowAnalyzer.DeathGate gate = HealthDataflowAnalyzer.analyzeDeathGate(cls);
+        if (gate == null) return false;
+        try {
+            Object snapshot = gate.field().get(target);
+            Object encoded = gate.encoder().invoke(null, gate.deathValue());
+            gate.field().set(target, encoded);
+            boolean dead = Boolean.TRUE.equals(gate.decoder().invoke(null, gate.field().get(target)));
+            if (dead == gate.deathValue()) {
+                EcaLogger.info("[DeathGate] flipped entity={} field={} deathValue={}",
+                        cls.getName(), gate.field().getName(), gate.deathValue());
+                return true;
+            }
+            gate.field().set(target, snapshot);   // 回读不符，回滚
+            return false;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
+    }
+
     /* 把外部扫描分析丢到后台执行器(去重)：完成后结果入分析器缓存，本次及分析期间的调用都跳过外部扫描通道。 */
     private static void submitExternalScanAnalysis(Class<?> cls) {
         if (EXTERNAL_SCAN_PENDING.add(cls)) {

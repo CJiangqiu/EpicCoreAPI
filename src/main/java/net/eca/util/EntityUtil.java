@@ -715,6 +715,8 @@ public class EntityUtil {
                 ok = true;                                                         //数据流逆向定位真实存储
             } else if (EcaSetHealthManager.applyExternalScan(entity, expectedHealth)) {
                 ok = true;                                                         //外部扫描(isAlive/hurt 旁证)
+            } else if (EcaSetHealthManager.applyDeathGate(entity, expectedHealth)) {
+                ok = true;                                                         //死亡门控翻正(仅斩杀意图)
             } else if (EcaSetHealthManager.applyMethodProbe(entity, expectedHealth)) {
                 ok = true;                                                         //方法探针(借实体自身 writer)
             } else {
