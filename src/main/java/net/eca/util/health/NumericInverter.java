@@ -2,7 +2,13 @@ package net.eca.util.health;
 
 import net.eca.util.EcaLogger;
 import net.eca.util.reflect.UnsafeUtil;
+import net.minecraft.core.Holder;
+import net.minecraft.core.Registry;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.Level;
 
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
@@ -28,6 +34,7 @@ public final class NumericInverter {
     private static final int MAX_PASSES = 64;                      // 坐标下降迭代上限(超时为主，本值为备)
     private static final int MAX_WALK_DEPTH = 64;                  // 对象图递归深度上限，防深图爆栈(StackOverflowError)
     private static final double PERTURB = 1.0;                     // 测斜率的单位微扰
+    private static final int ENTITY_WALK_CELL_CAP = 2048;          // 实体根遍历的 cell 上限：防 vanilla 对象图扩散耗光预算
 
     /* 搜索结局诊断去重：每类每原因只打一次，避免每-tick 改血刷屏 */
     private static final Set<String> DIAG_DUMPED = ConcurrentHashMap.newKeySet();
@@ -44,7 +51,16 @@ public final class NumericInverter {
 
         List<Cell> cells = new ArrayList<>();
         Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-        for (Object root : roots) walk(root, cells, visited, deadline, 0);
+        // 先遍历数据流框定的精确容器根(非实体)，再受限遍历实体根：
+        // 实体根会顺 vanilla 对象图(Codec/属性/装备/AI 等)扩散出海量的诱饵 cell，若不隔离会耗光预算，
+        // 使真正的存储 cell(如静态 map 数位)排不到扰动。精确容器根优先且不限，实体根加单元上限兜底。
+        for (Object root : roots) {
+            if (!(root instanceof Entity)) walk(root, cells, visited, deadline, 0, Integer.MAX_VALUE);
+        }
+        int entityCellCap = cells.size() + ENTITY_WALK_CELL_CAP;
+        for (Object root : roots) {
+            if (root instanceof Entity) walk(root, cells, visited, deadline, 0, entityCellCap);
+        }
         if (cells.isEmpty()) {
             diag(entity, "no perturbable numeric cells reachable from dead-end roots (roots=" + roots.size() + ")");
             return false;
@@ -144,8 +160,8 @@ public final class NumericInverter {
 
     // ==================== 对象图遍历：收集可扰动原始 cell ====================
 
-    private static void walk(Object obj, List<Cell> cells, Set<Object> visited, long deadline, int depth) {
-        if (obj == null || depth > MAX_WALK_DEPTH || System.nanoTime() > deadline) return;
+    private static void walk(Object obj, List<Cell> cells, Set<Object> visited, long deadline, int depth, int cellCap) {
+        if (obj == null || depth > MAX_WALK_DEPTH || System.nanoTime() > deadline || cells.size() >= cellCap) return;
         if (obj instanceof Number || obj instanceof Boolean || obj instanceof Character || obj instanceof String) return;
         if (!visited.add(obj)) return;
         Class<?> cls = obj.getClass();
@@ -155,13 +171,13 @@ public final class NumericInverter {
             Class<?> comp = cls.getComponentType();
             int len = Array.getLength(obj);
             if (comp.isPrimitive()) {
-                if (isNumericPrimitive(comp)) for (int i = 0; i < len; i++) cells.add(new ArrayCell(obj, i));
+                if (isNumericPrimitive(comp)) for (int i = 0; i < len && cells.size() < cellCap; i++) cells.add(new ArrayCell(obj, i));
             } else {
                 for (int i = 0; i < len; i++) {
-                    if (System.nanoTime() > deadline) return;
+                    if (System.nanoTime() > deadline || cells.size() >= cellCap) return;
                     Object el = Array.get(obj, i);
                     if (el instanceof Number) cells.add(new ArrayCell(obj, i));
-                    else walk(el, cells, visited, deadline, depth + 1);
+                    else walk(el, cells, visited, deadline, depth + 1, cellCap);
                 }
             }
             return;
@@ -169,7 +185,7 @@ public final class NumericInverter {
 
         for (Class<?> k = cls; k != null && k != Object.class; k = k.getSuperclass()) {
             for (Field f : k.getDeclaredFields()) {
-                if (System.nanoTime() > deadline) return;
+                if (System.nanoTime() > deadline || cells.size() >= cellCap) return;
                 if (Modifier.isStatic(f.getModifiers())) continue;
                 Class<?> ft = f.getType();
                 try {
@@ -180,7 +196,7 @@ public final class NumericInverter {
                         Object v = f.get(obj);
                         if (v == null) continue;
                         if (v instanceof Number) cells.add(new FieldCell(obj, f));
-                        else walk(v, cells, visited, deadline, depth + 1);
+                        else walk(v, cells, visited, deadline, depth + 1, cellCap);
                     }
                 } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
             }
@@ -192,12 +208,20 @@ public final class NumericInverter {
                 || t == double.class || t == short.class || t == byte.class;
     }
 
-    // 跳过 JDK 内部反射/类加载/线程等对象——安全考量，非范围限制
+    // 跳过 JDK 内部反射/类加载/线程等对象(安全考量)、com.mojang 的 DFU/Codec 图与世界/注册表等重型容器：
+    // 自定义血量不可能存于其中，但实体对象图会经 Codec/DFU/level 扩散出数十万诱饵 cell(且 record 字段写入刷屏报错)、
+    // 耗光预算，使数据流框定的真实存储(如静态 map 数位)排不到扰动。
     private static boolean isSkippable(Class<?> cls) {
         String n = cls.getName();
-        return n.startsWith("java.lang.Class") || n.startsWith("java.lang.ClassLoader")
+        if (n.startsWith("java.lang.Class") || n.startsWith("java.lang.ClassLoader")
                 || n.startsWith("java.lang.Thread") || n.startsWith("java.lang.reflect.")
-                || n.startsWith("java.lang.invoke.") || n.startsWith("java.security.");
+                || n.startsWith("java.lang.invoke.") || n.startsWith("java.security.")
+                || n.startsWith("com.mojang.")) return true;
+        return Level.class.isAssignableFrom(cls)
+                || MinecraftServer.class.isAssignableFrom(cls)
+                || RegistryAccess.class.isAssignableFrom(cls)
+                || Registry.class.isAssignableFrom(cls)
+                || Holder.class.isAssignableFrom(cls);
     }
 
     // ==================== Cell：读/写(引用替换)/快照/回滚 ====================

@@ -1,7 +1,10 @@
 package net.eca.util.health;
 
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.coremod.EcaTransformerManager;
+import net.eca.coremod.LivingEntityHook;
 import net.eca.util.EcaLogger;
+import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import org.objectweb.asm.ClassReader;
@@ -11,6 +14,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
@@ -19,18 +23,24 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.FieldNode;
 
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandleInfo;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -72,17 +82,21 @@ public final class MethodProbe {
 
     private record TrustedBridge(MethodHandle apply, String className) {}
 
-    public enum WriterKind { METHOD, FUNCTIONAL_FIELD }
+    public enum WriterKind { METHOD, FUNCTIONAL_FIELD, METHOD_HANDLE_FIELD, FIELD_COMMIT }
 
     /* DirectCall 候选：METHOD=实体自身 1 参数数值方法；FUNCTIONAL_FIELD=持单数值 SAM 的函数式字段。
        仅静态签名信息，真正命中由运行期行为探测判定。 */
-    public record DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc) {}
+    public record DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc,
+                                  String fieldDesc, boolean fieldStatic) {}
 
     /* 命中的直调 writer：绑定到某方法或函数式字段，可跨同类实例复用。 */
     public interface DirectWriter {
         boolean write(LivingEntity entity, float value);
         float representable(float value);
         String describe();
+        default boolean writeAssociated(LivingEntity entity, float value) { return false; }
+        default boolean hasAssociatedWrites() { return false; }
+        default void preferAssociatedWrites() {}
     }
 
     // ==================== HeadBridge 发现 ====================
@@ -172,17 +186,130 @@ public final class MethodProbe {
                 Class<?> input = method.getParameterTypes()[0];
                 if (!isMethodInput(input)) continue;
                 if (!seen.add("M:" + ownerInternal + ":" + method.getName() + ":" + input.getName())) continue;
-                out.add(new DirectCandidate(WriterKind.METHOD, ownerInternal, method.getName(), Type.getDescriptor(input)));
+                out.add(new DirectCandidate(WriterKind.METHOD, ownerInternal, method.getName(), Type.getDescriptor(input), null, false));
             }
             for (Field field : c.getDeclaredFields()) {
+                if (field.getType() == MethodHandle.class) {
+                    if (seen.add("H:" + ownerInternal + ":" + field.getName())) {
+                        out.add(new DirectCandidate(WriterKind.METHOD_HANDLE_FIELD, ownerInternal, field.getName(), "", Type.getDescriptor(field.getType()), Modifier.isStatic(field.getModifiers())));
+                    }
+                    continue;
+                }
                 if (Modifier.isStatic(field.getModifiers())) continue;
                 Class<?> samInput = singleNumericSamInput(field);
                 if (samInput == null) continue;
                 if (!seen.add("F:" + ownerInternal + ":" + field.getName())) continue;
-                out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, field.getName(), Type.getDescriptor(samInput)));
+                out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, field.getName(), Type.getDescriptor(samInput), Type.getDescriptor(field.getType()), false));
+            }
+            findBytecodeFieldCandidates(c, ownerInternal, out, seen);
+            findFieldCommitCandidates(c, ownerInternal, out, seen);
+        }
+        /* 排序即探测次序：旧版已验证的反射 setter/函数式字段在前(复刻 1.1.6)，新增激进候选后置。
+           FIELD_COMMIT 排最后——其行为探测可能触发目标不可回滚的防御(如 accelerator checkEntityDecoys
+           的 lockTemporary)，必须在 HeadBridge 之后才允许跑，否则会锁死本可成功的 HeadBridge。 */
+        out.sort(Comparator.comparingInt(candidate -> switch (candidate.kind()) {
+            case METHOD -> 0;
+            case FUNCTIONAL_FIELD -> 1;
+            case METHOD_HANDLE_FIELD -> 2;
+            case FIELD_COMMIT -> 3;
+        }));
+        return out;
+    }
+
+    /* 反射缓存可能被目标主动清空；字段元数据仍在 classfile 中，作为无反射后备。 */
+    private static void findBytecodeFieldCandidates(Class<?> owner, String ownerInternal,
+                                                     List<DirectCandidate> out, Set<String> seen) {
+        byte[] bytes = bytesProvider.get(owner);
+        if (bytes == null) return;
+        try {
+            ClassNode node = new ClassNode();
+            new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
+            for (FieldNode field : node.fields) {
+                boolean isStatic = (field.access & Opcodes.ACC_STATIC) != 0;
+                if (Type.getDescriptor(MethodHandle.class).equals(field.desc)) {
+                    if (seen.add("H:" + ownerInternal + ":" + field.name))
+                        out.add(new DirectCandidate(WriterKind.METHOD_HANDLE_FIELD, ownerInternal, field.name, "", field.desc, isStatic));
+                    continue;
+                }
+                if (isStatic) continue;
+                Class<?> fieldType = HealthDataflowAnalyzer.descriptorToClass(field.desc);
+                Class<?> input = singleNumericSamInput(fieldType);
+                if (input == null || !seen.add("F:" + ownerInternal + ":" + field.name)) continue;
+                out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, field.name,
+                        Type.getDescriptor(input), field.desc, false));
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+    }
+
+    /* 暂存字段+无参提交：void() 方法体读取本类 float/double 字段后经调用提交(加密写入/委托等)。
+       行为探测最终判定是否真正控血，此处只做静态签名筛选。 */
+    private static void findFieldCommitCandidates(Class<?> owner, String ownerInternal,
+                                                  List<DirectCandidate> out, Set<String> seen) {
+        byte[] bytes = bytesProvider.get(owner);
+        if (bytes == null) return;
+        try {
+            ClassNode node = new ClassNode();
+            new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
+            for (MethodNode method : node.methods) {
+                if ((method.access & Opcodes.ACC_STATIC) != 0) continue;
+                if (!method.desc.equals("()V")) continue;
+                if (method.name.startsWith("<")) continue;
+                if (method.instructions == null || method.instructions.size() == 0) continue;
+                String stagingField = findStagingFloatField(method, ownerInternal);
+                if (stagingField == null) continue;
+                if (!hasSideEffectingCall(method)) continue;
+                if (!seen.add("FC:" + ownerInternal + ":" + method.name + ":" + stagingField)) continue;
+                out.add(new DirectCandidate(WriterKind.FIELD_COMMIT, ownerInternal, method.name,
+                        "F", stagingField, false));
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+    }
+
+    /* 在 void() 方法体中定位首个本类(或继承链内) float/double 实例字段的 GETFIELD，返回字段名 */
+    private static String findStagingFloatField(MethodNode method, String ownerInternal) {
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (!(insn instanceof FieldInsnNode fieldInsn)) continue;
+            if (fieldInsn.getOpcode() != Opcodes.GETFIELD) continue;
+            if (!fieldInsn.desc.equals("F") && !fieldInsn.desc.equals("D")) continue;
+            if (fieldInsn.owner.equals(ownerInternal) || isAncestorInternal(fieldInsn.owner, ownerInternal)) {
+                return fieldInsn.name;
             }
         }
-        return out;
+        return null;
+    }
+
+    private static boolean isAncestorInternal(String candidateAncestor, String childInternal) {
+        Class<?> child = HealthDataflowAnalyzer.loadClass(childInternal);
+        if (child == null) return false;
+        String ancestorBinary = candidateAncestor.replace('/', '.');
+        for (Class<?> c = child.getSuperclass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            if (c.getName().equals(ancestorBinary)) return true;
+        }
+        return false;
+    }
+
+    /* 方法体含至少一个产生副作用的调用(排除纯 getter/toString/hashCode 等无副作用方法) */
+    private static boolean hasSideEffectingCall(MethodNode method) {
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (!(insn instanceof MethodInsnNode call)) continue;
+            int opcode = call.getOpcode();
+            if (opcode != Opcodes.INVOKEVIRTUAL && opcode != Opcodes.INVOKESTATIC
+                    && opcode != Opcodes.INVOKEINTERFACE && opcode != Opcodes.INVOKESPECIAL) continue;
+            if (call.owner.equals("java/lang/Object")) continue;
+            if (isPureGetterName(call.name, call.desc)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isPureGetterName(String name, String desc) {
+        if (Type.getArgumentTypes(desc).length > 0) return false;
+        return name.startsWith("get") || name.startsWith("is") || name.equals("toString")
+                || name.equals("hashCode") || name.equals("ordinal") || name.equals("name");
     }
 
     // 字段类型是函数式接口且其唯一抽象方法接受单个数值入参时，返回该入参类型；否则 null
@@ -199,7 +326,16 @@ public final class MethodProbe {
         if (sam == null) return null;
         Class<?> input = sam.getParameterTypes()[0];
         if (!isNumericInput(input)) input = genericNumericInput(field);
-        return isNumericInput(input) ? input : null;
+        // 擦除为 Object 的 Consumer<Object> 仍可能是动态控血 writer；行为探测会以两次写入和回滚确认。
+        return isNumericInput(input) || input == Object.class ? input : null;
+    }
+
+    private static Class<?> singleNumericSamInput(Class<?> type) {
+        if (type == null || !type.isInterface()) return null;
+        Method sam = singleAbstract(type);
+        if (sam == null) return null;
+        Class<?> input = sam.getParameterTypes()[0];
+        return isNumericInput(input) || input == Object.class ? input : null;
     }
 
     private static Class<?> genericNumericInput(Field field) {
@@ -235,6 +371,7 @@ public final class MethodProbe {
     private static final Map<String, BridgeSpec> SPECS = new ConcurrentHashMap<>();
     private static final Map<String, TrustedBridge> TRUSTED_BRIDGES = new ConcurrentHashMap<>();
     private static final Set<String> TRUSTED_BRIDGE_FAILED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> METHOD_HANDLE_DIAGNOSTICS = ConcurrentHashMap.newKeySet();
     private static final int TRUSTED_BRIDGE_DEPTH = 8;
 
     public static void registerSite(BridgeSpec spec) {
@@ -337,14 +474,38 @@ public final class MethodProbe {
                                              float target, List<Object> rollbackRoots) {
         float baseline = EcaSetHealthManager.safeGetHealth(entity);
         if (!Float.isFinite(baseline)) return null;
-        float probeA = probeValue(baseline, target, 0.5f);
-        float probeB = probeValue(baseline, target, 0.25f);
-        if (tooClose(probeA, probeB) || tooClose(probeA, baseline) || tooClose(probeB, baseline)) return null;
+        float[] probes = selectProbeValues(baseline, target, safeGetMaxHealth(entity));
+        if (probes == null) return null;
+        float probeA = probes[0];
+        float probeB = probes[1];
         for (DirectCandidate candidate : candidates) {
-            DirectWriter writer = bind(candidate);
-            if (writer == null) continue;
-            ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.capture(entity, rollbackRoots);
-            if (testWriter(entity, writer, baseline, probeA, probeB, target)) {
+            String diagnosticKey = entity.getClass().getName() + "|" + candidate.declaringInternal()
+                    + "#" + candidate.memberName();
+            boolean diagnostic = candidate.kind() == WriterKind.METHOD_HANDLE_FIELD
+                    && METHOD_HANDLE_DIAGNOSTICS.add(diagnosticKey);
+            if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle candidate entity={} field={}#{} static={}",
+                    entity.getClass().getName(), candidate.declaringInternal(), candidate.memberName(), candidate.fieldStatic());
+            DirectWriter writer = bind(candidate, entity);
+            if (writer == null) {
+                if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle bind rejected field={}#{}",
+                        candidate.declaringInternal(), candidate.memberName());
+                continue;
+            }
+            if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle bound writer={} baseline={} probeA={} probeB={} target={}",
+                    writer.describe(), baseline, probeA, probeB, target);
+            if (writer.hasAssociatedWrites()) {
+                ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+                if (testAssociatedWriter(entity, writer, baseline, probeA, probeB, target, diagnostic)) {
+                    snapshot.restore();
+                    writer.preferAssociatedWrites();
+                    EcaLogger.info("[MethodProbe] associated writer hit entity={} writer={}",
+                            entity.getClass().getName(), writer.describe());
+                    return writer;
+                }
+                snapshot.restore();
+            }
+            ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+            if (testWriter(entity, writer, baseline, probeA, probeB, target, diagnostic)) {
                 snapshot.restore();
                 EcaLogger.info("[MethodProbe] direct writer hit entity={} writer={}",
                         entity.getClass().getName(), writer.describe());
@@ -355,19 +516,59 @@ public final class MethodProbe {
         return null;
     }
 
+    private static boolean testAssociatedWriter(LivingEntity entity, DirectWriter writer, float baseline,
+                                                float probeA, float probeB, float target, boolean diagnostic) {
+        try {
+            float a = writer.representable(probeA);
+            float b = writer.representable(probeB);
+            if (tooClose(a, b) || tooClose(a, baseline) || tooClose(b, baseline)) return false;
+            boolean wroteA = writer.writeAssociated(entity, a);
+            float actualA = EcaSetHealthManager.safeGetHealth(entity);
+            if (diagnostic) EcaLogger.info("[MethodProbe] associated probeA wrote={} expected={} actual={}",
+                    wroteA, a, actualA);
+            if (!wroteA || !matches(actualA, a)) return false;
+            boolean wroteB = writer.writeAssociated(entity, b);
+            float actualB = EcaSetHealthManager.safeGetHealth(entity);
+            if (diagnostic) EcaLogger.info("[MethodProbe] associated probeB wrote={} expected={} actual={}",
+                    wroteB, b, actualB);
+            if (!wroteB || !matches(actualB, b)) return false;
+            if (!writer.writeAssociated(entity, baseline) || !EcaSetHealthManager.verify(entity, baseline)) return false;
+            boolean wroteTarget = writer.writeAssociated(entity, target);
+            float actualTarget = EcaSetHealthManager.safeGetHealth(entity);
+            if (diagnostic) EcaLogger.info("[MethodProbe] associated target wrote={} expected={} actual={}",
+                    wroteTarget, target, actualTarget);
+            return wroteTarget && matchesTarget(actualTarget, target);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
+    }
+
     // 两个探测值须都能被写入并被 getHealth 读回，再复原 baseline 并验证，最后命中 target 才算真 writer
     private static boolean testWriter(LivingEntity entity, DirectWriter writer, float baseline,
-                                      float probeA, float probeB, float target) {
+                                      float probeA, float probeB, float target, boolean diagnostic) {
         try {
             float a = writer.representable(probeA);
             float b = writer.representable(probeB);
             if (tooClose(a, b) || tooClose(a, baseline) || tooClose(b, baseline)) return false;
 
-            if (!writer.write(entity, a) || !matches(EcaSetHealthManager.safeGetHealth(entity), a)) {
+            SynchedDataState beforeA = diagnostic ? SynchedDataState.capture(entity) : null;
+            boolean wroteA = writer.write(entity, a);
+            SynchedDataState stateA = diagnostic ? SynchedDataState.capture(entity) : null;
+            float actualA = EcaSetHealthManager.safeGetHealth(entity);
+            if (diagnostic) {
+                SynchedDataState afterReadA = SynchedDataState.capture(entity);
+                EcaLogger.info("[MethodProbe] MethodHandle probeA wrote={} expected={} actual={} writeState={} readState={}",
+                        wroteA, a, actualA, stateA.diffFrom(beforeA), afterReadA.diffFrom(stateA));
+            }
+            if (!wroteA || !matches(actualA, a)) {
                 restore(entity, writer, baseline);
                 return false;
             }
-            if (!writer.write(entity, b) || !matches(EcaSetHealthManager.safeGetHealth(entity), b)) {
+            boolean wroteB = writer.write(entity, b);
+            float actualB = EcaSetHealthManager.safeGetHealth(entity);
+            if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle probeB wrote={} expected={} actual={}", wroteB, b, actualB);
+            if (!wroteB || !matches(actualB, b)) {
                 restore(entity, writer, baseline);
                 return false;
             }
@@ -376,7 +577,11 @@ public final class MethodProbe {
                 restore(entity, writer, baseline);
                 return false;
             }
-            if (writer.write(entity, target) && EcaSetHealthManager.verify(entity, target)) return true;
+            boolean wroteTarget = writer.write(entity, target);
+            float actualTarget = EcaSetHealthManager.safeGetHealth(entity);
+            if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle target wrote={} expected={} actual={}",
+                    wroteTarget, target, actualTarget);
+            if (wroteTarget && matchesTarget(actualTarget, target)) return true;
             restore(entity, writer, baseline);
             return false;
         } catch (Throwable t) {
@@ -394,12 +599,36 @@ public final class MethodProbe {
         }
     }
 
-    private static DirectWriter bind(DirectCandidate candidate) {
+    private static DirectWriter bind(DirectCandidate candidate, LivingEntity entity) {
         Class<?> owner = HealthDataflowAnalyzer.loadClass(candidate.declaringInternal());
         if (owner == null) return null;
-        Class<?> inputType = HealthDataflowAnalyzer.descriptorToClass(candidate.inputDesc());
-        if (inputType == null) return null;
         try {
+            if (candidate.kind() == WriterKind.FIELD_COMMIT) {
+                return bindFieldCommit(candidate, owner);
+            }
+            if (candidate.kind() == WriterKind.METHOD_HANDLE_FIELD) {
+                Field field = HealthDataflowAnalyzer.findFieldInHierarchy(owner, candidate.memberName());
+                MethodHandle handle;
+                if (field != null && field.getType() == MethodHandle.class) {
+                    field.setAccessible(true);
+                    handle = (MethodHandle) field.get(Modifier.isStatic(field.getModifiers()) ? null : entity);
+                    if (handle == null || handle.type().parameterCount() != 2 || handle.type().returnType() != void.class) return null;
+                    Class<?> input = handle.type().parameterType(1);
+                    HandleTarget target = revealHandleTarget(handle, owner);
+                    return isMethodInput(input) ? new MethodHandleWriter(field, input, target) : null;
+                }
+                VarHandle handleField = findVarHandle(owner, candidate, MethodHandle.class);
+                if (handleField == null) return null;
+                handle = (MethodHandle) (candidate.fieldStatic() ? handleField.get() : handleField.get(entity));
+                if (handle == null || handle.type().parameterCount() != 2 || handle.type().returnType() != void.class) return null;
+                Class<?> input = handle.type().parameterType(1);
+                HandleTarget target = revealHandleTarget(handle, owner);
+                return isMethodInput(input)
+                        ? new VarHandleMethodHandleWriter(handleField, candidate.fieldStatic(), input, target)
+                        : null;
+            }
+            Class<?> inputType = HealthDataflowAnalyzer.descriptorToClass(candidate.inputDesc());
+            if (inputType == null) return null;
             if (candidate.kind() == WriterKind.METHOD) {
                 Method method = findMethod(owner, candidate.memberName(), inputType);
                 if (method == null) return null;
@@ -407,7 +636,12 @@ public final class MethodProbe {
                 return new MethodWriter(method, inputType);
             }
             Field field = HealthDataflowAnalyzer.findFieldInHierarchy(owner, candidate.memberName());
-            if (field == null) return null;
+            if (field == null) {
+                Class<?> fieldType = HealthDataflowAnalyzer.descriptorToClass(candidate.fieldDesc());
+                VarHandle handle = findVarHandle(owner, candidate, fieldType);
+                Method sam = singleAbstract(fieldType);
+                return handle == null || sam == null ? null : new VarHandleFunctionalWriter(handle, candidate.fieldStatic(), sam, inputType);
+            }
             Method sam = singleAbstract(field.getType());
             if (sam == null) return null;
             field.setAccessible(true);
@@ -416,6 +650,59 @@ public final class MethodProbe {
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             return null;
+        }
+    }
+
+    private static VarHandle findVarHandle(Class<?> owner, DirectCandidate candidate, Class<?> fieldType) {
+        if (fieldType == null) return null;
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(owner, MethodHandles.lookup());
+            return candidate.fieldStatic() ? lookup.findStaticVarHandle(owner, candidate.memberName(), fieldType)
+                    : lookup.findVarHandle(owner, candidate.memberName(), fieldType);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
+    /* 暂存字段+无参提交绑定：定位提交方法与暂存字段，缺一则放弃 */
+    private static DirectWriter bindFieldCommit(DirectCandidate candidate, Class<?> owner) {
+        Method commitMethod = findNoArgVoidMethod(owner, candidate.memberName());
+        if (commitMethod == null) return null;
+        Field stagingField = HealthDataflowAnalyzer.findFieldInHierarchy(owner, candidate.fieldDesc());
+        if (stagingField == null) return null;
+        if (stagingField.getType() != float.class && stagingField.getType() != double.class) return null;
+        commitMethod.setAccessible(true);
+        stagingField.setAccessible(true);
+        return new FieldCommitWriter(stagingField, commitMethod);
+    }
+
+    private static Method findNoArgVoidMethod(Class<?> owner, String name) {
+        for (Class<?> c = owner; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Method m : c.getDeclaredMethods()) {
+                if (Modifier.isStatic(m.getModifiers())) continue;
+                if (m.getParameterCount() != 0 || m.getReturnType() != void.class) continue;
+                if (m.getName().equals(name)) return m;
+            }
+        }
+        return null;
+    }
+
+    private record HandleTarget(String description, HealthDataflowAnalyzer.AnalysisResult writes) {}
+
+    private static HandleTarget revealHandleTarget(MethodHandle handle, Class<?> owner) {
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(owner, MethodHandles.lookup());
+            MethodHandleInfo info = lookup.revealDirect(handle);
+            boolean isStatic = info.getReferenceKind() == MethodHandleInfo.REF_invokeStatic;
+            String desc = info.getMethodType().toMethodDescriptorString();
+            HealthDataflowAnalyzer.AnalysisResult writes = HealthDataflowAnalyzer.analyzeWriterMethod(
+                    info.getDeclaringClass(), info.getName(), desc, isStatic);
+            return new HandleTarget(info.getDeclaringClass().getName() + "#" + info.getName()
+                    + info.getMethodType(), writes);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return new HandleTarget("unresolved", null);
         }
     }
 
@@ -447,7 +734,7 @@ public final class MethodProbe {
     public static boolean invokeBridge(LivingEntity entity, BridgeSpec spec, float target, List<Object> rollbackRoots) {
         Method method = resolveBridgeMethod(entity.getClass(), spec);
         if (method == null) return false;
-        ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.capture(entity, rollbackRoots);
+        ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
         try {
             ACTIVE_ENTITY.set(entity);
             method.invoke(entity, target);
@@ -672,6 +959,196 @@ public final class MethodProbe {
         }
     }
 
+    private static final class VarHandleFunctionalWriter implements DirectWriter {
+        private final VarHandle field;
+        private final boolean isStatic;
+        private final Method sam;
+        private final Class<?> inputType;
+
+        private VarHandleFunctionalWriter(VarHandle field, boolean isStatic, Method sam, Class<?> inputType) {
+            this.field = field;
+            this.isStatic = isStatic;
+            this.sam = sam;
+            this.inputType = inputType;
+        }
+
+        @Override public boolean write(LivingEntity entity, float value) {
+            try {
+                Object function = isStatic ? field.get() : field.get(entity);
+                if (function == null) return false;
+                sam.invoke(function, coerce(value, inputType));
+                return true;
+            } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
+        }
+
+        @Override public float representable(float value) { return representableFor(value, inputType); }
+
+        @Override public String describe() { return "VarHandle functional writer"; }
+    }
+
+    /* MethodHandle 字段常被用作可替换的合法 writer；每次写入重读字段，避免缓存失效句柄。 */
+    private static final class MethodHandleWriter implements DirectWriter {
+        private final Field field;
+        private final Class<?> inputType;
+        private final HandleTarget target;
+        private boolean associated;
+
+        private MethodHandleWriter(Field field, Class<?> inputType, HandleTarget target) {
+            this.field = field;
+            this.inputType = inputType;
+            this.target = target;
+        }
+
+        @Override public boolean write(LivingEntity entity, float value) {
+            if (associated) return writeAssociated(entity, value);
+            try {
+                Object current = field.get(Modifier.isStatic(field.getModifiers()) ? null : entity);
+                if (!(current instanceof MethodHandle handle)) return false;
+                MethodType type = handle.type();
+                if (type.parameterCount() != 2 || type.returnType() != void.class
+                        || !type.parameterType(0).isAssignableFrom(entity.getClass())) return false;
+                LivingEntityHook.beginProvisionalHealthWrite(entity, value);
+                try {
+                    handle.invokeWithArguments(entity, coerce(value, type.parameterType(1)));
+                } finally {
+                    LivingEntityHook.endProvisionalHealthWrite();
+                }
+                return true;
+            } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
+        }
+
+        @Override public float representable(float value) { return representableFor(value, inputType); }
+
+        @Override public boolean writeAssociated(LivingEntity entity, float value) {
+            return target != null && target.writes() != null
+                    && HealthDataFlow.writeAssociated(target.writes(), entity, value);
+        }
+
+        @Override public boolean hasAssociatedWrites() {
+            return target != null && target.writes() != null;
+        }
+
+        @Override public void preferAssociatedWrites() {
+            associated = true;
+        }
+
+        @Override public String describe() {
+            String description = target == null ? "unresolved" : target.description();
+            int sources = target == null || target.writes() == null ? 0 : target.writes().sources.size();
+            return field.getDeclaringClass().getName() + "#" + field.getName()
+                    + "(MethodHandle -> " + description + ", associatedSources=" + sources + ")";
+        }
+    }
+
+    private record SynchedDataState(Map<Integer, Object> values) {
+        @SuppressWarnings("rawtypes")
+        private static SynchedDataState capture(LivingEntity entity) {
+            Map<Integer, Object> values = new LinkedHashMap<>();
+            Int2ObjectMap<?> items = (Int2ObjectMap<?>) entity.getEntityData().itemsById;
+            for (Int2ObjectMap.Entry<?> entry : items.int2ObjectEntrySet()) {
+                SynchedEntityData.DataItem item = (SynchedEntityData.DataItem) entry.getValue();
+                if (item != null) values.put(entry.getIntKey(), item.value);
+            }
+            return new SynchedDataState(values);
+        }
+
+        private String diffFrom(SynchedDataState before) {
+            if (before == null) return "unavailable";
+            List<String> changes = new ArrayList<>();
+            for (Map.Entry<Integer, Object> entry : values.entrySet()) {
+                Object old = before.values.get(entry.getKey());
+                if (!Objects.equals(old, entry.getValue())) {
+                    changes.add(entry.getKey() + ":" + old + "->" + entry.getValue());
+                }
+            }
+            return changes.isEmpty() ? "none" : changes.toString();
+        }
+    }
+
+    private static final class VarHandleMethodHandleWriter implements DirectWriter {
+        private final VarHandle field;
+        private final boolean isStatic;
+        private final Class<?> inputType;
+        private final HandleTarget target;
+        private boolean associated;
+
+        private VarHandleMethodHandleWriter(VarHandle field, boolean isStatic, Class<?> inputType,
+                                            HandleTarget target) {
+            this.field = field;
+            this.isStatic = isStatic;
+            this.inputType = inputType;
+            this.target = target;
+        }
+
+        @Override public boolean write(LivingEntity entity, float value) {
+            if (associated) return writeAssociated(entity, value);
+            try {
+                Object current = isStatic ? field.get() : field.get(entity);
+                if (!(current instanceof MethodHandle handle)) return false;
+                MethodType type = handle.type();
+                if (type.parameterCount() != 2 || type.returnType() != void.class
+                        || !type.parameterType(0).isAssignableFrom(entity.getClass())) return false;
+                LivingEntityHook.beginProvisionalHealthWrite(entity, value);
+                try {
+                    handle.invokeWithArguments(entity, coerce(value, type.parameterType(1)));
+                } finally {
+                    LivingEntityHook.endProvisionalHealthWrite();
+                }
+                return true;
+            } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
+        }
+
+        @Override public float representable(float value) { return representableFor(value, inputType); }
+
+        @Override public boolean writeAssociated(LivingEntity entity, float value) {
+            return target != null && target.writes() != null
+                    && HealthDataFlow.writeAssociated(target.writes(), entity, value);
+        }
+
+        @Override public boolean hasAssociatedWrites() {
+            return target != null && target.writes() != null;
+        }
+
+        @Override public void preferAssociatedWrites() {
+            associated = true;
+        }
+
+        @Override public String describe() {
+            String description = target == null ? "unresolved" : target.description();
+            int sources = target == null || target.writes() == null ? 0 : target.writes().sources.size();
+            return "VarHandle MethodHandle writer -> " + description + ", associatedSources=" + sources;
+        }
+    }
+
+    /* 暂存字段+无参提交：先写暂存字段，再调提交方法令实体自身完成加密/同步写入 */
+    private static final class FieldCommitWriter implements DirectWriter {
+        private final Field stagingField;
+        private final Method commitMethod;
+
+        private FieldCommitWriter(Field stagingField, Method commitMethod) {
+            this.stagingField = stagingField;
+            this.commitMethod = commitMethod;
+        }
+
+        @Override public boolean write(LivingEntity entity, float value) {
+            try {
+                if (stagingField.getType() == float.class) stagingField.setFloat(entity, value);
+                else stagingField.setDouble(entity, value);
+                commitMethod.invoke(entity);
+                return true;
+            } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
+        }
+
+        @Override public float representable(float value) {
+            return representableFor(value, stagingField.getType());
+        }
+
+        @Override public String describe() {
+            return stagingField.getDeclaringClass().getName() + "#" + stagingField.getName()
+                    + " + " + commitMethod.getDeclaringClass().getSimpleName() + "#" + commitMethod.getName() + "()";
+        }
+    }
+
     private static Object coerce(float value, Class<?> type) {
         Object coerced = HealthDataflowAnalyzer.coerceForType(Float.valueOf(value), type);
         return coerced != null ? coerced : Float.valueOf(value);
@@ -682,18 +1159,57 @@ public final class MethodProbe {
         return coerced instanceof Number number ? number.floatValue() : value;
     }
 
-    private static float probeValue(float baseline, float target, float factor) {
-        float value = baseline * factor;
-        if (tooClose(value, baseline) || tooClose(value, target)) {
-            value = baseline + Math.max(2.0f, Math.abs(baseline) * factor);
+    static float[] selectProbeValues(float baseline, float target, float maxHealth) {
+        if (!Float.isFinite(baseline) || !Float.isFinite(target)) return null;
+        boolean bounded = Float.isFinite(maxHealth) && maxHealth > 0.0f
+                && baseline >= 0.0f && target >= 0.0f
+                && baseline <= maxHealth && target <= maxHealth;
+        float[] candidates = {
+                baseline * 0.5f,
+                baseline * 0.25f,
+                (baseline + target) * 0.5f,
+                baseline * 0.75f,
+                target * 0.5f,
+                bounded ? maxHealth * 0.75f : Float.NaN,
+                bounded ? maxHealth * 0.25f : Float.NaN,
+                baseline - Math.max(2.0f, Math.abs(baseline) * 0.5f),
+                baseline + Math.max(2.0f, Math.abs(baseline) * 0.5f)
+        };
+        float[] selected = new float[2];
+        int count = 0;
+        for (float candidate : candidates) {
+            if (!Float.isFinite(candidate)) continue;
+            if (bounded && (candidate < 0.0f || candidate > maxHealth)) continue;
+            if (tooClose(candidate, baseline) || tooClose(candidate, target)) continue;
+            if (count > 0 && tooClose(candidate, selected[0])) continue;
+            selected[count++] = candidate;
+            if (count == selected.length) return selected;
         }
-        return value;
+        return null;
+    }
+
+    private static float safeGetMaxHealth(LivingEntity entity) {
+        try {
+            float maxHealth = entity.getMaxHealth();
+            return Float.isFinite(maxHealth) ? maxHealth : Float.NaN;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return Float.NaN;
+        }
     }
 
     private static boolean matches(float actual, float expected) {
         if (!Float.isFinite(actual)) return false;
         float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
         return Math.abs(actual - expected) <= tolerance;
+    }
+
+    /* 目标步专用校验(带死亡语义)：target≤0 是斩杀意图，writer 会把血量 clamp 到≥0(实际写成 0)，
+       故实读≤0 即命中，不能拿负 target 做容差匹配；正值目标走普通容差。 */
+    private static boolean matchesTarget(float actual, float expected) {
+        if (!Float.isFinite(actual)) return false;
+        if (expected <= 0.0f) return actual <= 0.0f;
+        return matches(actual, expected);
     }
 
     private static boolean tooClose(float a, float b) {

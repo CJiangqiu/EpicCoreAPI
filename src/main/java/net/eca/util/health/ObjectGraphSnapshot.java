@@ -1,9 +1,14 @@
 package net.eca.util.health;
 
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.util.EcaLogger;
 import net.eca.util.reflect.UnsafeUtil;
+import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.LivingEntity;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -41,6 +46,17 @@ final class ObjectGraphSnapshot {
         return snapshot;
     }
 
+    /* 行为探针只需要回滚候选 writer 的直接可达存储；不递归展开世界级根，避免探测本身成为全内存扫描。 */
+    static ObjectGraphSnapshot captureProbe(LivingEntity entity, List<Object> roots) {
+        ObjectGraphSnapshot snapshot = new ObjectGraphSnapshot(System.nanoTime() + TIME_BUDGET_NANOS);
+        snapshot.captureEntityFieldsShallow(entity);
+        snapshot.captureSynchedData(entity);
+        snapshot.captureStaticFieldsShallow(entity == null ? null : entity.getClass());
+        if (roots != null) for (Object root : roots) snapshot.captureRootShallow(root);
+        if (!snapshot.complete) snapshot.diag("probe snapshot incomplete");
+        return snapshot;
+    }
+
     void restore() {
         for (int i = slots.size() - 1; i >= 0; i--) {
             try {
@@ -60,6 +76,39 @@ final class ObjectGraphSnapshot {
         }
     }
 
+    private void captureEntityFieldsShallow(LivingEntity entity) {
+        if (entity == null || !visited.add(entity)) return;
+        for (Class<?> c = entity.getClass(); c != null && c != LivingEntity.class && c != Object.class; c = c.getSuperclass()) {
+            for (Field field : c.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers())) continue;
+                try {
+                    field.setAccessible(true);
+                    addSlot(new FieldSlot(entity, field, field.get(entity)));
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                    diag("probe field capture failed: " + c.getName() + "." + field.getName());
+                }
+            }
+        }
+    }
+
+    @SuppressWarnings("rawtypes")
+    private void captureSynchedData(LivingEntity entity) {
+        if (entity == null) return;
+        try {
+            SynchedEntityData entityData = entity.getEntityData();
+            Int2ObjectMap<?> items = (Int2ObjectMap<?>) entityData.itemsById;
+            addSlot(new SynchedDataDirtySlot(entityData, entityData.isDirty));
+            for (Int2ObjectMap.Entry<?> entry : items.int2ObjectEntrySet()) {
+                SynchedEntityData.DataItem item = (SynchedEntityData.DataItem) entry.getValue();
+                if (item != null) addSlot(new SynchedDataItemSlot(item, item.value, item.dirty));
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            diag("probe SynchedEntityData capture failed: " + t.getClass().getSimpleName());
+        }
+    }
+
     private void captureStaticAnchors(Class<?> entityClass) {
         for (Class<?> c = entityClass; c != null && c != LivingEntity.class && c != Object.class; c = c.getSuperclass()) {
             for (Field field : c.getDeclaredFields()) {
@@ -74,6 +123,92 @@ final class ObjectGraphSnapshot {
                     diag("static field capture failed: " + c.getName() + "." + field.getName());
                 }
             }
+        }
+    }
+
+    private void captureStaticFieldsShallow(Class<?> entityClass) {
+        for (Class<?> c = entityClass; c != null && c != LivingEntity.class && c != Object.class; c = c.getSuperclass()) {
+            for (Field field : c.getDeclaredFields()) {
+                if (!Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers())) continue;
+                try {
+                    field.setAccessible(true);
+                    addSlot(new FieldSlot(null, field, field.get(null)));
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                    diag("probe static field capture failed: " + c.getName() + "." + field.getName());
+                }
+            }
+        }
+    }
+
+    private void captureRootShallow(Object root) {
+        if (root == null || isLeaf(root) || !visited.add(root)) return;
+        if (root.getClass().isArray()) {
+            captureArrayShallow(root);
+        } else if (root instanceof Map<?, ?> map) {
+            captureMapShallow(map);
+        } else if (root instanceof Collection<?> collection) {
+            captureCollectionShallow(collection);
+        } else {
+            captureFieldsShallow(root, root.getClass());
+        }
+    }
+
+    private void captureFieldsShallow(Object owner, Class<?> cls) {
+        for (Field field : cls.getDeclaredFields()) {
+            if (!withinBudget()) return;
+            if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers())) continue;
+            try {
+                field.setAccessible(true);
+                addSlot(new FieldSlot(owner, field, field.get(owner)));
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                diag("probe root field capture failed: " + cls.getName() + "." + field.getName());
+            }
+        }
+    }
+
+    private void captureArrayShallow(Object array) {
+        try {
+            int length = Array.getLength(array);
+            if (length > MAX_SLOTS - slots.size()) {
+                complete = false;
+                return;
+            }
+            for (int i = 0; i < length && withinBudget(); i++) {
+                addSlot(new ArraySlot(array, i, Array.get(array, i)));
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            diag("probe root array capture failed");
+        }
+    }
+
+    private void captureMapShallow(Map<?, ?> map) {
+        List<MapEntry> copy = new ArrayList<>();
+        try {
+            if (map.size() > MAX_SLOTS - slots.size()) {
+                complete = false;
+                return;
+            }
+            for (Map.Entry<?, ?> entry : map.entrySet()) copy.add(new MapEntry(entry.getKey(), entry.getValue()));
+            addSlot(new MapSlot(map, copy));
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            diag("probe root map capture failed: " + map.getClass().getName());
+        }
+    }
+
+    private void captureCollectionShallow(Collection<?> collection) {
+        try {
+            if (collection.size() > MAX_SLOTS - slots.size()) {
+                complete = false;
+                return;
+            }
+            addSlot(new CollectionSlot(collection, new ArrayList<>(collection)));
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            diag("probe root collection capture failed: " + collection.getClass().getName());
         }
     }
 
@@ -182,7 +317,9 @@ final class ObjectGraphSnapshot {
 
     private boolean isLeaf(Object obj) {
         return obj instanceof Number || obj instanceof CharSequence || obj instanceof Boolean
-                || obj instanceof Character || obj instanceof Enum<?> || obj instanceof Class<?>;
+                || obj instanceof Character || obj instanceof Enum<?> || obj instanceof Class<?>
+                || obj instanceof MethodHandle || obj instanceof MethodType || obj instanceof VarHandle
+                || obj.getClass().getName().startsWith("java.lang.invoke.");
     }
 
     private boolean isSkippable(Class<?> cls) {
@@ -224,6 +361,20 @@ final class ObjectGraphSnapshot {
     private record ArraySlot(Object array, int index, Object value) implements Slot {
         @Override public void restore() {
             Array.set(array, index, value);
+        }
+    }
+
+    @SuppressWarnings("rawtypes")
+    private record SynchedDataItemSlot(SynchedEntityData.DataItem item, Object value, boolean dirty) implements Slot {
+        @Override public void restore() {
+            item.value = value;
+            item.dirty = dirty;
+        }
+    }
+
+    private record SynchedDataDirtySlot(SynchedEntityData entityData, boolean dirty) implements Slot {
+        @Override public void restore() {
+            entityData.isDirty = dirty;
         }
     }
 

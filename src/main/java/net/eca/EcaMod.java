@@ -2,9 +2,7 @@ package net.eca;
 
 import net.eca.agent.EcaAgent;
 import net.eca.compat.GeckoLibCompat;
-import net.eca.config.EcaConfiguration;
 import net.eca.coremod.EcaClassTransformer;
-import net.eca.coremod.EcaTransformerManager;
 import net.eca.event.EcaEventHandler;
 import net.eca.event.LoadCompleteHandler;
 import net.eca.init.ModConfigs;
@@ -41,10 +39,6 @@ public final class EcaMod {
         EcaClassTransformer.register();
         // 注册配置
         ModConfigs.register();
-        // 激进防御开启时激活 JVM TI 原生变换通道
-        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            EcaTransformerManager.activateJvmTiIfNeeded();
-        }
         // 注册网络处理器
         NetworkHandler.register();
         // 注册事件处理器

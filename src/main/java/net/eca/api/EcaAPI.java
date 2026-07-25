@@ -9,6 +9,7 @@ import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
+import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.UnsafeUtil;
 
@@ -209,6 +210,22 @@ public final class EcaAPI {
      */
     public static float getHealth(LivingEntity entity) {
         return EntityUtil.getHealth(entity);
+    }
+
+    //读取实体真实血量(旁路禁疗/血锁 hook，走实体自身 getHealth 读其真实存储)
+    /**
+     * Get the entity's real health by invoking its own getHealth() with the raw-read bypass enabled,
+     * so ECA heal-ban / health-lock hooks are skipped and the value reflects the entity's actual
+     * health storage. Unlike {@link #getHealth(LivingEntity)} (which reads the vanilla DATA_HEALTH_ID
+     * synched value and may be out of sync for custom-storage entities), this returns the true health
+     * even for entities that store health outside DATA_HEALTH_ID. Use this whenever the real current
+     * health is needed (e.g. computing an expected post-damage health), not the synced vanilla value.
+     * @param entity the living entity
+     * @return the real health value, or NaN if it cannot be read / is not finite
+     */
+    public static float getRealHealth(LivingEntity entity) {
+        if (entity == null) return Float.NaN;
+        return EcaSetHealthManager.safeGetHealth(entity);
     }
 
     // 设置实体血量（分阶段升级：Vanilla→Symbolic→Probe→Dynamic）

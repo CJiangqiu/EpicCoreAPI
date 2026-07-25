@@ -5,6 +5,7 @@ import com.sun.jna.CallbackReference;
 import com.sun.jna.Function;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
+import org.objectweb.asm.ClassReader;
 import com.sun.jna.ptr.IntByReference;
 import net.eca.agent.AgentLogWriter;
 
@@ -694,19 +695,25 @@ public final class JvmTiChannel {
                 Pointer newClassDataLen,
                 Pointer newClassData
         ) {
-            if (name == null || classData == null) return;
+            if (classData == null) return;
             if (transformFunctions.isEmpty()) return;
 
             try {
-                String className = name.replace('.', '/');
                 byte[] current = classData.getByteArray(0, classDataLen);
+                String className = name == null ? new ClassReader(current).getClassName()
+                        : name.replace('.', '/');
+                if (className == null || className.isEmpty()) return;
                 boolean anyTransformed = false;
 
                 for (BiFunction<String, byte[], byte[]> fn : transformFunctions) {
-                    byte[] result = fn.apply(className, current);
-                    if (result != null && result != current) {
-                        current = result;
-                        anyTransformed = true;
+                    try {
+                        byte[] result = fn.apply(className, current);
+                        if (result != null && result != current) {
+                            current = result;
+                            anyTransformed = true;
+                        }
+                    } catch (Throwable ignored) {
+                        // 一个变换器拒绝隐藏类时，后续捕获器仍必须收到原始 classfile。
                     }
                 }
 

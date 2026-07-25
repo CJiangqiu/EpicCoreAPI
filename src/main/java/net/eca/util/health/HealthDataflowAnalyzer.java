@@ -1,6 +1,8 @@
 package net.eca.util.health;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import net.eca.config.EcaConfiguration;
+import net.eca.util.EcaLogger;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.LivingEntity;
@@ -58,10 +60,12 @@ public final class HealthDataflowAnalyzer {
     public static final McMethod IS_DEAD_OR_DYING = new McMethod("m_21224_", "isDeadOrDying", "()Z");
     public static final McMethod HURT             = new McMethod("m_6469_", "hurt", "(" + DAMAGE_SOURCE_DESC + "F)Z");
     public static final McMethod ACTUALLY_HURT    = new McMethod("m_6475_", "actuallyHurt", "(" + DAMAGE_SOURCE_DESC + "F)V");
+    public static final McMethod SET_HEALTH       = new McMethod("m_21153_", "setHealth", "(F)V");
 
     /* ==================== 外部扫描：isAlive/isDeadOrDying 数据流逆向 ==================== */
 
     private static final Map<Class<?>, AnalysisResult> EXTERNAL_SCAN_CACHE = new ConcurrentHashMap<>();
+    private static final Set<Class<?>> EXTERNAL_SCAN_DIAG_DUMPED = ConcurrentHashMap.newKeySet();
 
     private HealthDataflowAnalyzer() {}
 
@@ -139,18 +143,73 @@ public final class HealthDataflowAnalyzer {
         return ar;
     }
 
-    public static boolean verifyExternalDataflow(Expr root, LivingEntity entity, float expected, Source sink) {
-        if (entity == null) return false;
-        boolean healthLikeSink = isExternalHealthLikeSink(sink);
-        if (expected <= 0.0f) {
-            return healthLikeSink && (!entity.isAlive() || entity.isDeadOrDying());
-        }
-        return EcaSetHealthManager.verify(entity, expected);
+    /* 仅查外部扫描缓存、绝不触发分析(供运行期非阻塞查询)。重量级分析由调用者在后台线程经
+       resolveExternalScanResult 预填，从而不阻塞服务器线程。 */
+    public static AnalysisResult peekExternalScanResult(Class<?> entityClass) {
+        if (entityClass == null) return null;
+        AnalysisResult ar = EXTERNAL_SCAN_CACHE.get(entityClass);
+        if (ar == null || ar.isEmpty() || ar.sources.isEmpty()) return null;
+        return ar;
     }
 
-    private static boolean isExternalHealthLikeSink(Source sink) {
-        return sink instanceof SynchedDataSource || sink instanceof MapEntrySource
-                || sink instanceof CapabilityDataSource || sink instanceof ConstOverrideSource;
+    public static boolean verifyExternalDataflow(Expr root, LivingEntity entity, float expected, Source sink) {
+        if (entity == null) return false;
+        boolean expressionMatches = externalExpressionMatches(root, sink, expected, newContext(entity));
+        if (expected <= 0.0f) {
+            return expressionMatches && (!entity.isAlive() || entity.isDeadOrDying());
+        }
+        if (!expressionMatches || entity.isRemoved()) return false;
+        // ConstOverride 在外部扫描中是高危假阳性(覆写辅助方法常数不一定改变真实血量)，
+        // 须额外通过 getHealth 校验；普通字段/SynchedData 写入信任 expressionMatches
+        if (sink instanceof ConstOverrideSource) {
+            return EcaSetHealthManager.verify(entity, expected);
+        }
+        return true;
+    }
+
+    private static final Set<String> EXTERNAL_EVAL_DIAG = ConcurrentHashMap.newKeySet();
+
+    private static boolean externalExpressionMatches(Expr expression, Source sink, float expected, EvalContext context) {
+        if (expression instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) {
+                if ((sink == null || containsSink(alternative, sink))
+                        && externalExpressionMatches(alternative, sink, expected, context)) return true;
+            }
+            return false;
+        }
+        // StoreWrite 是纯副作用写入(如无敌帧/击退计数)，不代表该字段是血量读取源
+        if (expression instanceof StoreWrite write) {
+            if (sink != null && sameSource(write.sink(), sink) && !containsSinkInReadPosition(write.valueExpr(), sink))
+                return false;
+        }
+        if (sink != null && !containsSink(expression, sink)) return false;
+        Object value = safeEvaluate(expression, context);
+        if (!(value instanceof Number number)) {
+            if (sink != null && EXTERNAL_EVAL_DIAG.add(sink.label + "|eval=" + value))
+                EcaLogger.info("[ExternalScan] eval non-numeric sink={} value={} expr={}", sink.label, value, expression);
+            return false;
+        }
+        float actual = number.floatValue();
+        float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
+        boolean matches = Float.isFinite(actual) && Math.abs(actual - expected) <= tolerance;
+        if (!matches && sink != null && EXTERNAL_EVAL_DIAG.add(sink.label + "|actual=" + actual))
+            EcaLogger.info("[ExternalScan] eval mismatch sink={} actual={} expected={}", sink.label, actual, expected);
+        return matches;
+    }
+
+    /* sink 是否出现在读取位置(作为调用参数/运算操作数等)，而非仅作为 StoreWrite 的写入目标 */
+    private static boolean containsSinkInReadPosition(Expr e, Source sink) {
+        if (sameSource(e, sink)) return true;
+        if (e instanceof Op op) {
+            for (Expr a : op.args()) if (containsSinkInReadPosition(a, sink)) return true;
+        }
+        if (e instanceof Call call) {
+            for (Expr a : call.args()) if (containsSinkInReadPosition(a, sink)) return true;
+        }
+        if (e instanceof Choice c) {
+            for (Expr a : c.alternatives()) if (containsSinkInReadPosition(a, sink)) return true;
+        }
+        return false;
     }
 
     /* ==================== Expr 类型系统 ==================== */
@@ -481,14 +540,18 @@ public final class HealthDataflowAnalyzer {
             this.ownerClassInternal = ownerClassInternal;
         }
 
-        /* read 提供"当前任一匹配 entry 的值"，求解期代入用；写入侧的兄弟表联写由调用者完成 */
+        /* read 提供"当前任一匹配 entry 的值"，求解期代入用；写入侧的兄弟表联写由调用者完成。
+           容器既支持 java.util.Map，也鸭子类型支持不实现 Map 的自定义容器(仅依赖只读 containsKey/get 访问器)。 */
         @Override public Object read(LivingEntity entity) {
             try {
                 Object obj = evaluate(containerExpr, new SimpleEvalContext(entity));
-                if (!(obj instanceof Map<?, ?> map)) return null;
+                if (obj == null) return null;
                 Object[] fb = {entity, entity.getUUID(), entity.getId()};
-                for (Object k : fb) if (k != null && map.containsKey(k)) return map.get(k);
-                return null;
+                if (obj instanceof Map<?, ?> map) {
+                    for (Object k : fb) if (k != null && map.containsKey(k)) return map.get(k);
+                    return null;
+                }
+                return duckMapGet(obj, fb);
             } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
 
@@ -499,6 +562,45 @@ public final class HealthDataflowAnalyzer {
 
         @Override protected String canonicalKey() {
             return "ME:" + System.identityHashCode(containerExpr) + ":" + keyKind;
+        }
+
+        /* 鸭子类型读取自定义 map 容器：按容器类缓存 containsKey/get 只读访问器，逐一尝试候选键。
+           仅调用只读访问器(无写入/写锁副作用)，使不实现 java.util.Map 的容器也能交出 entry 值供反演下探。 */
+        private static final Map<Class<?>, Method[]> DUCK_ACCESSORS = new ConcurrentHashMap<>();
+        private static final Method[] NO_DUCK_ACCESSORS = new Method[0];
+
+        private static Object duckMapGet(Object container, Object[] keys) {
+            Method[] acc = DUCK_ACCESSORS.computeIfAbsent(container.getClass(), cls -> {
+                Method containsKey = findDuckAccessor(cls, "containsKey");
+                Method get = findDuckAccessor(cls, "get");
+                if (containsKey == null || get == null) return NO_DUCK_ACCESSORS;
+                containsKey.setAccessible(true);
+                get.setAccessible(true);
+                return new Method[]{containsKey, get};
+            });
+            if (acc == NO_DUCK_ACCESSORS) return null;
+            try {
+                for (Object k : keys) {
+                    if (k == null) continue;
+                    if (Boolean.TRUE.equals(acc[0].invoke(container, k))) return acc[1].invoke(container, k);
+                }
+            } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
+            return null;
+        }
+
+        // 找擦除后的泛型 map 只读访问器：单参、非原始参数(排除 get(int) 索引器)，优先 Object 参数
+        private static Method findDuckAccessor(Class<?> cls, String name) {
+            Method fallback = null;
+            for (Class<?> c = cls; c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Method m : c.getDeclaredMethods()) {
+                    if (!m.getName().equals(name) || m.getParameterCount() != 1) continue;
+                    Class<?> pt = m.getParameterTypes()[0];
+                    if (pt.isPrimitive()) continue;
+                    if (pt == Object.class) return m;
+                    if (fallback == null) fallback = m;
+                }
+            }
+            return fallback;
         }
     }
 
@@ -585,6 +687,100 @@ public final class HealthDataflowAnalyzer {
     public static final DualityTable TABLE = new DualityTable();
     static { initDefaultRules(); }
 
+    /* 运行期发现的编解码对偶：仅在激进逻辑开启时，允许把同一工具类中已存在的 encode(number)->T
+       作为 decode(T)->number 的逆。它不尝试破译密钥，只复用目标自身的合法编码器。 */
+    private static final Map<String, Inverter> DISCOVERED_CODEC_INVERTERS = new ConcurrentHashMap<>();
+    private static final Set<String> CODEC_DISCOVERY_FAILED = ConcurrentHashMap.newKeySet();
+
+    private static Inverter lookupCallInverter(Call call) {
+        Inverter known = TABLE.lookupCall(call.owner(), call.name(), call.desc());
+        if (known != null) return known;
+        // Call IR 为实例调用额外携带 receiver；动态编码器只接受无 receiver 的静态工具方法。
+        if (call.args().size() != Type.getArgumentTypes(call.desc()).length) return null;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) return null;
+        String key = call.owner() + "#" + call.name() + "#" + call.desc();
+        Inverter cached = DISCOVERED_CODEC_INVERTERS.get(key);
+        if (cached != null || CODEC_DISCOVERY_FAILED.contains(key)) return cached;
+        Inverter discovered = discoverCodecInverter(call.owner(), call.name(), call.desc());
+        if (discovered == null) {
+            CODEC_DISCOVERY_FAILED.add(key);
+            return null;
+        }
+        Inverter existing = DISCOVERED_CODEC_INVERTERS.putIfAbsent(key, discovered);
+        return existing != null ? existing : discovered;
+    }
+
+    private static Inverter discoverCodecInverter(String ownerInternal, String decoderName, String decoderDesc) {
+        try {
+            Type[] decoderArgs = Type.getArgumentTypes(decoderDesc);
+            Type decoderReturn = Type.getReturnType(decoderDesc);
+            if (decoderArgs.length != 1 || !isNumericAsmType(decoderReturn)
+                    || decoderArgs[0].getSort() != Type.OBJECT) return null;
+            Class<?> owner = loadClass(ownerInternal);
+            Class<?> encodedType = asmTypeToClass(decoderArgs[0]);
+            Class<?> numericType = asmTypeToClass(decoderReturn);
+            if (owner == null || encodedType == null || numericType == null) return null;
+            Method decoder = findDeclaredStatic(owner, decoderName, encodedType, numericType);
+            if (decoder == null) return null;
+            for (Method encoder : owner.getDeclaredMethods()) {
+                if (!Modifier.isStatic(encoder.getModifiers()) || encoder.getParameterCount() != 1
+                        || encoder.getReturnType() != encodedType || !isNumericClass(encoder.getParameterTypes()[0])) continue;
+                encoder.setAccessible(true);
+                decoder.setAccessible(true);
+                if (validCodecPair(decoder, encoder, numericType)) {
+                    return (target, args, sinkArgIdx, ctx) -> encodeCodecTarget(encoder, target);
+                }
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+        return null;
+    }
+
+    private static Method findDeclaredStatic(Class<?> owner, String name, Class<?> parameter, Class<?> returnType) {
+        for (Method method : owner.getDeclaredMethods()) {
+            if (Modifier.isStatic(method.getModifiers()) && method.getName().equals(name)
+                    && method.getReturnType() == returnType && method.getParameterCount() == 1
+                    && method.getParameterTypes()[0] == parameter) return method;
+        }
+        return null;
+    }
+
+    private static boolean isNumericClass(Class<?> type) {
+        return type == byte.class || type == short.class || type == int.class || type == long.class
+                || type == float.class || type == double.class || type == Byte.class || type == Short.class
+                || type == Integer.class || type == Long.class || type == Float.class || type == Double.class
+                || type == Number.class;
+    }
+
+    private static boolean validCodecPair(Method decoder, Method encoder, Class<?> numericType) {
+        float[] probes = {1.25f, 17.5f, 73.75f};
+        try {
+            for (float probe : probes) {
+                Object input = coerceForType(Float.valueOf(probe), encoder.getParameterTypes()[0]);
+                if (input == null) return false;
+                Object encoded = encoder.invoke(null, input);
+                Object decoded = decoder.invoke(null, encoded);
+                if (!(decoded instanceof Number number) || !Float.isFinite(number.floatValue())) return false;
+                if (Math.abs(number.floatValue() - probe) > Math.max(0.01f, Math.abs(probe) * 0.001f)) return false;
+            }
+            return true;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
+    }
+
+    private static Object encodeCodecTarget(Method encoder, Object target) {
+        try {
+            Object input = coerceForType(target, encoder.getParameterTypes()[0]);
+            return input == null ? null : encoder.invoke(null, input);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
     /* ==================== Solve / Evaluate ==================== */
 
     public static Object solveFor(Expr root, Source sink, Object target, EvalContext ctx) {
@@ -644,7 +840,7 @@ public final class HealthDataflowAnalyzer {
         if (root instanceof Call call) {
             int idx = findArgWithSinkDetailed(call.args(), sink);
             if (idx == -2) {
-                Inverter inv = TABLE.lookupCall(call.owner(), call.name(), call.desc());
+                Inverter inv = lookupCallInverter(call);
                 if (inv == null) {
                     HealthSolveFailure failure = call.owner().startsWith("java/util/function/")
                         ? HealthSolveFailure.CALL_NOT_RESOLVED : HealthSolveFailure.INVERTER_MISSING;
@@ -660,7 +856,7 @@ public final class HealthDataflowAnalyzer {
                 return HealthSolveResult.failure(HealthSolveFailure.MULTI_LOCATION_UNSUPPORTED, "sink occurs in multiple call operands");
             }
             if (idx < 0) return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "sink is absent from call");
-            Inverter inv = TABLE.lookupCall(call.owner(), call.name(), call.desc());
+            Inverter inv = lookupCallInverter(call);
             if (inv == null) {
                 HealthSolveFailure failure = call.owner().startsWith("java/util/function/")
                     ? HealthSolveFailure.CALL_NOT_RESOLVED : HealthSolveFailure.INVERTER_MISSING;
@@ -981,7 +1177,7 @@ public final class HealthDataflowAnalyzer {
             return unwrapOptionalContent(container);
         }
         if (e instanceof Choice choice) {
-            for (Expr alternative : choice.alternatives()) {
+            for (Expr alternative : orderedWriteAlternatives(choice)) {
                 Object value = evaluateWithWriteInput(alternative, ctx, inputValue);
                 if (value != null) return value;
             }
@@ -1009,6 +1205,46 @@ public final class HealthDataflowAnalyzer {
         }
         if (e instanceof StoreWrite write) return evaluateWithWriteInput(write.valueExpr(), ctx, inputValue);
         return null;
+    }
+
+    /* Exception fallbacks often merge before the normal data-bearing branch. Store writes must
+       prefer expressions tied to live state and the requested input over literal defaults. */
+    private static List<Expr> orderedWriteAlternatives(Choice choice) {
+        List<Expr> alternatives = new ArrayList<>(choice.alternatives());
+        alternatives.sort(Comparator.comparingInt(HealthDataflowAnalyzer::writeBranchScore).reversed());
+        return alternatives;
+    }
+
+    private static int writeBranchScore(Expr expression) {
+        if (expression instanceof WriteInput) return 1_000;
+        if (expression instanceof Source) return 800;
+        if (expression == EntityParamMarker.I) return 600;
+        if (expression instanceof UnknownExpr) return -1_000;
+        if (expression instanceof Primitive) return 0;
+        if (expression instanceof Reference) return 20;
+        if (expression instanceof OptionalContentExpr optional) {
+            return 40 + writeBranchScore(optional.optionalExpr());
+        }
+        if (expression instanceof StoreWrite write) return writeBranchScore(write.valueExpr());
+        if (expression instanceof Op operation) return 60 + childBranchScore(operation.args());
+        if (expression instanceof Call call) return 80 + childBranchScore(call.args());
+        if (expression instanceof Closure closure) return 40 + childBranchScore(closure.captured());
+        if (expression instanceof Choice nested) {
+            int best = -1_000;
+            for (Expr alternative : nested.alternatives()) {
+                best = Math.max(best, writeBranchScore(alternative));
+            }
+            return best;
+        }
+        return 0;
+    }
+
+    private static int childBranchScore(List<Expr> expressions) {
+        int score = 0;
+        for (Expr expression : expressions) {
+            score += Math.max(-200, Math.min(1_000, writeBranchScore(expression)));
+        }
+        return score;
     }
 
     private enum UnknownEval { INSTANCE }
@@ -1699,18 +1935,104 @@ public final class HealthDataflowAnalyzer {
         return null;
     }
 
-    //同时分析 isAlive 和 isDeadOrDying，取 Sources 更多的结果
+    //按虚调用实际生效的定义方法分析，避免遗漏基类转换结果或混入被覆写的实现
     private static AnalysisResult analyzeUnifiedExternalScan(Class<?> entityClass) {
         List<AnalysisResult> candidates = new ArrayList<>();
-        for (Class<?> c = entityClass; c != null && c != LivingEntity.class; c = c.getSuperclass()) {
-            for (McMethod m : new McMethod[]{IS_ALIVE, IS_DEAD_OR_DYING}) {
-                AnalysisResult ar = analyzeExternalScanMethod(c, m);
-                if (ar != null && !ar.isEmpty() && !ar.sources.isEmpty()) candidates.add(ar);
-            }
-            AnalysisResult writes = analyzeDamageWriteMethods(c);
-            if (writes != null && !writes.isEmpty() && !writes.sources.isEmpty()) candidates.add(writes);
+        List<String> scannedMethods = new ArrayList<>();
+        for (McMethod method : new McMethod[]{IS_ALIVE, IS_DEAD_OR_DYING}) {
+            ClassAndMethod target = findMethodOwner(entityClass, method);
+            if (target == null) continue;
+            scannedMethods.add(target.owner().getName() + "#" + target.name() + method.desc());
+            AnalysisResult result = analyzeExternalComparisonMethod(
+                    target.owner(), target.name(), method.desc());
+            if (result != null && !result.isEmpty() && !result.sources.isEmpty()) candidates.add(result);
         }
-        return combineExternalScanCandidates(entityClass, candidates);
+        for (McMethod method : new McMethod[]{HURT, ACTUALLY_HURT}) {
+            ClassAndMethod target = findMethodOwner(entityClass, method);
+            if (target == null) continue;
+            scannedMethods.add(target.owner().getName() + "#" + target.name() + method.desc());
+            AnalysisResult result = analyzeDamageWriteMethod(
+                    target.owner(), target.name(), target.name(), method.desc());
+            if (result != null && !result.isEmpty() && !result.sources.isEmpty()) candidates.add(result);
+        }
+        AnalysisResult combined = combineExternalScanCandidates(entityClass, candidates);
+        if (EXTERNAL_SCAN_DIAG_DUMPED.add(entityClass)) {
+            EcaLogger.info("[ExternalScan] entity={} methods={} candidates={} sources={}",
+                    entityClass.getName(), scannedMethods, candidates.size(),
+                    combined != null ? combined.sources.size() : 0);
+        }
+        return combined;
+    }
+
+    private static AnalysisResult analyzeExternalComparisonMethod(Class<?> owner, String name, String desc) {
+        AnalysisCtx context = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+        Expr expression = analyzeComparisonMethod(owner, name, desc, null, context, 0);
+        if (expression == null || expression instanceof UnknownExpr) return null;
+        Expr stripped = stripEcaHealthWrappers(expression);
+        if (stripped == null || stripped instanceof UnknownExpr) return null;
+        return AnalysisResult.of(stripped, owner);
+    }
+
+    private static Expr analyzeComparisonMethod(Class<?> owner, String name, String desc,
+                                                TaintValue[] seedLocals, AnalysisCtx context, int depth) {
+        if (owner == null || owner.getClassLoader() == null || depth >= context.maxDepth) return null;
+        String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc + "#comparisons";
+        if (!context.inflight.add(cacheKey)) return new UnknownExpr("recursive-cycle-comparisons");
+        try {
+            byte[] bytes = classBytes(owner);
+            if (bytes == null) return null;
+            ClassNode classNode = new ClassNode();
+            new ClassReader(bytes).accept(classNode, ClassReader.EXPAND_FRAMES);
+            MethodNode method = null;
+            for (MethodNode candidate : classNode.methods) {
+                if (candidate.name.equals(name) && candidate.desc.equals(desc)) {
+                    method = candidate;
+                    break;
+                }
+            }
+            if (method == null || method.instructions.size() == 0) return null;
+
+            String ownerInternal = internalName(owner);
+            TaintInterpreter interpreter = new TaintInterpreter(
+                    context, depth, ownerInternal, method, seedLocals);
+            Analyzer<TaintValue> analyzer = new Analyzer<>(interpreter);
+            Frame<TaintValue>[] frames = analyzer.analyze(ownerInternal, method);
+            List<Expr> expressions = new ArrayList<>();
+            int index = 0;
+            for (AbstractInsnNode instruction : method.instructions) {
+                Frame<TaintValue> frame = frames[index++];
+                collectComparisonOperands(expressions, frame, instruction.getOpcode());
+                if (!(instruction instanceof MethodInsnNode call)
+                        || Type.getReturnType(call.desc) != Type.VOID_TYPE
+                        || call.name.startsWith("<") || frame == null) continue;
+                List<Expr> arguments = invokeValueExprs(call, frame);
+                Class<?> referencedOwner = loadClass(call.owner);
+                Class<?> targetOwner = referencedOwner == null ? null
+                        : resolveInvocationOwner(referencedOwner, call.name, call.desc);
+                if (targetOwner != owner || !isEntityControlCall(call, arguments)
+                        || context.inlineBudget <= 0) continue;
+                TaintValue[] nestedLocals = seedCallLocals(call, arguments, false);
+                if (nestedLocals == null) continue;
+                context.inlineBudget--;
+                Expr nested = analyzeComparisonMethod(
+                        targetOwner, call.name, call.desc, nestedLocals, context, depth + 1);
+                if (nested != null && !(nested instanceof UnknownExpr)) addUniqueExpr(expressions, nested);
+            }
+            if (expressions.isEmpty()) return null;
+            return expressions.size() == 1 ? expressions.get(0) : new Choice(List.copyOf(expressions));
+        } catch (Throwable throwable) {
+            if (throwable instanceof VirtualMachineError error) throw error;
+            return null;
+        } finally {
+            context.inflight.remove(cacheKey);
+        }
+    }
+
+    private static boolean isEntityControlCall(MethodInsnNode call, List<Expr> arguments) {
+        if (arguments.isEmpty()) return false;
+        if (call.getOpcode() != Opcodes.INVOKESTATIC) return arguments.get(0) == EntityParamMarker.I;
+        for (Expr argument : arguments) if (argument == EntityParamMarker.I) return true;
+        return false;
     }
 
     private static AnalysisResult combineExternalScanCandidates(Class<?> entityClass, List<AnalysisResult> candidates) {
@@ -1735,33 +2057,14 @@ public final class HealthDataflowAnalyzer {
         return 4;
     }
 
-    //对 isAlive/isDeadOrDying 跑数据流骨架，从 FCMPL/FCMPG 前栈帧提取血量表达式
-    private static AnalysisResult analyzeExternalScanMethod(Class<?> owner, McMethod method) {
-        //同名只可能存在其一：先 srg，未命中再 mcp，避免重复跑 Analyzer
-        AnalysisResult ar = analyzeForHealthExpr(owner, method.srg(), method.desc(), COMPARISON_OPERANDS_EXTRACTOR);
-        if (ar != null) return ar;
-        return analyzeForHealthExpr(owner, method.mcp(), method.desc(), COMPARISON_OPERANDS_EXTRACTOR);
-    }
-
     /* ==================== AnalysisResult + 入口 ==================== */
-
-    private static AnalysisResult analyzeDamageWriteMethods(Class<?> owner) {
-        List<Expr> writes = new ArrayList<>();
-        for (McMethod m : new McMethod[]{HURT, ACTUALLY_HURT}) {
-            AnalysisResult ar = analyzeDamageWriteMethod(owner, m.srg(), m.mcp(), m.desc());
-            if (ar == null || ar.isEmpty()) continue;
-            addUniqueExpr(writes, ar.returnExpr);
-        }
-        if (writes.isEmpty()) return null;
-        Expr expr = writes.size() == 1 ? writes.get(0) : new Choice(List.copyOf(writes));
-        return AnalysisResult.of(expr, owner);
-    }
 
     private static AnalysisResult analyzeDamageWriteMethod(Class<?> owner, String srgName, String mcpName, String desc) {
         AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
-        Expr writes = analyzeMethodWrites(owner, srgName, desc, null, ctx, 0);
+        TaintValue[] seedLocals = seedMethodInputs(desc, false);
+        Expr writes = analyzeMethodWrites(owner, srgName, desc, seedLocals, ctx, 0);
         if (writes == null || writes instanceof UnknownExpr) {
-            writes = analyzeMethodWrites(owner, mcpName, desc, null, ctx, 0);
+            writes = analyzeMethodWrites(owner, mcpName, desc, seedLocals, ctx, 0);
         }
         if (writes == null || writes instanceof UnknownExpr) return null;
         Expr stripped = stripEcaHealthWrappers(writes);
@@ -1816,19 +2119,25 @@ public final class HealthDataflowAnalyzer {
         int opcode = insn.getOpcode();
         if (insn instanceof FieldInsnNode field) {
             if (opcode == Opcodes.PUTFIELD && frame.getStackSize() >= 2) {
-                return buildFieldSourceFromReceiver(field, frame.getStack(frame.getStackSize() - 2).expr);
+                Source sink = buildFieldSourceFromReceiver(
+                        field, frame.getStack(frame.getStackSize() - 2).expr);
+                Expr value = frame.getStack(frame.getStackSize() - 1).expr;
+                return sink == null ? null : new StoreWrite(sink, value);
             }
-            if (opcode == Opcodes.PUTSTATIC && frame.getStackSize() >= 1) return buildStaticFieldWriteSource(field);
+            if (opcode == Opcodes.PUTSTATIC && frame.getStackSize() >= 1) {
+                Source sink = buildStaticFieldWriteSource(field);
+                return sink == null ? null
+                        : new StoreWrite(sink, frame.getStack(frame.getStackSize() - 1).expr);
+            }
             return null;
         }
         if (!(insn instanceof MethodInsnNode call)) return null;
-        if (Type.getReturnType(call.desc) != Type.VOID_TYPE) return null;
         List<Expr> args = invokeValueExprs(call, frame);
         if (args.isEmpty()) return null;
         Expr known = extractKnownWriteCall(call, args);
         if (known != null) return known;
         Expr inlined = tryInlineWriteCall(call, args, ctx, depth);
-        return inlined != null && !(inlined instanceof UnknownExpr) ? inlined : extractMethodCallWriteSource(call, args);
+        return inlined != null && !(inlined instanceof UnknownExpr) ? inlined : null;
     }
 
     private static Expr extractKnownWriteCall(MethodInsnNode call, List<Expr> args) {
@@ -1841,7 +2150,9 @@ public final class HealthDataflowAnalyzer {
         if (isMapPut(call) && args.size() >= 3) {
             Expr container = args.get(0);
             Expr key = args.get(1);
-            return new MapEntrySource(container, key, detectKeyKind(key), mapOwnerHint(container), Object.class, call.owner);
+            Source sink = new MapEntrySource(
+                    container, key, detectKeyKind(key), mapOwnerHint(container), Object.class, call.owner);
+            return new StoreWrite(sink, args.get(2));
         }
         return null;
     }
@@ -1866,11 +2177,16 @@ public final class HealthDataflowAnalyzer {
             return analyzeMethodWrites(target.owner(), target.name(), target.desc(), seedLocals, ctx, depth + 1);
         }
         if (depth + 1 >= ctx.maxDepth || ctx.inlineBudget <= 0 || call.name.startsWith("<")) return null;
-        if (call.owner.startsWith("java/") || call.owner.startsWith("javax/") || call.owner.startsWith("jdk/")
-                || call.owner.startsWith("net/minecraft/")) {
+        if (call.getOpcode() == Opcodes.INVOKESTATIC && !isHealthLifecycleCall(call)) return null;
+        if (call.owner.startsWith("java/") || call.owner.startsWith("javax/") || call.owner.startsWith("jdk/")) {
             return null;
         }
-        Class<?> owner = loadClass(call.owner);
+        if (call.owner.startsWith("net/minecraftforge/") || call.owner.startsWith("org/spongepowered/")
+                || call.owner.startsWith("com/google/")) return null;
+        Class<?> referencedOwner = loadClass(call.owner);
+        if (referencedOwner == null) return null;
+        if (call.owner.startsWith("net/minecraft/") && !isHealthLifecycleCall(call)) return null;
+        Class<?> owner = resolveInvocationOwner(referencedOwner, call.name, call.desc);
         if (owner == null) return null;
         boolean isStatic = call.getOpcode() == Opcodes.INVOKESTATIC;
         Type[] argTypes = Type.getArgumentTypes(call.desc);
@@ -1894,10 +2210,68 @@ public final class HealthDataflowAnalyzer {
         return analyzeMethodWrites(owner, call.name, call.desc, seedLocals, ctx, depth + 1);
     }
 
+    private static boolean isHealthLifecycleCall(MethodInsnNode call) {
+        for (McMethod method : new McMethod[]{HURT, ACTUALLY_HURT, SET_HEALTH}) {
+            if (method.desc().equals(call.desc)
+                    && (method.srg().equals(call.name) || method.mcp().equals(call.name))) return true;
+        }
+        return false;
+    }
+
+    private static Class<?> resolveInvocationOwner(Class<?> referencedOwner, String name, String desc) {
+        for (Class<?> current = referencedOwner; current != null && current != Object.class;
+             current = current.getSuperclass()) {
+            if (classDefinesMethod(current, name, desc)) return current;
+        }
+        return null;
+    }
+
     private static int localCount(Type[] types) {
         int count = 0;
         for (Type type : types) count += type.getSize();
         return count;
+    }
+
+    private static TaintValue[] seedMethodInputs(String desc, boolean isStatic) {
+        Type[] argumentTypes = Type.getArgumentTypes(desc);
+        int localCount = isStatic ? 0 : 1;
+        for (Type argumentType : argumentTypes) localCount += argumentType.getSize();
+        TaintValue[] locals = new TaintValue[localCount + 8];
+        int local = 0;
+        if (!isStatic) locals[local++] = new TaintValue(1, EntityParamMarker.I);
+        int numericIndex = 0;
+        for (Type argumentType : argumentTypes) {
+            Expr expression = isNumericAsmType(argumentType)
+                    ? new WriteInput(numericIndex++, descriptorChar(argumentType))
+                    : UnknownExpr.UNKNOWN;
+            locals[local] = new TaintValue(argumentType.getSize(), expression);
+            local += argumentType.getSize();
+        }
+        return locals;
+    }
+
+    private static TaintValue[] seedCallLocals(MethodInsnNode call, List<Expr> arguments,
+                                               boolean replaceNumericArguments) {
+        boolean isStatic = call.getOpcode() == Opcodes.INVOKESTATIC;
+        Type[] argumentTypes = Type.getArgumentTypes(call.desc);
+        int expected = argumentTypes.length + (isStatic ? 0 : 1);
+        if (arguments.size() != expected) return null;
+        int localCount = isStatic ? 0 : 1;
+        for (Type argumentType : argumentTypes) localCount += argumentType.getSize();
+        TaintValue[] locals = new TaintValue[localCount + 8];
+        int local = 0;
+        int argument = 0;
+        if (!isStatic) locals[local++] = new TaintValue(1, arguments.get(argument++));
+        int numericIndex = 0;
+        for (Type argumentType : argumentTypes) {
+            Expr argumentExpression = arguments.get(argument++);
+            Expr expression = replaceNumericArguments && isNumericAsmType(argumentType)
+                    ? new WriteInput(numericIndex++, descriptorChar(argumentType))
+                    : argumentExpression;
+            locals[local] = new TaintValue(argumentType.getSize(), expression);
+            local += argumentType.getSize();
+        }
+        return locals;
     }
 
     private static boolean isNumericAsmType(Type type) {
@@ -1910,28 +2284,6 @@ public final class HealthDataflowAnalyzer {
 
     private static char descriptorChar(Type type) {
         return type == null || type.getDescriptor().isEmpty() ? '?' : type.getDescriptor().charAt(0);
-    }
-
-    private static Expr extractMethodCallWriteSource(MethodInsnNode call, List<Expr> args) {
-        Type[] argTypes = Type.getArgumentTypes(call.desc);
-        boolean isStatic = call.getOpcode() == Opcodes.INVOKESTATIC;
-        int start = isStatic ? 0 : 1;
-        if (args.size() < start + argTypes.length) return null;
-        boolean hasEntity = false;
-        for (Expr arg : args) {
-            if (arg == EntityParamMarker.I) {
-                hasEntity = true;
-                break;
-            }
-        }
-        if (!hasEntity || call.owner.startsWith("net/minecraft/") || call.owner.startsWith("java/")) return null;
-        for (int i = 0; i < argTypes.length; i++) {
-            if (!isNumericType(argTypes[i])) continue;
-            Expr valueExpr = args.get(start + i);
-            if (valueExpr instanceof Primitive) continue;
-            return new MethodCallSource(call.owner, call.name, call.desc, List.copyOf(args), i);
-        }
-        return null;
     }
 
     private static Source buildFieldSourceFromReceiver(FieldInsnNode field, Expr receiver) {
@@ -2095,7 +2447,6 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static boolean shouldKeepAsRuntimeCall(Class<?> owner, String name, String desc) {
-        if (!Type.getReturnType(desc).equals(Type.getType(String.class))) return false;
         if (owner.getName().startsWith("java.")) return false;
         try {
             byte[] bytes = classBytes(owner);
@@ -2104,7 +2455,9 @@ public final class HealthDataflowAnalyzer {
             new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
             for (MethodNode method : cn.methods) {
                 if (method.name.equals(name) && method.desc.equals(desc)) {
-                    return hasComplexStringRuntimeBoundary(method);
+                    if (hasStaticCodecInverse(cn, method)) return true;
+                    return Type.getReturnType(desc).equals(Type.getType(String.class))
+                            && hasComplexStringRuntimeBoundary(method);
                 }
             }
         } catch (Throwable t) {
@@ -2137,7 +2490,20 @@ public final class HealthDataflowAnalyzer {
     public static AnalysisResult analyze(Class<?> entityClass, int maxDepth) {
         try {
             byte[] classBytes = classBytes(entityClass);
-            if (classBytes == null) return AnalysisResult.EMPTY;
+            if (classBytes == null) {
+                if (entityClass.getName().contains("/0x") && entityClass.getSuperclass() != null) {
+                    return analyze(entityClass.getSuperclass(), maxDepth);
+                }
+                return AnalysisResult.EMPTY;
+            }
+            // 运行时 klass 替换后的隐藏类不能从资源回退；若没有捕获到其覆写，继承的可读 getter
+            // 仍可描述同一存储协议，优先交给父类分析而非把伪字节码当作真实实现。
+            if (entityClass.getName().contains("/0x")
+                    && !classDefinesMethodInBytes(entityClass, classBytes, GET_HEALTH.srg())
+                    && !classDefinesMethodInBytes(entityClass, classBytes, GET_HEALTH.mcp())
+                    && entityClass.getSuperclass() != null) {
+                return analyze(entityClass.getSuperclass(), maxDepth);
+            }
             ClassAndMethod target = findMethodOwnerFromBytes(entityClass, classBytes);
             if (target == null) return AnalysisResult.EMPTY;
             AnalysisCtx ctx = new AnalysisCtx(maxDepth);
@@ -2166,25 +2532,41 @@ public final class HealthDataflowAnalyzer {
         COMPARISON_OPERANDS,
     }
 
-    /* FCMPL/FCMPG 提取器：浮点比较两操作数中,非 Primitive 常数的那一侧才是真实血量表达式 */
+    /* 收集条件分支依赖的数值表达式，保留多个独立生命状态候选。 */
     private static final java.util.function.BiFunction<MethodNode, Frame<TaintValue>[], Expr> COMPARISON_OPERANDS_EXTRACTOR = (mn, frames) -> {
+        List<Expr> candidates = new ArrayList<>();
         int idx = 0;
         for (AbstractInsnNode insn : mn.instructions) {
-            if (insn.getOpcode() == Opcodes.FCMPL || insn.getOpcode() == Opcodes.FCMPG) {
-                Frame<TaintValue> f = frames[idx];
-                if (f != null && f.getStackSize() >= 2) {
-                    Expr top = f.getStack(f.getStackSize() - 1).expr;
-                    Expr second = f.getStack(f.getStackSize() - 2).expr;
-                    Expr healthExpr = (top instanceof Primitive && !(second instanceof Primitive)) ? second
-                            : (second instanceof Primitive && !(top instanceof Primitive)) ? top : null;
-                    if (healthExpr == null && !(top instanceof Primitive)) healthExpr = top;
-                    if (healthExpr != null && !(healthExpr instanceof UnknownExpr)) return healthExpr;
-                }
-            }
+            Frame<TaintValue> frame = frames[idx];
+            collectComparisonOperands(candidates, frame, insn.getOpcode());
             idx++;
         }
-        return null;
+        if (candidates.isEmpty()) return null;
+        return candidates.size() == 1 ? candidates.get(0) : new Choice(List.copyOf(candidates));
     };
+
+    private static void collectComparisonOperands(List<Expr> candidates, Frame<TaintValue> frame, int opcode) {
+        if (frame == null) return;
+        boolean twoOperands = opcode == Opcodes.FCMPL || opcode == Opcodes.FCMPG
+                || opcode == Opcodes.DCMPL || opcode == Opcodes.DCMPG || opcode == Opcodes.LCMP
+                || opcode >= Opcodes.IF_ICMPEQ && opcode <= Opcodes.IF_ACMPNE;
+        if (twoOperands && frame.getStackSize() >= 2) {
+            Expr left = frame.getStack(frame.getStackSize() - 2).expr;
+            Expr right = frame.getStack(frame.getStackSize() - 1).expr;
+            addComparisonCandidate(candidates, left, right);
+            addComparisonCandidate(candidates, right, left);
+            return;
+        }
+        if (opcode >= Opcodes.IFEQ && opcode <= Opcodes.IFLE && frame.getStackSize() >= 1) {
+            addComparisonCandidate(candidates, frame.getStack(frame.getStackSize() - 1).expr, null);
+        }
+    }
+
+    private static void addComparisonCandidate(List<Expr> candidates, Expr candidate, Expr counterpart) {
+        if (candidate == null || candidate instanceof Primitive || candidate instanceof UnknownExpr) return;
+        if (counterpart != null && !(counterpart instanceof Primitive) && !(counterpart instanceof UnknownExpr)) return;
+        addUniqueExpr(candidates, candidate);
+    }
 
     /* 通用分析入口(查表版)：传入方法表项 + 提取策略即可分析。method.matchIn(cls) 内置 SRG 优先 MCP 后备查找。 */
     public static AnalysisResult analyzeMethod(Class<?> cls, McMethod method, ExtractionStrategy strategy) {
@@ -2255,6 +2637,19 @@ public final class HealthDataflowAnalyzer {
         for (Class<?> c = startClass.getSuperclass(); c != null && c != Object.class; c = c.getSuperclass()) {
             if (classDefinesMethod(c, GET_HEALTH.srg(), GET_HEALTH.desc())) return new ClassAndMethod(c, GET_HEALTH.srg());
             if (classDefinesMethod(c, GET_HEALTH.mcp(), GET_HEALTH.desc())) return new ClassAndMethod(c, GET_HEALTH.mcp());
+        }
+        return null;
+    }
+
+    private static ClassAndMethod findMethodOwner(Class<?> startClass, McMethod method) {
+        for (Class<?> current = startClass; current != null && current != Object.class;
+             current = current.getSuperclass()) {
+            if (classDefinesMethod(current, method.srg(), method.desc())) {
+                return new ClassAndMethod(current, method.srg());
+            }
+            if (classDefinesMethod(current, method.mcp(), method.desc())) {
+                return new ClassAndMethod(current, method.mcp());
+            }
         }
         return null;
     }
@@ -2345,6 +2740,23 @@ public final class HealthDataflowAnalyzer {
         return false;
     }
 
+    /* 保留可验证的静态编解码边界，避免分析器把解码器展开成 AES/Base64 等不可逆实现细节。 */
+    private static boolean hasStaticCodecInverse(ClassNode owner, MethodNode decoder) {
+        if ((decoder.access & Opcodes.ACC_STATIC) == 0) return false;
+        Type[] decoderArgs = Type.getArgumentTypes(decoder.desc);
+        Type decoderReturn = Type.getReturnType(decoder.desc);
+        if (decoderArgs.length != 1 || decoderArgs[0].getSort() != Type.OBJECT
+                || !isNumericAsmType(decoderReturn)) return false;
+        String encodedDesc = decoderArgs[0].getDescriptor();
+        for (MethodNode encoder : owner.methods) {
+            if ((encoder.access & Opcodes.ACC_STATIC) == 0) continue;
+            Type[] encoderArgs = Type.getArgumentTypes(encoder.desc);
+            if (encoderArgs.length == 1 && isNumericAsmType(encoderArgs[0])
+                    && Type.getReturnType(encoder.desc).getDescriptor().equals(encodedDesc)) return true;
+        }
+        return false;
+    }
+
     private static boolean isEcaHealthWrapperReference(Reference reference) {
         Object value = reference.value();
         return value instanceof String s && WRAPPER_REFERENCE_VALUES.contains(s);
@@ -2363,6 +2775,47 @@ public final class HealthDataflowAnalyzer {
             return (ret == null || ret instanceof UnknownExpr) ? null : ret;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+            return null;
+        }
+    }
+
+    /* Analyze the complete write set of a runtime-revealed writer. The entity receiver and the
+       single numeric input are seeded symbolically so every correlated store can be solved together. */
+    public static AnalysisResult analyzeWriterMethod(Class<?> owner, String methodName, String desc,
+                                                     boolean isStatic) {
+        if (owner == null || methodName == null || desc == null) return null;
+        try {
+            Type[] argumentTypes = Type.getArgumentTypes(desc);
+            int localCount = isStatic ? 0 : 1;
+            for (Type argumentType : argumentTypes) localCount += argumentType.getSize();
+            TaintValue[] seed = new TaintValue[localCount + 8];
+            int local = 0;
+            if (!isStatic) seed[local++] = new TaintValue(1, EntityParamMarker.I);
+            int numericIndex = 0;
+            for (Type argumentType : argumentTypes) {
+                Expr expression;
+                Class<?> argumentClass = asmTypeToClass(argumentType);
+                if (argumentType.getSort() == Type.OBJECT && argumentClass != null
+                        && LivingEntity.class.isAssignableFrom(argumentClass)) {
+                    expression = EntityParamMarker.I;
+                } else if (isNumericAsmType(argumentType)) {
+                    expression = new WriteInput(numericIndex++, descriptorChar(argumentType));
+                } else {
+                    expression = UnknownExpr.UNKNOWN;
+                }
+                seed[local] = new TaintValue(argumentType.getSize(), expression);
+                local += argumentType.getSize();
+            }
+            if (numericIndex != 1) return null;
+            AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+            Expr writes = analyzeMethodWrites(owner, methodName, desc, seed, ctx, 0);
+            if (writes == null || writes instanceof UnknownExpr) return null;
+            Expr stripped = stripEcaHealthWrappers(writes);
+            if (stripped == null || stripped instanceof UnknownExpr) return null;
+            AnalysisResult result = AnalysisResult.of(stripped, owner);
+            return result.sources.size() < 2 ? null : result;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
             return null;
         }
     }
@@ -3717,5 +4170,35 @@ public final class HealthDataflowAnalyzer {
        输入 IR 根 + 一个候选 sink + 目标值 + 求值上下文，返回 sink 应被写入的具体值或失败枚举。 */
     public static HealthSolveResult buildWritePath(Expr root, Source sink, Object target, EvalContext ctx) {
         return solveDetailed(root, sink, target, ctx);
+    }
+
+    /* Path-insensitive control flow can expose several writes to the same storage location. Keep
+       every representable value so the landing layer can validate complete transactions. */
+    public static List<Object> buildWriteCandidates(Expr root, Source sink, Object target,
+                                                    EvalContext ctx, int limit) {
+        if (root == null || sink == null || ctx == null || limit <= 0) return List.of();
+        List<Object> candidates = new ArrayList<>();
+        collectWriteCandidates(root, sink, target, ctx, limit, candidates);
+        return List.copyOf(candidates);
+    }
+
+    private static void collectWriteCandidates(Expr root, Source sink, Object target, EvalContext ctx,
+                                               int limit, List<Object> candidates) {
+        if (candidates.size() >= limit) return;
+        if (root instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) {
+                if (candidates.size() >= limit) return;
+                if (containsSink(alternative, sink)) {
+                    collectWriteCandidates(alternative, sink, target, ctx, limit, candidates);
+                }
+            }
+            return;
+        }
+        HealthSolveResult result = solveDetailed(root, sink, target, ctx);
+        if (!result.solved() || result.value() == null) return;
+        for (Object candidate : candidates) {
+            if (Objects.equals(candidate, result.value())) return;
+        }
+        candidates.add(result.value());
     }
 }

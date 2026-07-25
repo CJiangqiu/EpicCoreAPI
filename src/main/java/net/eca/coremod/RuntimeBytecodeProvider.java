@@ -1,5 +1,7 @@
 package net.eca.coremod;
 
+import org.objectweb.asm.ClassReader;
+
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
@@ -31,9 +33,7 @@ public final class RuntimeBytecodeProvider {
             @Override
             public byte[] transform(ClassLoader loader, String name,
                     Class<?> beingRedefined, ProtectionDomain pd, byte[] buf) {
-                if (name != null && buf != null) {
-                    RUNTIME_BYTES.put(name, buf.clone());
-                }
+                capture(name, buf);
                 return null;   // 只读不改
             }
         }, true);   // 支持 retransform，使已加载类批量重转换时也能截获
@@ -49,15 +49,35 @@ public final class RuntimeBytecodeProvider {
 
     /* 供 JVM TI 回调调用的静态捕获函数——仅捕获，不修改字节码 */
     static byte[] captureStatic(String className, byte[] bytes) {
-        if (className != null && bytes != null) {
-            RUNTIME_BYTES.put(className, bytes.clone());
-        }
+        capture(className, bytes);
         return null;   // 只读不改
+    }
+
+    /* 隐藏类的 JVM TI 名称可为空；以 classfile 内部名建立稳定别名，供 /0x... 运行时类名回查。 */
+    private static void capture(String className, byte[] bytes) {
+        if (bytes == null) return;
+        try {
+            String internalName = className;
+            if (internalName == null || internalName.isEmpty()) {
+                internalName = new ClassReader(bytes).getClassName();
+            }
+            if (internalName == null || internalName.isEmpty()) return;
+            byte[] copy = bytes.clone();
+            RUNTIME_BYTES.put(internalName.replace('.', '/'), copy);
+            int hiddenSuffix = internalName.indexOf("/0x");
+            if (hiddenSuffix > 0) RUNTIME_BYTES.put(internalName.substring(0, hiddenSuffix), copy);
+        } catch (Throwable ignored) {
+            // 捕获器不能因异常影响类定义；调用方会回退到其他字节码来源。
+        }
     }
 
     //取该类运行期字节码；未缓存时返回 null(调用方回退磁盘字节码)
     public static byte[] get(Class<?> clazz) {
         if (clazz == null) return null;
-        return RUNTIME_BYTES.get(clazz.getName().replace('.', '/'));
+        String internalName = clazz.getName().replace('.', '/');
+        byte[] bytes = RUNTIME_BYTES.get(internalName);
+        if (bytes != null) return bytes;
+        int hiddenSuffix = internalName.indexOf("/0x");
+        return hiddenSuffix > 0 ? RUNTIME_BYTES.get(internalName.substring(0, hiddenSuffix)) : null;
     }
 }

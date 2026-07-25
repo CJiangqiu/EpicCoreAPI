@@ -93,6 +93,7 @@ public final class ObfuscationMapping {
         methods.put("LivingEntity.dropAllDeathLoot", "m_6668_");
         methods.put("LivingEntity.getRecordMaxHp", "m_21233_");
         methods.put("LivingEntity.actuallyHurt", "m_6475_");
+        methods.put("LivingEntity.setHealth", "m_21153_");
 
         // Entity
         methods.put("Entity.setRemoved", "m_142467_");

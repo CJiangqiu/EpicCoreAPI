@@ -20,10 +20,19 @@ public final class LivingEntityHook {
     /* ECA 内部原始读：改血 verify 读 getHealth 时置位，令 processGetHealth 放行禁疗/血锁、暴露真实存储值。
        否则 verify 恒读到自家禁疗/血锁记录值，正确写入被误判失败并回滚。 */
     private static final ThreadLocal<Boolean> RAW_HEALTH_READ = ThreadLocal.withInitial(() -> false);
+    private static final ThreadLocal<ProvisionalHealth> PROVISIONAL_HEALTH = new ThreadLocal<>();
 
     public static void beginRawHealthRead() { RAW_HEALTH_READ.set(true); }
 
     public static void endRawHealthRead() { RAW_HEALTH_READ.set(false); }
+
+    public static void beginProvisionalHealthWrite(LivingEntity entity, float health) {
+        PROVISIONAL_HEALTH.set(new ProvisionalHealth(entity, health));
+    }
+
+    public static void endProvisionalHealthWrite() {
+        PROVISIONAL_HEALTH.remove();
+    }
 
     // ==================== getHealth() hook ====================
 
@@ -38,6 +47,11 @@ public final class LivingEntityHook {
      * @return locked/banned health value, or NaN for passthrough
      */
     public static float processGetHealth(LivingEntity entity) {
+        // 关联存储提交期间屏蔽可重入读取，避免完整性校验观察到只写了一半的状态。
+        ProvisionalHealth provisional = PROVISIONAL_HEALTH.get();
+        if (provisional != null && provisional.entity == entity) {
+            return provisional.health;
+        }
         // ECA 内部原始读：放行禁疗/血锁，回落真实 getHealth，供改血 verify 读到真实存储值
         if (RAW_HEALTH_READ.get()) {
             return Float.NaN;
@@ -57,6 +71,8 @@ public final class LivingEntityHook {
         // 放行：让原始方法体执行（常数覆盖已下沉至 CONSTANT 实体的 getHealth 方法体内）
         return Float.NaN;
     }
+
+    private record ProvisionalHealth(LivingEntity entity, float health) {}
 
     // ==================== getMaxHealth() hook ====================
 

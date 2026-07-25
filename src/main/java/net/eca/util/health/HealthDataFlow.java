@@ -96,6 +96,11 @@ public final class HealthDataFlow {
 
     //每个实体类首次走数据流改血时打印一次分析结构诊断
     private static final Set<String> FIRST_WRITE_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> FIRST_EXTERNAL_WRITE_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> ASSOCIATED_SUCCESS_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> ASSOCIATED_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final int MAX_ASSOCIATED_CANDIDATES_PER_SOURCE = 8;
+    private static final int MAX_ASSOCIATED_COMBINATIONS = 64;
 
     /* 数据流改血主入口：拿已分析的可写树把目标血量写进目标真实存储，verify 通过返回 true。
        DATAFLOW 与 CONST_OVERRIDE(带可写源)由本入口处理；无源 CONST_OVERRIDE/UNRESOLVED 在表层就被拦掉。 */
@@ -105,7 +110,8 @@ public final class HealthDataFlow {
         boolean firstWrite = FIRST_WRITE_DUMPED.add(cls.getName());
         if (firstWrite) dumpAnalysisStructure(cls, tree, target);
         return writeViaSources(cls, tree, entity, target, firstWrite,
-                (verifiedEntity, verifiedTarget, sink) -> EcaSetHealthManager.verify(verifiedEntity, verifiedTarget));
+                (verifiedEntity, verifiedTarget, sink) -> EcaSetHealthManager.verify(verifiedEntity, verifiedTarget),
+                "dataflow");
     }
 
     /* 外部扫描写入：与 write 同骨架，但用外部专用校验器(带死亡语义：目标≤0 需实体确实死亡)。
@@ -113,11 +119,109 @@ public final class HealthDataFlow {
     public static boolean writeExternal(AnalysisResult tree, LivingEntity entity, float target) {
         if (tree == null || entity == null) return false;
         Class<?> cls = entity.getClass();
-        boolean firstWrite = FIRST_WRITE_DUMPED.add(cls.getName());
-        if (firstWrite) dumpAnalysisStructure(cls, tree, target);
+        boolean firstWrite = FIRST_EXTERNAL_WRITE_DUMPED.add(cls.getName());
+        if (firstWrite) dumpExternalAnalysisStructure(cls, tree, target);
         return writeViaSources(cls, tree, entity, target, firstWrite,
                 (verifiedEntity, verifiedTarget, sink) ->
-                        HealthDataflowAnalyzer.verifyExternalDataflow(tree.returnExpr, verifiedEntity, verifiedTarget, sink));
+                    // 符号校验(verifyExternalDataflow)会被伪源骗过：外部扫描 returnExpr 是巨型 Choice，
+                    // 写任意凑巧匹配的 sink(Map entry/Properties/fallback 常数/vanilla 字段)都能让某个 alternative 命中 target。
+                    // 故所有源都追加 RAW getHealth 实读校验——真写下去 getHealth 必反映(过)，伪源改读不改存储(不过)，
+                    // 从而滤掉伪成功、放给方法探针真写。与数据流通道一律 RAW 校验对齐。
+                    HealthDataflowAnalyzer.verifyExternalDataflow(tree.returnExpr, verifiedEntity, verifiedTarget, sink)
+                        && EcaSetHealthManager.verifyExternalRaw(verifiedEntity, verifiedTarget),
+                "external");
+    }
+
+    /* Runtime-revealed writers commonly maintain ciphertext, keys and integrity tags as one unit.
+       Their write set must be committed as a group; probing individual stores creates invalid states. */
+    public static boolean writeAssociated(AnalysisResult tree, LivingEntity entity, float target) {
+        if (tree == null || entity == null || tree.sources.size() < 2) return false;
+        EvalContext context = HealthDataflowAnalyzer.newContext(entity);
+        List<AssociatedSourceCandidates> groups = new ArrayList<>();
+        for (Source sink : tree.sources) {
+            List<Object> candidates = HealthDataflowAnalyzer.buildWriteCandidates(
+                    tree.returnExpr, sink, Float.valueOf(target), context,
+                    MAX_ASSOCIATED_CANDIDATES_PER_SOURCE);
+            if (candidates.isEmpty()) return false;
+            groups.add(new AssociatedSourceCandidates(sink, sink.read(entity), candidates));
+        }
+
+        AssociatedSearch search = new AssociatedSearch();
+        boolean verified = tryAssociatedCombinations(groups, 0, new ArrayList<>(), entity, target, search);
+        if (verified && search.last != null) {
+            if (ASSOCIATED_SUCCESS_DUMPED.add(entity.getClass().getName())) {
+                EcaLogger.info("[AssociatedWriter] success entity={} sources={} expected={} attempts={}",
+                        entity.getClass().getName(), groups.size(), target, search.attempts);
+                dumpAssociatedStates(search.last.states());
+            }
+            return true;
+        }
+
+        if (ASSOCIATED_FAILURE_DUMPED.add(entity.getClass().getName())) {
+            boolean wroteAll = search.last != null && search.last.wroteAll();
+            boolean restored = search.last != null && search.last.restored();
+            EcaLogger.info("[AssociatedWriter] failed entity={} sources={} attempts={} wroteAll={} verified=false restore={}",
+                    entity.getClass().getName(), groups.size(), search.attempts, wroteAll, restored);
+            if (search.last != null) dumpAssociatedStates(search.last.states());
+        }
+        return false;
+    }
+
+    private static boolean tryAssociatedCombinations(List<AssociatedSourceCandidates> groups, int depth,
+                                                     List<PreparedSourceWrite> selected,
+                                                     LivingEntity entity, float target,
+                                                     AssociatedSearch search) {
+        if (search.attempts >= MAX_ASSOCIATED_COMBINATIONS) return false;
+        if (depth == groups.size()) {
+            search.attempts++;
+            search.last = attemptAssociatedTransaction(selected, entity, target);
+            return search.last.verified();
+        }
+        AssociatedSourceCandidates group = groups.get(depth);
+        for (Object candidate : group.values()) {
+            selected.add(new PreparedSourceWrite(group.sink(), group.snapshot(), candidate));
+            if (tryAssociatedCombinations(groups, depth + 1, selected, entity, target, search)) return true;
+            selected.remove(selected.size() - 1);
+            if (search.attempts >= MAX_ASSOCIATED_COMBINATIONS) return false;
+        }
+        return false;
+    }
+
+    private static AssociatedAttempt attemptAssociatedTransaction(List<PreparedSourceWrite> selected,
+                                                                  LivingEntity entity, float target) {
+        List<PreparedSourceWrite> writes = List.copyOf(selected);
+        boolean wroteAll = true;
+        for (PreparedSourceWrite write : writes) {
+            if (!dispatchWrite(write.sink(), entity, write.value())) {
+                wroteAll = false;
+                break;
+            }
+        }
+        List<Object> afterWrite = new ArrayList<>(writes.size());
+        for (PreparedSourceWrite write : writes) afterWrite.add(write.sink().read(entity));
+        boolean verified = wroteAll && EcaSetHealthManager.verify(entity, target);
+        List<AssociatedWriteState> states = new ArrayList<>(writes.size());
+        for (int i = 0; i < writes.size(); i++) {
+            PreparedSourceWrite write = writes.get(i);
+            states.add(new AssociatedWriteState(write, afterWrite.get(i), write.sink().read(entity)));
+        }
+        if (verified) return new AssociatedAttempt(true, true, true, states);
+
+        boolean restored = true;
+        for (int i = writes.size() - 1; i >= 0; i--) {
+            PreparedSourceWrite write = writes.get(i);
+            if (!dispatchWrite(write.sink(), entity, write.snapshot())) restored = false;
+        }
+        return new AssociatedAttempt(false, wroteAll, restored, states);
+    }
+
+    private static void dumpAssociatedStates(List<AssociatedWriteState> states) {
+        for (AssociatedWriteState state : states) {
+            PreparedSourceWrite write = state.write();
+            EcaLogger.info("[AssociatedWriter]   source={} before={} solved={} afterWrite={} afterVerify={}",
+                    write.sink().label, write.snapshot(), write.value(),
+                    state.afterWrite(), state.afterVerify());
+        }
     }
 
     /* 首次诊断：打印目标实体类的可写树结构(kind/definingClass/sources 列表)，便于排查不同实体的改血行为 */
@@ -135,6 +239,18 @@ public final class HealthDataFlow {
         }
     }
 
+    private static void dumpExternalAnalysisStructure(Class<?> cls, AnalysisResult tree, float target) {
+        EcaLogger.info("[ExternalScan] ===== first external write: {} =====", cls.getName());
+        EcaLogger.info("[ExternalScan]   target={} definingClass={} sources={}", target,
+                tree.definingClass != null ? tree.definingClass.getName() : "null", tree.sources.size());
+        EcaLogger.info("[ExternalScan]   returnExpr={}", tree.returnExpr);
+        int index = 0;
+        for (Source source : tree.sources) {
+            EcaLogger.info("[ExternalScan]   sink#{} {} type={} class={}",
+                    index++, source.label, source.valueType.getName(), source.getClass().getSimpleName());
+        }
+    }
+
     /* ==================== 写入编排 ==================== */
 
     @FunctionalInterface
@@ -144,12 +260,24 @@ public final class HealthDataFlow {
 
     private record PreparedSourceWrite(Source sink, Object snapshot, Object value) {}
 
+    private record AssociatedWriteState(PreparedSourceWrite write, Object afterWrite, Object afterVerify) {}
+
+    private record AssociatedSourceCandidates(Source sink, Object snapshot, List<Object> values) {}
+
+    private record AssociatedAttempt(boolean verified, boolean wroteAll, boolean restored,
+                                     List<AssociatedWriteState> states) {}
+
+    private static final class AssociatedSearch {
+        private int attempts;
+        private AssociatedAttempt last;
+    }
+
     private static final Set<String> FAIL_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* 逐个验证候选 Source，单点未命中再联合写入(应对双源防御)，失败回滚原值。
        仅在缓存失败树时打印一次诊断，避免每-tick 改血刷屏。 */
     public static boolean writeViaSources(Class<?> cls, AnalysisResult ar, LivingEntity entity, float expected,
-                                          boolean logSuccess, HealthVerifier verifier) {
+                                          boolean logSuccess, HealthVerifier verifier, String diagnosticChannel) {
         EvalContext ctx = HealthDataflowAnalyzer.newContext(entity);
         List<String> diag = new ArrayList<>();
         List<PreparedSourceWrite> solvedWrites = new ArrayList<>();
@@ -183,9 +311,10 @@ public final class HealthDataFlow {
 
         if (writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) return true;
 
-        if (FAIL_DUMPED.add(cls.getName())) {
-            EcaLogger.warn("[HealthDataflow] setHealth failed entity={} expected={} sink results:", cls.getName(), expected);
-            for (String line : diag) EcaLogger.warn("[HealthDataflow] {}", line);
+        if (FAIL_DUMPED.add(cls.getName() + "|" + diagnosticChannel)) {
+            EcaLogger.warn("[{}] setHealth failed entity={} expected={} sink results:",
+                    diagnosticChannel, cls.getName(), expected);
+            for (String line : diag) EcaLogger.warn("[{}] {}", diagnosticChannel, line);
         }
         return false;
     }
@@ -241,8 +370,14 @@ public final class HealthDataFlow {
        把目标血量登记进 ConstOverride；patched 字节码的 resolveHealth(this,...) 据此返回覆写值。 */
     private static boolean writeConstOverride(ConstOverrideSource s, LivingEntity entity, Object value) {
         Object holder = s.holder(entity);
-        if (holder == null || !(value instanceof Number n)) return false;
-        ConstOverride.setOverride(holder, n.floatValue());
+        if (holder == null) return false;
+        if (value instanceof Number n) {
+            ConstOverride.setOverride(holder, n.floatValue());
+            return true;
+        }
+        // 回滚到"写入前无覆写"的 null 快照：必须清除写入期间设上的覆写，
+        // 否则失败的常数覆写尝试会留下脏覆写污染 getHealth(如 twist 概率失败后永久改不动)。
+        ConstOverride.removeOverride(holder);
         return true;
     }
 
@@ -606,6 +741,9 @@ public final class HealthDataFlow {
             return true;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
+            // record 组件反射写必失败，JDK 又禁止对 record 取 Unsafe field offset(强写只刷 UnsupportedOperationException)；
+            // record 重建只在 FieldChain 路径(rebuildRecord)处理，瞬态 record(如 RuneBank$Duo)写了也不落库，直接放弃。
+            if (f.getDeclaringClass().isRecord()) return false;
             // final 字段 / 模块系统访问限制 → 走 Unsafe 兜底
             return UnsafeUtil.unsafePutField(target, f, value);
         }
