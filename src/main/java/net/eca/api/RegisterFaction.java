@@ -24,7 +24,7 @@ import java.lang.annotation.Target;
  *     @Override public String getDisplayName() { return "faction.mymod.undead.name"; }
  *     @Override public int getColor() { return 0xFF884400; }
  *
- *     @Override public FactionRelation getDefaultRelation() { return FactionRelation.NEUTRAL; }
+ *     @Override public FactionRelation getStaticDefaultRelation() { return FactionRelation.NEUTRAL; }
  *     @Override public String[] getHostileTo() { return new String[]{"village_guard"}; }
  *     @Override public String[] getFriendlyTo() { return new String[]{"lich_coven"}; }
  * }

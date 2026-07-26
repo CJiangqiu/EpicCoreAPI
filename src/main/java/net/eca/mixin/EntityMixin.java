@@ -5,7 +5,6 @@ import net.eca.client.FactionGlowData;
 import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.eca.util.ResurrectionManager;
-import net.eca.util.faction.FactionManager;
 import net.eca.util.faction.FactionUtil;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
@@ -172,10 +171,7 @@ public class EntityMixin {
     @Inject(method = "isAlliedTo", at = @At("HEAD"), cancellable = true)
     private void eca$checkFactionAllied(Entity other, CallbackInfoReturnable<Boolean> cir) {
         Entity self = (Entity) (Object) this;
-        if (FactionManager.areSameFaction(self, other)) {
-            cir.setReturnValue(true);
-            return;
-        }
+        // canAttack 已覆盖同阵营与友好阵营判定
         if (!FactionUtil.canAttack(self, other)) {
             cir.setReturnValue(true);
         }

@@ -353,11 +353,8 @@ LivingEntityMixin {
 
     // 检查阵营关系并发送动作栏提示；返回 true 表示应取消攻击
     private static boolean eca$checkFactionBlock(Entity attacker, LivingEntity target) {
-        if (FactionManager.areSameFaction(attacker, target)) {
-            eca$sendFactionActionBar(attacker, target);
-            return true;
-        }
-        if (FactionManager.getEffectiveRelation(attacker, target) == FactionRelation.FRIENDLY) {
+        FactionRelation rel = FactionManager.getEffectiveRelation(attacker, target);
+        if (rel == FactionRelation.SAME_FACTION || rel == FactionRelation.FRIENDLY) {
             eca$sendFactionActionBar(attacker, target);
             return true;
         }

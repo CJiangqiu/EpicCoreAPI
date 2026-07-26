@@ -31,6 +31,7 @@ public class EcaCommand {
                 .then(FilterCommand.registerSubCommand())
                 .then(ResurrectionCommand.registerSubCommand())
                 .then(FactionCommand.registerSubCommand())
+                .then(RaidCommand.registerSubCommand())
         );
     }
 }

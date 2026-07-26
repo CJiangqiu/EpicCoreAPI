@@ -31,13 +31,18 @@ import net.eca.util.filter.FilterType;
 import net.eca.util.faction.Faction;
 import net.eca.util.faction.FactionManager;
 import net.eca.util.faction.FactionRelation;
+import net.eca.util.raid.RaidDefinition;
+import net.eca.util.raid.RaidInstance;
+import net.eca.util.raid.RaidManager;
 import net.eca.util.spawn_ban.SpawnBanManager;
 import net.eca.client.render.preset.ShaderPreset;
 import net.eca.client.render.preset.ShaderPresetRegistry;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.util.RandomSource;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
@@ -1876,6 +1881,152 @@ public final class EcaAPI {
     public static void alertFactionMembers(String factionId, Entity attacker, Entity victim,
                                            Level level) {
         FactionManager.alertFactionMembers(factionId, attacker, victim, level);
+    }
+
+    // 查询阵营声明的成员实体类型池
+    /**
+     * Get the entity type pool a faction declares, mapped to spawn weights.
+     * Only factions registered through {@code @RegisterFaction} can declare one.
+     * 查询阵营声明的成员实体类型池（类型 → 权重）。
+     *
+     * @param factionId the faction id
+     * @return read-only entity type → weight map, empty if none declared
+     */
+    public static Map<EntityType<?>, Integer> getFactionMemberTypes(String factionId) {
+        return FactionManager.getMemberEntityTypes(factionId);
+    }
+
+    // 按权重从阵营成员类型池抽取一个实体类型
+    /**
+     * Pick one entity type from a faction's member pool, weighted by its declared values.
+     * 按权重从阵营的成员类型池中随机抽取一个实体类型。
+     *
+     * @param factionId the faction to draw from
+     * @param random    the random source to use
+     * @return a weighted-random entity type, or null if the faction declares no usable pool
+     */
+    public static EntityType<?> rollFactionMemberType(String factionId, RandomSource random) {
+        return FactionManager.rollMemberType(factionId, random);
+    }
+
+    // ==================== 袭击系统 ====================
+
+    // 在目标结构内发起袭击
+    /**
+     * Start a raid at a position inside its target structure. The raid center is taken from
+     * the structure's bounding box, not from {@code pos}. If the definition declares no
+     * target structure, {@code pos} becomes the center.
+     * 在目标结构内发起袭击，袭击中心取自结构包围盒。
+     *
+     * @param level  the server level
+     * @param pos    a position inside the target structure
+     * @param raidId the registered raid definition id
+     * @return the started raid, or null if the definition is unknown or the position is
+     *         not inside the target structure
+     */
+    public static RaidInstance startRaid(ServerLevel level, BlockPos pos, String raidId) {
+        if (level == null || pos == null) return null;
+        return RaidManager.startRaid(level, pos, raidId);
+    }
+
+    // 在指定坐标强制发起袭击，跳过结构查询
+    /**
+     * Start a raid with an explicit center, bypassing the structure lookup. Use this for
+     * trigger conditions unrelated to structures, and for testing.
+     * 以指定坐标为中心强制发起袭击，跳过结构查询。
+     *
+     * @param level  the server level
+     * @param center the raid center
+     * @param raidId the registered raid definition id
+     * @return the started raid, or null if the definition is unknown
+     */
+    public static RaidInstance startRaidAt(ServerLevel level, BlockPos center, String raidId) {
+        if (level == null || center == null) return null;
+        return RaidManager.startRaidAt(level, center, raidId);
+    }
+
+    // 结束袭击并清除全部存活袭击者
+    /**
+     * End a raid, discarding every surviving raider. This is how an endless raid is meant
+     * to be finished — it never satisfies the default victory condition on its own.
+     * 结束袭击并清除全部仍存活的袭击者，用于收尾无限波次袭击。
+     *
+     * @param level   the server level
+     * @param raid    the raid to end
+     * @param victory true to end in victory (fires reward callbacks), false for defeat
+     * @return true if the raid was active and has been ended
+     */
+    public static boolean endRaid(ServerLevel level, RaidInstance raid, boolean victory) {
+        if (level == null || raid == null) return false;
+        return RaidManager.endRaid(level, raid, victory);
+    }
+
+    // 按 ID 结束袭击并清除全部存活袭击者
+    /**
+     * End a raid by its instance id, discarding every surviving raider.
+     * 按袭击实例 ID 结束袭击并清除全部仍存活的袭击者。
+     *
+     * @param level   the server level
+     * @param raidId  the raid instance id
+     * @param victory true to end in victory, false for defeat
+     * @return true if a matching active raid was found and ended
+     */
+    public static boolean endRaid(ServerLevel level, int raidId, boolean victory) {
+        if (level == null) return false;
+        return RaidManager.endRaid(level, raidId, victory);
+    }
+
+    // 按 ID 获取活跃袭击
+    /**
+     * Get an active raid by its instance id.
+     * 按袭击实例 ID 获取活跃袭击。
+     *
+     * @param level  the server level
+     * @param raidId the raid instance id
+     * @return the active raid, or null
+     */
+    public static RaidInstance getRaid(ServerLevel level, int raidId) {
+        if (level == null) return null;
+        return RaidManager.getRaid(level, raidId);
+    }
+
+    // 获取该维度的全部活跃袭击
+    /**
+     * Get every active raid in a level.
+     * 获取该维度中的全部活跃袭击。
+     *
+     * @param level the server level
+     * @return active raids, may be empty
+     */
+    public static List<RaidInstance> getActiveRaids(ServerLevel level) {
+        if (level == null) return Collections.emptyList();
+        return RaidManager.getActiveRaids(level);
+    }
+
+    // 获取距指定坐标最近的活跃袭击
+    /**
+     * Find the nearest active raid whose center lies within a distance of a position.
+     * 获取距指定坐标一定范围内最近的活跃袭击。
+     *
+     * @param level       the server level
+     * @param pos         the position to search from
+     * @param maxDistance maximum distance in blocks
+     * @return the nearest raid in range, or null
+     */
+    public static RaidInstance getNearestRaid(ServerLevel level, BlockPos pos, double maxDistance) {
+        if (level == null || pos == null) return null;
+        return RaidManager.getNearestRaid(level, pos, maxDistance);
+    }
+
+    // 获取全部已注册的袭击定义
+    /**
+     * Get all registered raid definitions.
+     * 获取全部已注册的袭击定义。
+     *
+     * @return read-only map of raid id → definition
+     */
+    public static Map<String, RaidDefinition> getAllRaidDefinitions() {
+        return RaidManager.getAllDefinitions();
     }
 
     private EcaAPI() {}

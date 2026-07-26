@@ -1,7 +1,11 @@
 package net.eca.util.faction;
 
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
+
+import java.util.Collections;
+import java.util.Map;
 
 /**
  * Base class for declarative faction definitions discovered via {@link net.eca.api.RegisterFaction}.
@@ -17,7 +21,7 @@ import net.minecraft.world.entity.LivingEntity;
  *   <li>Static {@code hostileTo / friendlyTo / neutralTo} arrays</li>
  *   <li>Symmetric fallback (check the other faction's definition)</li>
  *   <li>{@link #getDefaultRelation(LivingEntity, Entity)} — dynamic per-target default override</li>
- *   <li>Static {@link #getDefaultRelation()}</li>
+ *   <li>Static {@link #getStaticDefaultRelation()}</li>
  * </ol>
  */
 public abstract class FactionDefinition {
@@ -53,6 +57,27 @@ public abstract class FactionDefinition {
      */
     public FactionRelation getStaticDefaultRelation() {
         return FactionRelation.HOSTILE;
+    }
+
+    // ==================== 可选覆写：成员实体类型池 ====================
+
+    // 本阵营由哪些实体类型构成（类型 → 权重）
+    /**
+     * Declare which entity types make up this faction, mapped to their spawn weights.
+     * <p>
+     * This is what lets a system spawn "members of this faction" without naming concrete
+     * types — a raid wave, for example, can declare a faction id and a total count instead
+     * of an explicit entity list. Weights are relative; entries with a weight of zero or
+     * less are ignored.
+     * <p>
+     * Defaults to an empty map, meaning nothing can be spawned from this faction by weight.
+     * This does not affect faction membership: entities bound via
+     * {@link FactionManager#joinFaction} belong to the faction regardless of this pool.
+     *
+     * @return entity type → spawn weight, defaults to empty
+     */
+    public Map<EntityType<?>, Integer> getMemberEntityTypes() {
+        return Collections.emptyMap();
     }
 
     // ==================== 可选覆写：预设固定关系 ====================

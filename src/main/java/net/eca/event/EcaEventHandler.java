@@ -14,8 +14,10 @@ import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.eca.util.faction.FactionManager;
 import net.eca.util.faction.FactionRelation;
+import net.eca.util.raid.RaidManager;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.AABB;
 import net.minecraftforge.event.TickEvent;
@@ -57,10 +59,19 @@ public class EcaEventHandler {
 
     @SubscribeEvent
     public void onEntityLeaveLevel(EntityLeaveLevelEvent event) {
-        if (event.getLevel() instanceof ServerLevel serverLevel &&
-            event.getEntity() instanceof LivingEntity living) {
+        if (!(event.getLevel() instanceof ServerLevel serverLevel)) return;
+        Entity entity = event.getEntity();
+        if (entity instanceof LivingEntity living) {
             ForceLoadingManager.onEntityLeave(living, serverLevel);
             EntityExtensionManager.onEntityLeave(living, serverLevel);
+        }
+        // 必须排在 EntityExtensionManager 之后：后者依赖 getFactionId 匹配才决定是否退营
+        Entity.RemovalReason reason = entity.getRemovalReason();
+        FactionManager.onEntityRemoved(entity, reason);
+
+        // 只有永久移除才算袭击者减员，区块卸载的袭击者会随区块一起回来
+        if (reason != null && reason.shouldDestroy()) {
+            RaidManager.onEntityRemoved(serverLevel, entity);
         }
     }
 
@@ -119,6 +130,7 @@ public class EcaEventHandler {
         if (event.phase == TickEvent.Phase.END) {
             EntityExtensionManager.tickDimension(serverLevel);
             ForceLoadingManager.tickDimension(serverLevel);
+            RaidManager.tickDimension(serverLevel);
         }
     }
 
@@ -217,6 +229,9 @@ public class EcaEventHandler {
         InvulnerableEntityManager.clearAll();
         GlobalEffectOverrideManager.clearAllDimensions();
         EntityExtensionManager.clearAll();
+        FactionManager.clearAll();
+        // 传入全部维度以便释放袭击期间强制加载的区块
+        RaidManager.clearAll(event.getServer().getAllLevels());
         NEXT_GLOW_SCAN.clear();
     }
 }

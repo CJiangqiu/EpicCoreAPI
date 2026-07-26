@@ -14,6 +14,7 @@ import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.faction.FactionManager;
 import net.eca.util.item_extension.ItemExtensionManager;
+import net.eca.util.raid.RaidManager;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
 import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.objectweb.asm.ClassReader;
@@ -60,9 +61,11 @@ public final class LoadCompleteHandler {
     public void onLoadComplete(FMLLoadCompleteEvent event) {
         EcaMod.setLoadComplete(true);
 
-        // 扫描并注册 Faction Definitions、Entity Extensions、Item Extensions、BossShow
+        // 扫描并注册 Faction Definitions、Raid Definitions、Entity Extensions、Item Extensions、BossShow
         // 阵营必须先于 EntityExtension 扫描，因为 EntityExtension 可能引用 @RegisterFaction 注册的阵营
         event.enqueueWork(FactionManager::scanAndRegisterAll);
+        // 袭击定义引用阵营 ID（袭击者绑定与按阵营抽取波次），必须排在阵营扫描之后
+        event.enqueueWork(RaidManager::scanAndRegisterAll);
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
         // Item Extension 系统纯客户端：ItemExtensionManager 标记 @OnlyIn(Dist.CLIENT)，
         // 在专用服务端形成该方法引用会触发 RuntimeDistCleaner 崩溃

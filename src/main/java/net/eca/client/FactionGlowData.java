@@ -14,7 +14,8 @@ public class FactionGlowData {
 
     // entityId → ARGB color
     private static final Map<Integer, Integer> GLOW_MAP = new ConcurrentHashMap<>();
-    private static long expireTime = 0;
+    // 网络线程写、渲染线程读，必须 volatile 保证可见性与 long 读写原子性
+    private static volatile long expireTime = 0;
 
     private FactionGlowData() {}
 

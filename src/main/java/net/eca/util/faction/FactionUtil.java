@@ -11,12 +11,11 @@ import net.minecraft.world.scores.Team;
  * 阵营攻击判断工具 — 统一入口，所有 Mixin 和外部调用都通过此函数判断是否可以攻击。
  *
  * 判断优先级：
- *   1. 目标为创造/旁观 → false（不可攻击）
- *   2. ECA 阵营同阵营    → false
- *   3. ECA 阵营友好关系  → false
- *   4. 原版队伍同盟      → false
- *   5. ECA 无敌保护      → false
- *   6. 其余             → true（可攻击）
+ *   1. 目标为创造/旁观        → false（不可攻击）
+ *   2. ECA 同阵营或友好关系   → false
+ *   3. 原版队伍同盟          → false
+ *   4. ECA 无敌保护          → false
+ *   5. 其余                 → true（可攻击）
  *
  * TLS 参考：areOriginalAllies + areWraithAllies → 整合为阵营名比较 + 关系表查询
  */
@@ -44,12 +43,7 @@ public class FactionUtil {
 
         if (attacker == null) return true;
 
-        // 同阵营 → 完全禁止
-        if (FactionManager.areSameFaction(attacker, target)) {
-            return false;
-        }
-
-        // 阵营间友好关系
+        // 同阵营与友好阵营均禁止攻击（getEffectiveRelation 已覆盖同阵营判定）
         FactionRelation rel = FactionManager.getEffectiveRelation(attacker, target);
         if (rel == FactionRelation.FRIENDLY || rel == FactionRelation.SAME_FACTION) {
             return false;

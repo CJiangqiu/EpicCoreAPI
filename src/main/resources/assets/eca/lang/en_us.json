@@ -382,5 +382,10 @@
   "gui.eca.shader_generator.status.layer_copied": "Layer copied",
   "gui.eca.shader_generator.status.element_pasted": "Element pasted",
   "gui.eca.shader_generator.status.layer_pasted": "Layer pasted",
-  "message.eca.faction.cannot_attack_friendly": "You cannot attack friendly factions!"
+  "message.eca.faction.cannot_attack_friendly": "You cannot attack friendly factions!",
+  "raid.eca.victory": "Raid Repelled",
+  "raid.eca.defeat": "Defenses Fallen",
+  "raid.eca.wave": "Wave %s / %s",
+  "raid.eca.wave_endless": "Wave %s",
+  "raid.eca.raiders_remaining": "%s left"
 }

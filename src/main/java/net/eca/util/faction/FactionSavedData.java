@@ -125,7 +125,7 @@ public class FactionSavedData extends SavedData {
     }
 
     // 加载全部阵营定义到 FactionManager
-    void loadFactionsInto(FactionManager target) {
+    void loadFactions() {
         for (Map.Entry<String, CompoundTag> entry : factionTags.entrySet()) {
             String id = entry.getKey();
             CompoundTag tag = entry.getValue();
@@ -146,7 +146,7 @@ public class FactionSavedData extends SavedData {
                     } catch (IllegalArgumentException ignored) {}
                 }
             }
-            target.putLoadedFaction(faction);
+            FactionManager.putLoadedFaction(faction);
         }
     }
 
@@ -175,9 +175,9 @@ public class FactionSavedData extends SavedData {
     }
 
     // 加载全部成员映射到 FactionManager
-    void loadMembersInto(FactionManager target) {
+    void loadMembers() {
         for (Map.Entry<UUID, String> entry : memberMap.entrySet()) {
-            target.putLoadedMember(entry.getKey(), entry.getValue());
+            FactionManager.putLoadedMember(entry.getKey(), entry.getValue());
         }
     }
 

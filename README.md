@@ -53,6 +53,19 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
 - `/eca resurrection check <target>` - One-shot container integrity check for an entity
 - `/eca resurrection revive <target>` - Manually force-revive a tracked entity immediately
 - `/eca resurrection interval <ms>` - Set poll interval in milliseconds (100–10000; default 25)
+- `/eca faction create <id> <displayName> [color]` - Create a faction (color accepts a preset name such as red/gold/teal)
+- `/eca faction remove <id>` - Remove a faction definition and drop every entity binding pointing at it
+- `/eca faction join <factionId> [targets]` - Bind entities to a faction (defaults to the command source entity)
+- `/eca faction leave [targets]` - Unbind entities from their current faction
+- `/eca faction list` - List all registered factions
+- `/eca faction info [factionId]` - Show a faction's color, members and relation overrides
+- `/eca faction relation <factionA> <factionB> <relation>` - Set A's relation toward B (hostile/neutral/friendly)
+- `/eca raid defs` - List all registered raid definitions
+- `/eca raid list` - List active raids in the current dimension
+- `/eca raid start <definitionId> [pos]` - Start a raid at a position inside its target structure (defaults to the command source position)
+- `/eca raid startat <definitionId> <pos>` - Start a raid with an explicit center, skipping the structure lookup
+- `/eca raid info <instanceId>` - Show details of one running raid
+- `/eca raid end <instanceId> <victory|defeat>` - End a raid and clear every surviving raider
 
 Added new command selectors, resolved through ECA's own entity lookup:
 - `@eca_e[...]` - all entities
@@ -196,6 +209,34 @@ side="BOTH"
 - `getResurrectionTotalChecks()` - Get the total number of entity checks performed since start
 - `checkResurrectionTarget(level, entity)` - Perform a one-shot container integrity check
 - `reviveResurrectionTarget(level, entity)` - Manually force-revive a tracked entity immediately
+- `createFaction(id, displayName, color)` - Create and register a faction (memory only)
+- `createFaction(id, displayName, color, level)` - Create and register a faction, persisted to world SavedData
+- `removeFaction(id)` - Remove a faction definition (memory only)
+- `removeFaction(id, level)` - Remove a faction definition and drop every entity binding pointing at it
+- `getFaction(id)` - Get a faction definition by id
+- `getAllFactions()` - Get all registered factions
+- `joinFaction(entity, factionId)` - Bind an entity to a faction
+- `leaveFaction(entity)` - Unbind an entity from its faction
+- `getEntityFaction(entity)` - Get the faction id an entity belongs to (null if none)
+- `areSameFaction(a, b)` - Check whether two entities share a faction
+- `getFactionMembers(level, factionId)` - Get all entities in a level belonging to a faction (O(n) scan, avoid per-tick use)
+- `kickAllFromFaction(factionId, level)` - Remove every entity in a level from a faction
+- `setFactionRelation(a, b, relation)` - Set faction A's relation toward faction B (memory only)
+- `setFactionRelation(a, b, relation, level)` - Set faction A's relation toward B, persisted
+- `getFactionRelation(a, b)` - Get the explicit relation from A to B (null if no override)
+- `getEffectiveFactionRelation(source, target)` - Resolve the effective relation between two entities
+- `canHarm(source, target)` - Check whether faction rules allow source to harm or target the target
+- `alertFactionMembers(factionId, attacker, victim, level)` - Make nearby untargeted allies retaliate against an attacker
+- `getFactionMemberTypes(factionId)` - Get the entity type pool a faction declares, mapped to spawn weights
+- `rollFactionMemberType(factionId, random)` - Pick one entity type from a faction's pool by weight
+- `startRaid(level, pos, raidId)` - Start a raid at a position inside its target structure (center taken from the structure)
+- `startRaidAt(level, center, raidId)` - Start a raid with an explicit center, skipping the structure lookup
+- `endRaid(level, raid, victory)` - End a raid, discarding every surviving raider
+- `endRaid(level, raidId, victory)` - End a raid by its instance id, discarding every surviving raider
+- `getRaid(level, raidId)` - Get an active raid by its instance id
+- `getActiveRaids(level)` - Get every active raid in a level
+- `getNearestRaid(level, pos, maxDistance)` - Find the nearest active raid within a distance
+- `getAllRaidDefinitions()` - Get all registered raid definitions
 
 Here is a simple example:
 
@@ -327,6 +368,23 @@ boolean tracked = EcaAPI.isResurrectionTracked(entity);
 EcaAPI.removeResurrectionTarget(entity);
 EcaAPI.setResurrectionPollInterval(50);
 EcaAPI.stopResurrection();
+
+// Faction
+EcaAPI.createFaction("undead_legion", "Undead Legion", 0xFF884400, serverLevel);
+EcaAPI.setFactionRelation("undead_legion", "village_guard", FactionRelation.HOSTILE, serverLevel);
+EcaAPI.joinFaction(entity, "undead_legion");
+String factionId = EcaAPI.getEntityFaction(entity);
+boolean allied = EcaAPI.areSameFaction(entityA, entityB);
+boolean mayAttack = EcaAPI.canHarm(attacker, target);
+FactionRelation relation = EcaAPI.getEffectiveFactionRelation(attacker, target);
+EcaAPI.leaveFaction(entity);
+
+// Raid
+RaidInstance raid = EcaAPI.startRaid(serverLevel, pos, "undead_siege");        // resolves the center from the target structure
+RaidInstance forced = EcaAPI.startRaidAt(serverLevel, center, "undead_siege"); // explicit center, no structure lookup
+List<RaidInstance> active = EcaAPI.getActiveRaids(serverLevel);
+RaidInstance nearest = EcaAPI.getNearestRaid(serverLevel, pos, 128.0);
+EcaAPI.endRaid(serverLevel, raid, true);                                       // ends in victory, clears surviving raiders
 ```
 
 ### Entity Extensions
@@ -827,6 +885,141 @@ EcaAPI.isBossShowPlaying(viewer); // check if viewer is in a cutscene
     ```
 - **Hot reload** — `/eca bossShow reload` picks up all JSON changes without restarting.
 
+### Faction System
+
+ECA provides a faction system that decides who is hostile to whom. Binding an entity to a faction makes vanilla AI, target selectors and every ECA attack path respect that relationship — you do not need to implement an interface or write a mixin. All faction-related checks funnel through a single entry point, `FactionUtil.canAttack`.
+
+Factions are registered by extending `FactionDefinition` and annotating the class with `@RegisterFaction`. Definitions are scanned during `FMLLoadCompleteEvent`; duplicate ids are logged and skipped (first one scanned wins). Factions can also be created at runtime through `EcaAPI.createFaction`, with or without persistence.
+
+Four relations are available:
+- `SAME_FACTION` — same faction id, fully immune to each other and never targeted
+- `FRIENDLY` — different factions but allied, no damage and no targeting
+- `NEUTRAL` — not deliberately targeted, but incidental damage still applies
+- `HOSTILE` — normal combat
+
+Relation resolution runs in this order, and the first match wins:
+1. Same faction id → `SAME_FACTION`
+2. A's `getRelation(self, target)` conditional override
+3. A's static `hostileTo` / `friendlyTo` / `neutralTo` arrays
+4. Symmetric fallback — the same two checks evaluated from B's side
+5. A's `getDefaultRelation(self, target)` conditional override (only when the other side has no faction)
+6. A's static default relation
+
+Entity bindings are stored in the overworld's SavedData, so they are global across dimensions and survive restarts. A binding is dropped when the entity is permanently removed; chunk unloads and dimension changes keep it, and players keep theirs across death and respawn.
+
+A faction may optionally declare which entity types it consists of through `getMemberEntityTypes()`, mapping types to spawn weights. This lets other systems spawn "some members of this faction" without naming concrete types — the raid system uses it for faction-drawn waves.
+
+```java
+@RegisterFaction
+public class UndeadLegionFaction extends FactionDefinition {
+
+    @Override public String getId() { return "undead_legion"; }
+    @Override public String getDisplayName() { return "faction.your_mod.undead_legion"; }
+    @Override public int getColor() { return 0xFF884400; }
+
+    // relation toward entities that belong to no faction
+    @Override public FactionRelation getStaticDefaultRelation() { return FactionRelation.HOSTILE; }
+
+    @Override public String[] getFriendlyTo() { return new String[]{"lich_coven"}; }
+    @Override public String[] getHostileTo() { return new String[]{"village_guard"}; }
+
+    // optional: conditional relation, return null to fall back to the static arrays above
+    @Override
+    public FactionRelation getRelation(LivingEntity self, Entity target) {
+        if (target instanceof Player player && player.isCreative()) {
+            return FactionRelation.NEUTRAL;
+        }
+        return null;
+    }
+
+    // optional: entity type pool with spawn weights, used by faction-drawn raid waves
+    @Override
+    public Map<EntityType<?>, Integer> getMemberEntityTypes() {
+        return Map.of(
+            EntityType.ZOMBIE, 5,
+            EntityType.SKELETON, 3,
+            EntityType.WITHER_SKELETON, 1
+        );
+    }
+}
+```
+
+Faction members can glow in their relation color for nearby players, and a hurt member alerts nearby allies that have no target to retaliate against the attacker. Both are configurable.
+
+### Raid System
+
+ECA provides a customizable raid system. The vanilla raid only works on villages, only accepts entities implementing `Raider`, and hardcodes its victory condition and rewards; an ECA raid can target any structure, use any entity type, and replace every rule that governs how it progresses and ends.
+
+Raids are registered by extending `RaidDefinition` and annotating with `@RegisterRaid`. Scanning runs after faction scanning, so a raid definition may freely reference faction ids. Only `getId()`, `getDisplayName()` and `getWaves()` are required — everything else has a working default modelled on the vanilla raid.
+
+**Targeting.** Override `getTargetStructure()` for a single structure, or `getTargetStructureTag()` to match any structure carrying a tag so one raid applies to several structure types. Anchoring drives the default defeat condition: the raid is lost when the target structure no longer covers the raid center. Declaring neither runs the raid unanchored, in which case it can only end by victory, timeout, or an explicit end call.
+
+**Waves.** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws that pull from a faction's `getMemberEntityTypes()` pool by weight.
+
+**Raiders.** Spawned raiders are bound to `getRaiderFactionId()` and receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight whatever is in front of them and only advance when they have no target. Any entity type works and no interface is required; entities without a `goalSelector` simply rely on faction aggression instead.
+
+**Progression.** `shouldAdvanceWave`, `checkVictory` and `checkDefeat` are all overridable. The defaults reproduce vanilla semantics: the next wave spawns once the previous one is dead, and the defenders win when every wave has spawned and every raider is gone.
+
+**Endless raids.** `isEndless()` cycles the wave list forever and never satisfies the default victory condition. Finish one with `EcaAPI.endRaid`, which discards every surviving raider.
+
+Raids run per dimension, persist across restarts, and keep their center chunk force-loaded for the duration so they do not freeze when no player is nearby.
+
+```java
+@RegisterRaid
+public class UndeadSiege extends RaidDefinition {
+
+    @Override public String getId() { return "undead_siege"; }
+    @Override public String getDisplayName() { return "raid.your_mod.undead_siege"; }
+    @Override public String getRaiderFactionId() { return "undead_legion"; }
+
+    @Override
+    public ResourceKey<Structure> getTargetStructure() {
+        return ResourceKey.create(Registries.STRUCTURE, new ResourceLocation("minecraft", "village_plains"));
+    }
+
+    @Override
+    public List<RaidWave> getWaves() {
+        return List.of(
+            // explicit entity types
+            new RaidWave().addEntry(EntityType.ZOMBIE, 6),
+            // drawn from the faction's member pool by weight
+            new RaidWave().addFaction("undead_legion", 10),
+            // both sources mixed, with a per-mob post-spawn callback
+            new RaidWave()
+                .addEntry(EntityType.WITHER_SKELETON, 4, mob -> mob.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.NETHERITE_SWORD)))
+                .addFaction("undead_legion", 8)
+                .spawnRadius(32.0)
+        );
+    }
+
+    // optional: replace the default victory condition
+    @Override
+    public boolean checkVictory(RaidContext ctx) {
+        return ctx.isAllWavesSpawned() && ctx.getAliveRaiderCount() == 0;
+    }
+
+    @Override
+    public void onVictory(RaidContext ctx) {
+        for (ServerPlayer player : ctx.getNearbyPlayers()) {
+            player.giveExperiencePoints(500);
+        }
+    }
+}
+```
+
+Registering a definition does not start anything. Raids are started explicitly so that any trigger condition can drive them — entering a region, using an item, a command, a scheduled event:
+
+```java
+// starts inside the target structure; the center comes from the structure's bounding box
+RaidInstance raid = EcaAPI.startRaid(serverLevel, pos, "undead_siege");
+
+// explicit center, structure lookup skipped
+RaidInstance forced = EcaAPI.startRaidAt(serverLevel, center, "undead_siege");
+
+// end it early, clearing every surviving raider
+EcaAPI.endRaid(serverLevel, raid, true);
+```
+
 ### ECA Transformer Whitelist
 
 Although I've added as many common libraries and mods to the ECA Transformer whitelist as possible, there may still be mods that crash due to ECA transformation. So I've prepared a JSON configuration for modpack developers to add package prefixes to the whitelist. You can add JSON files under the `config/eca/` folder. If the folder is empty on first launch, example files will be generated automatically.
@@ -914,6 +1107,19 @@ Any `.json` filename works, and you can have multiple files.
 - `/eca resurrection check <目标>` - 对实体进行一次性容器完整性检查（不执行复活）
 - `/eca resurrection revive <目标>` - 立即手动强制复活一个被追踪的实体
 - `/eca resurrection interval <毫秒>` - 设置轮询间隔（100~10000 ms，默认 25 ms）
+- `/eca faction create <id> <显示名> [颜色]` - 创建阵营（颜色可用预设名，如 red/gold/teal）
+- `/eca faction remove <id>` - 删除阵营定义，并清除指向它的全部实体绑定
+- `/eca faction join <阵营ID> [目标]` - 将实体加入阵营（省略目标时为命令执行者）
+- `/eca faction leave [目标]` - 将实体移出当前阵营
+- `/eca faction list` - 列出全部已注册阵营
+- `/eca faction info [阵营ID]` - 查看阵营的颜色、成员与关系覆盖
+- `/eca faction relation <阵营A> <阵营B> <关系>` - 设置 A 对 B 的关系（hostile/neutral/friendly）
+- `/eca raid defs` - 列出全部已注册的袭击定义
+- `/eca raid list` - 列出当前维度的活跃袭击
+- `/eca raid start <定义ID> [坐标]` - 在目标结构内发起袭击（省略坐标时为命令执行者位置）
+- `/eca raid startat <定义ID> <坐标>` - 以指定坐标为中心强制发起袭击，跳过结构查询
+- `/eca raid info <实例ID>` - 查看单场袭击的详情
+- `/eca raid end <实例ID> <victory|defeat>` - 结束袭击并清除全部仍存活的袭击者
 
 新增了由 ECA 选择器实现的命令选择器：
 - `@eca_e[...]` - 所有实体
@@ -1057,6 +1263,34 @@ side="BOTH"
 - `getResurrectionTotalChecks()` - 获取累计检查次数
 - `checkResurrectionTarget(level, entity)` - 进行一次容器完整性检查
 - `reviveResurrectionTarget(level, entity)` - 手动强制复活被追踪的实体
+- `createFaction(id, displayName, color)` - 创建并注册阵营（仅内存）
+- `createFaction(id, displayName, color, level)` - 创建并注册阵营，持久化到世界存档
+- `removeFaction(id)` - 删除阵营定义（仅内存）
+- `removeFaction(id, level)` - 删除阵营定义，并清除指向它的全部实体绑定
+- `getFaction(id)` - 按 ID 获取阵营定义
+- `getAllFactions()` - 获取全部已注册阵营
+- `joinFaction(entity, factionId)` - 将实体绑定到阵营
+- `leaveFaction(entity)` - 将实体移出所属阵营
+- `getEntityFaction(entity)` - 获取实体所属阵营 ID（无阵营返回 null）
+- `areSameFaction(a, b)` - 判断两个实体是否属于同一阵营
+- `getFactionMembers(level, factionId)` - 获取该世界中属于指定阵营的全部实体（O(n) 扫描，避免每 tick 调用）
+- `kickAllFromFaction(factionId, level)` - 将该世界中指定阵营的全部实体移出
+- `setFactionRelation(a, b, relation)` - 设置阵营 A 对阵营 B 的关系（仅内存）
+- `setFactionRelation(a, b, relation, level)` - 设置阵营 A 对 B 的关系并持久化
+- `getFactionRelation(a, b)` - 查询 A 对 B 的显式关系（无覆盖返回 null）
+- `getEffectiveFactionRelation(source, target)` - 解析两个实体之间的有效关系
+- `canHarm(source, target)` - 判断阵营规则是否允许 source 攻击 target
+- `alertFactionMembers(factionId, attacker, victim, level)` - 让附近无目标的同阵营盟友反击攻击者
+- `getFactionMemberTypes(factionId)` - 获取阵营声明的成员实体类型池（类型 → 权重）
+- `rollFactionMemberType(factionId, random)` - 按权重从阵营成员类型池抽取一个实体类型
+- `startRaid(level, pos, raidId)` - 在目标结构内发起袭击（中心取自结构包围盒）
+- `startRaidAt(level, center, raidId)` - 以指定坐标为中心发起袭击，跳过结构查询
+- `endRaid(level, raid, victory)` - 结束袭击并清除全部仍存活的袭击者
+- `endRaid(level, raidId, victory)` - 按实例 ID 结束袭击并清除全部仍存活的袭击者
+- `getRaid(level, raidId)` - 按实例 ID 获取活跃袭击
+- `getActiveRaids(level)` - 获取该世界中的全部活跃袭击
+- `getNearestRaid(level, pos, maxDistance)` - 获取指定范围内最近的活跃袭击
+- `getAllRaidDefinitions()` - 获取全部已注册的袭击定义
 
 以下是一个简易示例：
 
@@ -1188,6 +1422,23 @@ boolean tracked = EcaAPI.isResurrectionTracked(entity);
 EcaAPI.removeResurrectionTarget(entity);
 EcaAPI.setResurrectionPollInterval(50);
 EcaAPI.stopResurrection();
+
+// 阵营
+EcaAPI.createFaction("undead_legion", "亡灵军团", 0xFF884400, serverLevel);
+EcaAPI.setFactionRelation("undead_legion", "village_guard", FactionRelation.HOSTILE, serverLevel);
+EcaAPI.joinFaction(entity, "undead_legion");
+String factionId = EcaAPI.getEntityFaction(entity);
+boolean allied = EcaAPI.areSameFaction(entityA, entityB);
+boolean mayAttack = EcaAPI.canHarm(attacker, target);
+FactionRelation relation = EcaAPI.getEffectiveFactionRelation(attacker, target);
+EcaAPI.leaveFaction(entity);
+
+// 袭击
+RaidInstance raid = EcaAPI.startRaid(serverLevel, pos, "undead_siege");        // 中心取自目标结构
+RaidInstance forced = EcaAPI.startRaidAt(serverLevel, center, "undead_siege"); // 指定中心，跳过结构查询
+List<RaidInstance> active = EcaAPI.getActiveRaids(serverLevel);
+RaidInstance nearest = EcaAPI.getNearestRaid(serverLevel, pos, 128.0);
+EcaAPI.endRaid(serverLevel, raid, true);                                       // 以胜利结束并清除存活袭击者
 ```
 
 ### 实体扩展
@@ -1686,6 +1937,141 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
     }
     ```
 - **热重载** — `/eca bossShow reload` 立即加载所有 JSON 更改，无需重启游戏。
+
+### 阵营系统
+
+本 Mod 提供了一套阵营系统，用于决定谁与谁敌对。将实体绑定到阵营后，原版 AI、目标选择器以及 ECA 的全部攻击路径都会遵守该关系，你无需实现任何接口或编写混入。所有阵营相关判断都汇聚到唯一入口 `FactionUtil.canAttack`。
+
+注册阵营需要创建继承 `FactionDefinition` 的子类，并在类上标注 `@RegisterFaction`。ECA 在 `FMLLoadCompleteEvent` 期间扫描全部 Mod，重复 ID 会被记录并跳过（先扫描到的生效）。也可以通过 `EcaAPI.createFaction` 在运行时创建阵营，可选择是否持久化。
+
+四种关系：
+- `SAME_FACTION` — 同一阵营，完全免伤且不会被设为目标
+- `FRIENDLY` — 不同阵营但结盟，不造成伤害也不设目标
+- `NEUTRAL` — 不会被主动设为目标，但误伤仍然生效
+- `HOSTILE` — 正常敌对
+
+关系解析按以下顺序进行，命中即返回：
+1. 阵营 ID 相同 → `SAME_FACTION`
+2. A 的 `getRelation(self, target)` 条件覆写
+3. A 的静态 `hostileTo` / `friendlyTo` / `neutralTo` 预设
+4. 对称回退 —— 从 B 的角度重复上述两项判断
+5. A 的 `getDefaultRelation(self, target)` 条件覆写（仅当对方无阵营时）
+6. A 的静态默认关系
+
+实体绑定存储于主世界存档，因此跨维度全局共享并且能在重启后恢复。实体被永久移除时绑定会被清除；区块卸载和跨维度传送会保留绑定，玩家的绑定则在死亡重生后始终保留。
+
+阵营还可以通过 `getMemberEntityTypes()` 声明自己由哪些实体类型构成（类型 → 权重）。这使得其他系统无需指定具体类型即可生成"该阵营的一些成员"——袭击系统的按阵营抽取波次正是基于此。
+
+```java
+@RegisterFaction
+public class UndeadLegionFaction extends FactionDefinition {
+
+    @Override public String getId() { return "undead_legion"; }
+    @Override public String getDisplayName() { return "faction.your_mod.undead_legion"; }
+    @Override public int getColor() { return 0xFF884400; }
+
+    // 对无阵营实体的默认态度
+    @Override public FactionRelation getStaticDefaultRelation() { return FactionRelation.HOSTILE; }
+
+    @Override public String[] getFriendlyTo() { return new String[]{"lich_coven"}; }
+    @Override public String[] getHostileTo() { return new String[]{"village_guard"}; }
+
+    // 可选：条件关系，返回 null 则回退到上面的静态预设
+    @Override
+    public FactionRelation getRelation(LivingEntity self, Entity target) {
+        if (target instanceof Player player && player.isCreative()) {
+            return FactionRelation.NEUTRAL;
+        }
+        return null;
+    }
+
+    // 可选：成员实体类型池（类型 → 权重），供按阵营抽取的袭击波次使用
+    @Override
+    public Map<EntityType<?>, Integer> getMemberEntityTypes() {
+        return Map.of(
+            EntityType.ZOMBIE, 5,
+            EntityType.SKELETON, 3,
+            EntityType.WITHER_SKELETON, 1
+        );
+    }
+}
+```
+
+阵营成员可以按关系颜色对附近玩家发光；阵营成员受到攻击时，附近没有目标的同阵营盟友会转而攻击袭击者。两者均可在配置中开关。
+
+### 袭击系统
+
+本 Mod 提供了一套可自定义的袭击系统。原版袭击只能作用于村庄、只接受实现了 `Raider` 接口的实体，且胜利条件与奖励全部硬编码；ECA 的袭击可以指向任意结构、使用任意实体类型，并且能替换掉决定袭击如何推进与结束的每一条规则。
+
+注册袭击需要创建继承 `RaidDefinition` 的子类，并标注 `@RegisterRaid`。扫描排在阵营扫描之后，因此袭击定义可以自由引用阵营 ID。只有 `getId()`、`getDisplayName()` 和 `getWaves()` 必须覆写，其余全部带有仿原版的可用默认值。
+
+**目标锚定。** 覆写 `getTargetStructure()` 指向单一结构，或覆写 `getTargetStructureTag()` 匹配带有某个标签的任意结构，使一个袭击适用于多种结构。锚定决定了默认的失败条件：当目标结构不再覆盖袭击中心时判定防守失败。两者都不声明则袭击不锚定结构，此时只能通过胜利、超时或主动结束来终止。
+
+**波次。** 每个 `RaidWave` 可自由混用两种生成源——显式指定实体类型，以及按权重从阵营的 `getMemberEntityTypes()` 池中抽取。
+
+**袭击者。** 生成的袭击者会被绑定到 `getRaiderFactionId()`，并被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先攻击眼前的目标，只在没有目标时才向中心推进。任意实体类型均可使用，不要求实现任何接口；没有 `goalSelector` 的实体则仅依靠阵营敌对关系行动。
+
+**流程控制。** `shouldAdvanceWave`、`checkVictory` 和 `checkDefeat` 均可覆写。默认实现复现原版语义：上一波清空后生成下一波，全部波次生成完毕且袭击者全灭时防守方获胜。
+
+**无限波次。** `isEndless()` 会循环使用波次列表且永远不满足默认胜利条件。此类袭击需要通过 `EcaAPI.endRaid` 收尾，该方法会清除全部仍存活的袭击者。
+
+袭击按维度独立运行，可在重启后恢复，并在进行期间强制加载袭击中心所在区块，因此不会在附近无玩家时停摆。
+
+```java
+@RegisterRaid
+public class UndeadSiege extends RaidDefinition {
+
+    @Override public String getId() { return "undead_siege"; }
+    @Override public String getDisplayName() { return "raid.your_mod.undead_siege"; }
+    @Override public String getRaiderFactionId() { return "undead_legion"; }
+
+    @Override
+    public ResourceKey<Structure> getTargetStructure() {
+        return ResourceKey.create(Registries.STRUCTURE, new ResourceLocation("minecraft", "village_plains"));
+    }
+
+    @Override
+    public List<RaidWave> getWaves() {
+        return List.of(
+            // 显式指定实体类型
+            new RaidWave().addEntry(EntityType.ZOMBIE, 6),
+            // 按权重从阵营成员池抽取
+            new RaidWave().addFaction("undead_legion", 10),
+            // 两种来源混用，并对每个生成的实体做后处理
+            new RaidWave()
+                .addEntry(EntityType.WITHER_SKELETON, 4, mob -> mob.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.NETHERITE_SWORD)))
+                .addFaction("undead_legion", 8)
+                .spawnRadius(32.0)
+        );
+    }
+
+    // 可选：替换默认胜利条件
+    @Override
+    public boolean checkVictory(RaidContext ctx) {
+        return ctx.isAllWavesSpawned() && ctx.getAliveRaiderCount() == 0;
+    }
+
+    @Override
+    public void onVictory(RaidContext ctx) {
+        for (ServerPlayer player : ctx.getNearbyPlayers()) {
+            player.giveExperiencePoints(500);
+        }
+    }
+}
+```
+
+注册定义本身不会启动任何东西。袭击需要显式发起，因此任何触发条件都可以驱动它——进入某个区域、使用某个物品、执行命令、定时事件等：
+
+```java
+// 在目标结构内发起，中心取自结构包围盒
+RaidInstance raid = EcaAPI.startRaid(serverLevel, pos, "undead_siege");
+
+// 指定中心，跳过结构查询
+RaidInstance forced = EcaAPI.startRaidAt(serverLevel, center, "undead_siege");
+
+// 提前结束，并清除全部仍存活的袭击者
+EcaAPI.endRaid(serverLevel, raid, true);
+```
 
 ### ECA Transformer 白名单
 
