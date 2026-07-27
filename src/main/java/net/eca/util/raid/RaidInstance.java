@@ -1,5 +1,7 @@
 package net.eca.util.raid;
 
+import net.eca.network.NetworkHandler;
+import net.eca.network.RaidBossBarSyncPacket;
 import net.eca.util.EcaLogger;
 import net.eca.util.faction.FactionManager;
 import net.minecraft.core.BlockPos;
@@ -78,6 +80,12 @@ public class RaidInstance {
     private List<RaidWave> cachedWaves;
     private ServerBossEvent bossEvent;
 
+    // 上次已同步到客户端的状态，用于只在内容变化时发包而非每 tick 广播
+    private int lastSyncedWaves = -1;
+    private int lastSyncedAlive = -1;
+    private int lastSyncedWaveTotal = -1;
+    private RaidStatus lastSyncedStatus = null;
+
     // 创建一场袭击
     /**
      * @param id           unique raid id within the level
@@ -138,6 +146,11 @@ public class RaidInstance {
     // 获取当前存活袭击者数量
     public int getAliveRaiderCount() {
         return raiderUuids.size();
+    }
+
+    // 获取当前波次生成的袭击者总数（血条进度的分母）
+    public int getCurrentWaveTotal() {
+        return currentWaveTotal;
     }
 
     // 获取全部袭击者 UUID（只读）
@@ -475,6 +488,10 @@ public class RaidInstance {
     public void stop() {
         status = RaidStatus.STOPPED;
         if (bossEvent != null) {
+            // 解除客户端映射，否则该 BossEvent UUID 的状态会一直留在客户端表里
+            for (ServerPlayer player : new ArrayList<>(bossEvent.getPlayers())) {
+                NetworkHandler.sendToPlayer(new RaidBossBarSyncPacket(bossEvent.getId(), null), player);
+            }
             bossEvent.removeAllPlayers();
             bossEvent.setVisible(false);
         }
@@ -495,15 +512,40 @@ public class RaidInstance {
         List<ServerPlayer> nearby = new RaidContext(level, this).getNearbyPlayers();
         Set<ServerPlayer> shown = new HashSet<>(bar.getPlayers());
 
+        RaidBarState state = null;
         for (ServerPlayer player : nearby) {
             if (!shown.contains(player)) {
                 bar.addPlayer(player);
+                // 新加入的玩家没收到过状态，立即补发一次
+                if (state == null) {
+                    state = RaidBarState.of(this);
+                }
+                NetworkHandler.sendToPlayer(new RaidBossBarSyncPacket(bar.getId(), state), player);
             }
         }
         for (ServerPlayer player : shown) {
             if (!nearby.contains(player)) {
                 bar.removePlayer(player);
+                NetworkHandler.sendToPlayer(new RaidBossBarSyncPacket(bar.getId(), null), player);
             }
+        }
+    }
+
+    // 状态变化时向订阅了血条的玩家广播袭击快照
+    private void syncBarStateIfChanged(ServerBossEvent bar) {
+        int alive = getAliveRaiderCount();
+        if (wavesSpawned == lastSyncedWaves && alive == lastSyncedAlive
+                && currentWaveTotal == lastSyncedWaveTotal && status == lastSyncedStatus) {
+            return;
+        }
+        lastSyncedWaves = wavesSpawned;
+        lastSyncedAlive = alive;
+        lastSyncedWaveTotal = currentWaveTotal;
+        lastSyncedStatus = status;
+
+        RaidBarState state = RaidBarState.of(this);
+        for (ServerPlayer player : new ArrayList<>(bar.getPlayers())) {
+            NetworkHandler.sendToPlayer(new RaidBossBarSyncPacket(bar.getId(), state), player);
         }
     }
 
@@ -514,11 +556,13 @@ public class RaidInstance {
         if (status == RaidStatus.VICTORY) {
             bar.setName(name.copy().append(" - ").append(Component.translatable("raid.eca.victory")));
             bar.setProgress(0.0f);
+            syncBarStateIfChanged(bar);
             return;
         }
         if (status == RaidStatus.DEFEAT) {
             bar.setName(name.copy().append(" - ").append(Component.translatable("raid.eca.defeat")));
             bar.setProgress(0.0f);
+            syncBarStateIfChanged(bar);
             return;
         }
 
@@ -529,6 +573,7 @@ public class RaidInstance {
         bar.setName(name.copy().append(" - ").append(suffix)
                 .append(" (").append(Component.translatable("raid.eca.raiders_remaining", alive)).append(")"));
         bar.setProgress(Mth.clamp((float) alive / (float) currentWaveTotal, 0.0f, 1.0f));
+        syncBarStateIfChanged(bar);
     }
 
     // ==================== 持久化 ====================

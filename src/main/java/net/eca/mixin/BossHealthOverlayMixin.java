@@ -1,28 +1,20 @@
 package net.eca.mixin;
 
-import com.mojang.blaze3d.platform.GlStateManager;
-import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.vertex.BufferBuilder;
-import com.mojang.blaze3d.vertex.BufferUploader;
-import com.mojang.blaze3d.vertex.DefaultVertexFormat;
-import com.mojang.blaze3d.vertex.Tesselator;
-import com.mojang.blaze3d.vertex.VertexConsumer;
-import com.mojang.blaze3d.vertex.VertexFormat;
-import net.minecraft.client.renderer.GameRenderer;
-import net.eca.client.render.shader.EcaShaderInstance;
+import net.eca.client.render.EcaBossBarRenderer;
 import net.eca.util.entity_extension.EntityExtensionClientState;
-import net.eca.client.render.TextureSizeCache;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.EntityExtensionSafeAccess;
-import net.eca.util.EcaLogger;
 import net.eca.util.entity_extension.BossBarExtension;
+import net.eca.util.raid.RaidBarState;
+import net.eca.util.raid.RaidBossBarExtension;
+import net.eca.util.raid.RaidClientState;
+import net.eca.util.raid.RaidDefinition;
+import net.eca.util.raid.RaidManager;
+import net.eca.util.raid.RaidSafeAccess;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.BossHealthOverlay;
-import net.minecraft.client.renderer.RenderType;
-import net.minecraft.client.renderer.LightTexture;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.BossEvent;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
@@ -30,7 +22,6 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import java.util.UUID;
-import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -41,17 +32,19 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(BossHealthOverlay.class)
 public class BossHealthOverlayMixin {
 
-    private static final int BAR_WIDTH = 182;
-    private static final int BAR_HEIGHT = 5;
-
     @Inject(method = "drawBar(Lnet/minecraft/client/gui/GuiGraphics;IILnet/minecraft/world/BossEvent;)V", at = @At("HEAD"), cancellable = true)
     private void eca$drawCustomBossBar(GuiGraphics graphics, int x, int y, BossEvent event, CallbackInfo ci) {
-        if (tryRenderCustomBossBar(graphics, x, y, event)) {
+        // 实体扩展优先；未命中再尝试袭击血条
+        if (eca$tryRenderEntityExtensionBar(graphics, y, event)
+                || eca$tryRenderRaidBar(graphics, y, event)) {
             ci.cancel();
         }
     }
 
-    private boolean tryRenderCustomBossBar(GuiGraphics graphics, int x, int y, BossEvent event) {
+    // ==================== 实体扩展血条 ====================
+
+    @Unique
+    private boolean eca$tryRenderEntityExtensionBar(GuiGraphics graphics, int y, BossEvent event) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) {
             return false;
@@ -86,213 +79,62 @@ public class BossHealthOverlayMixin {
             return true;
         }
 
-        ResourceLocation frameTexture = bossBar.getFrameTexture();
-        ResourceLocation fillTexture = bossBar.getFillTexture();
-        RenderType frameType = bossBar.getFrameRenderType();
-        RenderType fillType = bossBar.getFillRenderType();
+        EcaBossBarRenderer.BarAppearance appearance = new EcaBossBarRenderer.BarAppearance();
+        appearance.frameTexture = bossBar.getFrameTexture();
+        appearance.fillTexture = bossBar.getFillTexture();
+        appearance.frameRenderType = bossBar.getFrameRenderType();
+        appearance.fillRenderType = bossBar.getFillRenderType();
+        appearance.frameWidth = bossBar.getFrameWidth();
+        appearance.frameHeight = bossBar.getFrameHeight();
+        appearance.fillWidth = bossBar.getFillWidth();
+        appearance.fillHeight = bossBar.getFillHeight();
+        appearance.frameOffsetX = bossBar.getFrameOffsetX();
+        appearance.frameOffsetY = bossBar.getFrameOffsetY();
+        appearance.fillOffsetX = bossBar.getFillOffsetX();
+        appearance.fillOffsetY = bossBar.getFillOffsetY();
+        appearance.frameAlpha = bossBar.getFrameAlpha();
+        appearance.fillAlpha = bossBar.getFillAlpha();
 
         // 启用了 bossBarExtension 但未设置任何自定义渲染 → 隐藏原版 bar，不渲染任何内容
-        if (frameTexture == null && fillTexture == null && frameType == null && fillType == null) {
+        if (appearance.isEmpty()) {
             return true;
         }
 
-        int barWidth = BAR_WIDTH;
-        int barHeight = BAR_HEIGHT;
-        int fillTextureWidth = BAR_WIDTH;
-        int fillTextureHeight = BAR_HEIGHT;
+        return EcaBossBarRenderer.draw(graphics, y, event.getProgress(), appearance,
+                extension.getClass().getName());
+    }
 
-        if (frameTexture != null) {
-            TextureSizeCache.Size frameSize = TextureSizeCache.get(frameTexture);
-            barWidth = frameSize.width();
-            barHeight = frameSize.height();
-        } else if (frameType != null) {
-            barWidth = bossBar.getFrameWidth();
-            barHeight = bossBar.getFrameHeight();
-        }
+    // ==================== 袭击血条 ====================
 
-        if (fillTexture != null) {
-            TextureSizeCache.Size fillSize = TextureSizeCache.get(fillTexture);
-            fillTextureWidth = fillSize.width();
-            fillTextureHeight = fillSize.height();
-        } else if (fillType != null) {
-            fillTextureWidth = bossBar.getFillWidth();
-            fillTextureHeight = bossBar.getFillHeight();
-        } else {
-            fillTextureWidth = barWidth;
-            fillTextureHeight = barHeight;
-        }
-
-        if (frameType != null && (barWidth <= 0 || barHeight <= 0)) {
-            EcaLogger.warn("Custom boss bar frame size must be set for {}", extension.getClass().getName());
+    @Unique
+    private boolean eca$tryRenderRaidBar(GuiGraphics graphics, int y, BossEvent event) {
+        RaidBarState state = RaidClientState.getBarState(event.getId());
+        if (state == null) {
             return false;
         }
 
-        if (fillType != null && (fillTextureWidth <= 0 || fillTextureHeight <= 0)) {
-            EcaLogger.warn("Custom boss bar fill size must be set for {}", extension.getClass().getName());
+        RaidDefinition definition = RaidManager.getDefinition(state.getDefinitionId());
+        if (definition == null) {
             return false;
         }
 
-        int fillWidth = (int) (event.getProgress() * (float) fillTextureWidth);
-
-        int layoutWidth = barWidth;
-        if (frameTexture == null && frameType == null && fillTextureWidth > 0) {
-            layoutWidth = fillTextureWidth;
+        RaidBossBarExtension bossBar = RaidSafeAccess.bossBarExtension(definition);
+        if (bossBar == null || !RaidSafeAccess.enabled(bossBar)) {
+            return false;
+        }
+        if (!RaidSafeAccess.shouldRender(bossBar, state)) {
+            return true;
         }
 
-        float scale = 1.0f;
-        int guiWidth = graphics.guiWidth();
-        if (layoutWidth > 0) {
-            float availableWidth = Math.max(1.0f, (float) guiWidth - 20.0f);
-            scale = Math.min(1.0f, availableWidth / (float) layoutWidth);
+        EcaBossBarRenderer.BarAppearance appearance = RaidSafeAccess.resolveAppearance(bossBar, state);
+
+        // 启用了自定义血条但未设置任何可绘制内容 → 隐藏原版 bar
+        if (appearance.isEmpty()) {
+            return true;
         }
 
-        float scaledWidth = layoutWidth * scale;
-        float renderX = (guiWidth - scaledWidth) * 0.5f;
-
-        graphics.pose().pushPose();
-        graphics.pose().translate(renderX, y, 0.0f);
-        graphics.pose().scale(scale, scale, 1.0f);
-
-        int frameOffsetX = bossBar.getFrameOffsetX();
-        int frameOffsetY = bossBar.getFrameOffsetY();
-        int fillOffsetX = bossBar.getFillOffsetX();
-        int fillOffsetY = bossBar.getFillOffsetY();
-
-        int baseFillOffsetX = Math.max(0, (barWidth - fillTextureWidth) / 2);
-        int baseFillOffsetY = Math.max(0, (barHeight - fillTextureHeight) / 2);
-        int fillDrawX = baseFillOffsetX + fillOffsetX;
-        int fillDrawY = baseFillOffsetY + fillOffsetY;
-
-        int frameDrawX = frameOffsetX;
-        int frameDrawY = frameOffsetY;
-
-        // 外框：满宽渲染（先渲染作为底层）
-        eca$renderLayer(graphics, frameTexture, frameType,
-                frameDrawX, frameDrawY, barWidth, barHeight, barWidth, barHeight, bossBar.getFrameAlpha());
-
-        // 填充：按 progress 裁剪渲染（后渲染覆盖在外框上方）
-        if (fillWidth > 0) {
-            eca$renderLayer(graphics, fillTexture, fillType,
-                    fillDrawX, fillDrawY, fillWidth, fillTextureHeight, fillTextureWidth, fillTextureHeight, bossBar.getFillAlpha());
-        }
-
-        graphics.pose().popPose();
-
-        return true;
-    }
-
-    @Unique
-    private void eca$renderLayer(GuiGraphics graphics, ResourceLocation texture, RenderType renderType,
-                                 int x, int y, int drawWidth, int drawHeight, int fullWidth, int fullHeight,
-                                 float alpha) {
-        if (texture == null && renderType == null) {
-            return;
-        }
-        EcaShaderInstance.setOpacity(alpha);
-        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, alpha);
-        try {
-            if (texture != null && renderType != null) {
-                drawTextureWithShaderMask(graphics, texture, renderType,
-                        x, y, drawWidth, drawHeight, fullWidth, fullHeight);
-            } else if (texture != null) {
-                graphics.blit(texture, x, y, 0, 0, drawWidth, drawHeight, fullWidth, fullHeight);
-            } else {
-                drawRenderType(graphics, renderType, x, y, drawWidth, drawHeight, fullWidth);
-            }
-        } finally {
-            RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-            EcaShaderInstance.clearOpacity();
-        }
-    }
-
-    @Unique
-    private void drawTextureWithShaderMask(GuiGraphics graphics, ResourceLocation texture, RenderType renderType,
-                                           int x, int y, int drawWidth, int drawHeight, int fullWidth, int fullHeight) {
-        graphics.flush();
-        Matrix4f matrix = graphics.pose().last().pose();
-
-        // 清除渲染区域的 alpha 通道为 0
-        RenderSystem.colorMask(false, false, false, true);
-        RenderSystem.enableBlend();
-        RenderSystem.blendFuncSeparate(
-                GlStateManager.SourceFactor.ZERO, GlStateManager.DestFactor.ZERO,
-                GlStateManager.SourceFactor.ZERO, GlStateManager.DestFactor.ZERO
-        );
-        RenderSystem.setShader(GameRenderer::getPositionColorShader);
-        BufferBuilder clearBuilder = Tesselator.getInstance().getBuilder();
-        clearBuilder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
-        clearBuilder.vertex(matrix, x, y + drawHeight, 0).color(0, 0, 0, 255).endVertex();
-        clearBuilder.vertex(matrix, x + drawWidth, y + drawHeight, 0).color(0, 0, 0, 255).endVertex();
-        clearBuilder.vertex(matrix, x + drawWidth, y, 0).color(0, 0, 0, 255).endVertex();
-        clearBuilder.vertex(matrix, x, y, 0).color(0, 0, 0, 255).endVertex();
-        BufferUploader.drawWithShader(clearBuilder.end());
-        RenderSystem.colorMask(true, true, true, true);
-
-        // 渲染贴图，alpha 通道直接写入帧缓冲区
-        RenderSystem.enableBlend();
-        RenderSystem.blendFuncSeparate(
-                GlStateManager.SourceFactor.SRC_ALPHA, GlStateManager.DestFactor.ONE_MINUS_SRC_ALPHA,
-                GlStateManager.SourceFactor.ONE, GlStateManager.DestFactor.ZERO
-        );
-        RenderSystem.setShaderTexture(0, texture);
-        RenderSystem.setShader(GameRenderer::getPositionTexShader);
-        float texU1 = fullWidth <= 0 ? 0.0f : (float) drawWidth / (float) fullWidth;
-        float texV1 = fullHeight <= 0 ? 0.0f : (float) drawHeight / (float) fullHeight;
-        BufferBuilder texBuilder = Tesselator.getInstance().getBuilder();
-        texBuilder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);
-        texBuilder.vertex(matrix, x, y + drawHeight, 0).uv(0.0f, texV1).endVertex();
-        texBuilder.vertex(matrix, x + drawWidth, y + drawHeight, 0).uv(texU1, texV1).endVertex();
-        texBuilder.vertex(matrix, x + drawWidth, y, 0).uv(texU1, 0.0f).endVertex();
-        texBuilder.vertex(matrix, x, y, 0).uv(0.0f, 0.0f).endVertex();
-        BufferUploader.drawWithShader(texBuilder.end());
-
-        // 将 alpha 缩放到 0.5，使着色器半透明叠加在贴图上
-        RenderSystem.colorMask(false, false, false, true);
-        RenderSystem.enableBlend();
-        RenderSystem.blendFuncSeparate(
-                GlStateManager.SourceFactor.ZERO, GlStateManager.DestFactor.ONE,
-                GlStateManager.SourceFactor.ZERO, GlStateManager.DestFactor.SRC_ALPHA
-        );
-        RenderSystem.setShader(GameRenderer::getPositionColorShader);
-        BufferBuilder scaleBuilder = Tesselator.getInstance().getBuilder();
-        scaleBuilder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
-        scaleBuilder.vertex(matrix, x, y + drawHeight, 0).color(0, 0, 0, 127).endVertex();
-        scaleBuilder.vertex(matrix, x + drawWidth, y + drawHeight, 0).color(0, 0, 0, 127).endVertex();
-        scaleBuilder.vertex(matrix, x + drawWidth, y, 0).color(0, 0, 0, 127).endVertex();
-        scaleBuilder.vertex(matrix, x, y, 0).color(0, 0, 0, 127).endVertex();
-        BufferUploader.drawWithShader(scaleBuilder.end());
-        RenderSystem.colorMask(true, true, true, true);
-
-        // 渲染着色器，使用 DST_ALPHA 混合（只在贴图非透明区域显示）
-        renderType.setupRenderState();
-        RenderSystem.blendFuncSeparate(
-                GlStateManager.SourceFactor.DST_ALPHA, GlStateManager.DestFactor.ONE_MINUS_DST_ALPHA,
-                GlStateManager.SourceFactor.ZERO, GlStateManager.DestFactor.ONE
-        );
-        float shaderU1 = fullWidth <= 0 ? 0.0f : (float) drawWidth / (float) fullWidth;
-        int light = LightTexture.FULL_BRIGHT;
-        BufferBuilder shaderBuilder = Tesselator.getInstance().getBuilder();
-        shaderBuilder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.BLOCK);
-        shaderBuilder.vertex(matrix, x, y + drawHeight, 0).color(1.0f, 1.0f, 1.0f, 1.0f).uv(0.0f, 1.0f).uv2(light).normal(0.0f, 0.0f, 1.0f).endVertex();
-        shaderBuilder.vertex(matrix, x + drawWidth, y + drawHeight, 0).color(1.0f, 1.0f, 1.0f, 1.0f).uv(shaderU1, 1.0f).uv2(light).normal(0.0f, 0.0f, 1.0f).endVertex();
-        shaderBuilder.vertex(matrix, x + drawWidth, y, 0).color(1.0f, 1.0f, 1.0f, 1.0f).uv(shaderU1, 0.0f).uv2(light).normal(0.0f, 0.0f, 1.0f).endVertex();
-        shaderBuilder.vertex(matrix, x, y, 0).color(1.0f, 1.0f, 1.0f, 1.0f).uv(0.0f, 0.0f).uv2(light).normal(0.0f, 0.0f, 1.0f).endVertex();
-        BufferUploader.drawWithShader(shaderBuilder.end());
-        renderType.clearRenderState();
-
-        RenderSystem.defaultBlendFunc();
-    }
-
-    @Unique
-    private void drawRenderType(GuiGraphics graphics, RenderType renderType, int x, int y, int width, int height, int fullWidth) {
-        float u1 = fullWidth <= 0 ? 0.0f : (float) width / (float) fullWidth;
-        Matrix4f matrix = graphics.pose().last().pose();
-        VertexConsumer consumer = graphics.bufferSource().getBuffer(renderType);
-        int light = LightTexture.FULL_BRIGHT;
-        consumer.vertex(matrix, x, y + height, 0).color(1.0f, 1.0f, 1.0f, 1.0f).uv(0.0f, 1.0f).uv2(light).normal(0.0f, 0.0f, 1.0f).endVertex();
-        consumer.vertex(matrix, x + width, y + height, 0).color(1.0f, 1.0f, 1.0f, 1.0f).uv(u1, 1.0f).uv2(light).normal(0.0f, 0.0f, 1.0f).endVertex();
-        consumer.vertex(matrix, x + width, y, 0).color(1.0f, 1.0f, 1.0f, 1.0f).uv(u1, 0.0f).uv2(light).normal(0.0f, 0.0f, 1.0f).endVertex();
-        consumer.vertex(matrix, x, y, 0).color(1.0f, 1.0f, 1.0f, 1.0f).uv(0.0f, 0.0f).uv2(light).normal(0.0f, 0.0f, 1.0f).endVertex();
-        graphics.flush();
+        float progress = RaidSafeAccess.progress(bossBar, state, event.getProgress());
+        return EcaBossBarRenderer.draw(graphics, y, progress, appearance,
+                definition.getClass().getName());
     }
 }

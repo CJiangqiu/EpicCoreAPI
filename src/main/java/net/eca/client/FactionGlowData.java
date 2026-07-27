@@ -1,5 +1,8 @@
 package net.eca.client;
 
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
+
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -7,9 +10,10 @@ import java.util.concurrent.ConcurrentHashMap;
 /*
  * 阵营发光数据 — 客户端侧存储实体 ID → 发光颜色的映射。
  *
- * 由 FactionGlowSyncPacket 更新，由 EntityMixin 的 isCurrentlyGlowing / getTeamColor 注入消费。
+ * 由 FactionGlowSyncPacket 更新，由 EntityFactionGlowMixin 的 isCurrentlyGlowing / getTeamColor 注入消费。
  * 复用原版队伍发光描边系统，无需自定义渲染。
  */
+@OnlyIn(Dist.CLIENT)
 public class FactionGlowData {
 
     // entityId → ARGB color

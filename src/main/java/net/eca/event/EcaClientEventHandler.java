@@ -2,6 +2,7 @@ package net.eca.event;
 
 import net.eca.client.FactionGlowData;
 import net.eca.util.entity_extension.EntityExtensionClientState;
+import net.eca.util.raid.RaidClientState;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -17,5 +18,6 @@ public final class EcaClientEventHandler {
     public static void onClientLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
         EntityExtensionClientState.clearAll();
         FactionGlowData.clear();
+        RaidClientState.clearAll();
     }
 }

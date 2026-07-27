@@ -217,7 +217,7 @@ side="BOTH"
 - `getAllFactions()` - Get all registered factions
 - `joinFaction(entity, factionId)` - Bind an entity to a faction
 - `leaveFaction(entity)` - Unbind an entity from its faction
-- `getEntityFaction(entity)` - Get the faction id an entity belongs to (null if none)
+- `getEntityFaction(entity)` - Get the faction id an entity belongs to (null if none; tamed animals fall back to their owner's faction)
 - `areSameFaction(a, b)` - Check whether two entities share a faction
 - `getFactionMembers(level, factionId)` - Get all entities in a level belonging to a faction (O(n) scan, avoid per-tick use)
 - `kickAllFromFaction(factionId, level)` - Remove every entity in a level from a faction
@@ -907,6 +907,8 @@ Relation resolution runs in this order, and the first match wins:
 
 Entity bindings are stored in the overworld's SavedData, so they are global across dimensions and survive restarts. A binding is dropped when the entity is permanently removed; chunk unloads and dimension changes keep it, and players keep theirs across death and respawn.
 
+Tamed animals inherit their owner's faction automatically, so a pet is protected by its owner's allies, answers faction alerts, and counts as a faction member. The inheritance is resolved at lookup time rather than stored, which means a pet follows its owner across faction changes and never creates a binding of its own — calling `leaveFaction` on such a pet therefore does nothing. Bind a pet explicitly if it must belong elsewhere; an explicit binding always takes precedence over inheritance.
+
 A faction may optionally declare which entity types it consists of through `getMemberEntityTypes()`, mapping types to spawn weights. This lets other systems spawn "some members of this faction" without naming concrete types — the raid system uses it for faction-drawn waves.
 
 ```java
@@ -1271,7 +1273,7 @@ side="BOTH"
 - `getAllFactions()` - 获取全部已注册阵营
 - `joinFaction(entity, factionId)` - 将实体绑定到阵营
 - `leaveFaction(entity)` - 将实体移出所属阵营
-- `getEntityFaction(entity)` - 获取实体所属阵营 ID（无阵营返回 null）
+- `getEntityFaction(entity)` - 获取实体所属阵营 ID（无阵营返回 null；驯服动物回退为主人的阵营）
 - `areSameFaction(a, b)` - 判断两个实体是否属于同一阵营
 - `getFactionMembers(level, factionId)` - 获取该世界中属于指定阵营的全部实体（O(n) 扫描，避免每 tick 调用）
 - `kickAllFromFaction(factionId, level)` - 将该世界中指定阵营的全部实体移出
@@ -1959,6 +1961,8 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 6. A 的静态默认关系
 
 实体绑定存储于主世界存档，因此跨维度全局共享并且能在重启后恢复。实体被永久移除时绑定会被清除；区块卸载和跨维度传送会保留绑定，玩家的绑定则在死亡重生后始终保留。
+
+驯服动物会自动继承主人的阵营，因此宠物同样受主人盟友保护、会响应阵营求援、并被计入阵营成员。继承在查询时解析而非落库，这意味着宠物始终跟随主人换营且自身不会产生绑定——对这类宠物调用 `leaveFaction` 不会有任何效果。若希望宠物归属其他阵营，显式绑定即可，显式绑定始终优先于继承。
 
 阵营还可以通过 `getMemberEntityTypes()` 声明自己由哪些实体类型构成（类型 → 权重）。这使得其他系统无需指定具体类型即可生成"该阵营的一些成员"——袭击系统的按阵营抽取波次正是基于此。
 

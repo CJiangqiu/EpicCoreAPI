@@ -150,6 +150,12 @@ public class NetworkHandler {
                 .decoder(FactionGlowSyncPacket::decode)
                 .consumerMainThread(FactionGlowSyncPacket::handle)
                 .add();
+
+        CHANNEL.messageBuilder(RaidBossBarSyncPacket.class, id(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(RaidBossBarSyncPacket::encode)
+                .decoder(RaidBossBarSyncPacket::decode)
+                .consumerMainThread(RaidBossBarSyncPacket::handle)
+                .add();
     }
 
     /**

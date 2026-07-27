@@ -11,6 +11,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
@@ -23,10 +24,11 @@ import java.util.concurrent.ConcurrentHashMap;
 /*
  * 阵营管理器 — 实体-阵营绑定 + 阵营定义 + 关系查询
  *
- * 三层查询：
+ * 四层查询：
  *   1. FACTION_MEMBER_IDS   — 快速路径，绝大多数实体不在此集合内，直接返回 null
  *   2. ENTITY_FACTION_CACHE  — WeakHashMap<Entity, String>，实体存活期间缓存，GC 时自动清除
  *   3. PERSISTENT_MEMBERS    — UUID→factionId，由 FactionSavedData 持久化，重启后恢复
+ *   4. 主人继承              — 驯服动物无自身绑定时继承主人阵营，纯计算不落库
  *
  * 持久化：
  *   - 阵营定义 + 实体绑定统一存储于 FactionSavedData（主世界 DataStorage）
@@ -432,6 +434,10 @@ public class FactionManager {
     // 实体退出阵营
     /**
      * Remove an entity from its current faction, if any.
+     * <p>
+     * This clears an explicit binding only. A tamed animal that merely inherits its owner's
+     * faction has no binding of its own, so calling this on one has no effect — it keeps
+     * following its owner. Bind the pet explicitly first if it must differ from its owner.
      *
      * @param entity the entity to unbind
      */
@@ -449,7 +455,8 @@ public class FactionManager {
     // 获取实体所属阵营 ID（三层查询）
     /**
      * Get the faction id an entity belongs to.
-     * Uses three-layer lookup: fast-path set → WeakHashMap cache → persistent UUID map.
+     * Uses four-layer lookup: fast-path set → WeakHashMap cache → persistent UUID map →
+     * owner inheritance for tamed animals.
      * The fast-path set is consulted first as an optimization, but a miss does NOT
      * short-circuit — the persistent SavedData layer is always checked as authoritative
      * source, and a hit there will populate both the cache and the fast-path set.
@@ -481,9 +488,34 @@ public class FactionManager {
             return persistent;
         }
 
+        // Layer 3: 驯服动物继承主人阵营（不写持久化，主人换营时自动跟随）
+        String inherited = resolveOwnerFaction(entity);
+        if (inherited != null) {
+            return inherited;
+        }
+
         // 完全未命中 → 清理快速路径脏数据
         FACTION_MEMBER_IDS.remove(entity.getId());
         return null;
+    }
+
+    /*
+     * 解析驯服动物继承自主人的阵营。
+     *
+     * 只读 owner UUID 直接查持久映射，不解析主人实体：这条在 canAttack 与发光扫描的
+     * 热路径上，且主人离线或不在同一维度时仍需正确继承。
+     *
+     * 只解析一层——原版 TamableAnimal.getOwner() 本身只支持玩家主人，
+     * 宠物的主人是另一只宠物属于第三方 mod 的边缘情况，不在此处递归。
+     *
+     * 结果不写入缓存与持久映射：宠物没有自己的绑定，主人改变阵营后下次查询自动跟随。
+     */
+    private static String resolveOwnerFaction(Entity entity) {
+        if (!(entity instanceof TamableAnimal pet)) return null;
+        UUID ownerUuid = pet.getOwnerUUID();
+        if (ownerUuid == null) return null;
+        String ownerFaction = PERSISTENT_MEMBERS.get(ownerUuid);
+        return (ownerFaction != null && !ownerFaction.isEmpty()) ? ownerFaction : null;
     }
 
     // 检查实体是否属于任意阵营

@@ -4,6 +4,8 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.BossEvent;
 import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
 
 import java.util.List;
 
@@ -265,5 +267,23 @@ public abstract class RaidDefinition {
      */
     public int getCelebrationTicks() {
         return 600;
+    }
+
+    // ==================== 可选覆写：血条外观 ====================
+
+    // 自定义 Boss 血条外观（仅客户端）
+    /**
+     * Provide a custom appearance for this raid's boss bar. Returning null — the default —
+     * leaves the vanilla bar in place, styled only by {@link #getBossBarColor()}.
+     * <p>
+     * The returned extension also needs {@link RaidBossBarExtension#enabled()} to return true
+     * before it takes over rendering. Its condition methods receive a {@link RaidBarState}
+     * snapshot synced from the server, so the bar can react to wave progress and outcome.
+     *
+     * @return the custom bar appearance, or null to keep the vanilla bar
+     */
+    @OnlyIn(Dist.CLIENT)
+    public RaidBossBarExtension bossBarExtension() {
+        return null;
     }
 }
