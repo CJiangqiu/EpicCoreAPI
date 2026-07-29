@@ -244,6 +244,7 @@ public final class HealthDataFlow {
     private static AssociatedAttempt attemptAssociatedTransaction(List<PreparedSourceWrite> selected,
                                                                   LivingEntity entity, float target) {
         List<PreparedSourceWrite> writes = List.copyOf(selected);
+        float anchorBefore = EcaSetHealthManager.readHealthAnchor(entity);
         boolean wroteAll = true;
         for (PreparedSourceWrite write : writes) {
             if (!dispatchWrite(write.sink(), entity, write.value())) {
@@ -253,6 +254,7 @@ public final class HealthDataFlow {
         }
         List<Object> afterWrite = new ArrayList<>(writes.size());
         for (PreparedSourceWrite write : writes) afterWrite.add(write.sink().read(entity));
+        if (wroteAll) EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, target);
         boolean verified = wroteAll && EcaSetHealthManager.verify(entity, target);
         List<AssociatedWriteState> states = new ArrayList<>(writes.size());
         for (int i = 0; i < writes.size(); i++) {
@@ -390,6 +392,7 @@ public final class HealthDataFlow {
                                            List<String> diag, HealthVerifier verifier, boolean logSuccess) {
         if (writes.size() < 2) return false;
 
+        float anchorBefore = EcaSetHealthManager.readHealthAnchor(entity);
         boolean wroteAll = true;
         for (PreparedSourceWrite write : writes) {
             if (!dispatchWrite(write.sink(), entity, write.value())) {
@@ -397,6 +400,8 @@ public final class HealthDataFlow {
                 break;
             }
         }
+        // 单源逐个写时锚点不动、多源同时写才生效的存储，取证只能在联合写之后进行
+        if (wroteAll) EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected);
         if (wroteAll && verifier.verify(entity, expected, null)) {
             EcaSetHealthManager.recordObservedWrite(entity.getClass());
             if (logSuccess) {

@@ -94,6 +94,9 @@ public final class NumericInverter {
                 rollback(cells, snapshot);
                 return false;
             }
+            /* 非零斜率就是锚点随写入变化的直接证据，比原版字段联动的弱取证强。
+               不补正的话，读自定义存储的 getHealth 会被判死，descent 再准也过不了 verify。 */
+            EcaSetHealthManager.promoteAnchorTrust(entity.getClass());
 
             for (int pass = 0; pass < MAX_PASSES; pass++) {
                 if (System.nanoTime() > deadline) break;

@@ -534,6 +534,8 @@ public final class MethodProbe {
             if (diagnostic) EcaLogger.info("[MethodProbe] associated probeB wrote={} expected={} actual={}",
                     wroteB, b, actualB);
             if (!wroteB || !matches(actualB, b)) return false;
+            // 与 testWriter 同理：两个不同写入分别被锚点读回，已证明锚点反映真实存储
+            EcaSetHealthManager.promoteAnchorTrust(entity.getClass());
             if (!writer.writeAssociated(entity, baseline) || !EcaSetHealthManager.verify(entity, baseline)) return false;
             boolean wroteTarget = writer.writeAssociated(entity, target);
             float actualTarget = EcaSetHealthManager.readHealthAnchor(entity);
