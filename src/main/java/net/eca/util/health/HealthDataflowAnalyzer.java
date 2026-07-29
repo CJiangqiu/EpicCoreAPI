@@ -20,6 +20,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandleInfo;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.lang.ref.SoftReference;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -1959,15 +1960,8 @@ public final class HealthDataflowAnalyzer {
                                                         java.util.function.BiFunction<MethodNode, Frame<TaintValue>[], Expr> extractor) {
         if (owner == null || owner.getClassLoader() == null) return null;
         try {
-            byte[] bytes = classBytes(owner);
-            if (bytes == null) return null;
             String ownerInternal = internalName(owner);
-            ClassNode cn = new ClassNode();
-            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
-            MethodNode mn = null;
-            for (MethodNode m : cn.methods) {
-                if (m.desc.equals(desc) && m.name.equals(name)) { mn = m; break; }
-            }
+            MethodNode mn = findMethodNode(classNode(owner), name, desc);
             if (mn == null || mn.instructions.size() == 0) return null;
 
             AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
@@ -1990,13 +1984,18 @@ public final class HealthDataflowAnalyzer {
     private static AnalysisResult analyzeUnifiedExternalScan(Class<?> entityClass) {
         List<AnalysisResult> candidates = new ArrayList<>();
         List<String> scannedMethods = new ArrayList<>();
+        List<String> entryCosts = new ArrayList<>();
+        long scanStart = System.nanoTime();
         for (McMethod method : new McMethod[]{IS_ALIVE, IS_DEAD_OR_DYING}) {
             ClassAndMethod target = findMethodOwner(entityClass, method);
             if (target == null) continue;
             String label = target.owner().getName() + "#" + target.name() + method.desc();
             scannedMethods.add(label);
+            long entryStart = System.nanoTime();
+            int fetchStart = bytesFetchCount();
             AnalysisResult result = safeExternalEntry(entityClass, label,
                     () -> analyzeExternalComparisonMethod(target.owner(), target.name(), method.desc()));
+            entryCosts.add(entryCost(target.name(), entryStart, fetchStart));
             if (result != null && !result.isEmpty() && !result.sources.isEmpty()) candidates.add(result);
         }
         for (McMethod method : new McMethod[]{HURT, ACTUALLY_HURT}) {
@@ -2004,8 +2003,11 @@ public final class HealthDataflowAnalyzer {
             if (target == null) continue;
             String label = target.owner().getName() + "#" + target.name() + method.desc();
             scannedMethods.add(label);
+            long entryStart = System.nanoTime();
+            int fetchStart = bytesFetchCount();
             AnalysisResult result = safeExternalEntry(entityClass, label,
                     () -> analyzeDamageWriteMethod(target.owner(), target.name(), target.name(), method.desc()));
+            entryCosts.add(entryCost(target.name(), entryStart, fetchStart));
             if (result != null && !result.isEmpty() && !result.sources.isEmpty()) candidates.add(result);
         }
         AnalysisResult combined = combineExternalScanCandidates(entityClass, candidates);
@@ -2013,8 +2015,18 @@ public final class HealthDataflowAnalyzer {
             EcaLogger.info("[ExternalScan] entity={} methods={} candidates={} sources={}",
                     entityClass.getName(), scannedMethods, candidates.size(),
                     combined != null ? combined.sources.size() : 0);
+            EcaLogger.info("[ExternalScan]   cost entity={} total={}ms perEntry={}",
+                    entityClass.getName(), millisSince(scanStart), entryCosts);
         }
         return combined;
+    }
+
+    private static String entryCost(String name, long startNanos, int fetchStart) {
+        return name + " " + millisSince(startNanos) + "ms bytes=" + (bytesFetchCount() - fetchStart);
+    }
+
+    private static long millisSince(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000L;
     }
 
     /* 隔离单个扫描入口的异常：不隔离时第一个抛出的入口会连带废掉其余入口，
@@ -2163,17 +2175,7 @@ public final class HealthDataflowAnalyzer {
         String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc + "#comparisons";
         if (!context.inflight.add(cacheKey)) return new UnknownExpr("recursive-cycle-comparisons");
         try {
-            byte[] bytes = classBytes(owner);
-            if (bytes == null) return null;
-            ClassNode classNode = new ClassNode();
-            new ClassReader(bytes).accept(classNode, ClassReader.EXPAND_FRAMES);
-            MethodNode method = null;
-            for (MethodNode candidate : classNode.methods) {
-                if (candidate.name.equals(name) && candidate.desc.equals(desc)) {
-                    method = candidate;
-                    break;
-                }
-            }
+            MethodNode method = findMethodNode(classNode(owner), name, desc);
             if (method == null || method.instructions.size() == 0) return null;
 
             String ownerInternal = internalName(owner);
@@ -2565,14 +2567,15 @@ public final class HealthDataflowAnalyzer {
     private static List<Expr> collectClassComparisons(Class<?> entityClass, boolean priorityOnly) {
         List<Expr> out = new ArrayList<>();
         List<String> failures = new ArrayList<>();
-        byte[] bytes = classBytes(entityClass);
-        if (bytes == null) return out;
-        ClassNode classNode = new ClassNode();
-        new ClassReader(bytes).accept(classNode, ClassReader.EXPAND_FRAMES);
+        ClassNode classNode = classNode(entityClass);
+        if (classNode == null) return out;
         String ownerInternal = internalName(entityClass);
         // 后台分析串行执行，单个类达到时间预算后使用已经收集的结果
-        long deadline = System.nanoTime() + COMPARISON_SCAN_BUDGET_NANOS;
+        long scanStart = System.nanoTime();
+        long deadline = scanStart + COMPARISON_SCAN_BUDGET_NANOS;
         boolean timedOut = false;
+        int analyzed = 0;
+        List<String> slow = new ArrayList<>();
         for (MethodNode method : classNode.methods) {
             if (method.instructions.size() == 0 || method.name.startsWith("<")) continue;
             if ((method.access & Opcodes.ACC_STATIC) != 0) continue;
@@ -2581,6 +2584,9 @@ public final class HealthDataflowAnalyzer {
             /* 每个方法使用独立的预算和递归检测集，避免前序方法耗尽预算或残留状态影响后续分析。 */
             AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
             ctx.inheritedInline = true;
+            long methodStart = System.nanoTime();
+            int fetchStart = bytesFetchCount();
+            analyzed++;
             try {
                 TaintValue[] seed = seedMethodInputs(method.desc, false);
                 TaintInterpreter interpreter = new TaintInterpreter(ctx, 0, ownerInternal, method, seed);
@@ -2596,6 +2602,21 @@ public final class HealthDataflowAnalyzer {
                     failures.add(method.name + method.desc + " -> " + t.getClass().getSimpleName());
                 }
             }
+            // 预算是被少数几个方法吃光还是被普遍拖慢，只有逐方法计时能区分
+            if (System.nanoTime() - methodStart >= COMPARISON_SLOW_METHOD_NANOS
+                    && slow.size() < COMPARISON_SLOW_METHOD_LIMIT) {
+                slow.add(method.name + method.desc + " " + millisSince(methodStart)
+                        + "ms bytes=" + (bytesFetchCount() - fetchStart)
+                        + " inlineLeft=" + ctx.inlineBudget + " nodeLeft=" + ctx.nodeBudget);
+            }
+        }
+        if (timedOut || System.nanoTime() - scanStart >= COMPARISON_SLOW_SCAN_NANOS) {
+            EcaLogger.info("[EffectiveHealth]   scan cost entity={} stage={} elapsed={}ms analyzed={} collected={} timedOut={}",
+                    entityClass.getName(), priorityOnly ? "priority" : "full",
+                    millisSince(scanStart), analyzed, out.size(), timedOut);
+            if (!slow.isEmpty()) {
+                EcaLogger.info("[EffectiveHealth]   slowest methods entity={} {}", entityClass.getName(), slow);
+            }
         }
         if (timedOut) {
             EcaLogger.info("[EffectiveHealth]   scan timed out entity={} budgetMs={} collected={}",
@@ -2609,6 +2630,10 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static final int COMPARISON_FAILURE_LIMIT = 8;
+    /* 逐方法计时的记录门槛与条数上限，以及整体扫描的报告门槛。 */
+    private static final long COMPARISON_SLOW_METHOD_NANOS = 200_000_000L;
+    private static final int COMPARISON_SLOW_METHOD_LIMIT = 8;
+    private static final long COMPARISON_SLOW_SCAN_NANOS = 1_000_000_000L;
     private static final long COMPARISON_SCAN_BUDGET_NANOS = 15_000_000_000L;
 
     private static int externalSourcePriority(Source source) {
@@ -2640,17 +2665,7 @@ public final class HealthDataflowAnalyzer {
         String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc + "#writes";
         if (!ctx.inflight.add(cacheKey)) return new UnknownExpr("recursive-cycle-writes");
         try {
-            byte[] bytes = classBytes(owner);
-            if (bytes == null) return null;
-            ClassNode cn = new ClassNode();
-            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
-            MethodNode mn = null;
-            for (MethodNode method : cn.methods) {
-                if (method.name.equals(name) && method.desc.equals(desc)) {
-                    mn = method;
-                    break;
-                }
-            }
+            MethodNode mn = findMethodNode(classNode(owner), name, desc);
             if (mn == null || mn.instructions.size() == 0) return null;
 
             String ownerInternal = internalName(owner);
@@ -3061,10 +3076,8 @@ public final class HealthDataflowAnalyzer {
     private static boolean shouldKeepAsRuntimeCall(Class<?> owner, String name, String desc) {
         if (owner.getName().startsWith("java.")) return false;
         try {
-            byte[] bytes = classBytes(owner);
-            if (bytes == null) return false;
-            ClassNode cn = new ClassNode();
-            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
+            ClassNode cn = classNode(owner);
+            if (cn == null) return false;
             for (MethodNode method : cn.methods) {
                 if (method.name.equals(name) && method.desc.equals(desc)) {
                     if (hasStaticCodecInverse(cn, method)) return true;
@@ -3473,8 +3486,54 @@ public final class HealthDataflowAnalyzer {
     }
 
     /* 通过 ClassBytesProvider 读取字节码；调用者可提供运行期转换结果，否则从类资源读取。 */
+    /* 字节码读取次数计数器：慢分析的主要成本是反复取类字节并重建 ClassNode，
+       按分析入口取差值即可看出该入口拉进了多大的类图。各分析线程各自计数。 */
+    private static final ThreadLocal<int[]> BYTES_FETCH_COUNT = ThreadLocal.withInitial(() -> new int[1]);
+
+    static int bytesFetchCount() {
+        return BYTES_FETCH_COUNT.get()[0];
+    }
+
     private static byte[] classBytes(Class<?> clazz) {
+        BYTES_FETCH_COUNT.get()[0]++;
         return bytesProvider.get(clazz);
+    }
+
+    /* 解析结果缓存：深度内联会把同一批类反复解析上千次，而 EXPAND_FRAMES 展开栈映射帧是最贵的一步。
+       缓存按线程私有，因为 ASM 的 InsnList.indexOf 会惰性写 insnNode.index，共享实例存在数据竞争；
+       而每次分析本就在单线程内跑完，重复解析也发生在同一线程内，线程私有不损命中率。
+       值用软引用并限量淘汰，避免常驻分析线程持续累积展开后的 ClassNode。
+       只服务于只读分析路径；ConstOverride 与 HeadBridge 注入会改指令，必须各自重新解析。 */
+    private static final int CLASS_NODE_CACHE_LIMIT = 128;
+    private static final ThreadLocal<LinkedHashMap<Class<?>, SoftReference<ClassNode>>> CLASS_NODE_CACHE =
+            ThreadLocal.withInitial(() -> new LinkedHashMap<>(32, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(Map.Entry<Class<?>, SoftReference<ClassNode>> eldest) {
+                    return size() > CLASS_NODE_CACHE_LIMIT;
+                }
+            });
+
+    /* 取该类以 EXPAND_FRAMES 解析出的 ClassNode；调用方只读，不得修改返回的节点。 */
+    private static ClassNode classNode(Class<?> clazz) {
+        if (clazz == null) return null;
+        LinkedHashMap<Class<?>, SoftReference<ClassNode>> cache = CLASS_NODE_CACHE.get();
+        SoftReference<ClassNode> cached = cache.get(clazz);
+        ClassNode node = cached == null ? null : cached.get();
+        if (node != null) return node;
+        byte[] bytes = classBytes(clazz);
+        if (bytes == null) return null;
+        node = new ClassNode();
+        new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
+        cache.put(clazz, new SoftReference<>(node));
+        return node;
+    }
+
+    /* 在已解析的类中按名字与描述符定位方法；找不到返回 null。 */
+    private static MethodNode findMethodNode(ClassNode node, String name, String desc) {
+        if (node == null) return null;
+        for (MethodNode method : node.methods) {
+            if (method.name.equals(name) && method.desc.equals(desc)) return method;
+        }
+        return null;
     }
 
     //类内部名：剥去隐藏类的运行期后缀(Foo/0x000... → Foo)，以便按磁盘模板类定位字节码。
@@ -3526,14 +3585,9 @@ public final class HealthDataflowAnalyzer {
         //环检测：覆盖顶层方法 + 跨方法环(如 getHealth↔position↔setHealth 互相调用),已在分析栈上则坍缩 Unknown
         if (!ctx.inflight.add(cacheKey)) return new UnknownExpr("recursive-cycle");
         try {
-            byte[] bytes = classBytes(owner);
-            if (bytes == null) return null;
-            ClassNode cn = new ClassNode();
-            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
-            MethodNode mn = null;
-            for (MethodNode m : cn.methods) {
-                if (m.name.equals(name) && m.desc.equals(desc)) { mn = m; break; }
-            }
+            ClassNode cn = classNode(owner);
+            if (cn == null) return null;
+            MethodNode mn = findMethodNode(cn, name, desc);
             // 子类未声明该方法时上溯基类，否则继承的访问器不展开，血量表达式会停在 Call 节点
             if (mn == null && ctx.inheritedInline && owner.getSuperclass() != null) {
                 return analyzeMethod(owner.getSuperclass(), name, desc, seedLocals, ctx, depth);
@@ -3688,14 +3742,7 @@ public final class HealthDataflowAnalyzer {
         String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc + "#arrayStore";
         if (!ctx.inflight.add(cacheKey)) return new UnknownExpr("recursive-cycle-arrayStore");
         try {
-            byte[] bytes = classBytes(owner);
-            if (bytes == null) return null;
-            ClassNode cn = new ClassNode();
-            new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
-            MethodNode mn = null;
-            for (MethodNode m : cn.methods) {
-                if (m.name.equals(name) && m.desc.equals(desc)) { mn = m; break; }
-            }
+            MethodNode mn = findMethodNode(classNode(owner), name, desc);
             if (mn == null || mn.instructions.size() == 0) return null;
 
             String ownerInternal = internalName(owner);
@@ -4026,10 +4073,8 @@ public final class HealthDataflowAnalyzer {
                沿继承链向上扫，最先出现匹配的(最派生)定义类即生效——其初始化器/构造器在构造序列中最后执行。 */
             for (Class<?> scan = fieldOwner; scan != null && scan != Object.class; scan = scan.getSuperclass()) {
                 try {
-                    byte[] bytes = classBytes(scan);
-                    if (bytes == null) continue;
-                    ClassNode node = new ClassNode();
-                    new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
+                    ClassNode node = classNode(scan);
+                    if (node == null) continue;
                     Closure lastInClass = null;
                     for (MethodNode method : node.methods) {
                         if (!method.name.equals("<init>")) continue;
@@ -4256,10 +4301,8 @@ public final class HealthDataflowAnalyzer {
             try {
                 Class<?> owner = loadClass(m.owner);
                 if (owner == null) return null;
-                byte[] bytes = classBytes(owner);
-                if (bytes == null) return null;
-                ClassNode cn = new ClassNode();
-                new ClassReader(bytes).accept(cn, ClassReader.EXPAND_FRAMES);
+                ClassNode cn = classNode(owner);
+                if (cn == null) return null;
                 for (MethodNode method : cn.methods) {
                     if (!method.name.equals(m.name) || !method.desc.equals(m.desc)) continue;
                     if (isStatic) {

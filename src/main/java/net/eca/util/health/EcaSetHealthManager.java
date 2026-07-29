@@ -246,9 +246,17 @@ public final class EcaSetHealthManager {
             if (tree != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
                     && tree.classify() != HealthDataflowAnalyzer.AnalysisResult.Kind.CONST_OVERRIDE) return;
             EcaLogger.info("[ExternalScan] join prewarm started entity={}", cls.getName());
+            /* 预热跑完之前，同一执行器上的运行期请求只能排队等待，因此预热时长直接决定
+               "生成后第一次改血能否命中缓存"。分两段计时以便定位是哪一段变慢。 */
+            long scanStart = System.nanoTime();
             HealthDataflowAnalyzer.resolveExternalScanResult(cls);
+            long scanMs = (System.nanoTime() - scanStart) / 1_000_000L;
+            long comparisonStart = System.nanoTime();
             // 比较表达式一并预扫，证据到手后即可当场建模，无需再等一次改血
             HealthDataflowAnalyzer.prewarmClassComparisons(cls);
+            long comparisonMs = (System.nanoTime() - comparisonStart) / 1_000_000L;
+            EcaLogger.info("[ExternalScan] join prewarm done entity={} externalScan={}ms comparisons={}ms total={}ms",
+                    cls.getName(), scanMs, comparisonMs, scanMs + comparisonMs);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             EcaLogger.info("[ExternalScan] join prewarm threw entity={} type={} msg={}",
