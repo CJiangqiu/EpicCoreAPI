@@ -690,8 +690,8 @@ public final class HealthDataflowAnalyzer {
     public static final DualityTable TABLE = new DualityTable();
     static { initDefaultRules(); }
 
-    /* 运行期发现的编解码对偶：仅在激进逻辑开启时，允许把同一工具类中已存在的 encode(number)->T
-       作为 decode(T)->number 的逆。它不尝试破译密钥，只复用目标自身的合法编码器。 */
+    /* 运行期发现的编解码对偶：仅在激进逻辑开启时，允许把同一工具类中已存在的 encode(P)->E
+       作为 decode(E)->P 的逆，明文 P 可为数字或文本。它不尝试破译密钥，只复用目标自身的合法编码器。 */
     private static final Map<String, Inverter> DISCOVERED_CODEC_INVERTERS = new ConcurrentHashMap<>();
     private static final Set<String> CODEC_DISCOVERY_FAILED = ConcurrentHashMap.newKeySet();
 
@@ -717,20 +717,26 @@ public final class HealthDataflowAnalyzer {
         try {
             Type[] decoderArgs = Type.getArgumentTypes(decoderDesc);
             Type decoderReturn = Type.getReturnType(decoderDesc);
-            if (decoderArgs.length != 1 || !isNumericAsmType(decoderReturn)
-                    || decoderArgs[0].getSort() != Type.OBJECT) return null;
+            if (decoderArgs.length != 1 || decoderArgs[0].getSort() != Type.OBJECT) return null;
+            /* 明文可以是数字，也可以是文本：密文串先解成明文串，再由上层 parseXxx 取数，
+               此时解码器形如 (String)->String，不能只认数值返回。 */
+            boolean numericPlain = isNumericAsmType(decoderReturn);
+            if (!numericPlain && decoderReturn.getSort() != Type.OBJECT) return null;
             Class<?> owner = loadClass(ownerInternal);
             Class<?> encodedType = asmTypeToClass(decoderArgs[0]);
-            Class<?> numericType = asmTypeToClass(decoderReturn);
-            if (owner == null || encodedType == null || numericType == null) return null;
-            Method decoder = findDeclaredStatic(owner, decoderName, encodedType, numericType);
+            Class<?> plainType = asmTypeToClass(decoderReturn);
+            if (owner == null || encodedType == null || plainType == null) return null;
+            Method decoder = findDeclaredStatic(owner, decoderName, encodedType, plainType);
             if (decoder == null) return null;
             for (Method encoder : owner.getDeclaredMethods()) {
-                if (!Modifier.isStatic(encoder.getModifiers()) || encoder.getParameterCount() != 1
-                        || encoder.getReturnType() != encodedType || !isNumericClass(encoder.getParameterTypes()[0])) continue;
+                // 明密文同类型时解码器自身也符合编码器形状，必须排除
+                if (encoder.equals(decoder) || !Modifier.isStatic(encoder.getModifiers())
+                        || encoder.getParameterCount() != 1 || encoder.getReturnType() != encodedType) continue;
+                Class<?> plainInput = encoder.getParameterTypes()[0];
+                if (numericPlain ? !isNumericClass(plainInput) : plainInput != plainType) continue;
                 encoder.setAccessible(true);
                 decoder.setAccessible(true);
-                if (validCodecPair(decoder, encoder, numericType)) {
+                if (validCodecPair(decoder, encoder, numericPlain)) {
                     return (target, args, sinkArgIdx, ctx) -> encodeCodecTarget(encoder, target);
                 }
             }
@@ -756,16 +762,27 @@ public final class HealthDataflowAnalyzer {
                 || type == Number.class;
     }
 
-    private static boolean validCodecPair(Method decoder, Method encoder, Class<?> numericType) {
-        float[] probes = {1.25f, 17.5f, 73.75f};
+    /* 以探针值验证 decode(encode(p)) == p。数值明文按容差比较，文本明文按内容比较。
+       文本探针取浮点字面形态：这类编解码在血量场景中总是垫在 parseFloat 之下。 */
+    private static boolean validCodecPair(Method decoder, Method encoder, boolean numericPlain) {
         try {
-            for (float probe : probes) {
-                Object input = coerceForType(Float.valueOf(probe), encoder.getParameterTypes()[0]);
+            if (numericPlain) {
+                for (float probe : new float[]{1.25f, 17.5f, 73.75f}) {
+                    Object input = coerceForType(Float.valueOf(probe), encoder.getParameterTypes()[0]);
+                    if (input == null) return false;
+                    Object decoded = decoder.invoke(null, encoder.invoke(null, input));
+                    if (!(decoded instanceof Number number) || !Float.isFinite(number.floatValue())) return false;
+                    if (Math.abs(number.floatValue() - probe) > Math.max(0.01f, Math.abs(probe) * 0.001f)) return false;
+                }
+                return true;
+            }
+            for (String probe : new String[]{"1.25", "-73.75", "20.0"}) {
+                Object input = coerceForType(probe, encoder.getParameterTypes()[0]);
                 if (input == null) return false;
                 Object encoded = encoder.invoke(null, input);
+                if (encoded == null) return false;
                 Object decoded = decoder.invoke(null, encoded);
-                if (!(decoded instanceof Number number) || !Float.isFinite(number.floatValue())) return false;
-                if (Math.abs(number.floatValue() - probe) > Math.max(0.01f, Math.abs(probe) * 0.001f)) return false;
+                if (decoded == null || !probe.equals(decoded.toString())) return false;
             }
             return true;
         } catch (Throwable t) {
@@ -2903,8 +2920,58 @@ public final class HealthDataflowAnalyzer {
             return remapped != null ? remapped : new MethodTarget(owner, name, desc);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
+        }
+        return resolveHandleBySignature(handle, reference.className());
+    }
+
+    /* revealDirect 只能揭示本 Lookup 有权访问的句柄，指向隐藏类成员的句柄必然失败。
+       这类隐藏类通常只是转发壳，真实实现仍留在定义它的宿主类中，因此改按句柄类型在句柄字段
+       所属类里反查同签名静态方法。同签名命中多个实现时放弃，宁可无解也不猜错目标。 */
+    private static MethodTarget resolveHandleBySignature(MethodHandle handle, String ownerInternal) {
+        if (handle == null || ownerInternal == null) return null;
+        Class<?> owner = loadClass(ownerInternal);
+        if (owner == null) return null;
+        String desc;
+        try {
+            desc = handle.type().toMethodDescriptorString();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
             return null;
         }
+        Set<String> dispatchers = methodHandleDispatchers(owner);
+        MethodTarget found = null;
+        for (Method method : owner.getDeclaredMethods()) {
+            if (!Modifier.isStatic(method.getModifiers())) continue;
+            String methodDesc = Type.getMethodDescriptor(method);
+            if (!methodDesc.equals(desc)) continue;
+            // 自身经句柄再分发的方法是调用方而非实现，选中它只会解析回原点
+            if (dispatchers.contains(method.getName() + methodDesc)) continue;
+            if (found != null) return null;
+            found = new MethodTarget(owner, method.getName(), desc);
+        }
+        return found;
+    }
+
+    /* owner 中经由 MethodHandle 再分发的方法，按 name+desc 标识。 */
+    private static Set<String> methodHandleDispatchers(Class<?> owner) {
+        Set<String> names = new HashSet<>();
+        try {
+            byte[] bytes = classBytes(owner);
+            if (bytes == null) return names;
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, 0);
+            for (MethodNode mn : cn.methods) {
+                for (AbstractInsnNode insn : mn.instructions) {
+                    if (insn instanceof MethodInsnNode call && isMethodHandleInvoke(call)) {
+                        names.add(mn.name + mn.desc);
+                        break;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+        return names;
     }
 
     private static MethodTarget remapHiddenNestmateTarget(Class<?> owner, String name, String desc) {

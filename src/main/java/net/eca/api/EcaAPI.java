@@ -101,8 +101,8 @@ public final class EcaAPI {
         if (entity == null) {
             throw new IllegalArgumentException("Entity cannot be null");
         }
-        if (value <= 0) {
-            throw new IllegalArgumentException("Lock health value must be greater than 0");
+        if (!Float.isFinite(value) || value <= 0.0f) {
+            throw new IllegalArgumentException("Lock health value must be finite and greater than 0");
         }
         setHealth(entity, value);
         HealthLockManager.setLock(entity, value);
@@ -843,6 +843,9 @@ public final class EcaAPI {
     public static void lockMaxHealth(LivingEntity entity, float value) {
         if (entity == null) {
             throw new IllegalArgumentException("Entity cannot be null");
+        }
+        if (!Float.isFinite(value) || value <= 0.0f) {
+            throw new IllegalArgumentException("Max health lock value must be finite and greater than 0");
         }
         HealthLockManager.setMaxHealthLock(entity, value);
         EntityUtil.setMaxHealth(entity, value);

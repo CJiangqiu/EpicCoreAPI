@@ -278,32 +278,6 @@ public final class EcaSetHealthManager {
         }
     }
 
-    /* 常规血量路径无效且生死状态由编码布尔字段控制时，斩杀请求通过实体自身编码器写入死亡状态。
-       写入后使用解码器校验，再由调用方执行击杀和掉落流程。 */
-    public static boolean applyDeathGate(LivingEntity target, float targetHealth) {
-        if (target == null || targetHealth > 0.0f) return false;
-        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) return false;
-        Class<?> cls = target.getClass();
-        HealthDataflowAnalyzer.DeathGate gate = HealthDataflowAnalyzer.analyzeDeathGate(cls);
-        if (gate == null) return false;
-        try {
-            Object snapshot = gate.field().get(target);
-            Object encoded = gate.encoder().invoke(null, gate.deathValue());
-            gate.field().set(target, encoded);
-            boolean dead = Boolean.TRUE.equals(gate.decoder().invoke(null, gate.field().get(target)));
-            if (dead == gate.deathValue()) {
-                EcaLogger.info("[DeathGate] flipped entity={} field={} deathValue={}",
-                        cls.getName(), gate.field().getName(), gate.deathValue());
-                return true;
-            }
-            gate.field().set(target, snapshot);   // 回读不符，回滚
-            return false;
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            return false;
-        }
-    }
-
     /* 外部扫描在后台去重执行，完成后写入分析缓存。任务异常必须记录，
        以便区分配置关闭、分析进行中和分析失败。 */
     private static void submitExternalScanAnalysis(Class<?> cls) {

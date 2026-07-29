@@ -13,6 +13,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.world.effect.MobEffectCategory;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerLevel;
@@ -95,11 +96,11 @@ LivingEntityMixin {
         }
 
         tag.putBoolean(NBT_INVULNERABLE, entity.getEntityData().get(EntityUtil.INVULNERABLE));
-        tag.putInt(NBT_HEALTH_LOCK_ENC, parseIntSafe(entity.getEntityData().get(EntityUtil.HEALTH_LOCK_VALUE)));
+        tag.putString(NBT_HEALTH_LOCK_ENC, entity.getEntityData().get(EntityUtil.HEALTH_LOCK_VALUE));
         tag.putInt(NBT_HEALTH_LOCK_KEY, parseIntSafe(entity.getEntityData().get(EntityUtil.HEALTH_LOCK_KEY)));
         tag.putInt(NBT_HEALTH_LOCK_CHECK, parseIntSafe(entity.getEntityData().get(EntityUtil.HEALTH_LOCK_CHECK)));
         tag.putString(NBT_HEAL_BAN_VALUE, entity.getEntityData().get(EntityUtil.HEAL_BAN_VALUE));
-        tag.putInt(NBT_MAX_HEALTH_LOCK_ENC, parseIntSafe(entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_VALUE)));
+        tag.putString(NBT_MAX_HEALTH_LOCK_ENC, entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_VALUE));
         tag.putInt(NBT_MAX_HEALTH_LOCK_KEY, parseIntSafe(entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_KEY)));
         tag.putInt(NBT_MAX_HEALTH_LOCK_CHECK, parseIntSafe(entity.getEntityData().get(EntityUtil.MAX_HEALTH_LOCK_CHECK)));
         tag.putBoolean(NBT_RESURRECTION_TRACKED, entity.getEntityData().get(EntityUtil.RESURRECTION_TRACKED));
@@ -131,7 +132,10 @@ LivingEntityMixin {
         }
         // 锁血（新加密格式 int）
         if (tag.contains(NBT_HEALTH_LOCK_ENC)) {
-            entity.getEntityData().set(EntityUtil.HEALTH_LOCK_VALUE, String.valueOf(tag.getInt(NBT_HEALTH_LOCK_ENC)));
+            String encrypted = tag.contains(NBT_HEALTH_LOCK_ENC, Tag.TAG_STRING)
+                    ? tag.getString(NBT_HEALTH_LOCK_ENC)
+                    : String.valueOf(tag.getInt(NBT_HEALTH_LOCK_ENC));
+            entity.getEntityData().set(EntityUtil.HEALTH_LOCK_VALUE, encrypted);
             entity.getEntityData().set(EntityUtil.HEALTH_LOCK_KEY,   String.valueOf(tag.getInt(NBT_HEALTH_LOCK_KEY)));
             entity.getEntityData().set(EntityUtil.HEALTH_LOCK_CHECK, String.valueOf(tag.getInt(NBT_HEALTH_LOCK_CHECK)));
         }
@@ -143,7 +147,10 @@ LivingEntityMixin {
         }
         // 最大血量锁定（新加密格式 int）
         if (tag.contains(NBT_MAX_HEALTH_LOCK_ENC)) {
-            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, String.valueOf(tag.getInt(NBT_MAX_HEALTH_LOCK_ENC)));
+            String encrypted = tag.contains(NBT_MAX_HEALTH_LOCK_ENC, Tag.TAG_STRING)
+                    ? tag.getString(NBT_MAX_HEALTH_LOCK_ENC)
+                    : String.valueOf(tag.getInt(NBT_MAX_HEALTH_LOCK_ENC));
+            entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_VALUE, encrypted);
             entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_KEY,   String.valueOf(tag.getInt(NBT_MAX_HEALTH_LOCK_KEY)));
             entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_CHECK, String.valueOf(tag.getInt(NBT_MAX_HEALTH_LOCK_CHECK)));
         }

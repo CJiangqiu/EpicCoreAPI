@@ -3,6 +3,7 @@ package net.eca.util.health;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.world.entity.LivingEntity;
 
@@ -25,6 +26,8 @@ import java.util.concurrent.ThreadLocalRandom;
  * 禁疗保持旧加密（不变）。
  */
 public class HealthLockManager {
+
+    private static final String FLOAT_PAYLOAD_PREFIX = "F:";
 
     // ==================== MethodHandle 间接调用（防字节码静态分析） ====================
 
@@ -102,8 +105,8 @@ public class HealthLockManager {
                 && EntityUtil.HEALTH_LOCK_CHECK != null
                 && validateIntegrity(entity,
                     EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY, EntityUtil.HEALTH_LOCK_CHECK)) {
-            Integer decrypted = decrypt(entity, EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY);
-            if (decrypted != null && decrypted > 0) {
+            Float decrypted = decryptLockValue(entity, EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY);
+            if (decrypted != null && decrypted > 0.0f) {
                 HEALTH_LOCK_IDS.add(entity.getId());
             }
         }
@@ -125,8 +128,9 @@ public class HealthLockManager {
                 && EntityUtil.MAX_HEALTH_LOCK_CHECK != null
                 && validateIntegrity(entity,
                     EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY, EntityUtil.MAX_HEALTH_LOCK_CHECK)) {
-            Integer decrypted = decrypt(entity, EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY);
-            if (decrypted != null && decrypted > 0) {
+            Float decrypted = decryptLockValue(entity,
+                    EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY);
+            if (decrypted != null && decrypted > 0.0f) {
                 MAX_HEALTH_LOCK_IDS.add(entity.getId());
             }
         }
@@ -138,6 +142,17 @@ public class HealthLockManager {
         if (s == null || s.isEmpty()) return 0;
         try { return Integer.parseInt(s); }
         catch (NumberFormatException e) { return 0; }
+    }
+
+    private static boolean isFloatPayload(String encrypted) {
+        return encrypted != null && encrypted.startsWith(FLOAT_PAYLOAD_PREFIX);
+    }
+
+    private static int parseEncryptedPayload(String encrypted) {
+        if (isFloatPayload(encrypted)) {
+            return parseIntSafe(encrypted.substring(FLOAT_PAYLOAD_PREFIX.length()));
+        }
+        return parseIntSafe(encrypted);
     }
 
     private static volatile boolean synchedReadFailureLogged = false;
@@ -156,21 +171,22 @@ public class HealthLockManager {
 
     // ==================== 新加密核心：三字段写入/清除/校验/解密 ====================
 
-    private static void writeEncrypted(LivingEntity entity, int lockValue,
+    private static void writeEncrypted(LivingEntity entity, float lockValue,
                                         EntityDataAccessor<String> encField,
                                         EntityDataAccessor<String> keyField,
                                         EntityDataAccessor<String> checkField) {
+        int payload = encodeFloatPayload(lockValue);
         int key = ThreadLocalRandom.current().nextInt(10000);
         int encrypted;
         int check;
         try {
-            encrypted = (int) ENCRYPT_MH.invokeExact(lockValue, key);
+            encrypted = (int) ENCRYPT_MH.invokeExact(payload, key);
             check     = (int) CHECK_MH.invokeExact(encrypted, key);
         } catch (Throwable e) {
-            encrypted = key - lockValue;
+            encrypted = key - payload;
             check     = key + encrypted;
         }
-        entity.getEntityData().set(encField,   String.valueOf(encrypted));
+        entity.getEntityData().set(encField,   FLOAT_PAYLOAD_PREFIX + encrypted);
         entity.getEntityData().set(keyField,   String.valueOf(key));
         entity.getEntityData().set(checkField, String.valueOf(check));
     }
@@ -194,7 +210,7 @@ public class HealthLockManager {
         if (encStr == null || encStr.isEmpty()
                 || keyStr == null || keyStr.isEmpty()
                 || checkStr == null || checkStr.isEmpty()) return false;
-        int encrypted    = parseIntSafe(encStr);
+        int encrypted    = parseEncryptedPayload(encStr);
         int key          = parseIntSafe(keyStr);
         int storedCheck  = parseIntSafe(checkStr);
         try {
@@ -206,42 +222,56 @@ public class HealthLockManager {
     }
 
     // 返回解密值，无法读取或字段为空返回 null
-    private static Integer decrypt(LivingEntity entity,
-                                    EntityDataAccessor<String> encField,
-                                    EntityDataAccessor<String> keyField) {
+    private static Float decryptLockValue(LivingEntity entity,
+                                          EntityDataAccessor<String> encField,
+                                          EntityDataAccessor<String> keyField) {
         String encStr = readSynchedSafely(entity, encField);
         String keyStr = readSynchedSafely(entity, keyField);
         if (encStr == null || encStr.isEmpty() || keyStr == null || keyStr.isEmpty()) return null;
-        int encrypted = parseIntSafe(encStr);
+        int encrypted = parseEncryptedPayload(encStr);
         int key       = parseIntSafe(keyStr);
+        int payload;
         try {
-            return (int) DECRYPT_MH.invokeExact(encrypted, key);
+            payload = (int) DECRYPT_MH.invokeExact(encrypted, key);
         } catch (Throwable e) {
-            return key - encrypted;
+            payload = key - encrypted;
         }
+        return decodeLockValue(payload, isFloatPayload(encStr));
+    }
+
+    static int encodeFloatPayload(float value) {
+        return Float.floatToRawIntBits(value);
+    }
+
+    static Float decodeLockValue(int payload, boolean floatFormat) {
+        float value = floatFormat ? Float.intBitsToFloat(payload) : (float) payload;
+        return Float.isFinite(value) && value > 0.0f ? value : null;
     }
 
     // ==================== NBT 回退：三字段写入/清除/解密 ====================
 
-    private static void writeNbtEncrypted(CompoundTag data, int lockValue,
+    private static void writeNbtEncrypted(CompoundTag data, float lockValue,
                                            String encKey, String keyKey, String checkKey) {
+        int payload = encodeFloatPayload(lockValue);
         int key = ThreadLocalRandom.current().nextInt(10000);
         int encrypted;
         int check;
         try {
-            encrypted = (int) ENCRYPT_MH.invokeExact(lockValue, key);
+            encrypted = (int) ENCRYPT_MH.invokeExact(payload, key);
             check     = (int) CHECK_MH.invokeExact(encrypted, key);
         } catch (Throwable e) {
-            encrypted = key - lockValue;
+            encrypted = key - payload;
             check     = key + encrypted;
         }
-        data.putInt(encKey,   encrypted);
+        data.putString(encKey, FLOAT_PAYLOAD_PREFIX + encrypted);
         data.putInt(keyKey,   key);
         data.putInt(checkKey, check);
     }
 
-    private static Integer readNbtDecrypt(CompoundTag data, String encKey, String keyKey, String checkKey) {
-        int encrypted   = data.getInt(encKey);
+    private static Float readNbtDecrypt(CompoundTag data, String encKey, String keyKey, String checkKey) {
+        String encryptedValue = data.contains(encKey, Tag.TAG_STRING)
+                ? data.getString(encKey) : String.valueOf(data.getInt(encKey));
+        int encrypted   = parseEncryptedPayload(encryptedValue);
         int key         = data.getInt(keyKey);
         int storedCheck = data.getInt(checkKey);
         if (encrypted == 0 && key == 0 && storedCheck == 0) return null;
@@ -256,26 +286,27 @@ public class HealthLockManager {
                     encrypted, key, expected, storedCheck);
             return null;
         }
+        int payload;
         try {
-            return (int) DECRYPT_MH.invokeExact(encrypted, key);
+            payload = (int) DECRYPT_MH.invokeExact(encrypted, key);
         } catch (Throwable e) {
-            return key - encrypted;
+            payload = key - encrypted;
         }
+        return decodeLockValue(payload, isFloatPayload(encryptedValue));
     }
 
     // ==================== 血量锁定（新加密） ====================
 
     public static void setLock(LivingEntity entity, float value) {
-        if (entity == null) return;
-        int lockValue = Math.max(1, (int) value);
+        if (entity == null || !Float.isFinite(value) || value <= 0.0f) return;
         HEALTH_LOCK_IDS.add(entity.getId());
         if (EntityUtil.HEALTH_LOCK_VALUE != null
                 && EntityUtil.HEALTH_LOCK_KEY != null
                 && EntityUtil.HEALTH_LOCK_CHECK != null) {
-            writeEncrypted(entity, lockValue,
+            writeEncrypted(entity, value,
                     EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY, EntityUtil.HEALTH_LOCK_CHECK);
         } else {
-            writeNbtEncrypted(entity.getPersistentData(), lockValue,
+            writeNbtEncrypted(entity.getPersistentData(), value,
                     NBT_HEALTH_LOCK_ENC, NBT_HEALTH_LOCK_KEY, NBT_HEALTH_LOCK_CHECK);
         }
     }
@@ -309,28 +340,26 @@ public class HealthLockManager {
                         entity.getClass().getName(), entity.getId());
                 return null;
             }
-            Integer decrypted = decrypt(entity, EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY);
-            return decrypted != null && decrypted > 0 ? (float) decrypted : null;
+            return decryptLockValue(entity, EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY);
         }
         // NBT 回退
-        Integer nbtResult = readNbtDecrypt(entity.getPersistentData(),
+        Float nbtResult = readNbtDecrypt(entity.getPersistentData(),
                 NBT_HEALTH_LOCK_ENC, NBT_HEALTH_LOCK_KEY, NBT_HEALTH_LOCK_CHECK);
-        return nbtResult != null && nbtResult > 0 ? (float) nbtResult.intValue() : null;
+        return nbtResult;
     }
 
     // ==================== 最大血量锁定（新加密） ====================
 
     public static void setMaxHealthLock(LivingEntity entity, float value) {
-        if (entity == null) return;
-        int lockValue = Math.max(1, (int) value);
+        if (entity == null || !Float.isFinite(value) || value <= 0.0f) return;
         MAX_HEALTH_LOCK_IDS.add(entity.getId());
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null
                 && EntityUtil.MAX_HEALTH_LOCK_KEY != null
                 && EntityUtil.MAX_HEALTH_LOCK_CHECK != null) {
-            writeEncrypted(entity, lockValue,
+            writeEncrypted(entity, value,
                     EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY, EntityUtil.MAX_HEALTH_LOCK_CHECK);
         } else {
-            writeNbtEncrypted(entity.getPersistentData(), lockValue,
+            writeNbtEncrypted(entity.getPersistentData(), value,
                     NBT_MAX_HEALTH_LOCK_ENC, NBT_MAX_HEALTH_LOCK_KEY, NBT_MAX_HEALTH_LOCK_CHECK);
         }
     }
@@ -364,13 +393,13 @@ public class HealthLockManager {
                         entity.getClass().getName(), entity.getId());
                 return null;
             }
-            Integer decrypted = decrypt(entity, EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY);
-            return decrypted != null && decrypted > 0 ? (float) decrypted : null;
+            return decryptLockValue(entity,
+                    EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY);
         }
         // NBT 回退
-        Integer nbtResult = readNbtDecrypt(entity.getPersistentData(),
+        Float nbtResult = readNbtDecrypt(entity.getPersistentData(),
                 NBT_MAX_HEALTH_LOCK_ENC, NBT_MAX_HEALTH_LOCK_KEY, NBT_MAX_HEALTH_LOCK_CHECK);
-        return nbtResult != null && nbtResult > 0 ? (float) nbtResult.intValue() : null;
+        return nbtResult;
     }
 
     // ==================== 禁疗（旧加密，不变） ====================

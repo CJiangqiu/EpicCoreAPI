@@ -8,6 +8,7 @@ import net.eca.network.NetworkHandler;
 import net.eca.network.SetHealthClientSyncPacket;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.EcaSetHealthManager;
+import net.eca.util.health.HealthDataflowAnalyzer;
 import net.eca.util.health.HealthLockManager;
 import net.minecraft.network.syncher.EntityDataSerializer;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -715,8 +716,6 @@ public class EntityUtil {
                 ok = true;                                                         //数据流逆向定位真实存储
             } else if (EcaSetHealthManager.applyExternalScan(entity, expectedHealth)) {
                 ok = true;                                                         //外部扫描(isAlive/hurt 旁证，含有效血量换算)
-            } else if (EcaSetHealthManager.applyDeathGate(entity, expectedHealth)) {
-                ok = true;                                                         //死亡门控翻正(仅斩杀意图)
             } else if (EcaSetHealthManager.applyMethodProbe(entity, expectedHealth)) {
                 ok = true;                                                         //方法探针(借实体自身 writer)
             } else {
@@ -773,6 +772,8 @@ public class EntityUtil {
         if (entity == null || damageSource == null) return;
 
         try {
+            //门控实体的 die/remove 在开关翻正前空转，必须先于原版死亡处理和掉落解锁
+            unlockDeathGate(entity);
             //设置血量为0
             setHealth(entity, 0.0f);
             //设置伤害来源
@@ -804,6 +805,33 @@ public class EntityUtil {
 
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to set entity dead: {}", e.getMessage());
+        }
+    }
+
+    //翻正编码布尔死亡门控，使实体自身的 die/remove 不再空转
+    /* 生死由编码布尔字段而非血量决定的实体，血量路径全部无效。
+       借实体自身编码器写入死亡值，再用解码器回读校验，不符则回滚。 */
+    private static boolean unlockDeathGate(LivingEntity target) {
+        if (target == null) return false;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) return false;
+        Class<?> cls = target.getClass();
+        HealthDataflowAnalyzer.DeathGate gate = HealthDataflowAnalyzer.analyzeDeathGate(cls);
+        if (gate == null) return false;
+        try {
+            Object snapshot = gate.field().get(target);
+            Object encoded = gate.encoder().invoke(null, gate.deathValue());
+            gate.field().set(target, encoded);
+            boolean dead = Boolean.TRUE.equals(gate.decoder().invoke(null, gate.field().get(target)));
+            if (dead == gate.deathValue()) {
+                EcaLogger.info("[DeathGate] unlocked entity={} field={} deathValue={}",
+                        cls.getName(), gate.field().getName(), gate.deathValue());
+                return true;
+            }
+            gate.field().set(target, snapshot);   // 回读不符，回滚
+            return false;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
         }
     }
 
