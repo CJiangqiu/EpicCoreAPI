@@ -216,7 +216,7 @@ LivingEntityMixin {
         // 阵营目标验证：每 tick 检查当前目标是否仍然可攻击
         // 防止关系变更后（如命令设置友好）已锁定的目标继续被攻击
         if (!self.level().isClientSide && self instanceof Mob mob && mob.getTarget() != null) {
-            if (!FactionUtil.canAttack(mob, mob.getTarget())) {
+            if (!FactionUtil.canTarget(mob, mob.getTarget())) {
                 mob.setTarget(null);
             }
         }

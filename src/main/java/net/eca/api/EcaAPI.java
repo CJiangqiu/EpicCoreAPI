@@ -1733,8 +1733,8 @@ public final class EcaAPI {
 
     // 实体加入阵营
     /**
-     * Bind an entity to a faction. If the faction is not registered yet, a warning is
-     * logged but the binding still takes effect (the faction can be registered later).
+     * Bind an entity to a registered faction. The request is refused and logged if the
+     * faction does not exist.
      * 将实体加入指定阵营。
      *
      * @param entity    the entity
@@ -1799,9 +1799,9 @@ public final class EcaAPI {
 
     // 获取阵营内全部实体
     /**
-     * Get all entities in the given level that belong to the specified faction.
-     * This is an O(n) scan — avoid calling every tick.
-     * 获取指定维度中属于该阵营的所有实体（O(n) 扫描）。
+     * Resolve the specified faction's member table to live entities in the given level.
+     * Unloaded members and members in other dimensions are omitted.
+     * 将阵营成员表解析为指定维度中的已加载实体。
      *
      * @param level     the level to scan
      * @param factionId the faction id
@@ -1813,8 +1813,9 @@ public final class EcaAPI {
 
     // 移除阵营内全部实体
     /**
-     * Remove all entities in the given level from the specified faction.
-     * 将指定维度中该阵营的所有实体移出阵营。
+     * Remove every explicit member from the specified faction, including unloaded members
+     * and members in other dimensions.
+     * 将指定阵营的全部显式成员移出阵营，包括未加载和其他维度中的成员。
      *
      * @param factionId the faction id
      * @param level     the level to scan
@@ -1884,6 +1885,21 @@ public final class EcaAPI {
      */
     public static boolean canHarm(Entity source, Entity target) {
         return FactionManager.canHarm(source, target);
+    }
+
+    // 判断阵营与保护规则是否允许主动锁定目标
+    /**
+     * Check whether {@code source} may deliberately acquire {@code target} as a combat
+     * target. Unlike {@link #canHarm(Entity, Entity)}, this returns false for an effective
+     * {@link FactionRelation#NEUTRAL} relation. Entities without factions continue to use
+     * vanilla targeting rules.
+     *
+     * @param source the entity attempting to acquire a target
+     * @param target the proposed target
+     * @return true if deliberate targeting is permitted
+     */
+    public static boolean canTarget(Entity source, Entity target) {
+        return FactionUtil.canTarget(source, target);
     }
 
     // ==================== 阵营求援 ====================

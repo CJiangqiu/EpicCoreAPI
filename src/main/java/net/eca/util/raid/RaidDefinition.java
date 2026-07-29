@@ -71,8 +71,9 @@ public abstract class RaidDefinition {
 
     // 袭击的波次列表
     /**
-     * Define the raid's waves in order. Called once when the raid starts.
-     * For endless raids (see {@link #isEndless()}) the list is cycled.
+     * Define the raid's waves in order. The list is inspected during start validation and
+     * cached by the raid instance when progression begins, so implementations should return
+     * stable contents. For endless raids (see {@link #isEndless()}) the list is cycled.
      *
      * @return ordered wave list; an empty list makes the raid end immediately
      */
@@ -158,7 +159,7 @@ public abstract class RaidDefinition {
     // 是否达成胜利条件
     /**
      * Decide whether the defenders have won. Defaults to "all waves spawned and every
-     * raider dead". Never called for endless raids unless overridden to return true.
+     * raider dead"; the default implementation always returns false for endless raids.
      *
      * @param ctx the raid context
      * @return true if the raid is won

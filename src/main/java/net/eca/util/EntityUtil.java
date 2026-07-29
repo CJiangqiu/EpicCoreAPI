@@ -702,6 +702,8 @@ public class EntityUtil {
             boolean client = entity.level() != null && entity.level().isClientSide;
             //客户端仅允许被同步包驱动改血(否则客户端会与服务端各自为政)
             if (client && !IS_FROM_SYNC.get()) return false;
+            //锚点可信度探测自身要写原版血量，必须先于所有通道完成，否则会污染通道的回滚快照
+            EcaSetHealthManager.warmAnchorTrust(entity);
             float beforeHealth = EcaSetHealthManager.safeGetHealth(entity);
 
             //第一步：写原版 DATA_HEALTH_ID。若目标 getHealth 就是读这里(原版实体多数如此)，验证已通过则直接成功，

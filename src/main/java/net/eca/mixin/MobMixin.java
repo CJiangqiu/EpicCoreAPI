@@ -24,8 +24,8 @@ public class MobMixin {
             ci.cancel();
             return;
         }
-        // 阵营保护：同阵营或友好阵营不设为目标
-        if (!FactionUtil.canAttack(self, target)) {
+        // 阵营保护：同阵营、友好或中立关系不设为目标
+        if (!FactionUtil.canTarget(self, target)) {
             ci.cancel();
         }
     }

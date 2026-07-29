@@ -4,6 +4,7 @@ import net.eca.config.EcaConfiguration;
 import net.eca.coremod.EcaTransformerManager;
 import net.eca.coremod.LivingEntityHook;
 import net.eca.util.EcaLogger;
+import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 
@@ -153,14 +154,25 @@ public final class EcaSetHealthManager {
             }
         }
 
-        // 使用有效血量表达式校验，避免 getHealth 与存储解耦时错误接受或拒绝写入
         HealthDataflowAnalyzer.EffectiveHealthModel resolved = model;
+        /* 差分不过说明该存储不控制生死，模型误选。此时必须连同已确认状态一并撤销：
+           错误锚点一旦留下，后续每次 verify 都会读它而恒真，改血将永久假成功。 */
+        if (!probeEffectiveModel(target, resolved)) {
+            EFFECTIVE_ANCHOR_CONFIRMED.remove(cls);
+            if (EFFECTIVE_ANCHOR_OWNED.remove(cls)) registerHealthAnchor(cls, null);
+            HealthDataflowAnalyzer.rejectEffectiveModel(cls, resolved);
+            EFFECTIVE_MODEL_SUBMITTED.remove(cls);
+            return false;
+        }
+
+        // 使用有效血量表达式校验，避免 getHealth 与存储解耦时错误接受或拒绝写入
         boolean anchorWasPresent = hasHealthAnchor(cls);
         registerHealthAnchor(cls, entity -> {
             Object value = HealthDataflowAnalyzer.evaluate(
                     resolved.readExpr(), HealthDataflowAnalyzer.newContext(entity));
             return value instanceof Number number ? number.floatValue() : Float.NaN;
         });
+        EFFECTIVE_ANCHOR_OWNED.add(cls);
 
         List<Object> rollbackRoots = collectRollbackRoots(target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
@@ -173,15 +185,69 @@ public final class EcaSetHealthManager {
         /* 未经成功写入确认的模型失败后立即失效，以便候选集合变化时重新分析。
            写入失败由快照回滚；已经确认的锚点不因单次失败而移除。 */
         if (!EFFECTIVE_ANCHOR_CONFIRMED.contains(cls)) {
-            if (!anchorWasPresent) registerHealthAnchor(cls, null);
+            if (!anchorWasPresent) {
+                EFFECTIVE_ANCHOR_OWNED.remove(cls);
+                registerHealthAnchor(cls, null);
+            }
             HealthDataflowAnalyzer.rejectEffectiveModel(cls, resolved);
             EFFECTIVE_MODEL_SUBMITTED.remove(cls);
         }
         return false;
     }
 
+    /* 已通过生死翻转差分的模型，按类与存储标识去重，避免每次改血重复探测。 */
+    private static final Set<String> EFFECTIVE_MODEL_PROBED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> EFFECTIVE_MODEL_PROBE_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 把存储改成使模型输出为 0 的值，观察实体是否转为死亡：不转说明该存储不参与生死判定，
+       模型是误选(伤害中间量、吸收值等同样会被比较指令扫描命中)。
+       观测用实体自身的 isDeadOrDying，不经过模型表达式，因而能证伪模型。
+       实体已处于死亡状态时取不到翻转证据，直接放行，留给写入后的死亡语义校验判定。 */
+    private static boolean probeEffectiveModel(LivingEntity target,
+                                               HealthDataflowAnalyzer.EffectiveHealthModel model) {
+        Class<?> cls = target.getClass();
+        String key = cls.getName() + "|" + model.storage().label;
+        if (EFFECTIVE_MODEL_PROBED.contains(key)) return true;
+        try {
+            if (target.isDeadOrDying()) return true;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
+
+        Object snapshot = model.storage().read(target);
+        boolean flipped = false;
+        boolean restored;
+        try {
+            HealthSolveResult solved = HealthDataflowAnalyzer.buildWritePath(
+                    model.readExpr(), model.storage(), Float.valueOf(0.0f),
+                    HealthDataflowAnalyzer.newContext(target));
+            if (solved.solved() && solved.value() != null
+                    && HealthDataFlow.dispatchWrite(model.storage(), target, solved.value())) {
+                flipped = target.isDeadOrDying();
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        } finally {
+            restored = HealthDataFlow.dispatchWrite(model.storage(), target, snapshot);
+        }
+
+        if (flipped && restored) {
+            EFFECTIVE_MODEL_PROBED.add(key);
+            return true;
+        }
+        if (EFFECTIVE_MODEL_PROBE_DUMPED.add(key)) {
+            EcaLogger.info("[EffectiveHealth] model rejected entity={} storage={} flipped={} restore={}",
+                    cls.getName(), model.storage().label, flipped, restored ? "OK" : "FAIL");
+        }
+        return false;
+    }
+
     /* 有效血量锚点已被一次成功写入证实的类 */
     private static final Set<Class<?>> EFFECTIVE_ANCHOR_CONFIRMED = ConcurrentHashMap.newKeySet();
+
+    /* 由本通道安装的锚点。外部经 registerHealthAnchor 注册的锚点不在其列，不可被本通道撤销。 */
+    private static final Set<Class<?>> EFFECTIVE_ANCHOR_OWNED = ConcurrentHashMap.newKeySet();
 
     /* 已提交模型分析的候选签名：同一批候选只分析一次；候选随各通道失败逐步补齐，签名一变即允许重试。 */
     private static final Map<Class<?>, String> EFFECTIVE_MODEL_SUBMITTED = new ConcurrentHashMap<>();
@@ -594,12 +660,13 @@ public final class EcaSetHealthManager {
         }
     }
 
-    // 校验改血是否生效：观测锚点落在目标值容差内
+    // 校验改血是否生效：观测锚点落在目标值容差内，且锚点本身能反映写入
     public static boolean verify(LivingEntity target, float targetHealth) {
         float actual = readHealthAnchor(target);
         if (!Float.isFinite(actual)) return false;
         float tolerance = Math.max(0.5f, Math.abs(targetHealth) * 0.02f);
-        return Math.abs(actual - targetHealth) <= tolerance;
+        if (Math.abs(actual - targetHealth) > tolerance) return false;
+        return isAnchorTrustworthy(target);
     }
 
     // 外部扫描专用实读校验(带死亡语义：target≤0 需实读血量≤0，正值走容差匹配)。
@@ -607,8 +674,64 @@ public final class EcaSetHealthManager {
     public static boolean verifyExternalRaw(LivingEntity target, float targetHealth) {
         float actual = readHealthAnchor(target);
         if (!Float.isFinite(actual)) return false;
-        if (targetHealth <= 0.0f) return actual <= 0.0f;
+        if (targetHealth <= 0.0f) return actual <= 0.0f && isAnchorTrustworthy(target);
         return verify(target, targetHealth);
+    }
+
+    /* ==================== 锚点可信度 ==================== */
+
+    /* getHealth 是否跟随原版 DATA_HEALTH_ID，按实体类探测一次并缓存。
+       被改写成常量或改读自定义存储的 getHealth 与真实血量脱钩，它证明不了任何写入生效；
+       此时凡是目标值恰好等于该常量的改血都会无条件通过校验。 */
+    private static final Map<Class<?>, Boolean> GET_HEALTH_TRACKS_VANILLA = new ConcurrentHashMap<>();
+    private static final Set<String> ANCHOR_TRUST_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 探测本身要写原版血量，混在通道事务里会污染快照，故须在任何写入之前先把结论预热进缓存。 */
+    public static void warmAnchorTrust(LivingEntity target) {
+        if (target != null) isAnchorTrustworthy(target);
+    }
+
+    /* 锚点能否作为写入生效的证据。替代锚点已由生死翻转差分证实，直接放行；
+       其余按类探测 getHealth 与原版血量的联动性。 */
+    private static boolean isAnchorTrustworthy(LivingEntity target) {
+        if (target == null) return false;
+        Class<?> cls = target.getClass();
+        if (hasHealthAnchor(cls)) return true;
+        Boolean cached = GET_HEALTH_TRACKS_VANILLA.get(cls);
+        if (cached != null) return cached;
+        boolean tracks = probeVanillaHealthTracking(target);
+        GET_HEALTH_TRACKS_VANILLA.put(cls, tracks);
+        if (!tracks && ANCHOR_TRUST_DUMPED.add(cls.getName())) {
+            EcaLogger.info("[HealthAnchor] getHealth decoupled from vanilla storage entity={} (rejected as evidence)",
+                    cls.getName());
+        }
+        return tracks;
+    }
+
+    /* 写入两个不同的原版血量哨兵，比较 getHealth 读数是否随之变化；不变即为脱钩。
+       上限不可用时(诱饵 getMaxHealth 常返回 0)退回固定哨兵。无论结果如何都写回原值。 */
+    private static boolean probeVanillaHealthTracking(LivingEntity target) {
+        try {
+            SynchedEntityData data = target.getEntityData();
+            Float snapshot = data.get(LivingEntity.DATA_HEALTH_ID);
+            float max = target.getMaxHealth();
+            boolean bounded = Float.isFinite(max) && max > 2.0f;
+            float low = bounded ? max * 0.25f : 3.0f;
+            float high = bounded ? max * 0.75f : 9.0f;
+            try {
+                data.set(LivingEntity.DATA_HEALTH_ID, Float.valueOf(low));
+                float readLow = safeGetHealth(target);
+                data.set(LivingEntity.DATA_HEALTH_ID, Float.valueOf(high));
+                float readHigh = safeGetHealth(target);
+                if (!Float.isFinite(readLow) || !Float.isFinite(readHigh)) return false;
+                return Math.abs(readHigh - readLow) > 1.0E-4f;
+            } finally {
+                data.set(LivingEntity.DATA_HEALTH_ID, snapshot);
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
     }
 
     /* ==================== 血量观测锚点 ==================== */

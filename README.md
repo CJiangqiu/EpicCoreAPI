@@ -223,13 +223,14 @@ side="BOTH"
 - `getEntityFaction(entity)` - Get the faction id an entity belongs to (null if none; tamed animals fall back to their owner's faction)
 - `areSameFaction(a, b)` - Check whether two entities share a faction
 - `isFriendly(a, b)` - Check the complete friendly relationship: same/friendly ECA faction, vanilla scoreboard alliance, or owner-pet alliance (excludes creative, spectator and ECA invulnerability)
-- `getFactionMembers(level, factionId)` - Get all entities in a level belonging to a faction (O(n) scan, avoid per-tick use)
-- `kickAllFromFaction(factionId, level)` - Remove every entity in a level from a faction
+- `getFactionMembers(level, factionId)` - Resolve the faction's member table to live entities in one level
+- `kickAllFromFaction(factionId, level)` - Remove every explicit member globally, including unloaded and cross-dimension members
 - `setFactionRelation(a, b, relation)` - Set faction A's relation toward faction B (memory only)
 - `setFactionRelation(a, b, relation, level)` - Set faction A's relation toward B, persisted
 - `getFactionRelation(a, b)` - Get the explicit relation from A to B (null if no override)
 - `getEffectiveFactionRelation(source, target)` - Resolve the effective relation between two entities
-- `canHarm(source, target)` - Check whether faction rules allow source to harm or target the target
+- `canHarm(source, target)` - Check whether ECA faction relations allow source to harm the target
+- `canTarget(source, target)` - Check whether complete faction and protection rules allow source to deliberately target the target
 - `alertFactionMembers(factionId, attacker, victim, level)` - Make nearby untargeted allies retaliate against an attacker
 - `getFactionMemberTypes(factionId)` - Get the entity type pool a faction declares, mapped to spawn weights
 - `rollFactionMemberType(factionId, random)` - Pick one entity type from a faction's pool by weight
@@ -397,6 +398,7 @@ String factionId = EcaAPI.getEntityFaction(entity);
 boolean sameFaction = EcaAPI.areSameFaction(entityA, entityB);
 boolean friendly = EcaAPI.isFriendly(entityA, entityB);
 boolean mayAttack = EcaAPI.canHarm(attacker, target);
+boolean mayTarget = EcaAPI.canTarget(attacker, target);
 FactionRelation relation = EcaAPI.getEffectiveFactionRelation(attacker, target);
 EcaAPI.leaveFaction(entity);
 
@@ -908,9 +910,9 @@ EcaAPI.isBossShowPlaying(viewer); // check if viewer is in a cutscene
 
 ### Faction System
 
-ECA provides a faction system that decides who is hostile to whom. Binding an entity to a faction makes vanilla AI, target selectors and every ECA attack path respect that relationship — you do not need to implement an interface or write a mixin. `FactionUtil.isFriendly` resolves relationships, while `FactionUtil.canAttack` additionally enforces creative/spectator and ECA invulnerability protection.
+ECA provides a faction system that constrains targeting and damage relationships. Binding an entity makes vanilla alliance checks and target assignment respect same-faction, friendly and neutral rules without requiring an interface or mixin. It does not add target-acquisition AI: a `HOSTILE` relation permits combat, but the entity's own goals or an alert mechanism must still acquire the target. Standard `LivingEntity` damage paths enforce friendly protection; direct state-changing APIs remain the caller's responsibility. `FactionUtil.isFriendly` resolves alliances, while `FactionUtil.canAttack` additionally enforces creative/spectator and ECA invulnerability protection.
 
-`EcaAPI.isFriendly(a, b)` is the public complete friendly check. It returns true for the same ECA faction, friendly ECA factions, vanilla scoreboard allies, owner-pet pairs, pets with the same owner, and pets whose owners are scoreboard allies. Creative mode, spectator mode and ECA invulnerability are deliberately excluded because they are attack protections rather than alliance relationships. Use `areSameFaction` only when exact ECA faction identity matters; `canHarm` checks ECA faction relations only.
+`EcaAPI.isFriendly(a, b)` is the public complete friendly check. It returns true for the same ECA faction, friendly ECA factions, vanilla scoreboard allies, owner-pet pairs, pets with the same owner, and pets whose owners are scoreboard allies. Creative mode, spectator mode and ECA invulnerability are deliberately excluded because they are attack protections rather than alliance relationships. Use `areSameFaction` only when exact ECA faction identity matters; `canHarm` checks ECA faction relations only, while `canTarget` also rejects neutral relations and complete target immunity.
 
 Factions are registered by extending `FactionDefinition` and annotating the class with `@RegisterFaction`. Definitions are scanned during `FMLLoadCompleteEvent`; duplicate ids are logged and skipped (first one scanned wins). Factions can also be created at runtime through `EcaAPI.createFaction`, with or without persistence.
 
@@ -932,7 +934,7 @@ Each faction owns its **member table**. A member is recorded as a UUID plus its 
 
 A binding is dropped when the entity is permanently removed; chunk unloads and dimension changes keep it, and players keep theirs across death and respawn. Membership cannot outlive its faction — unregistering a faction drops its whole member table, and joining a faction that does not exist is refused rather than silently recorded.
 
-Tamed animals inherit their owner's faction automatically, so a pet is protected by its owner's allies, answers faction alerts, and counts as a faction member. The inheritance is resolved at lookup time rather than stored, which means a pet follows its owner across faction changes and never creates a binding of its own — calling `leaveFaction` on such a pet therefore does nothing. Bind a pet explicitly if it must belong elsewhere; an explicit binding always takes precedence over inheritance.
+Tamed animals inherit their owner's faction automatically, so a pet is protected by its owner's allies and can answer nearby faction alerts. Inheritance is resolved at lookup time rather than stored: an inherited pet is not included in the persistent member table, offline queries, counts or table-wide leader propagation. It follows its owner across faction changes and never creates a binding of its own — calling `leaveFaction` on such a pet therefore does nothing. Bind a pet explicitly if it must belong elsewhere or participate in member-table operations; an explicit binding always takes precedence over inheritance.
 
 A faction may optionally declare which entity types it consists of through `getMemberEntityTypes()`, mapping types to spawn weights. This lets other systems spawn "some members of this faction" without naming concrete types — the raid system uses it for faction-drawn waves.
 
@@ -973,7 +975,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 **Leaders.** A faction may designate one member as its leader. Setting a leader adds it to the faction automatically if it was not a member — a leader outside its own faction would be a contradictory state. Leaving the faction also vacates the post, and a leader that is permanently removed is cleared automatically.
 
-**Threat propagation.** When a leader attacks something, or is attacked, that entity becomes the target of **every member of the faction**. Two mechanisms coexist:
+**Threat propagation.** When a leader attacks something, or is attacked, that entity is offered as the target of every resolvable mob in the faction member table. Existing targets and faction target permissions may still prevent a switch. Two mechanisms coexist:
 
 | | Trigger | Range |
 |---|---|---|
@@ -986,7 +988,7 @@ Both mechanisms are governed **entirely by config** — there are no per-faction
 
 - `Leader Protection Enabled` (default `true`)
 - `Immediate Leader Protection` (default `false`)
-- `Alert Enabled` / `Alert Range` / `Immediate Member Alert` (default `false`)
+- `Alert Enabled` (default `true`) / `Alert Range` (default `32`) / `Immediate Member Alert` (default `false`)
 
 "Immediate" off means only members that currently have no target will engage; on means they abandon whatever they were fighting.
 
@@ -994,7 +996,7 @@ Both mechanisms are governed **entirely by config** — there are no per-faction
 
 | Direction | Methods |
 |---|---|
-| entity relationship | `areSameFaction(a, b)` (same ECA faction only), `isFriendly(a, b)` (complete ECA + vanilla friendly check), `getEffectiveFactionRelation(a, b)`, `canHarm(a, b)` (ECA faction rules only) |
+| entity relationship | `areSameFaction(a, b)` (same ECA faction only), `isFriendly(a, b)` (complete ECA + vanilla friendly check), `getEffectiveFactionRelation(a, b)`, `canHarm(a, b)` (ECA faction harm rules only), `canTarget(a, b)` (neutral and immunity-aware target check) |
 | member → faction | `getEntityFaction(entity)` (includes pet inheritance), `getEntityFaction(uuid)`, `isFactionMember(uuid, id)` |
 | faction → members | `getFactionMemberRecords(id)`, `getFactionMemberUuids(id)`, `getFactionMembersByType(id, typeId)`, `getFactionMemberCount(id)` |
 | faction → entities | `resolveFactionMembers(id, level)` |
@@ -1015,19 +1017,21 @@ Raids are registered by extending `RaidDefinition` and annotating with `@Registe
 
 **Waves.** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws that pull from a faction's `getMemberEntityTypes()` pool by weight.
 
-**Raiders.** Spawned raiders are bound to `getRaiderFactionId()` and receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight whatever is in front of them and only advance when they have no target. Any entity type works and no interface is required; entities without a `goalSelector` simply rely on faction aggression instead.
+**Raiders.** Spawned raiders are bound to `getRaiderFactionId()`. Spawned `Mob` instances also receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight an already acquired target and otherwise advance. Any entity type can be spawned and no interface is required, but faction hostility does not create target-acquisition AI; non-`Mob` entities receive neither the navigation goal nor mob callbacks. Override `getRaiderGoalPriority()` or return a negative value to change or disable goal injection.
 
-**Boss.** A wave may declare a leader with `RaidWave.setLeader(type)`. The spawned entity becomes the leader of the raid's raider faction, so the faction's threat propagation applies to it for free — attack the boss and every raider comes for you, and whatever the boss attacks becomes everyone's target. Declaring a leader requires `getRaiderFactionId()`; without a faction there is nothing to lead and the entry spawns as an ordinary raider.
+**Boss.** A wave may declare a leader with `RaidWave.setLeader(type)`. The spawned entity becomes the leader of the raid's raider faction, so the faction's threat propagation applies to it for free. Eligible, loaded mobs without an existing target respond by default; `Immediate Leader Protection` allows them to replace an existing target. Declaring a leader requires `getRaiderFactionId()`; without a faction there is nothing to lead and the entry spawns as an ordinary raider.
 
 Note that propagation walks the **entire faction member table**, not just this raid's participants. If the raider faction has other members elsewhere in the world, they answer too. Use a raid-specific faction if you want the response confined to the raid.
 
-**Validation.** Starting a raid verifies the factions it references. A missing raider faction **refuses the start** outright — raiders without a faction binding ignore defenders entirely, and the failure would otherwise surface only as "the raid began but nothing attacks". A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
+**Validation.** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction **refuses the start** outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
 
 **Progression.** `shouldAdvanceWave`, `checkVictory` and `checkDefeat` are all overridable. The defaults reproduce vanilla semantics: the next wave spawns once the previous one is dead, and the defenders win when every wave has spawned and every raider is gone.
 
+**Timing and callbacks.** `getMaxDurationTicks()` defaults to 48000, `getWaveCooldownTicks()` to 300, `getParticipantRadius()` to 96 blocks and `getCelebrationTicks()` to 600. A wave can add its own `spawnDelay()` and `spawnRadius()`. Lifecycle hooks are `onStart`, `onWaveStart`, `onWaveEnd`, `onVictory`, `onDefeat` and `onStop`. Client-side `bossBarExtension()` can replace the raid bar appearance while retaining server-synced raid state.
+
 **Endless raids.** `isEndless()` cycles the wave list forever and never satisfies the default victory condition. Finish one with `EcaAPI.endRaid`, which discards every surviving raider.
 
-Raids run per dimension, persist across restarts, and keep their center chunk force-loaded for the duration so they do not freeze when no player is nearby.
+Raids run per dimension and automatically restore their latest periodic checkpoint after a restart. Permanent casualties and terminal operations are saved immediately; ordinary progression is checkpointed once per second. The center chunk is force-loaded for the duration, but raiders that travel into other unloaded chunks are not force-loaded with it.
 
 ```java
 @RegisterRaid
@@ -1343,13 +1347,14 @@ side="BOTH"
 - `getEntityFaction(entity)` - 获取实体所属阵营 ID（无阵营返回 null；驯服动物回退为主人的阵营）
 - `areSameFaction(a, b)` - 判断两个实体是否属于同一阵营
 - `isFriendly(a, b)` - 完整判断友方关系：ECA 同阵营/友好阵营、原版计分板同盟或宠物主从同盟（不含创造、旁观和 ECA 无敌）
-- `getFactionMembers(level, factionId)` - 获取该世界中属于指定阵营的全部实体（O(n) 扫描，避免每 tick 调用）
-- `kickAllFromFaction(factionId, level)` - 将该世界中指定阵营的全部实体移出
+- `getFactionMembers(level, factionId)` - 将阵营成员表解析为指定维度中的已加载实体
+- `kickAllFromFaction(factionId, level)` - 全局移出全部显式成员，包括未加载和其他维度中的成员
 - `setFactionRelation(a, b, relation)` - 设置阵营 A 对阵营 B 的关系（仅内存）
 - `setFactionRelation(a, b, relation, level)` - 设置阵营 A 对 B 的关系并持久化
 - `getFactionRelation(a, b)` - 查询 A 对 B 的显式关系（无覆盖返回 null）
 - `getEffectiveFactionRelation(source, target)` - 解析两个实体之间的有效关系
 - `canHarm(source, target)` - 判断阵营规则是否允许 source 攻击 target
+- `canTarget(source, target)` - 判断完整阵营与保护规则是否允许 source 主动锁定 target
 - `alertFactionMembers(factionId, attacker, victim, level)` - 让附近无目标的同阵营盟友反击攻击者
 - `getFactionMemberTypes(factionId)` - 获取阵营声明的成员实体类型池（类型 → 权重）
 - `rollFactionMemberType(factionId, random)` - 按权重从阵营成员类型池抽取一个实体类型
@@ -1517,6 +1522,7 @@ String factionId = EcaAPI.getEntityFaction(entity);
 boolean sameFaction = EcaAPI.areSameFaction(entityA, entityB);
 boolean friendly = EcaAPI.isFriendly(entityA, entityB);
 boolean mayAttack = EcaAPI.canHarm(attacker, target);
+boolean mayTarget = EcaAPI.canTarget(attacker, target);
 FactionRelation relation = EcaAPI.getEffectiveFactionRelation(attacker, target);
 EcaAPI.leaveFaction(entity);
 
@@ -2027,9 +2033,9 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 
 ### 阵营系统
 
-本 Mod 提供了一套阵营系统，用于决定谁与谁敌对。将实体绑定到阵营后，原版 AI、目标选择器以及 ECA 的全部攻击路径都会遵守该关系，你无需实现任何接口或编写混入。`FactionUtil.isFriendly` 负责解析友方关系，`FactionUtil.canAttack` 则在此基础上额外执行创造/旁观与 ECA 无敌保护。
+本 Mod 提供了一套约束目标选择与伤害关系的阵营系统。实体绑定阵营后，原版同盟判断和目标设置会遵守同阵营、友好与中立规则，无需实现接口或编写混入。阵营系统不会自动添加索敌 AI：`HOSTILE` 只代表允许交战，仍需实体自身 Goal 或求援机制取得目标。标准 `LivingEntity` 伤害路径会执行友军保护，直接修改状态的 API 则仍需调用方自行判断。`FactionUtil.isFriendly` 负责解析同盟关系，`FactionUtil.canAttack` 则额外执行创造/旁观与 ECA 无敌保护。
 
-对外可通过 `EcaAPI.isFriendly(a, b)` 完整判断友方关系。它涵盖 ECA 同阵营、ECA 友好阵营、原版计分板同盟、玩家与自己的宠物、同主人的宠物，以及主人属于原版同盟队伍的宠物。创造模式、旁观模式和 ECA 无敌刻意不计入友方，因为它们属于攻击保护而非同盟关系。只有需要判断 ECA 阵营 ID 完全相同时才使用 `areSameFaction`；`canHarm` 也只检查 ECA 阵营关系。
+对外可通过 `EcaAPI.isFriendly(a, b)` 完整判断友方关系。它涵盖 ECA 同阵营、ECA 友好阵营、原版计分板同盟、玩家与自己的宠物、同主人的宠物，以及主人属于原版同盟队伍的宠物。创造模式、旁观模式和 ECA 无敌刻意不计入友方，因为它们属于攻击保护而非同盟关系。只有需要判断 ECA 阵营 ID 完全相同时才使用 `areSameFaction`；`canHarm` 只检查 ECA 阵营伤害关系，`canTarget` 则同时拒绝中立关系和完整目标免疫。
 
 注册阵营需要创建继承 `FactionDefinition` 的子类，并在类上标注 `@RegisterFaction`。ECA 在 `FMLLoadCompleteEvent` 期间扫描全部 Mod，重复 ID 会被记录并跳过（先扫描到的生效）。也可以通过 `EcaAPI.createFaction` 在运行时创建阵营，可选择是否持久化。
 
@@ -2051,7 +2057,7 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 
 实体被永久移除时绑定会被清除；区块卸载和跨维度传送会保留绑定，玩家的绑定则在死亡重生后始终保留。成员身份不能脱离阵营存在——注销阵营会一并清空其成员表，加入不存在的阵营会被拒绝而不是被静默记录。
 
-驯服动物会自动继承主人的阵营，因此宠物同样受主人盟友保护、会响应阵营求援、并被计入阵营成员。继承在查询时解析而非落库，这意味着宠物始终跟随主人换营且自身不会产生绑定——对这类宠物调用 `leaveFaction` 不会有任何效果。若希望宠物归属其他阵营，显式绑定即可，显式绑定始终优先于继承。
+驯服动物会自动继承主人的阵营，因此宠物同样受主人盟友保护，并可响应附近的阵营求援。继承在查询时解析而非落库：继承阵营的宠物不会出现在持久化成员表、离线查询、成员计数或遍历成员表的首领传导中。宠物会始终跟随主人换营且自身不会产生绑定——对这类宠物调用 `leaveFaction` 不会有任何效果。若希望宠物归属其他阵营或参与成员表操作，需要显式绑定；显式绑定始终优先于继承。
 
 阵营还可以通过 `getMemberEntityTypes()` 声明自己由哪些实体类型构成（类型 → 权重）。这使得其他系统无需指定具体类型即可生成"该阵营的一些成员"——袭击系统的按阵营抽取波次正是基于此。
 
@@ -2092,7 +2098,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 **首领。** 阵营可以指定一名成员作为首领。设置首领时若该实体尚未入营会自动加入——首领不属于自己的阵营是自相矛盾的状态。退出阵营同时卸任首领，首领被永久移除时首领记录会自动清除。
 
-**仇恨传导。** 当首领攻击某个实体或被某个实体攻击时，该实体会成为**全体阵营成员**的目标。系统中并存两套机制：
+**仇恨传导。** 当首领攻击某个实体或被某个实体攻击时，系统会尝试把该实体交给成员表中可解析的全部生物作为目标；已有目标和阵营目标权限仍可能阻止切换。系统中并存两套机制：
 
 | | 触发条件 | 范围 |
 |---|---|---|
@@ -2105,7 +2111,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 - `Leader Protection Enabled`（默认 `true`）
 - `Immediate Leader Protection`（默认 `false`）
-- `Alert Enabled` / `Alert Range` / `Immediate Member Alert`（默认 `false`）
+- `Alert Enabled`（默认 `true`）/ `Alert Range`（默认 `32`）/ `Immediate Member Alert`（默认 `false`）
 
 "Immediate" 关闭时只有当前没有目标的成员才会响应；开启时成员会放弃正在交战的目标。
 
@@ -2113,7 +2119,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 | 方向 | 方法 |
 |---|---|
-| 实体关系 | `areSameFaction(a, b)`（仅 ECA 同阵营）、`isFriendly(a, b)`（完整 ECA + 原版友方判断）、`getEffectiveFactionRelation(a, b)`、`canHarm(a, b)`（仅 ECA 阵营规则） |
+| 实体关系 | `areSameFaction(a, b)`（仅 ECA 同阵营）、`isFriendly(a, b)`（完整 ECA + 原版友方判断）、`getEffectiveFactionRelation(a, b)`、`canHarm(a, b)`（仅 ECA 阵营伤害规则）、`canTarget(a, b)`（包含中立与免疫的目标检查） |
 | 成员 → 阵营 | `getEntityFaction(entity)`（含宠物继承）、`getEntityFaction(uuid)`、`isFactionMember(uuid, id)` |
 | 阵营 → 成员 | `getFactionMemberRecords(id)`、`getFactionMemberUuids(id)`、`getFactionMembersByType(id, typeId)`、`getFactionMemberCount(id)` |
 | 阵营 → 实体 | `resolveFactionMembers(id, level)` |
@@ -2134,19 +2140,21 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 **波次。** 每个 `RaidWave` 可自由混用两种生成源——显式指定实体类型，以及按权重从阵营的 `getMemberEntityTypes()` 池中抽取。
 
-**袭击者。** 生成的袭击者会被绑定到 `getRaiderFactionId()`，并被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先攻击眼前的目标，只在没有目标时才向中心推进。任意实体类型均可使用，不要求实现任何接口；没有 `goalSelector` 的实体则仅依靠阵营敌对关系行动。
+**袭击者。** 生成的袭击者会被绑定到 `getRaiderFactionId()`；其中 `Mob` 实例还会被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先处理已经取得的目标，否则向中心推进。任意实体类型均可生成且不要求实现接口，但阵营敌对不会自动创建索敌 AI；非 `Mob` 实体不会获得导航 Goal，也不会执行生物回调。可覆写 `getRaiderGoalPriority()` 调整优先级，返回负数则禁用注入。
 
-**Boss。** 波次可以通过 `RaidWave.setLeader(type)` 声明一名首领。生成的实体会被设为该袭击所属袭击者阵营的首领，从而免费获得阵营的仇恨传导——攻击 Boss 会招来全体袭击者，Boss 攻击谁则全员一同攻击谁。声明首领需要 `getRaiderFactionId()`；没有阵营就没有可领导的对象，该条目会作为普通袭击者生成。
+**Boss。** 波次可以通过 `RaidWave.setLeader(type)` 声明一名首领。生成的实体会被设为该袭击所属袭击者阵营的首领，从而使用阵营仇恨传导。默认只有已加载、符合目标权限且当前没有目标的生物会响应；开启 `Immediate Leader Protection` 后才会替换已有目标。声明首领需要 `getRaiderFactionId()`；没有阵营就没有可领导的对象，该条目会作为普通袭击者生成。
 
 需要注意传导遍历的是**整张阵营成员表**，而非仅本场袭击的参与者。若该袭击者阵营在世界其他地方还有成员，它们同样会响应。希望响应范围限定在本场袭击内，请为袭击使用专属阵营。
 
-**启动校验。** 发起袭击时会校验其引用的阵营。袭击者阵营缺失会**直接拒绝启动**——没有阵营绑定的袭击者会完全无视防守方，而这种失败原本只会表现为"袭击开始了但没有任何东西发起攻击"。波次抽取的阵营若未注册或未声明成员池，则记录错误并跳过该组，袭击仍会启动。
+**启动校验。** 发起袭击时会校验其引用的阵营。非空但未注册的袭击者阵营会**直接拒绝启动**，因为所请求的友伤和求援规则无法应用。主动返回 `null` 则是允许的，此时每个生成实体完全由自身 AI 控制。波次抽取的阵营若未注册或未声明成员池，则记录错误并跳过该组，袭击仍会启动。
 
 **流程控制。** `shouldAdvanceWave`、`checkVictory` 和 `checkDefeat` 均可覆写。默认实现复现原版语义：上一波清空后生成下一波，全部波次生成完毕且袭击者全灭时防守方获胜。
 
+**时间与回调。** `getMaxDurationTicks()` 默认 48000，`getWaveCooldownTicks()` 默认 300，`getParticipantRadius()` 默认 96 格，`getCelebrationTicks()` 默认 600。每个波次还可设置 `spawnDelay()` 和 `spawnRadius()`。生命周期回调包括 `onStart`、`onWaveStart`、`onWaveEnd`、`onVictory`、`onDefeat` 与 `onStop`；客户端 `bossBarExtension()` 可在保留服务端袭击状态同步的同时替换血条外观。
+
 **无限波次。** `isEndless()` 会循环使用波次列表且永远不满足默认胜利条件。此类袭击需要通过 `EcaAPI.endRaid` 收尾，该方法会清除全部仍存活的袭击者。
 
-袭击按维度独立运行，可在重启后恢复，并在进行期间强制加载袭击中心所在区块，因此不会在附近无玩家时停摆。
+袭击按维度独立运行，并会在重启后自动恢复最近一次周期检查点。永久减员和终止操作会立即保存，普通流程每秒保存一次。袭击期间只强制加载中心区块；走入其他未加载区块的袭击者不会随中心区块一起强制加载。
 
 ```java
 @RegisterRaid

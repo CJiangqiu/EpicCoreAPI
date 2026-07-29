@@ -59,7 +59,7 @@ public abstract class EntityExtension {
     /*
      * 该实体类型应自动加入的阵营 ID。
      * 返回 null（默认）表示不自动加入阵营。
-     * 返回的阵营 ID 必须已由 @RegisterFaction 注册，否则实体仍会绑定但记录警告。
+     * 返回的阵营 ID 必须已由 @RegisterFaction 注册，否则绑定会被拒绝并记录日志。
      */
     /**
      * @return the faction id that entities of this type should automatically join,

@@ -35,6 +35,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class RaidManager {
 
+    private static final int PERSIST_INTERVAL_TICKS = 20;
+
     // 袭击定义注册表（id → RaidDefinition）
     private static final Map<String, RaidDefinition> RAID_DEFINITIONS = new ConcurrentHashMap<>();
 
@@ -360,20 +362,26 @@ public class RaidManager {
      * @param level the level to tick
      */
     public static void tickDimension(ServerLevel level) {
-        Map<Integer, RaidInstance> raids = ACTIVE_RAIDS.get(level.dimension());
-        if (raids == null || raids.isEmpty()) return;
+        ensureLoaded(level);
+        Map<Integer, RaidInstance> raids = getRaids(level);
+        if (raids.isEmpty()) return;
 
         boolean changed = false;
         // ConcurrentHashMap 的迭代是弱一致的，回调中启动或结束袭击不会抛 CME
         for (RaidInstance raid : raids.values()) {
+            RaidStatus previousStatus = raid.getStatus();
             raid.tick(level);
+            if (raid.getStatus() != previousStatus) {
+                changed = true;
+            }
             if (raid.getStatus() == RaidStatus.STOPPED) {
                 raids.remove(raid.getId());
                 forceLoadCenter(level, raid, false);
                 changed = true;
             }
         }
-        if (changed) {
+        // 定期抓取运行状态，兼顾重启恢复精度与 SavedData 序列化开销。
+        if (changed || level.getGameTime() % PERSIST_INTERVAL_TICKS == 0L) {
             persist(level);
         }
     }
@@ -389,12 +397,15 @@ public class RaidManager {
      */
     public static void onEntityRemoved(ServerLevel level, Entity entity) {
         if (entity == null) return;
-        Map<Integer, RaidInstance> raids = ACTIVE_RAIDS.get(level.dimension());
-        if (raids == null || raids.isEmpty()) return;
+        ensureLoaded(level);
+        Map<Integer, RaidInstance> raids = getRaids(level);
+        if (raids.isEmpty()) return;
 
         UUID uuid = entity.getUUID();
         for (RaidInstance raid : raids.values()) {
             if (raid.onRaiderRemoved(uuid)) {
+                // 永久减员必须立即落盘，避免重启后恢复已不存在的袭击者 UUID。
+                persist(level);
                 break;
             }
         }

@@ -21,17 +21,16 @@ import net.minecraft.world.scores.Team;
  */
 public class FactionUtil {
 
-    // 判断 attacker 是否可以对 target 造成伤害或设为目标
+    // 判断 attacker 是否可以对 target 造成伤害
     /**
      * Central attack permission check. Returns false if the attacker is forbidden from
-     * harming or targeting {@code target} due to faction rules, vanilla team rules,
-     * ECA invulnerability, or creative/spectator immunity.
-     * <p>
-     * All faction-related mixins delegate to this single entry point.
+     * harming {@code target} due to friendly relations, vanilla team rules, ECA
+     * invulnerability, or creative/spectator immunity. Neutral relations still permit
+     * incidental damage.
      *
      * @param attacker the attacking/targeting entity (may be null for sourceless damage)
      * @param target   the target entity
-     * @return true if the attack/targeting is permitted
+     * @return true if harming the target is permitted
      */
     public static boolean canAttack(Entity attacker, Entity target) {
         if (target == null) return false;
@@ -53,6 +52,24 @@ public class FactionUtil {
         }
 
         return true;
+    }
+
+    // 判断 attacker 是否可以主动将 target 设为目标
+    /**
+     * Check whether an entity may deliberately target another entity. This applies all
+     * harm restrictions and additionally rejects an effective neutral faction relation.
+     * Two entities without any faction remain governed by vanilla targeting rules.
+     *
+     * @param attacker the entity attempting to acquire a target
+     * @param target   the proposed target
+     * @return true if deliberate targeting is permitted
+     */
+    public static boolean canTarget(Entity attacker, Entity target) {
+        if (!canAttack(attacker, target)) return false;
+        if (!FactionManager.hasFaction(attacker) && !FactionManager.hasFaction(target)) {
+            return true;
+        }
+        return FactionManager.getEffectiveRelation(attacker, target) != FactionRelation.NEUTRAL;
     }
 
     // 判断两个实体是否因 ECA 阵营或原版同盟关系而互为友方

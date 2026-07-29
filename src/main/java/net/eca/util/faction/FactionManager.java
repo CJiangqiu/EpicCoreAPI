@@ -1003,7 +1003,7 @@ public class FactionManager {
         return FactionRelation.NEUTRAL;
     }
 
-    // 判断 source 是否可以对 target 造成伤害或设为目标
+    // 判断 ECA 阵营关系是否允许 source 伤害 target
     /**
      * @param source the attacker / targeter
      * @param target the target entity
@@ -1093,7 +1093,7 @@ public class FactionManager {
             // AABB 是方形，仍需按半径裁剪为球形范围
             if (mob.distanceToSqr(victim) > rangeSq) continue;
             if (!factionId.equals(getFactionId(mob))) continue;
-            if (!FactionUtil.canAttack(mob, livingAttacker)) continue;
+            if (!FactionUtil.canTarget(mob, livingAttacker)) continue;
 
             mob.setTarget(livingAttacker);
         }
@@ -1138,7 +1138,7 @@ public class FactionManager {
             if (!(member instanceof Mob mob) || !mob.isAlive()) continue;
             if (!immediate && mob.getTarget() != null) continue;
             // 传导不得让成员攻击自己人
-            if (!FactionUtil.canAttack(mob, target)) continue;
+            if (!FactionUtil.canTarget(mob, target)) continue;
 
             mob.setTarget(target);
         }

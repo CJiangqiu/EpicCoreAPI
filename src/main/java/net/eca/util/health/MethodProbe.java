@@ -324,6 +324,8 @@ public final class MethodProbe {
         }
         if (sam == null) return null;
         Class<?> input = sam.getParameterTypes()[0];
+        // 变长 SAM(Object...)：读写共用一个入口，靠实参个数分派，行为探测足以判定是否为 writer
+        if (input == Object[].class) return input;
         if (!isNumericInput(input)) input = genericNumericInput(field);
         // 擦除为 Object 的 Consumer<Object> 仍可能是动态控血 writer；行为探测会以两次写入和回滚确认。
         return isNumericInput(input) || input == Object.class ? input : null;
@@ -334,6 +336,7 @@ public final class MethodProbe {
         Method sam = singleAbstract(type);
         if (sam == null) return null;
         Class<?> input = sam.getParameterTypes()[0];
+        if (input == Object[].class) return input;
         return isNumericInput(input) || input == Object.class ? input : null;
     }
 
@@ -946,7 +949,7 @@ public final class MethodProbe {
             try {
                 Object function = field.get(entity);
                 if (function == null) return false;
-                sam.invoke(function, coerce(value, inputType));
+                sam.invoke(function, samArgument(value, inputType));
                 return true;
             } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
         }
@@ -975,7 +978,7 @@ public final class MethodProbe {
             try {
                 Object function = isStatic ? field.get() : field.get(entity);
                 if (function == null) return false;
-                sam.invoke(function, coerce(value, inputType));
+                sam.invoke(function, samArgument(value, inputType));
                 return true;
             } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
         }
@@ -1151,6 +1154,13 @@ public final class MethodProbe {
     private static Object coerce(float value, Class<?> type) {
         Object coerced = HealthDataflowAnalyzer.coerceForType(Float.valueOf(value), type);
         return coerced != null ? coerced : Float.valueOf(value);
+    }
+
+    /* 变长 SAM 的实参必须自行装成数组：其形参本身就是 Object[]，直接传数值会按零参调用命中读取分支。
+       返回类型保持 Object，确保 Method.invoke 把它当作单个形参而非实参列表展开。 */
+    private static Object samArgument(float value, Class<?> inputType) {
+        if (inputType == Object[].class) return new Object[]{Float.valueOf(value)};
+        return coerce(value, inputType);
     }
 
     private static float representableFor(float value, Class<?> type) {
