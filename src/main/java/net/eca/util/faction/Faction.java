@@ -1,8 +1,13 @@
 package net.eca.util.faction;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * A faction (阵营) is a named group that entities can belong to.
@@ -18,6 +23,12 @@ public class Faction {
     private int color;
     private FactionRelation defaultRelation;
     private final Map<String, FactionRelation> relations;
+
+    // 阵营首领，可为空；被永久移除时自动清空
+    private FactionMember leader;
+
+    // 成员表：本阵营成员的权威记录，成员→阵营的反向索引由 FactionManager 派生维护
+    private final Map<UUID, FactionMember> members = new ConcurrentHashMap<>();
 
     // 创建一个阵营
     /**
@@ -144,5 +155,119 @@ public class Faction {
      */
     public Map<String, FactionRelation> getRelations() {
         return Collections.unmodifiableMap(relations);
+    }
+
+    // ==================== 首领 ====================
+
+    // 获取阵营首领（无首领返回 null）
+    /**
+     * @return the faction leader, or null if this faction has none
+     */
+    public FactionMember getLeader() {
+        return leader;
+    }
+
+    // 设置阵营首领
+    /**
+     * Set or clear the faction leader. The leader is not implicitly added to the member
+     * table — {@link FactionManager} keeps the two consistent.
+     *
+     * @param leader the new leader, or null to clear
+     */
+    public void setLeader(FactionMember leader) {
+        this.leader = leader;
+    }
+
+    // 是否有首领
+    public boolean hasLeader() {
+        return leader != null;
+    }
+
+    // 判断指定 UUID 是否为本阵营首领
+    /**
+     * @param uuid the entity UUID to test
+     * @return true if this faction's leader has that UUID
+     */
+    public boolean isLeader(UUID uuid) {
+        return leader != null && uuid != null && leader.getUuid().equals(uuid);
+    }
+
+    // ==================== 成员 ====================
+
+    // 加入一名成员（同 UUID 覆盖，用于刷新类型信息）
+    /**
+     * @param member the member to add
+     */
+    public void addMember(FactionMember member) {
+        if (member != null && member.getUuid() != null) {
+            members.put(member.getUuid(), member);
+        }
+    }
+
+    // 移除一名成员
+    /**
+     * @param uuid the member's UUID
+     * @return the removed member, or null if it was not in this faction
+     */
+    public FactionMember removeMember(UUID uuid) {
+        return uuid == null ? null : members.remove(uuid);
+    }
+
+    // 获取一名成员记录
+    /**
+     * @param uuid the member's UUID
+     * @return the member record, or null
+     */
+    public FactionMember getMember(UUID uuid) {
+        return uuid == null ? null : members.get(uuid);
+    }
+
+    // 是否包含指定成员
+    public boolean hasMember(UUID uuid) {
+        return uuid != null && members.containsKey(uuid);
+    }
+
+    // 获取全部成员记录（只读）
+    /**
+     * @return read-only view of every member record
+     */
+    public Map<UUID, FactionMember> getMembers() {
+        return Collections.unmodifiableMap(members);
+    }
+
+    // 获取全部成员 UUID（只读）
+    /**
+     * @return read-only view of every member UUID
+     */
+    public Set<UUID> getMemberUuids() {
+        return Collections.unmodifiableSet(members.keySet());
+    }
+
+    // 按实体类型筛选成员
+    /**
+     * Filter members by entity type without loading any entity.
+     *
+     * @param typeId the entity type registry id, e.g. {@code "minecraft:zombie"}
+     * @return matching member records
+     */
+    public List<FactionMember> getMembersByType(String typeId) {
+        List<FactionMember> result = new ArrayList<>();
+        if (typeId == null) return result;
+        for (FactionMember member : members.values()) {
+            if (typeId.equals(member.getTypeId())) {
+                result.add(member);
+            }
+        }
+        return result;
+    }
+
+    // 获取成员数量
+    public int getMemberCount() {
+        return members.size();
+    }
+
+    // 清空全部成员
+    public void clearMembers() {
+        members.clear();
     }
 }

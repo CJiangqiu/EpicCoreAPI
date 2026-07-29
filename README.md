@@ -60,6 +60,9 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
 - `/eca faction list` - List all registered factions
 - `/eca faction info [factionId]` - Show a faction's color, members and relation overrides
 - `/eca faction relation <factionA> <factionB> <relation>` - Set A's relation toward B (hostile/neutral/friendly)
+- `/eca faction leader <factionId>` - Show a faction's leader and whether it is currently loaded
+- `/eca faction leader <factionId> set [target]` - Set the leader (defaults to the command source entity; joins the faction automatically)
+- `/eca faction leader <factionId> clear` - Clear the leader; the former leader remains a member
 - `/eca raid defs` - List all registered raid definitions
 - `/eca raid list` - List active raids in the current dimension
 - `/eca raid start <definitionId> [pos]` - Start a raid at a position inside its target structure (defaults to the command source position)
@@ -219,6 +222,7 @@ side="BOTH"
 - `leaveFaction(entity)` - Unbind an entity from its faction
 - `getEntityFaction(entity)` - Get the faction id an entity belongs to (null if none; tamed animals fall back to their owner's faction)
 - `areSameFaction(a, b)` - Check whether two entities share a faction
+- `isFriendly(a, b)` - Check the complete friendly relationship: same/friendly ECA faction, vanilla scoreboard alliance, or owner-pet alliance (excludes creative, spectator and ECA invulnerability)
 - `getFactionMembers(level, factionId)` - Get all entities in a level belonging to a faction (O(n) scan, avoid per-tick use)
 - `kickAllFromFaction(factionId, level)` - Remove every entity in a level from a faction
 - `setFactionRelation(a, b, relation)` - Set faction A's relation toward faction B (memory only)
@@ -229,6 +233,22 @@ side="BOTH"
 - `alertFactionMembers(factionId, attacker, victim, level)` - Make nearby untargeted allies retaliate against an attacker
 - `getFactionMemberTypes(factionId)` - Get the entity type pool a faction declares, mapped to spawn weights
 - `rollFactionMemberType(factionId, random)` - Pick one entity type from a faction's pool by weight
+- `joinFaction(uuid, typeId, isPlayer, factionId, level)` - Bind an entity to a faction by UUID, without requiring it to be loaded
+- `leaveFaction(uuid, level)` - Remove a member from its faction by UUID, without requiring it to be loaded
+- `getEntityFaction(uuid)` - Get the faction bound to a UUID (pure index lookup; no pet inheritance, which needs a live entity)
+- `isFactionMember(uuid, factionId)` - Check whether a UUID belongs to a specific faction
+- `getFactionMemberRecords(factionId)` - Get every member record (UUID + entity type) without loading entities
+- `getFactionMemberUuids(factionId)` - Get every member UUID without loading entities
+- `getFactionMembersByType(factionId, typeId)` - Filter members by entity type without loading entities
+- `getFactionMemberCount(factionId)` - Get a faction's member count without loading entities
+- `resolveFactionMembers(factionId, level)` - Resolve a faction's members to live entities in one level
+- `setFactionLeader(factionId, leader, level)` - Set a faction's leader (joins the faction automatically if needed)
+- `clearFactionLeader(factionId, level)` - Clear the leader; the former leader remains a member
+- `getFactionLeader(factionId)` - Get the leader record without loading the entity
+- `getFactionLeaderUuid(factionId)` - Get the leader's UUID
+- `resolveFactionLeader(factionId, server)` - Resolve the leader to a live entity, searching every dimension
+- `isFactionLeader(entity)` - Check whether an entity leads any faction
+- `getFactionByLeader(uuid)` - Find which faction an entity leads
 - `startRaid(level, pos, raidId)` - Start a raid at a position inside its target structure (center taken from the structure)
 - `startRaidAt(level, center, raidId)` - Start a raid with an explicit center, skipping the structure lookup
 - `endRaid(level, raid, victory)` - End a raid, discarding every surviving raider
@@ -374,7 +394,8 @@ EcaAPI.createFaction("undead_legion", "Undead Legion", 0xFF884400, serverLevel);
 EcaAPI.setFactionRelation("undead_legion", "village_guard", FactionRelation.HOSTILE, serverLevel);
 EcaAPI.joinFaction(entity, "undead_legion");
 String factionId = EcaAPI.getEntityFaction(entity);
-boolean allied = EcaAPI.areSameFaction(entityA, entityB);
+boolean sameFaction = EcaAPI.areSameFaction(entityA, entityB);
+boolean friendly = EcaAPI.isFriendly(entityA, entityB);
 boolean mayAttack = EcaAPI.canHarm(attacker, target);
 FactionRelation relation = EcaAPI.getEffectiveFactionRelation(attacker, target);
 EcaAPI.leaveFaction(entity);
@@ -887,7 +908,9 @@ EcaAPI.isBossShowPlaying(viewer); // check if viewer is in a cutscene
 
 ### Faction System
 
-ECA provides a faction system that decides who is hostile to whom. Binding an entity to a faction makes vanilla AI, target selectors and every ECA attack path respect that relationship — you do not need to implement an interface or write a mixin. All faction-related checks funnel through a single entry point, `FactionUtil.canAttack`.
+ECA provides a faction system that decides who is hostile to whom. Binding an entity to a faction makes vanilla AI, target selectors and every ECA attack path respect that relationship — you do not need to implement an interface or write a mixin. `FactionUtil.isFriendly` resolves relationships, while `FactionUtil.canAttack` additionally enforces creative/spectator and ECA invulnerability protection.
+
+`EcaAPI.isFriendly(a, b)` is the public complete friendly check. It returns true for the same ECA faction, friendly ECA factions, vanilla scoreboard allies, owner-pet pairs, pets with the same owner, and pets whose owners are scoreboard allies. Creative mode, spectator mode and ECA invulnerability are deliberately excluded because they are attack protections rather than alliance relationships. Use `areSameFaction` only when exact ECA faction identity matters; `canHarm` checks ECA faction relations only.
 
 Factions are registered by extending `FactionDefinition` and annotating the class with `@RegisterFaction`. Definitions are scanned during `FMLLoadCompleteEvent`; duplicate ids are logged and skipped (first one scanned wins). Factions can also be created at runtime through `EcaAPI.createFaction`, with or without persistence.
 
@@ -905,7 +928,9 @@ Relation resolution runs in this order, and the first match wins:
 5. A's `getDefaultRelation(self, target)` conditional override (only when the other side has no faction)
 6. A's static default relation
 
-Entity bindings are stored in the overworld's SavedData, so they are global across dimensions and survive restarts. A binding is dropped when the entity is permanently removed; chunk unloads and dimension changes keep it, and players keep theirs across death and respawn.
+Each faction owns its **member table**. A member is recorded as a UUID plus its entity type, which means a roster can be listed, filtered by type and counted **without loading a single entity** — members sitting in unloaded chunks or other dimensions are still fully visible and manageable. Factions live in the overworld's SavedData, so membership is global across dimensions and survives restarts.
+
+A binding is dropped when the entity is permanently removed; chunk unloads and dimension changes keep it, and players keep theirs across death and respawn. Membership cannot outlive its faction — unregistering a faction drops its whole member table, and joining a faction that does not exist is refused rather than silently recorded.
 
 Tamed animals inherit their owner's faction automatically, so a pet is protected by its owner's allies, answers faction alerts, and counts as a faction member. The inheritance is resolved at lookup time rather than stored, which means a pet follows its owner across faction changes and never creates a binding of its own — calling `leaveFaction` on such a pet therefore does nothing. Bind a pet explicitly if it must belong elsewhere; an explicit binding always takes precedence over inheritance.
 
@@ -946,7 +971,39 @@ public class UndeadLegionFaction extends FactionDefinition {
 }
 ```
 
-Faction members can glow in their relation color for nearby players, and a hurt member alerts nearby allies that have no target to retaliate against the attacker. Both are configurable.
+**Leaders.** A faction may designate one member as its leader. Setting a leader adds it to the faction automatically if it was not a member — a leader outside its own faction would be a contradictory state. Leaving the faction also vacates the post, and a leader that is permanently removed is cleared automatically.
+
+**Threat propagation.** When a leader attacks something, or is attacked, that entity becomes the target of **every member of the faction**. Two mechanisms coexist:
+
+| | Trigger | Range |
+|---|---|---|
+| Leader protection | the leader attacks or is attacked | the entire member table |
+| Member alert | any member is hurt | configurable radius around the victim |
+
+Leader protection is deliberately not range-limited: the member table is walked directly, so summons far from their master still answer. Members that cannot be resolved in the leader's dimension are skipped, and propagation never hands a member a target it is forbidden to attack. Repeat propagation of the same target within one tick is dropped, so a rapidly attacking leader does not walk the table on every hit.
+
+Both mechanisms are governed **entirely by config** — there are no per-faction overrides, so every faction behaves the same way on a given server:
+
+- `Leader Protection Enabled` (default `true`)
+- `Immediate Leader Protection` (default `false`)
+- `Alert Enabled` / `Alert Range` / `Immediate Member Alert` (default `false`)
+
+"Immediate" off means only members that currently have no target will engage; on means they abandon whatever they were fighting.
+
+**Querying.** Membership can be inspected from either direction, and the methods that do not resolve entities work entirely offline:
+
+| Direction | Methods |
+|---|---|
+| entity relationship | `areSameFaction(a, b)` (same ECA faction only), `isFriendly(a, b)` (complete ECA + vanilla friendly check), `getEffectiveFactionRelation(a, b)`, `canHarm(a, b)` (ECA faction rules only) |
+| member → faction | `getEntityFaction(entity)` (includes pet inheritance), `getEntityFaction(uuid)`, `isFactionMember(uuid, id)` |
+| faction → members | `getFactionMemberRecords(id)`, `getFactionMemberUuids(id)`, `getFactionMembersByType(id, typeId)`, `getFactionMemberCount(id)` |
+| faction → entities | `resolveFactionMembers(id, level)` |
+| faction → leader | `getFactionLeader(id)`, `getFactionLeaderUuid(id)`, `resolveFactionLeader(id, server)` (searches every dimension) |
+| leader → faction | `getFactionByLeader(uuid)`, `isFactionLeader(entity)` |
+
+`joinFaction` and `leaveFaction` both have UUID overloads for managing members whose entity is not loaded.
+
+Faction members can also glow in their relation color for nearby players, which is configurable and off by default.
 
 ### Raid System
 
@@ -959,6 +1016,12 @@ Raids are registered by extending `RaidDefinition` and annotating with `@Registe
 **Waves.** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws that pull from a faction's `getMemberEntityTypes()` pool by weight.
 
 **Raiders.** Spawned raiders are bound to `getRaiderFactionId()` and receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight whatever is in front of them and only advance when they have no target. Any entity type works and no interface is required; entities without a `goalSelector` simply rely on faction aggression instead.
+
+**Boss.** A wave may declare a leader with `RaidWave.setLeader(type)`. The spawned entity becomes the leader of the raid's raider faction, so the faction's threat propagation applies to it for free — attack the boss and every raider comes for you, and whatever the boss attacks becomes everyone's target. Declaring a leader requires `getRaiderFactionId()`; without a faction there is nothing to lead and the entry spawns as an ordinary raider.
+
+Note that propagation walks the **entire faction member table**, not just this raid's participants. If the raider faction has other members elsewhere in the world, they answer too. Use a raid-specific faction if you want the response confined to the raid.
+
+**Validation.** Starting a raid verifies the factions it references. A missing raider faction **refuses the start** outright — raiders without a faction binding ignore defenders entirely, and the failure would otherwise surface only as "the raid began but nothing attacks". A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
 
 **Progression.** `shouldAdvanceWave`, `checkVictory` and `checkDefeat` are all overridable. The defaults reproduce vanilla semantics: the next wave spawns once the previous one is dead, and the defenders win when every wave has spawned and every raider is gone.
 
@@ -990,6 +1053,7 @@ public class UndeadSiege extends RaidDefinition {
             new RaidWave()
                 .addEntry(EntityType.WITHER_SKELETON, 4, mob -> mob.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.NETHERITE_SWORD)))
                 .addFaction("undead_legion", 8)
+                .setLeader(EntityType.WITHER, mob -> mob.setCustomName(Component.literal("Undead Warlord")))
                 .spawnRadius(32.0)
         );
     }
@@ -1116,6 +1180,9 @@ Any `.json` filename works, and you can have multiple files.
 - `/eca faction list` - 列出全部已注册阵营
 - `/eca faction info [阵营ID]` - 查看阵营的颜色、成员与关系覆盖
 - `/eca faction relation <阵营A> <阵营B> <关系>` - 设置 A 对 B 的关系（hostile/neutral/friendly）
+- `/eca faction leader <阵营ID>` - 查看阵营首领及其当前是否已加载
+- `/eca faction leader <阵营ID> set [目标]` - 设置首领（省略目标时为命令执行者，会自动加入该阵营）
+- `/eca faction leader <阵营ID> clear` - 清除首领，原首领仍保留成员身份
 - `/eca raid defs` - 列出全部已注册的袭击定义
 - `/eca raid list` - 列出当前维度的活跃袭击
 - `/eca raid start <定义ID> [坐标]` - 在目标结构内发起袭击（省略坐标时为命令执行者位置）
@@ -1275,6 +1342,7 @@ side="BOTH"
 - `leaveFaction(entity)` - 将实体移出所属阵营
 - `getEntityFaction(entity)` - 获取实体所属阵营 ID（无阵营返回 null；驯服动物回退为主人的阵营）
 - `areSameFaction(a, b)` - 判断两个实体是否属于同一阵营
+- `isFriendly(a, b)` - 完整判断友方关系：ECA 同阵营/友好阵营、原版计分板同盟或宠物主从同盟（不含创造、旁观和 ECA 无敌）
 - `getFactionMembers(level, factionId)` - 获取该世界中属于指定阵营的全部实体（O(n) 扫描，避免每 tick 调用）
 - `kickAllFromFaction(factionId, level)` - 将该世界中指定阵营的全部实体移出
 - `setFactionRelation(a, b, relation)` - 设置阵营 A 对阵营 B 的关系（仅内存）
@@ -1285,6 +1353,22 @@ side="BOTH"
 - `alertFactionMembers(factionId, attacker, victim, level)` - 让附近无目标的同阵营盟友反击攻击者
 - `getFactionMemberTypes(factionId)` - 获取阵营声明的成员实体类型池（类型 → 权重）
 - `rollFactionMemberType(factionId, random)` - 按权重从阵营成员类型池抽取一个实体类型
+- `joinFaction(uuid, typeId, isPlayer, factionId, level)` - 按 UUID 将实体加入阵营，无需实体在线或已加载
+- `leaveFaction(uuid, level)` - 按 UUID 将实体移出所属阵营，无需实体在线
+- `getEntityFaction(uuid)` - 按 UUID 查询所属阵营（纯索引查询；不含需要实体才能解析的宠物继承）
+- `isFactionMember(uuid, factionId)` - 判断指定 UUID 是否为该阵营成员
+- `getFactionMemberRecords(factionId)` - 获取阵营全部成员记录（UUID + 实体类型），无需加载实体
+- `getFactionMemberUuids(factionId)` - 获取阵营全部成员 UUID，无需加载实体
+- `getFactionMembersByType(factionId, typeId)` - 按实体类型筛选阵营成员，无需加载实体
+- `getFactionMemberCount(factionId)` - 获取阵营成员数量，无需加载实体
+- `resolveFactionMembers(factionId, level)` - 将阵营成员解析为该维度中实际存在的实体
+- `setFactionLeader(factionId, leader, level)` - 设置阵营首领（若未入营则自动加入）
+- `clearFactionLeader(factionId, level)` - 清除阵营首领，原首领仍保留成员身份
+- `getFactionLeader(factionId)` - 获取阵营首领记录，无需加载实体
+- `getFactionLeaderUuid(factionId)` - 获取阵营首领的 UUID
+- `resolveFactionLeader(factionId, server)` - 将阵营首领解析为实体，跨全部维度搜索
+- `isFactionLeader(entity)` - 判断实体是否为任意阵营的首领
+- `getFactionByLeader(uuid)` - 反查某实体担任首领的阵营
 - `startRaid(level, pos, raidId)` - 在目标结构内发起袭击（中心取自结构包围盒）
 - `startRaidAt(level, center, raidId)` - 以指定坐标为中心发起袭击，跳过结构查询
 - `endRaid(level, raid, victory)` - 结束袭击并清除全部仍存活的袭击者
@@ -1430,7 +1514,8 @@ EcaAPI.createFaction("undead_legion", "亡灵军团", 0xFF884400, serverLevel);
 EcaAPI.setFactionRelation("undead_legion", "village_guard", FactionRelation.HOSTILE, serverLevel);
 EcaAPI.joinFaction(entity, "undead_legion");
 String factionId = EcaAPI.getEntityFaction(entity);
-boolean allied = EcaAPI.areSameFaction(entityA, entityB);
+boolean sameFaction = EcaAPI.areSameFaction(entityA, entityB);
+boolean friendly = EcaAPI.isFriendly(entityA, entityB);
 boolean mayAttack = EcaAPI.canHarm(attacker, target);
 FactionRelation relation = EcaAPI.getEffectiveFactionRelation(attacker, target);
 EcaAPI.leaveFaction(entity);
@@ -1942,7 +2027,9 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 
 ### 阵营系统
 
-本 Mod 提供了一套阵营系统，用于决定谁与谁敌对。将实体绑定到阵营后，原版 AI、目标选择器以及 ECA 的全部攻击路径都会遵守该关系，你无需实现任何接口或编写混入。所有阵营相关判断都汇聚到唯一入口 `FactionUtil.canAttack`。
+本 Mod 提供了一套阵营系统，用于决定谁与谁敌对。将实体绑定到阵营后，原版 AI、目标选择器以及 ECA 的全部攻击路径都会遵守该关系，你无需实现任何接口或编写混入。`FactionUtil.isFriendly` 负责解析友方关系，`FactionUtil.canAttack` 则在此基础上额外执行创造/旁观与 ECA 无敌保护。
+
+对外可通过 `EcaAPI.isFriendly(a, b)` 完整判断友方关系。它涵盖 ECA 同阵营、ECA 友好阵营、原版计分板同盟、玩家与自己的宠物、同主人的宠物，以及主人属于原版同盟队伍的宠物。创造模式、旁观模式和 ECA 无敌刻意不计入友方，因为它们属于攻击保护而非同盟关系。只有需要判断 ECA 阵营 ID 完全相同时才使用 `areSameFaction`；`canHarm` 也只检查 ECA 阵营关系。
 
 注册阵营需要创建继承 `FactionDefinition` 的子类，并在类上标注 `@RegisterFaction`。ECA 在 `FMLLoadCompleteEvent` 期间扫描全部 Mod，重复 ID 会被记录并跳过（先扫描到的生效）。也可以通过 `EcaAPI.createFaction` 在运行时创建阵营，可选择是否持久化。
 
@@ -1960,7 +2047,9 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 5. A 的 `getDefaultRelation(self, target)` 条件覆写（仅当对方无阵营时）
 6. A 的静态默认关系
 
-实体绑定存储于主世界存档，因此跨维度全局共享并且能在重启后恢复。实体被永久移除时绑定会被清除；区块卸载和跨维度传送会保留绑定，玩家的绑定则在死亡重生后始终保留。
+每个阵营拥有自己的**成员表**。成员以 UUID 加实体类型的形式记录，因此列出名单、按类型筛选、统计数量**完全不需要加载任何实体**——处于未加载区块或其他维度的成员同样可见、可管理。阵营存储于主世界存档，成员归属跨维度全局共享并能在重启后恢复。
+
+实体被永久移除时绑定会被清除；区块卸载和跨维度传送会保留绑定，玩家的绑定则在死亡重生后始终保留。成员身份不能脱离阵营存在——注销阵营会一并清空其成员表，加入不存在的阵营会被拒绝而不是被静默记录。
 
 驯服动物会自动继承主人的阵营，因此宠物同样受主人盟友保护、会响应阵营求援、并被计入阵营成员。继承在查询时解析而非落库，这意味着宠物始终跟随主人换营且自身不会产生绑定——对这类宠物调用 `leaveFaction` 不会有任何效果。若希望宠物归属其他阵营，显式绑定即可，显式绑定始终优先于继承。
 
@@ -2001,7 +2090,39 @@ public class UndeadLegionFaction extends FactionDefinition {
 }
 ```
 
-阵营成员可以按关系颜色对附近玩家发光；阵营成员受到攻击时，附近没有目标的同阵营盟友会转而攻击袭击者。两者均可在配置中开关。
+**首领。** 阵营可以指定一名成员作为首领。设置首领时若该实体尚未入营会自动加入——首领不属于自己的阵营是自相矛盾的状态。退出阵营同时卸任首领，首领被永久移除时首领记录会自动清除。
+
+**仇恨传导。** 当首领攻击某个实体或被某个实体攻击时，该实体会成为**全体阵营成员**的目标。系统中并存两套机制：
+
+| | 触发条件 | 范围 |
+|---|---|---|
+| 首领保护 | 首领攻击他人或被攻击 | 整张成员表 |
+| 成员求援 | 任意成员受到伤害 | 受害者周围的可配置半径 |
+
+首领保护刻意不设范围限制：直接遍历成员表，因此远离主人的召唤物同样会响应。无法在首领所在维度解析到的成员会被跳过，传导也绝不会让成员获得一个它本就不允许攻击的目标。同一 tick 内对同一目标的重复传导会被丢弃，避免首领连续攻击时反复遍历成员表。
+
+两套机制**完全由配置文件控制**，不提供按阵营覆写，因此同一服务器上所有阵营表现一致：
+
+- `Leader Protection Enabled`（默认 `true`）
+- `Immediate Leader Protection`（默认 `false`）
+- `Alert Enabled` / `Alert Range` / `Immediate Member Alert`（默认 `false`）
+
+"Immediate" 关闭时只有当前没有目标的成员才会响应；开启时成员会放弃正在交战的目标。
+
+**查询。** 归属关系可以从两个方向查询，其中不解析实体的方法完全离线可用：
+
+| 方向 | 方法 |
+|---|---|
+| 实体关系 | `areSameFaction(a, b)`（仅 ECA 同阵营）、`isFriendly(a, b)`（完整 ECA + 原版友方判断）、`getEffectiveFactionRelation(a, b)`、`canHarm(a, b)`（仅 ECA 阵营规则） |
+| 成员 → 阵营 | `getEntityFaction(entity)`（含宠物继承）、`getEntityFaction(uuid)`、`isFactionMember(uuid, id)` |
+| 阵营 → 成员 | `getFactionMemberRecords(id)`、`getFactionMemberUuids(id)`、`getFactionMembersByType(id, typeId)`、`getFactionMemberCount(id)` |
+| 阵营 → 实体 | `resolveFactionMembers(id, level)` |
+| 阵营 → 首领 | `getFactionLeader(id)`、`getFactionLeaderUuid(id)`、`resolveFactionLeader(id, server)`（跨全部维度搜索） |
+| 首领 → 阵营 | `getFactionByLeader(uuid)`、`isFactionLeader(entity)` |
+
+`joinFaction` 与 `leaveFaction` 均提供 UUID 重载，用于管理实体未加载的成员。
+
+阵营成员还可以按关系颜色对附近玩家发光，该功能可在配置中开关，默认关闭。
 
 ### 袭击系统
 
@@ -2014,6 +2135,12 @@ public class UndeadLegionFaction extends FactionDefinition {
 **波次。** 每个 `RaidWave` 可自由混用两种生成源——显式指定实体类型，以及按权重从阵营的 `getMemberEntityTypes()` 池中抽取。
 
 **袭击者。** 生成的袭击者会被绑定到 `getRaiderFactionId()`，并被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先攻击眼前的目标，只在没有目标时才向中心推进。任意实体类型均可使用，不要求实现任何接口；没有 `goalSelector` 的实体则仅依靠阵营敌对关系行动。
+
+**Boss。** 波次可以通过 `RaidWave.setLeader(type)` 声明一名首领。生成的实体会被设为该袭击所属袭击者阵营的首领，从而免费获得阵营的仇恨传导——攻击 Boss 会招来全体袭击者，Boss 攻击谁则全员一同攻击谁。声明首领需要 `getRaiderFactionId()`；没有阵营就没有可领导的对象，该条目会作为普通袭击者生成。
+
+需要注意传导遍历的是**整张阵营成员表**，而非仅本场袭击的参与者。若该袭击者阵营在世界其他地方还有成员，它们同样会响应。希望响应范围限定在本场袭击内，请为袭击使用专属阵营。
+
+**启动校验。** 发起袭击时会校验其引用的阵营。袭击者阵营缺失会**直接拒绝启动**——没有阵营绑定的袭击者会完全无视防守方，而这种失败原本只会表现为"袭击开始了但没有任何东西发起攻击"。波次抽取的阵营若未注册或未声明成员池，则记录错误并跳过该组，袭击仍会启动。
 
 **流程控制。** `shouldAdvanceWave`、`checkVictory` 和 `checkDefeat` 均可覆写。默认实现复现原版语义：上一波清空后生成下一波，全部波次生成完毕且袭击者全灭时防守方获胜。
 
@@ -2045,6 +2172,7 @@ public class UndeadSiege extends RaidDefinition {
             new RaidWave()
                 .addEntry(EntityType.WITHER_SKELETON, 4, mob -> mob.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.NETHERITE_SWORD)))
                 .addFaction("undead_legion", 8)
+                .setLeader(EntityType.WITHER, mob -> mob.setCustomName(Component.literal("Undead Warlord")))
                 .spawnRadius(32.0)
         );
     }

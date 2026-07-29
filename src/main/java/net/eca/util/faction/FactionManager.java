@@ -3,7 +3,6 @@ package net.eca.util.faction;
 import net.eca.api.RegisterFaction;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
-import net.eca.util.EntityUtil;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.RandomSource;
@@ -22,21 +21,38 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /*
- * 阵营管理器 — 实体-阵营绑定 + 阵营定义 + 关系查询
+ * 阵营管理器 — 阵营定义 + 成员表 + 首领 + 关系查询
  *
- * 四层查询：
- *   1. FACTION_MEMBER_IDS   — 快速路径，绝大多数实体不在此集合内，直接返回 null
- *   2. ENTITY_FACTION_CACHE  — WeakHashMap<Entity, String>，实体存活期间缓存，GC 时自动清除
- *   3. PERSISTENT_MEMBERS    — UUID→factionId，由 FactionSavedData 持久化，重启后恢复
+ * 数据模型：
+ *   Faction 是唯一权威，成员表与首领都嵌在其中，随 FactionSavedData 持久化。
+ *   MEMBER_INDEX 与 LEADER_INDEX 是由成员表派生的反向索引，只存在于内存，
+ *   加载时重建——因此不存在两张表写不同步的可能。
+ *
+ * getFactionId 四层查询：
+ *   1. FACTION_MEMBER_IDS   — 快速路径提示，纯性能，丢失不影响正确性
+ *   2. ENTITY_FACTION_CACHE  — WeakHashMap<Entity, String>，实体存活期间缓存
+ *   3. MEMBER_INDEX          — UUID→factionId 反向索引，权威结果
  *   4. 主人继承              — 驯服动物无自身绑定时继承主人阵营，纯计算不落库
  *
- * 持久化：
- *   - 阵营定义 + 实体绑定统一存储于 FactionSavedData（主世界 DataStorage）
- *   - 不依赖实体 NBT / SynchedEntityData
+ * 持久化统一存于主世界 DataStorage，不依赖实体 NBT / SynchedEntityData。
  */
 public class FactionManager {
 
-    // ==================== 三层缓存 ====================
+    // ==================== 权威数据 ====================
+
+    // 阵营注册表（id → Faction，含成员表与首领）
+    private static final Map<String, Faction> FACTIONS = new ConcurrentHashMap<>();
+
+    // 阵营定义对象注册表（id → FactionDefinition，进程级，不随存档清除）
+    private static final Map<String, FactionDefinition> FACTION_DEFINITIONS = new ConcurrentHashMap<>();
+
+    // ==================== 派生索引与缓存 ====================
+
+    // 成员 UUID → factionId，由各阵营成员表派生
+    private static final Map<UUID, String> MEMBER_INDEX = new ConcurrentHashMap<>();
+
+    // 首领 UUID → factionId，由各阵营首领字段派生
+    private static final Map<UUID, String> LEADER_INDEX = new ConcurrentHashMap<>();
 
     // 快速路径：按 entityId 记录当前属于任意阵营的实体
     private static final Set<Integer> FACTION_MEMBER_IDS = ConcurrentHashMap.newKeySet();
@@ -45,25 +61,31 @@ public class FactionManager {
     private static final Map<Entity, String> ENTITY_FACTION_CACHE =
             Collections.synchronizedMap(new WeakHashMap<>());
 
-    // 阵营定义注册表（id → Faction 静态数据）
-    private static final Map<String, Faction> FACTIONS = new ConcurrentHashMap<>();
-
-    // 阵营定义对象注册表（id → FactionDefinition，用于条件查询）
-    private static final Map<String, FactionDefinition> FACTION_DEFINITIONS = new ConcurrentHashMap<>();
-
-    // UUID → factionId 持久化映射（由 SavedData 加载和写入）
-    private static final Map<UUID, String> PERSISTENT_MEMBERS = new ConcurrentHashMap<>();
+    // 首领仇恨传导节流记录（factionId → 上次传导的目标与时刻）
+    private static final Map<String, Propagation> LAST_PROPAGATION = new ConcurrentHashMap<>();
 
     // 是否已从 SavedData 加载
     private static volatile boolean loaded = false;
+
+    private static final class Propagation {
+        final UUID target;
+        final long gameTime;
+
+        Propagation(UUID target, long gameTime) {
+            this.target = target;
+            this.gameTime = gameTime;
+        }
+    }
+
+    private FactionManager() {}
 
     // ==================== SavedData 辅助 ====================
 
     /*
      * 阵营数据统一存于主世界。
      *
-     * FACTIONS 与 PERSISTENT_MEMBERS 是全局静态的，持久化层必须同样全局才自洽：
-     * 若按实体所在维度分别存储，则非主世界写入的绑定会因 ensureLoaded 只加载一次
+     * FACTIONS 与派生索引都是全局静态的，持久化层必须同样全局才自洽：
+     * 若按实体所在维度分别存储，则非主世界写入的数据会因 ensureLoaded 只加载一次
      * 而在重启后永久丢失，跨维度的阵营成员将失去敌我判定。
      */
     private static FactionSavedData getSavedData(Entity entity) {
@@ -78,13 +100,22 @@ public class FactionManager {
         return FactionSavedData.get(server.overworld());
     }
 
-    private FactionManager() {}
+    // 将一个阵营的当前状态写回存档
+    private static void persist(Faction faction, Level level) {
+        if (faction == null) return;
+        FactionSavedData data = getSavedData(level);
+        if (data != null) {
+            data.putFaction(faction);
+        }
+    }
+
+    // ==================== 加载与清理 ====================
 
     // 尝试从世界数据加载（惰性、幂等）
     /**
-     * Attempt to load faction definitions and member mappings from SavedData.
-     * Annotation-registered factions are rebuilt first as a baseline, then SavedData
-     * entries are applied on top so persisted runtime edits take precedence.
+     * Attempt to load factions from SavedData. Annotation-registered factions are rebuilt
+     * first as a baseline, then SavedData entries are applied on top so persisted runtime
+     * edits take precedence. Derived indexes are rebuilt from the loaded member tables.
      * Idempotent — subsequent calls are no-ops until {@link #clearAll()} resets the state.
      *
      * @param level any server level (uses the overworld's DataStorage)
@@ -97,7 +128,7 @@ public class FactionManager {
             if (loaded) return;
             rebuildFactionsFromDefinitions();
             data.loadFactions();
-            data.loadMembers();
+            rebuildIndexes();
             loaded = true;
         }
     }
@@ -107,9 +138,19 @@ public class FactionManager {
         FACTIONS.put(faction.getId(), faction);
     }
 
-    static void putLoadedMember(UUID uuid, String factionId) {
-        PERSISTENT_MEMBERS.put(uuid, factionId);
-        // 不加入 FACTION_MEMBER_IDS — entityId 在实体加载缓存时才填充
+    // 由各阵营的成员表与首领重建反向索引
+    private static void rebuildIndexes() {
+        MEMBER_INDEX.clear();
+        LEADER_INDEX.clear();
+        for (Faction faction : FACTIONS.values()) {
+            for (UUID uuid : faction.getMemberUuids()) {
+                MEMBER_INDEX.put(uuid, faction.getId());
+            }
+            FactionMember leader = faction.getLeader();
+            if (leader != null) {
+                LEADER_INDEX.put(leader.getUuid(), faction.getId());
+            }
+        }
     }
 
     // 由 @RegisterFaction 定义重建阵营基线，使注解阵营不随存档切换丢失
@@ -121,9 +162,8 @@ public class FactionManager {
 
     // 清空随存档变化的全部状态
     /**
-     * Clear all per-save faction state: definitions loaded from SavedData, entity bindings,
-     * and runtime caches. Called on server stop so a single-player session that opens a
-     * second save does not inherit the first save's factions.
+     * Clear all per-save faction state. Called on server stop so a single-player session
+     * that opens a second save does not inherit the first save's factions.
      * <p>
      * {@code FACTION_DEFINITIONS} is intentionally preserved — annotation scanning runs
      * once per process, and {@link #ensureLoaded} rebuilds from it on the next load.
@@ -131,9 +171,11 @@ public class FactionManager {
     public static void clearAll() {
         synchronized (FactionManager.class) {
             FACTIONS.clear();
-            PERSISTENT_MEMBERS.clear();
+            MEMBER_INDEX.clear();
+            LEADER_INDEX.clear();
             FACTION_MEMBER_IDS.clear();
             ENTITY_FACTION_CACHE.clear();
+            LAST_PROPAGATION.clear();
             loaded = false;
         }
     }
@@ -150,6 +192,7 @@ public class FactionManager {
     public static void registerFaction(Faction faction) {
         if (faction == null || faction.getId() == null || faction.getId().isEmpty()) return;
         FACTIONS.put(faction.getId(), faction);
+        indexFaction(faction);
     }
 
     // 注册一个阵营（持久化到 SavedData）
@@ -163,9 +206,17 @@ public class FactionManager {
         if (faction == null || faction.getId() == null || faction.getId().isEmpty()) return;
         ensureLoaded(level);
         FACTIONS.put(faction.getId(), faction);
-        FactionSavedData data = getSavedData(level);
-        if (data != null) {
-            data.putFaction(faction);
+        indexFaction(faction);
+        persist(faction, level);
+    }
+
+    private static void indexFaction(Faction faction) {
+        for (UUID uuid : faction.getMemberUuids()) {
+            MEMBER_INDEX.put(uuid, faction.getId());
+        }
+        FactionMember leader = faction.getLeader();
+        if (leader != null) {
+            LEADER_INDEX.put(leader.getUuid(), faction.getId());
         }
     }
 
@@ -178,14 +229,17 @@ public class FactionManager {
      */
     public static boolean unregisterFaction(String factionId) {
         if (factionId == null) return false;
-        return FACTIONS.remove(factionId) != null;
+        Faction removed = FACTIONS.remove(factionId);
+        if (removed == null) return false;
+        dropIndexesOf(removed);
+        return true;
     }
 
-    // 注销一个阵营（持久化到 SavedData，并清理该阵营的全部成员绑定）
+    // 注销一个阵营（持久化到 SavedData，成员与首领一并失效）
     /**
-     * Unregister a faction definition and drop every entity binding that points at it.
-     * Bindings must be dropped here — a member entry naming a faction that no longer
-     * exists can never be resolved or cleaned up again.
+     * Unregister a faction and drop its entire member table. Membership cannot outlive the
+     * faction — an entry naming a faction that no longer exists could never be resolved
+     * or cleaned up again.
      *
      * @param factionId the faction id to remove
      * @param level     the server level for persistence
@@ -194,40 +248,37 @@ public class FactionManager {
     public static boolean unregisterFaction(String factionId, Level level) {
         if (factionId == null) return false;
         ensureLoaded(level);
-        boolean removed = FACTIONS.remove(factionId) != null;
-        if (removed) {
-            FactionSavedData data = getSavedData(level);
-            if (data != null) {
-                data.removeFaction(factionId);
-            }
-            dropMembersOf(factionId, data);
+        Faction removed = FACTIONS.remove(factionId);
+        if (removed == null) return false;
+
+        dropIndexesOf(removed);
+        FactionSavedData data = getSavedData(level);
+        if (data != null) {
+            data.removeFaction(factionId);
         }
-        return removed;
+        return true;
     }
 
-    // 移除指向指定阵营的全部成员绑定（运行时缓存 + 持久化）
-    private static void dropMembersOf(String factionId, FactionSavedData data) {
-        Iterator<Map.Entry<UUID, String>> it = PERSISTENT_MEMBERS.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<UUID, String> entry = it.next();
-            if (factionId.equals(entry.getValue())) {
-                it.remove();
-                if (data != null) {
-                    data.removeMember(entry.getKey());
-                }
-            }
+    // 清除某阵营在派生索引与运行时缓存中的全部痕迹
+    private static void dropIndexesOf(Faction faction) {
+        String factionId = faction.getId();
+        for (UUID uuid : faction.getMemberUuids()) {
+            MEMBER_INDEX.remove(uuid);
+        }
+        FactionMember leader = faction.getLeader();
+        if (leader != null) {
+            LEADER_INDEX.remove(leader.getUuid());
         }
         synchronized (ENTITY_FACTION_CACHE) {
             ENTITY_FACTION_CACHE.entrySet().removeIf(e -> factionId.equals(e.getValue()));
         }
-        // 快速路径仅是提示集合，清空后由 getFactionId 的持久层回填，不会丢失绑定
+        LAST_PROPAGATION.remove(factionId);
+        // 快速路径仅是提示集合，清空后由 getFactionId 的索引层回填，不会丢失归属
         FACTION_MEMBER_IDS.clear();
     }
 
     // 获取阵营定义
     /**
-     * Get a faction definition by its id.
-     *
      * @param factionId the faction id
      * @return the faction, or null if not registered
      */
@@ -238,8 +289,6 @@ public class FactionManager {
 
     // 获取全部阵营定义（只读）
     /**
-     * Get an unmodifiable view of all registered factions.
-     *
      * @return read-only faction map
      */
     public static Map<String, Faction> getAllFactions() {
@@ -248,8 +297,6 @@ public class FactionManager {
 
     // 检查阵营是否已注册
     /**
-     * Check whether a faction id is registered.
-     *
      * @param factionId the faction id
      * @return true if registered
      */
@@ -275,8 +322,7 @@ public class FactionManager {
     // 获取阵营的成员实体类型池（类型 → 权重）
     /**
      * Get the entity type pool declared by a faction's {@link FactionDefinition}.
-     * Only factions registered through {@link RegisterFaction} can declare a pool —
-     * factions created via the API or commands always return an empty map.
+     * Only factions registered through {@link RegisterFaction} can declare a pool.
      *
      * @param factionId the faction id
      * @return read-only entity type → weight map, empty if the faction declares no pool
@@ -292,7 +338,6 @@ public class FactionManager {
     /**
      * Randomly pick one entity type from a faction's member pool, weighted by the
      * values declared in {@link FactionDefinition#getMemberEntityTypes()}.
-     * Entries with a weight of zero or less are skipped.
      *
      * @param factionId the faction to draw from
      * @param random    the random source to use
@@ -334,7 +379,6 @@ public class FactionManager {
      * Scan all loaded mods for classes annotated with {@link RegisterFaction},
      * instantiate each {@link FactionDefinition}, and register the resulting faction.
      * Duplicate ids are logged and skipped (first registration wins).
-     * Called once during {@code FMLLoadCompleteEvent}, before entity extension scanning.
      */
     public static void scanAndRegisterAll() {
         ModList.get().forEachModFile(modFile -> {
@@ -373,11 +417,9 @@ public class FactionManager {
 
         String id = def.getId();
         if (id == null || id.isEmpty()) {
-            EcaLogger.error("[Faction] FactionDefinition {} returned null or empty id — skipping",
-                    clazz.getName());
+            EcaLogger.error("[Faction] FactionDefinition {} returned null or empty id — skipping", clazz.getName());
             return;
         }
-
         if (FACTIONS.containsKey(id)) {
             EcaLogger.error("[Faction] Duplicate faction id '{}' from {} — already registered, skipping",
                     id, clazz.getName());
@@ -404,31 +446,70 @@ public class FactionManager {
         return faction;
     }
 
-    // ==================== 实体-阵营绑定 ====================
+    // ==================== 成员绑定 ====================
 
     // 实体加入阵营
     /**
-     * Bind an entity to a faction. If the faction is not registered, a warning is logged
-     * and the entity is still tagged, but faction-level relation queries will fall back
-     * to default behavior.
+     * Bind an entity to a faction, recording its type so the membership stays inspectable
+     * while the entity is unloaded. Joining a faction the entity already belongs to simply
+     * refreshes the recorded type.
      *
      * @param entity    the entity to bind
      * @param factionId the target faction id
+     * @return true if the binding was created; false if the faction does not exist
      */
-    public static void joinFaction(Entity entity, String factionId) {
-        if (entity == null || factionId == null || factionId.isEmpty()) return;
+    public static boolean joinFaction(Entity entity, String factionId) {
+        if (entity == null || factionId == null || factionId.isEmpty()) return false;
         ensureLoaded(entity.level());
-        if (!FACTIONS.containsKey(factionId)) {
-            EcaLogger.info("[Faction] Entity {} joined unregistered faction '{}' — relations will use defaults",
-                    entity.getUUID(), factionId);
+        if (!bindMember(FactionMember.of(entity), factionId, entity.level())) {
+            return false;
         }
         FACTION_MEMBER_IDS.add(entity.getId());
         ENTITY_FACTION_CACHE.put(entity, factionId);
-        PERSISTENT_MEMBERS.put(entity.getUUID(), factionId);
-        FactionSavedData data = getSavedData(entity);
-        if (data != null) {
-            data.addMember(entity.getUUID(), factionId);
+        return true;
+    }
+
+    // 按 UUID 加入阵营（无需实体在线）
+    /**
+     * Bind an entity to a faction by UUID, without requiring the entity to be loaded.
+     * This is the form to use when managing summons or offline members.
+     *
+     * @param uuid      the entity UUID
+     * @param typeId    the entity type registry id, e.g. {@code "minecraft:zombie"}
+     * @param isPlayer  whether the member is a player
+     * @param factionId the target faction id
+     * @param level     any server level, used to reach the overworld SavedData
+     * @return true if the binding was created
+     */
+    public static boolean joinFaction(UUID uuid, String typeId, boolean isPlayer, String factionId, Level level) {
+        if (uuid == null || factionId == null || factionId.isEmpty()) return false;
+        ensureLoaded(level);
+        return bindMember(new FactionMember(uuid, typeId, isPlayer), factionId, level);
+    }
+
+    // 绑定成员的唯一写入路径：迁出旧阵营 → 写入新阵营 → 更新索引 → 落库
+    private static boolean bindMember(FactionMember member, String factionId, Level level) {
+        if (member == null) return false;
+        Faction faction = FACTIONS.get(factionId);
+        if (faction == null) {
+            EcaLogger.info("[Faction] Cannot join unregistered faction '{}' — membership requires an existing faction",
+                    factionId);
+            return false;
         }
+
+        String previous = MEMBER_INDEX.get(member.getUuid());
+        if (previous != null && !previous.equals(factionId)) {
+            Faction previousFaction = FACTIONS.get(previous);
+            if (previousFaction != null) {
+                previousFaction.removeMember(member.getUuid());
+                persist(previousFaction, level);
+            }
+        }
+
+        faction.addMember(member);
+        MEMBER_INDEX.put(member.getUuid(), factionId);
+        persist(faction, level);
+        return true;
     }
 
     // 实体退出阵营
@@ -445,21 +526,47 @@ public class FactionManager {
         if (entity == null) return;
         FACTION_MEMBER_IDS.remove(entity.getId());
         ENTITY_FACTION_CACHE.remove(entity);
-        PERSISTENT_MEMBERS.remove(entity.getUUID());
-        FactionSavedData data = getSavedData(entity);
-        if (data != null) {
-            data.removeMember(entity.getUUID());
-        }
+        unbindMember(entity.getUUID(), entity.level());
     }
 
-    // 获取实体所属阵营 ID（三层查询）
+    // 按 UUID 退出阵营（无需实体在线）
+    /**
+     * Remove a member from its faction by UUID, without requiring the entity to be loaded.
+     *
+     * @param uuid  the entity UUID
+     * @param level any server level, used to reach the overworld SavedData
+     * @return true if a binding was removed
+     */
+    public static boolean leaveFaction(UUID uuid, Level level) {
+        ensureLoaded(level);
+        return unbindMember(uuid, level);
+    }
+
+    private static boolean unbindMember(UUID uuid, Level level) {
+        if (uuid == null) return false;
+        String factionId = MEMBER_INDEX.remove(uuid);
+        if (factionId == null) return false;
+
+        Faction faction = FACTIONS.get(factionId);
+        if (faction != null) {
+            faction.removeMember(uuid);
+            // 首领必然是成员，退营即卸任
+            if (faction.isLeader(uuid)) {
+                faction.setLeader(null);
+                LEADER_INDEX.remove(uuid);
+            }
+            persist(faction, level);
+        }
+        return true;
+    }
+
+    // ==================== 归属查询 ====================
+
+    // 获取实体所属阵营 ID（四层查询）
     /**
      * Get the faction id an entity belongs to.
-     * Uses four-layer lookup: fast-path set → WeakHashMap cache → persistent UUID map →
+     * Uses four-layer lookup: fast-path set → WeakHashMap cache → member index →
      * owner inheritance for tamed animals.
-     * The fast-path set is consulted first as an optimization, but a miss does NOT
-     * short-circuit — the persistent SavedData layer is always checked as authoritative
-     * source, and a hit there will populate both the cache and the fast-path set.
      *
      * @param entity the entity to query
      * @return faction id, or null if the entity belongs to no faction
@@ -468,8 +575,8 @@ public class FactionManager {
         if (entity == null) return null;
         ensureLoaded(entity.level());
 
-        // 没有任何成员绑定时立即返回，未使用阵营系统的存档不必为每次查询计算 UUID
-        if (PERSISTENT_MEMBERS.isEmpty()) return null;
+        // 没有任何成员时立即返回，未使用阵营系统的存档不必为每次查询计算 UUID
+        if (MEMBER_INDEX.isEmpty()) return null;
 
         // Layer 1: 快速路径命中 → 查 WeakHashMap
         if (FACTION_MEMBER_IDS.contains(entity.getId())) {
@@ -479,13 +586,12 @@ public class FactionManager {
             }
         }
 
-        // Layer 2: UUID 持久化映射（权威数据源，重启后由 SavedData 加载）
-        String persistent = PERSISTENT_MEMBERS.get(entity.getUUID());
-        if (persistent != null && !persistent.isEmpty()) {
-            // 回填运行时缓存和快速路径（处理重启后首次查询的冷启动）
-            ENTITY_FACTION_CACHE.put(entity, persistent);
+        // Layer 2: 反向索引（权威结果）
+        String indexed = MEMBER_INDEX.get(entity.getUUID());
+        if (indexed != null && !indexed.isEmpty()) {
+            ENTITY_FACTION_CACHE.put(entity, indexed);
             FACTION_MEMBER_IDS.add(entity.getId());
-            return persistent;
+            return indexed;
         }
 
         // Layer 3: 驯服动物继承主人阵营（不写持久化，主人换营时自动跟随）
@@ -499,29 +605,37 @@ public class FactionManager {
         return null;
     }
 
+    // 按 UUID 获取所属阵营（纯索引查询，不含宠物继承）
+    /**
+     * Get the faction id bound to a UUID. Pure index lookup — no entity required, and no
+     * owner inheritance, since that needs a live entity to resolve.
+     *
+     * @param uuid the entity UUID
+     * @return faction id, or null if this UUID has no explicit binding
+     */
+    public static String getFactionId(UUID uuid) {
+        return uuid == null ? null : MEMBER_INDEX.get(uuid);
+    }
+
     /*
      * 解析驯服动物继承自主人的阵营。
      *
-     * 只读 owner UUID 直接查持久映射，不解析主人实体：这条在 canAttack 与发光扫描的
+     * 只读 owner UUID 直接查索引，不解析主人实体：这条在 canAttack 与发光扫描的
      * 热路径上，且主人离线或不在同一维度时仍需正确继承。
      *
-     * 只解析一层——原版 TamableAnimal.getOwner() 本身只支持玩家主人，
-     * 宠物的主人是另一只宠物属于第三方 mod 的边缘情况，不在此处递归。
-     *
-     * 结果不写入缓存与持久映射：宠物没有自己的绑定，主人改变阵营后下次查询自动跟随。
+     * 只解析一层——原版 TamableAnimal.getOwner() 本身只支持玩家主人。
+     * 结果不写入缓存与索引：宠物没有自己的绑定，主人改变阵营后下次查询自动跟随。
      */
     private static String resolveOwnerFaction(Entity entity) {
         if (!(entity instanceof TamableAnimal pet)) return null;
         UUID ownerUuid = pet.getOwnerUUID();
         if (ownerUuid == null) return null;
-        String ownerFaction = PERSISTENT_MEMBERS.get(ownerUuid);
+        String ownerFaction = MEMBER_INDEX.get(ownerUuid);
         return (ownerFaction != null && !ownerFaction.isEmpty()) ? ownerFaction : null;
     }
 
     // 检查实体是否属于任意阵营
     /**
-     * Check whether an entity belongs to any faction.
-     *
      * @param entity the entity to check
      * @return true if the entity has a faction
      */
@@ -529,11 +643,18 @@ public class FactionManager {
         return getFactionId(entity) != null;
     }
 
+    // 检查 UUID 是否为指定阵营的成员
+    /**
+     * @param uuid      the entity UUID
+     * @param factionId the faction id
+     * @return true if the UUID is bound to that faction
+     */
+    public static boolean isMember(UUID uuid, String factionId) {
+        return uuid != null && factionId != null && factionId.equals(MEMBER_INDEX.get(uuid));
+    }
+
     // 判断两个实体是否属于同一阵营
     /**
-     * Check whether two entities belong to the same faction.
-     * Both entities must have a faction; if either has none, returns false.
-     *
      * @param a first entity
      * @param b second entity
      * @return true if both belong to the same faction
@@ -545,105 +666,254 @@ public class FactionManager {
         return factionA != null && factionA.equals(factionB);
     }
 
-    // 查询实体所在阵营的全体成员
+    // ==================== 反向查询：阵营 → 成员 ====================
+
+    // 获取阵营的全部成员记录（只读，无需实体在线）
     /**
-     * Get all entities in the given level that belong to the specified faction.
-     * This is an O(n) scan over {@link EntityUtil#getEntities(Level)} — avoid calling
-     * every tick. Use {@link #areSameFaction} or {@link #getFactionId} for per-entity checks.
+     * @param factionId the faction id
+     * @return read-only member records, empty if the faction is unknown
+     */
+    public static Collection<FactionMember> getMembers(String factionId) {
+        Faction faction = getFaction(factionId);
+        return faction == null ? Collections.emptyList() : faction.getMembers().values();
+    }
+
+    // 获取阵营的全部成员 UUID（只读，无需实体在线）
+    /**
+     * @param factionId the faction id
+     * @return read-only member UUIDs, empty if the faction is unknown
+     */
+    public static Set<UUID> getMemberUuids(String factionId) {
+        Faction faction = getFaction(factionId);
+        return faction == null ? Collections.emptySet() : faction.getMemberUuids();
+    }
+
+    // 按实体类型筛选阵营成员（无需实体在线）
+    /**
+     * @param factionId the faction id
+     * @param typeId    the entity type registry id, e.g. {@code "minecraft:zombie"}
+     * @return matching member records
+     */
+    public static List<FactionMember> getMembersByType(String factionId, String typeId) {
+        Faction faction = getFaction(factionId);
+        return faction == null ? Collections.emptyList() : faction.getMembersByType(typeId);
+    }
+
+    // 获取阵营成员数量
+    /**
+     * @param factionId the faction id
+     * @return member count, 0 if the faction is unknown
+     */
+    public static int getMemberCount(String factionId) {
+        Faction faction = getFaction(factionId);
+        return faction == null ? 0 : faction.getMemberCount();
+    }
+
+    // 将阵营成员解析为该维度中实际存在的实体
+    /**
+     * Resolve a faction's members to live entities in one level. Members in unloaded chunks
+     * or other dimensions resolve to nothing and are omitted, so the result may be much
+     * shorter than {@link #getMemberCount}.
      *
-     * @param level     the level to scan
+     * @param factionId the faction id
+     * @param level     the level to resolve in
+     * @return resolvable member entities
+     */
+    public static List<Entity> resolveMembers(String factionId, ServerLevel level) {
+        List<Entity> result = new ArrayList<>();
+        if (level == null) return result;
+        for (UUID uuid : getMemberUuids(factionId)) {
+            Entity entity = level.getEntity(uuid);
+            if (entity != null && entity.isAlive()) {
+                result.add(entity);
+            }
+        }
+        return result;
+    }
+
+    // 查询实体所在阵营的全体成员（保留原签名，现走成员表而非全实体扫描）
+    /**
+     * Get the entities of a faction present in the given level.
+     *
+     * @param level     the level to resolve in
      * @param factionId the faction id to filter by
      * @return list of entities belonging to the faction (may be empty)
      */
     public static List<Entity> getFactionMembers(Level level, String factionId) {
-        if (level == null || factionId == null || factionId.isEmpty()) {
+        if (!(level instanceof ServerLevel serverLevel) || factionId == null || factionId.isEmpty()) {
             return Collections.emptyList();
         }
         ensureLoaded(level);
-        List<Entity> members = new ArrayList<>();
-        for (Entity entity : EntityUtil.getEntities(level)) {
-            if (factionId.equals(getFactionId(entity))) {
-                members.add(entity);
-            }
-        }
-        return members;
+        return resolveMembers(factionId, serverLevel);
     }
 
-    // 将指定阵营的全部实体移出
+    // 将指定阵营的全部成员移出
     /**
-     * Remove all entities in the given level from the specified faction.
+     * Remove every member from a faction. Operates on the member table directly, so members
+     * in unloaded chunks are unbound too.
      *
-     * @param factionId the faction to kick members from
-     * @param level     the level to scan
+     * @param factionId the faction to clear
+     * @param level     the server level for persistence
      */
     public static void kickAll(String factionId, Level level) {
         if (factionId == null || level == null) return;
-        for (Entity entity : getFactionMembers(level, factionId)) {
-            leaveFaction(entity);
+        ensureLoaded(level);
+        Faction faction = FACTIONS.get(factionId);
+        if (faction == null) return;
+
+        for (UUID uuid : new ArrayList<>(faction.getMemberUuids())) {
+            MEMBER_INDEX.remove(uuid);
+            LEADER_INDEX.remove(uuid);
         }
+        faction.clearMembers();
+        faction.setLeader(null);
+        synchronized (ENTITY_FACTION_CACHE) {
+            ENTITY_FACTION_CACHE.entrySet().removeIf(e -> factionId.equals(e.getValue()));
+        }
+        FACTION_MEMBER_IDS.clear();
+        persist(faction, level);
     }
 
-    // 阵营求援：当阵营成员被非友方攻击时，附近同阵营生物将攻击者设为目标
+    // ==================== 首领 ====================
+
+    // 设置阵营首领（实体版，自动加入该阵营）
     /**
-     * Alert nearby same-faction mobs to target an attacker.
-     * Called when a faction member is hurt by a non-friendly source.
-     * Only affects {@link Mob} entities without an existing target,
-     * within the configured alert range of the victim.
-     * <p>
-     * Candidates are gathered from an AABB around the victim rather than by scanning
-     * the whole level, since this runs on the damage path.
+     * Set a faction's leader. The entity is added to the faction if it is not already a
+     * member — a leader that is not part of its own faction would be a contradictory state.
      *
-     * @param factionId the victim's faction id
-     * @param attacker  the entity that attacked (must be a LivingEntity to be set as target)
-     * @param victim    the entity that was attacked
-     * @param level     the level to search for allies
+     * @param factionId the faction id
+     * @param entity    the new leader
+     * @param level     the server level for persistence
+     * @return true if the leader was set
      */
-    public static void alertFactionMembers(String factionId, Entity attacker, Entity victim, Level level) {
-        if (factionId == null || attacker == null || victim == null || level == null) return;
-        if (!(attacker instanceof LivingEntity livingAttacker)) return;
-        if (!EcaConfiguration.getFactionAlertEnabledSafely()) return;
-
-        int range = EcaConfiguration.getFactionAlertRangeSafely();
-        double rangeSq = (double) range * range;
-        AABB area = victim.getBoundingBox().inflate(range);
-
-        // 已有目标的实体不打断其当前战斗
-        for (Mob mob : level.getEntitiesOfClass(Mob.class, area,
-                m -> m != victim && m.getTarget() == null)) {
-            // AABB 是方形，仍需按半径裁剪为球形范围
-            if (mob.distanceToSqr(victim) > rangeSq) continue;
-            if (!factionId.equals(getFactionId(mob))) continue;
-
-            mob.setTarget(livingAttacker);
-        }
+    public static boolean setLeader(String factionId, Entity entity, Level level) {
+        if (entity == null) return false;
+        ensureLoaded(level);
+        return setLeader(factionId, FactionMember.of(entity), level);
     }
 
-    // 实体离开世界时清理运行时缓存，永久移除时一并清理持久化绑定
+    // 设置阵营首领（成员记录版，自动加入该阵营）
     /**
-     * Called when an entity leaves a level. Runtime caches are always dropped; the
-     * persistent binding is removed only when the entity is gone for good, otherwise
-     * a world's member map grows without bound as mobs die.
-     * <p>
-     * Chunk unloads and dimension changes keep the binding so the entity rejoins its
-     * faction on reload. Players always keep theirs — a player UUID survives respawn.
+     * Set a faction's leader from a member record, without requiring the entity to be loaded.
      *
-     * @param entity the entity leaving the level
-     * @param reason why the entity was removed; null is treated as a temporary unload
+     * @param factionId the faction id
+     * @param member    the new leader record
+     * @param level     the server level for persistence
+     * @return true if the leader was set
      */
-    public static void onEntityRemoved(Entity entity, Entity.RemovalReason reason) {
-        if (entity == null) return;
-        FACTION_MEMBER_IDS.remove(entity.getId());
-        ENTITY_FACTION_CACHE.remove(entity);
-
-        if (reason == null || !reason.shouldDestroy()) return;
-        if (entity instanceof Player) return;
-
-        if (PERSISTENT_MEMBERS.remove(entity.getUUID()) != null) {
-            FactionSavedData data = getSavedData(entity);
-            if (data != null) {
-                data.removeMember(entity.getUUID());
-            }
+    public static boolean setLeader(String factionId, FactionMember member, Level level) {
+        if (factionId == null || member == null) return false;
+        ensureLoaded(level);
+        Faction faction = FACTIONS.get(factionId);
+        if (faction == null) {
+            EcaLogger.info("[Faction] Cannot set leader: faction '{}' not registered", factionId);
+            return false;
         }
+
+        FactionMember previous = faction.getLeader();
+        if (previous != null) {
+            LEADER_INDEX.remove(previous.getUuid());
+        }
+
+        // 首领必须是成员
+        if (!faction.hasMember(member.getUuid())) {
+            bindMember(member, factionId, level);
+        }
+        faction.setLeader(member);
+        LEADER_INDEX.put(member.getUuid(), factionId);
+        persist(faction, level);
+        return true;
+    }
+
+    // 清除阵营首领（成员身份保留）
+    /**
+     * Clear a faction's leader. The former leader remains a member.
+     *
+     * @param factionId the faction id
+     * @param level     the server level for persistence
+     * @return true if a leader was cleared
+     */
+    public static boolean clearLeader(String factionId, Level level) {
+        if (factionId == null) return false;
+        ensureLoaded(level);
+        Faction faction = FACTIONS.get(factionId);
+        if (faction == null || !faction.hasLeader()) return false;
+
+        LEADER_INDEX.remove(faction.getLeader().getUuid());
+        faction.setLeader(null);
+        LAST_PROPAGATION.remove(factionId);
+        persist(faction, level);
+        return true;
+    }
+
+    // 获取阵营首领记录
+    /**
+     * @param factionId the faction id
+     * @return the leader record, or null
+     */
+    public static FactionMember getLeader(String factionId) {
+        Faction faction = getFaction(factionId);
+        return faction == null ? null : faction.getLeader();
+    }
+
+    // 获取阵营首领 UUID
+    /**
+     * @param factionId the faction id
+     * @return the leader UUID, or null
+     */
+    public static UUID getLeaderUuid(String factionId) {
+        FactionMember leader = getLeader(factionId);
+        return leader == null ? null : leader.getUuid();
+    }
+
+    // 将阵营首领解析为实体（跨全部维度搜索）
+    /**
+     * Resolve a faction's leader to a live entity, searching every dimension. Player leaders
+     * take the player-list fast path; other entities require scanning each level's lookup.
+     *
+     * @param factionId the faction id
+     * @param server    the running server
+     * @return the leader entity, or null if it is offline or unloaded
+     */
+    public static Entity resolveLeader(String factionId, MinecraftServer server) {
+        FactionMember leader = getLeader(factionId);
+        if (leader == null || server == null) return null;
+
+        if (leader.isPlayer()) {
+            return server.getPlayerList().getPlayer(leader.getUuid());
+        }
+        for (ServerLevel level : server.getAllLevels()) {
+            Entity entity = level.getEntity(leader.getUuid());
+            if (entity != null) return entity;
+        }
+        return null;
+    }
+
+    // 判断实体是否为任意阵营的首领
+    /**
+     * @param entity the entity to test
+     * @return true if it leads some faction
+     */
+    public static boolean isLeader(Entity entity) {
+        return entity != null && LEADER_INDEX.containsKey(entity.getUUID());
+    }
+
+    // 判断 UUID 是否为任意阵营的首领
+    /**
+     * @param uuid the entity UUID
+     * @return true if it leads some faction
+     */
+    public static boolean isLeader(UUID uuid) {
+        return uuid != null && LEADER_INDEX.containsKey(uuid);
+    }
+
+    // 反查某实体担任首领的阵营
+    /**
+     * @param uuid the leader's UUID
+     * @return the faction id it leads, or null
+     */
+    public static String getFactionByLeader(UUID uuid) {
+        return uuid == null ? null : LEADER_INDEX.get(uuid);
     }
 
     // ==================== 关系查询 ====================
@@ -655,13 +925,12 @@ public class FactionManager {
      *   1. 同阵营                              → SAME_FACTION
      *   2. FactionDefinition.getRelation() 条件 → 非 null 即返回
      *   3. Faction 静态 hostileTo/friendlyTo/neutralTo
-     *   4. 对称回退（B 的 FactionDefinition + B 的 Faction 静态表；但 B 的 DEFAULT 不在此环节对称）
+     *   4. 对称回退（B 的 FactionDefinition + B 的 Faction 静态表）
      *   5. FactionDefinition.getDefaultRelation() 条件 → 非 null 即返回
      *   6. Faction 静态 defaultRelation
      */
     /**
      * Resolve the effective relation from entity {@code a}'s perspective toward entity {@code b}.
-     * The result determines whether {@code a} can target or damage {@code b}.
      *
      * @param a the source entity (attacker / targeter)
      * @param b the target entity
@@ -673,14 +942,11 @@ public class FactionManager {
         String factionA = getFactionId(a);
         String factionB = getFactionId(b);
 
-        // 1. 同阵营
         if (factionA != null && factionA.equals(factionB)) {
             return FactionRelation.SAME_FACTION;
         }
 
-        // 2. 双方都有阵营 → 条件方法 + 静态关系表 + 对称回退
         if (factionA != null && factionB != null) {
-            // 2a. A 的 FactionDefinition 条件方法
             FactionDefinition defA = FACTION_DEFINITIONS.get(factionA);
             if (defA != null) {
                 LivingEntity selfA = (a instanceof LivingEntity) ? (LivingEntity) a : null;
@@ -688,14 +954,12 @@ public class FactionManager {
                 if (dyn != null) return dyn;
             }
 
-            // 2b. A 的 Faction 静态关系表
             Faction fA = FACTIONS.get(factionA);
             if (fA != null) {
                 FactionRelation rel = fA.getRelation(factionB);
                 if (rel != null) return rel;
             }
 
-            // 2c. 对称回退：B 的条件方法 + B 的静态表（但 B 的 default 不在此环节对称）
             FactionDefinition defB = FACTION_DEFINITIONS.get(factionB);
             if (defB != null) {
                 LivingEntity selfB = (b instanceof LivingEntity) ? (LivingEntity) b : null;
@@ -709,11 +973,9 @@ public class FactionManager {
                 if (rel != null) return rel;
             }
 
-            // 双方都有阵营但无覆盖 → 默认敌对
             return FactionRelation.HOSTILE;
         }
 
-        // 3. A 有阵营，B 无阵营 → A 的 defaultRelation（条件优先，静态回退）
         if (factionA != null) {
             FactionDefinition defA = FACTION_DEFINITIONS.get(factionA);
             if (defA != null) {
@@ -726,7 +988,6 @@ public class FactionManager {
             return FactionRelation.HOSTILE;
         }
 
-        // 4. A 无阵营，B 有阵营 → 逆向 B 的 defaultRelation（条件优先，静态回退）
         if (factionB != null) {
             FactionDefinition defB = FACTION_DEFINITIONS.get(factionB);
             if (defB != null) {
@@ -739,15 +1000,11 @@ public class FactionManager {
             return FactionRelation.HOSTILE;
         }
 
-        // 5. 双方都无阵营
         return FactionRelation.NEUTRAL;
     }
 
     // 判断 source 是否可以对 target 造成伤害或设为目标
     /**
-     * Shortcut: returns true if {@code source} is allowed to harm or target {@code target}
-     * under the current faction rules.
-     *
      * @param source the attacker / targeter
      * @param target the target entity
      * @return false if faction rules prevent harm, true otherwise
@@ -757,12 +1014,10 @@ public class FactionManager {
         return rel != FactionRelation.SAME_FACTION && rel != FactionRelation.FRIENDLY;
     }
 
-    // ==================== 阵营间关系快捷方法 ====================
+    // ==================== 阵营间关系 ====================
 
     // 设置阵营 A 对阵营 B 的关系（内存，不持久化）
     /**
-     * Set the relation that faction A has toward faction B (memory only).
-     *
      * @param factionAId the source faction id
      * @param factionBId the target faction id
      * @param relation   the relation to set
@@ -779,8 +1034,6 @@ public class FactionManager {
 
     // 设置阵营 A 对阵营 B 的关系（持久化到 SavedData）
     /**
-     * Set the relation that faction A has toward faction B, persisting to SavedData.
-     *
      * @param factionAId the source faction id
      * @param factionBId the target faction id
      * @param relation   the relation to set
@@ -796,16 +1049,11 @@ public class FactionManager {
             return;
         }
         factionA.setRelation(factionBId, relation);
-        FactionSavedData data = getSavedData(level);
-        if (data != null) {
-            data.putRelation(factionAId, factionA);
-        }
+        persist(factionA, level);
     }
 
     // 查询阵营 A 对阵营 B 的关系（无覆盖返回 null）
     /**
-     * Get the explicit relation from faction A to faction B.
-     *
      * @param factionAId the source faction id
      * @param factionBId the target faction id
      * @return the relation, or null if no explicit override
@@ -815,5 +1063,109 @@ public class FactionManager {
         Faction factionA = FACTIONS.get(factionAId);
         if (factionA == null) return null;
         return factionA.getRelation(factionBId);
+    }
+
+    // ==================== 仇恨传导 ====================
+
+    // 阵营求援：当阵营成员被非友方攻击时，附近同阵营生物将攻击者设为目标
+    /**
+     * Alert nearby same-faction mobs to target an attacker, used when an ordinary member is
+     * hurt. Candidates come from an AABB around the victim rather than the whole member
+     * table, since this runs on the damage path and only nearby allies should react.
+     *
+     * @param factionId the victim's faction id
+     * @param attacker  the entity that attacked
+     * @param victim    the entity that was attacked
+     * @param level     the level to search for allies
+     */
+    public static void alertFactionMembers(String factionId, Entity attacker, Entity victim, Level level) {
+        if (factionId == null || attacker == null || victim == null || level == null) return;
+        if (!(attacker instanceof LivingEntity livingAttacker)) return;
+        if (!EcaConfiguration.getFactionAlertEnabledSafely()) return;
+
+        int range = EcaConfiguration.getFactionAlertRangeSafely();
+        double rangeSq = (double) range * range;
+        AABB area = victim.getBoundingBox().inflate(range);
+        boolean immediate = EcaConfiguration.getFactionImmediateMemberAlertSafely();
+
+        for (Mob mob : level.getEntitiesOfClass(Mob.class, area, m -> m != victim)) {
+            if (!immediate && mob.getTarget() != null) continue;
+            // AABB 是方形，仍需按半径裁剪为球形范围
+            if (mob.distanceToSqr(victim) > rangeSq) continue;
+            if (!factionId.equals(getFactionId(mob))) continue;
+            if (!FactionUtil.canAttack(mob, livingAttacker)) continue;
+
+            mob.setTarget(livingAttacker);
+        }
+    }
+
+    // 首领仇恨传导：首领攻击他人或被攻击时，全阵营成员锁定该实体
+    /**
+     * Propagate a target to every member of the faction a leader commands. Unlike member
+     * alerts this is not range-limited — the whole member table is walked, so distant
+     * summons still answer. Members in other dimensions cannot be resolved and are skipped.
+     * <p>
+     * Whether an already-engaged member switches targets is decided by config, not per
+     * faction. Repeat propagations of the same target within one tick are dropped so a
+     * rapidly attacking leader does not walk the table every hit.
+     *
+     * @param leader the leader that attacked or was attacked
+     * @param target the entity to propagate
+     * @param level  the leader's level
+     */
+    public static void propagateLeaderTarget(Entity leader, LivingEntity target, ServerLevel level) {
+        if (leader == null || target == null || level == null) return;
+        if (!EcaConfiguration.getFactionLeaderProtectionEnabledSafely()) return;
+
+        String factionId = LEADER_INDEX.get(leader.getUUID());
+        if (factionId == null) return;
+        Faction faction = FACTIONS.get(factionId);
+        if (faction == null) return;
+
+        long gameTime = level.getGameTime();
+        Propagation last = LAST_PROPAGATION.get(factionId);
+        if (last != null && last.gameTime == gameTime && target.getUUID().equals(last.target)) {
+            return;
+        }
+        LAST_PROPAGATION.put(factionId, new Propagation(target.getUUID(), gameTime));
+
+        boolean immediate = EcaConfiguration.getFactionImmediateLeaderProtectionSafely();
+        UUID leaderUuid = leader.getUUID();
+
+        for (UUID uuid : faction.getMemberUuids()) {
+            if (uuid.equals(leaderUuid)) continue;
+            Entity member = level.getEntity(uuid);
+            if (!(member instanceof Mob mob) || !mob.isAlive()) continue;
+            if (!immediate && mob.getTarget() != null) continue;
+            // 传导不得让成员攻击自己人
+            if (!FactionUtil.canAttack(mob, target)) continue;
+
+            mob.setTarget(target);
+        }
+    }
+
+    // ==================== 实体移除 ====================
+
+    // 实体离开世界时清理运行时缓存，永久移除时一并清理归属与首领身份
+    /**
+     * Called when an entity leaves a level. Runtime caches are always dropped; membership
+     * and leadership are removed only when the entity is gone for good, otherwise a
+     * world's member table grows without bound as mobs die.
+     * <p>
+     * Chunk unloads and dimension changes keep the binding so the entity rejoins its
+     * faction on reload. Players always keep theirs — a player UUID survives respawn.
+     *
+     * @param entity the entity leaving the level
+     * @param reason why the entity was removed; null is treated as a temporary unload
+     */
+    public static void onEntityRemoved(Entity entity, Entity.RemovalReason reason) {
+        if (entity == null) return;
+        FACTION_MEMBER_IDS.remove(entity.getId());
+        ENTITY_FACTION_CACHE.remove(entity);
+
+        if (reason == null || !reason.shouldDestroy()) return;
+        if (entity instanceof Player) return;
+
+        unbindMember(entity.getUUID(), entity.level());
     }
 }

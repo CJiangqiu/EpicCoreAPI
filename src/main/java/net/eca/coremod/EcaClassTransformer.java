@@ -45,6 +45,17 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
     private static final String LIVING_ENTITY = "net/minecraft/world/entity/LivingEntity";
     private static final String ENTITY        = "net/minecraft/world/entity/Entity";
+    private static final String DISPLAY_WINDOW = "net/minecraftforge/fml/earlydisplay/DisplayWindow";
+
+    private static final Set<String> CONTAINER_TARGETS = Set.of(
+        "net/minecraft/world/level/entity/EntityTickList",
+        "net/minecraft/world/level/entity/EntityLookup",
+        "net/minecraft/util/ClassInstanceMultiMap",
+        "net/minecraft/server/level/ChunkMap",
+        "net/minecraft/world/level/entity/PersistentEntitySectionManager",
+        "net/minecraft/world/level/entity/EntitySectionStorage",
+        "net/minecraft/server/level/ServerLevel"
+    );
 
     /* 必须在注册 Transformer 前从磁盘读取，避免类加载回调进入 ForgeConfigSpec 而与 ModuleClassLoader 死锁。 */
     private static final boolean FORCE_COMPATIBILITY_MODE = readForceCompatibilityMode();
@@ -99,33 +110,17 @@ public final class EcaClassTransformer implements ClassFileTransformer {
        实体 hook 仅在"自然首次加载(classBeingRedefined==null)"或此标记为真时注入；
        其他 mod 发起的 retransform/redefine 期间返回 null，避免 ECA 加入他人的重转换链导致 VerifyError。 */
     private static final ThreadLocal<Boolean> OWN_RETRANSFORM = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Boolean> TRANSFORMING = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     // ==================== 初始化入口 ====================
 
     private static volatile boolean registered = false;
 
-    /* 仅注册 Transformer 与永久捕获器，不做 retransform。
-       在 mod CONSTRUCT 阶段调用：此时其他 mod（如 SuperSteve）正在并发构造/defineClass，
-       一旦在此 retransform 已加载的类，会与并发的 ModuleClassLoader 锁 + Mixin LaunchPluginHandler 锁
-       发生顺序反转死锁。注册是廉价的，且注册后续加载的类都会在加载期被变换，无需 retransform。 */
-    public static void register() {
-        EcaTransformerManager.registerClassTransformer();
-    }
-
-    /* 注册 Transformer 并重转换已加载的类。须在 mod 加载完成后（线程池空闲）调用，避免并发 retransform 死锁。
-       强制兼容模式下跳过全部重转换。 */
+    /* 注册 Transformer 并重转换已加载的类。注册本身同样必须推迟到 mod 并行构造结束，
+       否则首次类定义会在持有 Mixin 锁时进入此 Transformer。 */
     public static void init() {
         if (EcaConfiguration.getForceCompatibilityModeSafely()) return;
         EcaTransformerManager.applyLoadCompleteTransforms();
-    }
-
-    static boolean registerWithInstrumentation(Instrumentation inst) {
-        if (inst == null) {
-            AgentLogWriter.info("[EcaClassTransformer] No Instrumentation available, skipping register");
-            return false;
-        }
-        ensureRegistered(inst);
-        return true;
     }
 
     static boolean retransformLoadedClassesWithInstrumentation(Instrumentation inst) {
@@ -133,7 +128,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             AgentLogWriter.info("[EcaClassTransformer] No Instrumentation available, skipping init");
             return false;
         }
-        ensureRegistered(inst);
+        if (!ensureRegistered(inst)) return false;
         int before = transformCount;
         retransformLoadedClasses(inst);
         return transformCount > before;
@@ -143,16 +138,52 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         TransformerWhitelist.loadJsonWhitelist();
     }
 
-    private static void ensureRegistered(Instrumentation inst) {
-        if (!registered) {
+    private static synchronized boolean ensureRegistered(Instrumentation inst) {
+        if (registered) return true;
+        try {
             ensureWhitelistLoaded();
+            initializeTransformerDependencies();
             inst.addTransformer(new EcaClassTransformer(), true);
-            AgentLogWriter.info("[EcaClassTransformer] Registered as ClassFileTransformer");
             registered = true;
+        } catch (Throwable t) {
+            AgentLogWriter.info("[EcaClassTransformer] Registration failed: " + t.getMessage());
+            return false;
         }
 
-        //注册永久捕获器排在链尾，之后所有类加载/retransform 自动缓存最终字节码
-        RuntimeBytecodeProvider.registerPermanentCapture(inst);
+        try {
+            // 捕获器必须排在核心转换器之后，才能缓存 ECA 处理后的字节码。
+            RuntimeBytecodeProvider.registerPermanentCapture(inst);
+        } catch (Throwable t) {
+            AgentLogWriter.info("[EcaClassTransformer] Runtime bytecode capture registration failed: "
+                    + t.getMessage());
+        }
+        AgentLogWriter.info("[EcaClassTransformer] Registered at load complete");
+        return true;
+    }
+
+    /* Transformer 回调中禁止首次加载辅助实现；它会把 ModuleClassLoader 锁带入 Mixin 转换链。 */
+    private static void initializeTransformerDependencies() throws ClassNotFoundException {
+        Class<?>[] roots = {
+            EcaClassTransformer.class,
+            RuntimeBytecodeProvider.class,
+            ContainerReplacementTransformer.class,
+            LoadingScreenTransformer.class,
+            TransformerWhitelist.class,
+            AllReturnToggle.class,
+            AllReturnTransformer.class,
+            ConstOverride.class,
+            MethodProbe.class
+        };
+        for (Class<?> root : roots) {
+            initializeClassTree(root);
+        }
+    }
+
+    private static void initializeClassTree(Class<?> type) throws ClassNotFoundException {
+        Class.forName(type.getName(), true, type.getClassLoader());
+        for (Class<?> nested : type.getDeclaredClasses()) {
+            initializeClassTree(nested);
+        }
     }
 
     private static boolean readForceCompatibilityMode() {
@@ -302,6 +333,20 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         // 强制兼容模式：跳过全部字节码转换
         if (FORCE_COMPATIBILITY_MODE) return null;
 
+        // 这些类绝不能触发辅助转换器加载；特殊 Minecraft/Forge 目标在下方单独放行。
+        if (isIntrinsicProtected(className) && !isSpecialTarget(className)) return null;
+        if (TRANSFORMING.get()) return null;
+
+        TRANSFORMING.set(Boolean.TRUE);
+        try {
+            return transformInternal(className, classBeingRedefined, classfileBuffer);
+        } finally {
+            TRANSFORMING.remove();
+        }
+    }
+
+    private byte[] transformInternal(String className, Class<?> classBeingRedefined, byte[] classfileBuffer) {
+
         // 白名单内的特殊目标：DisplayWindow 渐变背景
         if (LoadingScreenTransformer.ENABLED &&
             LoadingScreenTransformer.TARGET_CLASS.equals(className)) {
@@ -333,6 +378,26 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             AgentLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
             return null;
         }
+    }
+
+    private static boolean isSpecialTarget(String className) {
+        return DISPLAY_WINDOW.equals(className)
+                || CONTAINER_TARGETS.contains(className)
+                || isHealthHookTarget(className);
+    }
+
+    private static boolean isIntrinsicProtected(String className) {
+        return className.startsWith("java/")
+                || className.startsWith("javax/")
+                || className.startsWith("jdk/")
+                || className.startsWith("sun/")
+                || className.startsWith("com/sun/")
+                || className.startsWith("net/eca/")
+                || className.startsWith("org/objectweb/asm/")
+                || className.startsWith("org/spongepowered/")
+                || className.startsWith("cpw/mods/")
+                || className.startsWith("net/minecraft/")
+                || className.startsWith("net/minecraftforge/");
     }
 
     private byte[] doTransform(String className, byte[] classfileBuffer) {

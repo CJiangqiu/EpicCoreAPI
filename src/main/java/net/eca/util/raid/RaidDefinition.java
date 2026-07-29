@@ -198,6 +198,17 @@ public abstract class RaidDefinition {
     public void onWaveStart(RaidContext ctx, int waveIndex) {
     }
 
+    // 每波袭击者全部清除后调用
+    /**
+     * Called once after every spawned wave has no remaining raiders. This callback runs
+     * before either the next wave starts or final victory is awarded.
+     *
+     * @param ctx       the raid context
+     * @param waveIndex zero-based index of the wave that just ended
+     */
+    public void onWaveEnd(RaidContext ctx, int waveIndex) {
+    }
+
     // 胜利时调用，发放奖励
     /**
      * Award victory rewards here. {@link RaidContext#getNearbyPlayers()} gives the

@@ -15,6 +15,7 @@ import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -245,24 +246,31 @@ LivingEntityMixin {
         }
     }
 
-    // 阵营求援：伤害实际生效后，通知附近同阵营生物将攻击者设为目标
+    // 阵营仇恨传导：伤害实际生效后，先做首领传导，再做附近成员求援
     @Inject(method = "hurt", at = @At("RETURN"))
     private void eca$factionAlertOnHurt(DamageSource source, float amount, CallbackInfoReturnable<Boolean> cir) {
         if (!cir.getReturnValue()) return; // 伤害被取消则不触发
         LivingEntity self = (LivingEntity) (Object) this;
-        if (self.level().isClientSide) return;
+        if (!(self.level() instanceof ServerLevel serverLevel)) return;
 
         Entity attacker = source.getEntity();
         if (attacker == null || attacker == self) return;
 
-        String factionId = FactionManager.getFactionId(self);
-        if (factionId == null) return;
-
-        // 仅对敌对/中立的攻击者触发求援（同阵营和友好不触发）
+        // 同阵营与友好之间的伤害不触发任何仇恨传导
         FactionRelation rel = FactionManager.getEffectiveRelation(attacker, self);
         if (rel == FactionRelation.SAME_FACTION || rel == FactionRelation.FRIENDLY) return;
 
-        FactionManager.alertFactionMembers(factionId, attacker, self, self.level());
+        // 首领传导先于成员求援：首领的仇恨不受范围限制，优先级也更高。
+        // propagateLeaderTarget 自行判断传入实体是否为某阵营首领，非首领直接返回。
+        if (attacker instanceof LivingEntity livingAttacker) {
+            FactionManager.propagateLeaderTarget(self, livingAttacker, serverLevel);
+        }
+        FactionManager.propagateLeaderTarget(attacker, self, serverLevel);
+
+        String factionId = FactionManager.getFactionId(self);
+        if (factionId != null) {
+            FactionManager.alertFactionMembers(factionId, attacker, self, serverLevel);
+        }
     }
 
     @Inject(method = "actuallyHurt", at = @At("HEAD"), cancellable = true)

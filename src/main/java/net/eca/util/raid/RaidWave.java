@@ -23,6 +23,7 @@ public class RaidWave {
 
     private final List<RaidSpawnEntry> entries = new ArrayList<>();
     private final Map<String, Integer> factionCounts = new LinkedHashMap<>();
+    private RaidSpawnEntry leaderEntry;
     private int spawnDelayTicks = 0;
     private double spawnRadius = 24.0;
 
@@ -69,6 +70,44 @@ public class RaidWave {
             factionCounts.merge(factionId, count, Integer::sum);
         }
         return this;
+    }
+
+    // 指定本波的首领：生成后被设为袭击者阵营的首领
+    /**
+     * Declare this wave's leader. Exactly one leader may be declared per wave; a later call
+     * replaces the earlier one. The spawned entity is made the leader of the raid's raider
+     * faction, which makes every raider answer when it attacks or is attacked.
+     * <p>
+     * Requires the raid to declare {@link RaidDefinition#getRaiderFactionId()} — without a
+     * faction there is nothing to lead, and the entry is spawned as an ordinary raider.
+     *
+     * @param type the leader's entity type
+     * @return this wave, for chaining
+     */
+    public RaidWave setLeader(EntityType<?> type) {
+        return setLeader(type, null);
+    }
+
+    // 指定本波的首领（附生成后处理）
+    /**
+     * Declare this wave's leader with a post-spawn callback, typically used to give the
+     * boss its equipment or attributes.
+     *
+     * @param type      the leader's entity type
+     * @param postSpawn applied to the spawned leader; may be null
+     * @return this wave, for chaining
+     */
+    public RaidWave setLeader(EntityType<?> type, Consumer<Mob> postSpawn) {
+        this.leaderEntry = type == null ? null : new RaidSpawnEntry(type, 1, postSpawn);
+        return this;
+    }
+
+    // 获取本波的首领条目（未声明返回 null）
+    /**
+     * @return the declared leader entry, or null if this wave has no leader
+     */
+    public RaidSpawnEntry getLeaderEntry() {
+        return leaderEntry;
     }
 
     // 设置本波生成前的额外延迟（tick）
@@ -122,7 +161,7 @@ public class RaidWave {
      * @return combined count of explicit entries and faction-drawn entities
      */
     public int getTotalCount() {
-        int total = 0;
+        int total = leaderEntry == null ? 0 : leaderEntry.getCount();
         for (RaidSpawnEntry entry : entries) {
             total += entry.getCount();
         }

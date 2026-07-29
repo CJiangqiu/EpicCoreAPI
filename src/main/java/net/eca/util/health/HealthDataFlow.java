@@ -42,8 +42,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /*
  * 数据流改血落地层：吃 HealthDataflowAnalyzer 产出的可写树(AnalysisResult)，
  * 把求解结果写进目标真实存储并校验，失败回滚。
- * 拥有写目标的全部副作用——Source 子类的真正写入实现按 instanceof 分发到本类，
- * Unsafe/反射/retransform 都集中在这里，使分析器保持零 ECA 依赖、零副作用。
+ * Source 的写入按具体类型分派到本类，Unsafe、反射和 retransform 操作也集中在此，
+ * 使分析器保持只读且不依赖 ECA 运行期状态。
  */
 public final class HealthDataFlow {
 
@@ -62,12 +62,19 @@ public final class HealthDataFlow {
             HealthDataflowAnalyzer.setClassBytesProvider(HealthDataFlow::classBytesViaRuntime);
             HealthDataflowAnalyzer.setOverrideLookup(ConstOverride::getOverride);
             MethodProbe.setClassBytesProvider(HealthDataFlow::classBytesViaRuntime);
+            // 锁血/最大血量锁的密文、密钥、校验位三者都参与 hook 取值，必须整组登记才能剥净
             HealthDataflowAnalyzer.setStripConfig(
                     Set.of("net/eca/coremod/LivingEntityHook", "net/eca/util/health/HealthLockManager"),
                     Set.of("SF:net.eca.util.EntityUtil.HEALTH_LOCK_VALUE",
+                           "SF:net.eca.util.EntityUtil.HEALTH_LOCK_KEY",
+                           "SF:net.eca.util.EntityUtil.HEALTH_LOCK_CHECK",
                            "SF:net.eca.util.EntityUtil.HEAL_BAN_VALUE",
-                           "SF:net.eca.util.EntityUtil.MAX_HEALTH_LOCK_VALUE"),
-                    Set.of("ecaHealthLockValue", "ecaHealBanValue", "ecaMaxHealthLockValue"));
+                           "SF:net.eca.util.EntityUtil.MAX_HEALTH_LOCK_VALUE",
+                           "SF:net.eca.util.EntityUtil.MAX_HEALTH_LOCK_KEY",
+                           "SF:net.eca.util.EntityUtil.MAX_HEALTH_LOCK_CHECK"),
+                    Set.of("ecaHealthLockEnc", "ecaHealthLockKey", "ecaHealthLockCheck",
+                           "ecaMaxHealthLockEnc", "ecaMaxHealthLockKey", "ecaMaxHealthLockCheck",
+                           "ecaHealBanValue"));
             initialized = true;
         }
     }
@@ -123,14 +130,58 @@ public final class HealthDataFlow {
         if (firstWrite) dumpExternalAnalysisStructure(cls, tree, target);
         return writeViaSources(cls, tree, entity, target, firstWrite,
                 (verifiedEntity, verifiedTarget, sink) ->
-                    // 符号校验(verifyExternalDataflow)会被伪源骗过：外部扫描 returnExpr 是巨型 Choice，
-                    // 写任意凑巧匹配的 sink(Map entry/Properties/fallback 常数/vanilla 字段)都能让某个 alternative 命中 target。
-                    // 故所有源都追加 RAW getHealth 实读校验——真写下去 getHealth 必反映(过)，伪源改读不改存储(不过)，
-                    // 从而滤掉伪成功、放给方法探针真写。与数据流通道一律 RAW 校验对齐。
+                    // 外部扫描的 Choice 可能使无效候选通过符号校验，因此还需验证 getHealth 的实际读数
                     HealthDataflowAnalyzer.verifyExternalDataflow(tree.returnExpr, verifiedEntity, verifiedTarget, sink)
                         && EcaSetHealthManager.verifyExternalRaw(verifiedEntity, verifiedTarget),
                 "external");
     }
+
+    /* 有效血量写入：对模型的有效血量表达式求逆，得到应写入存储的值；反向累加存储会得到上限减目标值，
+       写入后用同一表达式复核。校验不经过 getHealth，故解耦实体上的正确写入不会再被误判回滚。 */
+    public static boolean writeEffective(HealthDataflowAnalyzer.EffectiveHealthModel model,
+                                         LivingEntity entity, float target) {
+        if (model == null || entity == null) return false;
+        Class<?> cls = entity.getClass();
+        EvalContext ctx = HealthDataflowAnalyzer.newContext(entity);
+        HealthSolveResult solved = HealthDataflowAnalyzer.buildWritePath(
+                model.readExpr(), model.storage(), Float.valueOf(target), ctx);
+        if (!solved.solved() || solved.value() == null) {
+            if (EFFECTIVE_DUMPED.add(cls.getName())) {
+                EcaLogger.info("[EffectiveHealth] solve=FAIL entity={} storage={} target={} {} ({})",
+                        cls.getName(), model.storage().label, target, solved.failure(), solved.detail());
+            }
+            return false;
+        }
+
+        Object snapshot = model.storage().read(entity);
+        if (!dispatchWrite(model.storage(), entity, solved.value())) {
+            dispatchWrite(model.storage(), entity, snapshot);
+            if (EFFECTIVE_DUMPED.add(cls.getName())) {
+                EcaLogger.info("[EffectiveHealth] write=FAIL entity={} storage={} solved={}",
+                        cls.getName(), model.storage().label, solved.value());
+            }
+            return false;
+        }
+        if (EcaSetHealthManager.verify(entity, target)) {
+            EcaSetHealthManager.recordObservedWrite(cls);
+            if (EFFECTIVE_SUCCESS_DUMPED.add(cls.getName())) {
+                EcaLogger.info("[EffectiveHealth] success entity={} storage={} solved={} target={}",
+                        cls.getName(), model.storage().label, solved.value(), target);
+            }
+            return true;
+        }
+
+        boolean restored = dispatchWrite(model.storage(), entity, snapshot);
+        if (EFFECTIVE_DUMPED.add(cls.getName())) {
+            EcaLogger.info("[EffectiveHealth] verify=FAIL entity={} storage={} solved={} target={} anchor={} restore={}",
+                    cls.getName(), model.storage().label, solved.value(), target,
+                    EcaSetHealthManager.readHealthAnchor(entity), restored ? "OK" : "FAIL");
+        }
+        return false;
+    }
+
+    private static final Set<String> EFFECTIVE_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> EFFECTIVE_SUCCESS_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* Runtime-revealed writers commonly maintain ciphertext, keys and integrity tags as one unit.
        Their write set must be committed as a group; probing individual stores creates invalid states. */
@@ -205,7 +256,12 @@ public final class HealthDataFlow {
             PreparedSourceWrite write = writes.get(i);
             states.add(new AssociatedWriteState(write, afterWrite.get(i), write.sink().read(entity)));
         }
-        if (verified) return new AssociatedAttempt(true, true, true, states);
+        if (verified) {
+            EcaSetHealthManager.recordObservedWrite(entity.getClass());
+            return new AssociatedAttempt(true, true, true, states);
+        }
+        // 关联写入全部成功但校验失败时，记录观测锚点与存储可能解耦
+        if (wroteAll) EcaSetHealthManager.recordUnobservedWrite(entity.getClass(), null, "associated-sources");
 
         boolean restored = true;
         for (int i = writes.size() - 1; i >= 0; i--) {
@@ -297,6 +353,7 @@ public final class HealthDataFlow {
                 continue;
             }
             if (verifier.verify(entity, expected, sink)) {
+                EcaSetHealthManager.recordObservedWrite(cls);
                 if (logSuccess) {
                     EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}",
                             cls.getName(), sink.label, solved.value(), expected);
@@ -305,6 +362,8 @@ public final class HealthDataFlow {
             }
 
             boolean restored = dispatchWrite(sink, entity, snapshot);
+            // 写入成功但校验失败时，单独记录观测锚点与存储可能解耦
+            EcaSetHealthManager.recordUnobservedWrite(cls, sink, sink.label);
             diag.add("    [" + sink.label + "] solved=" + solved.value()
                     + " verify=FAIL restore=" + (restored ? "OK" : "FAIL"));
         }
@@ -312,9 +371,9 @@ public final class HealthDataFlow {
         if (writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) return true;
 
         if (FAIL_DUMPED.add(cls.getName() + "|" + diagnosticChannel)) {
-            EcaLogger.warn("[{}] setHealth failed entity={} expected={} sink results:",
+            EcaLogger.info("[{}] setHealth failed entity={} expected={} sink results:",
                     diagnosticChannel, cls.getName(), expected);
-            for (String line : diag) EcaLogger.warn("[{}] {}", diagnosticChannel, line);
+            for (String line : diag) EcaLogger.info("[{}] {}", diagnosticChannel, line);
         }
         return false;
     }
@@ -333,12 +392,15 @@ public final class HealthDataFlow {
             }
         }
         if (wroteAll && verifier.verify(entity, expected, null)) {
+            EcaSetHealthManager.recordObservedWrite(entity.getClass());
             if (logSuccess) {
                 EcaLogger.info("[HealthDataflow] setHealth success entity={} sink=all-sources expected={}",
                         entity.getClass().getName(), expected);
             }
             return true;
         }
+        // 全源写入成功但校验失败时，记录观测锚点与存储可能解耦
+        if (wroteAll) EcaSetHealthManager.recordUnobservedWrite(entity.getClass(), null, "all-sources");
 
         boolean restoredAll = true;
         for (int i = writes.size() - 1; i >= 0; i--) {
@@ -375,8 +437,8 @@ public final class HealthDataFlow {
             ConstOverride.setOverride(holder, n.floatValue());
             return true;
         }
-        // 回滚到"写入前无覆写"的 null 快照：必须清除写入期间设上的覆写，
-        // 否则失败的常数覆写尝试会留下脏覆写污染 getHealth(如 twist 概率失败后永久改不动)。
+                // 快照为 null 时清除写入期间设置的覆写，恢复写入前状态
+        // 失败后必须清除常数覆写，避免后续 getHealth 继续读取临时值
         ConstOverride.removeOverride(holder);
         return true;
     }
@@ -419,7 +481,7 @@ public final class HealthDataFlow {
             container = cur;
         } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
 
-        // 普通字段先走 VarHandle，final 字段失败再走 Unsafe 兜底
+        // 普通字段优先使用 VarHandle，final 字段写入失败时再尝试 Unsafe
         try {
             handles[n - 1].set(container, coerced);
             return true;
@@ -519,7 +581,7 @@ public final class HealthDataFlow {
             }
         } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
 
-        // 兄弟表/记录表：owner 类及其嵌套类的所有静态 Map 字段一起写，对抗"主表与影子表不一致→回滚"防御
+    // 同时更新 owner 类及其嵌套类的静态 Map，保持相关记录表一致
         if (s.ownerClassInternal != null) {
             Class<?> ownerClass = HealthDataflowAnalyzer.loadClass(s.ownerClassInternal);
             if (ownerClass != null && writeSiblingMaps(ownerClass, entity, s, value, writtenMaps)) any = true;
@@ -527,7 +589,7 @@ public final class HealthDataFlow {
         return any;
     }
 
-    /* 写入 cls 及其嵌套类中所有"已含本实体键"的静态 Map 字段(影子/记录表)，令多表一致、规避不一致回滚。
+    /* 写入 cls 及其嵌套类中已经包含本实体键的静态 Map 字段，保持多表一致。
        仅改动 matchKey 命中(以本实体为键)的 Map，故对无关静态表安全；writtenMaps 身份集防重复写。 */
     private static boolean writeSiblingMaps(Class<?> cls, LivingEntity entity, MapEntrySource s, Object value, Set<Object> writtenMaps) {
         boolean any = false;
@@ -742,9 +804,9 @@ public final class HealthDataFlow {
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             // record 组件反射写必失败，JDK 又禁止对 record 取 Unsafe field offset(强写只刷 UnsupportedOperationException)；
-            // record 重建只在 FieldChain 路径(rebuildRecord)处理，瞬态 record(如 RuneBank$Duo)写了也不落库，直接放弃。
+            // record 重建仅由 FieldChain 路径处理，无法写回持有者的临时 record 不参与写入
             if (f.getDeclaringClass().isRecord()) return false;
-            // final 字段 / 模块系统访问限制 → 走 Unsafe 兜底
+            // final 字段或模块访问受限时尝试 Unsafe
             return UnsafeUtil.unsafePutField(target, f, value);
         }
     }

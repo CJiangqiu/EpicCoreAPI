@@ -30,7 +30,9 @@ import net.eca.util.filter.FilterManager;
 import net.eca.util.filter.FilterType;
 import net.eca.util.faction.Faction;
 import net.eca.util.faction.FactionManager;
+import net.eca.util.faction.FactionMember;
 import net.eca.util.faction.FactionRelation;
+import net.eca.util.faction.FactionUtil;
 import net.eca.util.raid.RaidDefinition;
 import net.eca.util.raid.RaidInstance;
 import net.eca.util.raid.RaidManager;
@@ -53,6 +55,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -1775,6 +1778,22 @@ public final class EcaAPI {
         return FactionManager.areSameFaction(a, b);
     }
 
+    // 判断两个实体是否因 ECA 阵营或原版同盟关系而互为友方
+    /**
+     * Check whether two entities are friendly. This includes entities in the same ECA faction,
+     * entities whose ECA factions have a friendly relation, vanilla scoreboard allies,
+     * owner-pet pairs, and pets that share an owner or whose owners are scoreboard allies.
+     * Creative mode, spectator mode, and ECA invulnerability are attack protections rather than
+     * alliance relationships and are therefore not included.
+     *
+     * @param a first entity
+     * @param b second entity
+     * @return true if the entities have an ECA or vanilla friendly relationship
+     */
+    public static boolean isFriendly(Entity a, Entity b) {
+        return FactionUtil.isFriendly(a, b);
+    }
+
     // 获取阵营内全部实体
     /**
      * Get all entities in the given level that belong to the specified faction.
@@ -1907,6 +1926,218 @@ public final class EcaAPI {
      */
     public static EntityType<?> rollFactionMemberType(String factionId, RandomSource random) {
         return FactionManager.rollMemberType(factionId, random);
+    }
+
+    // ==================== 阵营成员（UUID 级，无需实体在线） ====================
+
+    // 按 UUID 加入阵营
+    /**
+     * Bind an entity to a faction by UUID, without requiring it to be loaded. Use this when
+     * managing summons or offline members whose entity may be in an unloaded chunk.
+     * 按 UUID 将实体加入阵营，无需实体在线或已加载。
+     *
+     * @param uuid      the entity UUID
+     * @param typeId    the entity type registry id, e.g. {@code "minecraft:zombie"}
+     * @param isPlayer  whether the member is a player
+     * @param factionId the target faction id
+     * @param level     any server level, used to reach the overworld SavedData
+     * @return true if the binding was created
+     */
+    public static boolean joinFaction(UUID uuid, String typeId, boolean isPlayer, String factionId, Level level) {
+        return FactionManager.joinFaction(uuid, typeId, isPlayer, factionId, level);
+    }
+
+    // 按 UUID 退出阵营
+    /**
+     * Remove a member from its faction by UUID, without requiring it to be loaded.
+     * 按 UUID 将实体移出所属阵营，无需实体在线。
+     *
+     * @param uuid  the entity UUID
+     * @param level any server level, used to reach the overworld SavedData
+     * @return true if a binding was removed
+     */
+    public static boolean leaveFaction(UUID uuid, Level level) {
+        return FactionManager.leaveFaction(uuid, level);
+    }
+
+    // 按 UUID 查询所属阵营
+    /**
+     * Get the faction id bound to a UUID. Pure index lookup, no entity needed — but also no
+     * pet-owner inheritance, which requires a live entity to resolve.
+     * 按 UUID 查询所属阵营，纯索引查询；不含需要实体才能解析的宠物继承。
+     *
+     * @param uuid the entity UUID
+     * @return faction id, or null if this UUID has no explicit binding
+     */
+    public static String getEntityFaction(UUID uuid) {
+        return FactionManager.getFactionId(uuid);
+    }
+
+    // 判断 UUID 是否为指定阵营成员
+    /**
+     * Check whether a UUID is bound to a specific faction.
+     * 判断指定 UUID 是否为该阵营的成员。
+     *
+     * @param uuid      the entity UUID
+     * @param factionId the faction id
+     * @return true if the UUID belongs to that faction
+     */
+    public static boolean isFactionMember(UUID uuid, String factionId) {
+        return FactionManager.isMember(uuid, factionId);
+    }
+
+    // 获取阵营的全部成员记录
+    /**
+     * Get every member record of a faction, including type info, without loading entities.
+     * 获取阵营的全部成员记录（含类型信息），无需加载实体。
+     *
+     * @param factionId the faction id
+     * @return read-only member records, empty if the faction is unknown
+     */
+    public static Collection<FactionMember> getFactionMemberRecords(String factionId) {
+        return FactionManager.getMembers(factionId);
+    }
+
+    // 获取阵营的全部成员 UUID
+    /**
+     * Get every member UUID of a faction without loading entities.
+     * 获取阵营的全部成员 UUID，无需加载实体。
+     *
+     * @param factionId the faction id
+     * @return read-only member UUIDs, empty if the faction is unknown
+     */
+    public static Set<UUID> getFactionMemberUuids(String factionId) {
+        return FactionManager.getMemberUuids(factionId);
+    }
+
+    // 按实体类型筛选阵营成员
+    /**
+     * Filter a faction's members by entity type without loading entities.
+     * 按实体类型筛选阵营成员，无需加载实体。
+     *
+     * @param factionId the faction id
+     * @param typeId    the entity type registry id, e.g. {@code "minecraft:zombie"}
+     * @return matching member records
+     */
+    public static List<FactionMember> getFactionMembersByType(String factionId, String typeId) {
+        return FactionManager.getMembersByType(factionId, typeId);
+    }
+
+    // 获取阵营成员数量
+    /**
+     * Get a faction's member count without loading entities.
+     * 获取阵营成员数量，无需加载实体。
+     *
+     * @param factionId the faction id
+     * @return member count, 0 if the faction is unknown
+     */
+    public static int getFactionMemberCount(String factionId) {
+        return FactionManager.getMemberCount(factionId);
+    }
+
+    // 将阵营成员解析为该维度中实际存在的实体
+    /**
+     * Resolve a faction's members to live entities in one level. Members in unloaded chunks
+     * or other dimensions are omitted.
+     * 将阵营成员解析为该维度中实际存在的实体，未加载或跨维度的成员会被跳过。
+     *
+     * @param factionId the faction id
+     * @param level     the level to resolve in
+     * @return resolvable member entities
+     */
+    public static List<Entity> resolveFactionMembers(String factionId, ServerLevel level) {
+        return FactionManager.resolveMembers(factionId, level);
+    }
+
+    // ==================== 阵营首领 ====================
+
+    // 设置阵营首领（自动加入该阵营）
+    /**
+     * Set a faction's leader. The entity is added to the faction if it is not already a
+     * member, since a leader outside its own faction would be a contradictory state.
+     * 设置阵营首领；若该实体尚未入营则自动加入。
+     *
+     * @param factionId the faction id
+     * @param leader    the new leader
+     * @param level     the server level for persistence
+     * @return true if the leader was set
+     */
+    public static boolean setFactionLeader(String factionId, Entity leader, Level level) {
+        return FactionManager.setLeader(factionId, leader, level);
+    }
+
+    // 清除阵营首领（成员身份保留）
+    /**
+     * Clear a faction's leader. The former leader remains a member.
+     * 清除阵营首领，原首领仍保留成员身份。
+     *
+     * @param factionId the faction id
+     * @param level     the server level for persistence
+     * @return true if a leader was cleared
+     */
+    public static boolean clearFactionLeader(String factionId, Level level) {
+        return FactionManager.clearLeader(factionId, level);
+    }
+
+    // 获取阵营首领记录
+    /**
+     * Get a faction's leader record without loading the entity.
+     * 获取阵营首领记录，无需加载实体。
+     *
+     * @param factionId the faction id
+     * @return the leader record, or null
+     */
+    public static FactionMember getFactionLeader(String factionId) {
+        return FactionManager.getLeader(factionId);
+    }
+
+    // 获取阵营首领 UUID
+    /**
+     * Get a faction's leader UUID.
+     * 获取阵营首领的 UUID。
+     *
+     * @param factionId the faction id
+     * @return the leader UUID, or null
+     */
+    public static UUID getFactionLeaderUuid(String factionId) {
+        return FactionManager.getLeaderUuid(factionId);
+    }
+
+    // 将阵营首领解析为实体（跨全部维度搜索）
+    /**
+     * Resolve a faction's leader to a live entity, searching every dimension.
+     * 将阵营首领解析为实体，跨全部维度搜索。
+     *
+     * @param factionId the faction id
+     * @param server    the running server
+     * @return the leader entity, or null if offline or unloaded
+     */
+    public static Entity resolveFactionLeader(String factionId, MinecraftServer server) {
+        return FactionManager.resolveLeader(factionId, server);
+    }
+
+    // 判断实体是否为任意阵营的首领
+    /**
+     * Check whether an entity leads any faction.
+     * 判断实体是否为任意阵营的首领。
+     *
+     * @param entity the entity to test
+     * @return true if it leads some faction
+     */
+    public static boolean isFactionLeader(Entity entity) {
+        return FactionManager.isLeader(entity);
+    }
+
+    // 反查某实体担任首领的阵营
+    /**
+     * Find which faction an entity leads.
+     * 反查某实体担任首领的阵营。
+     *
+     * @param uuid the leader's UUID
+     * @return the faction id it leads, or null
+     */
+    public static String getFactionByLeader(UUID uuid) {
+        return FactionManager.getFactionByLeader(uuid);
     }
 
     // ==================== 袭击系统 ====================

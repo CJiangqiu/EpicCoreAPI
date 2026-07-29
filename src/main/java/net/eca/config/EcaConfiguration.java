@@ -33,6 +33,9 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.ConfigValue<String> FACTION_GLOW_SAME_FACTION_COLOR;
     public static ForgeConfigSpec.BooleanValue FACTION_ALERT_ENABLED;
     public static ForgeConfigSpec.IntValue FACTION_ALERT_RANGE;
+    public static ForgeConfigSpec.BooleanValue FACTION_IMMEDIATE_MEMBER_ALERT;
+    public static ForgeConfigSpec.BooleanValue FACTION_LEADER_PROTECTION_ENABLED;
+    public static ForgeConfigSpec.BooleanValue FACTION_IMMEDIATE_LEADER_PROTECTION;
 
     static {
         // Compatibility Configuration | 兼容性配置
@@ -183,6 +186,23 @@ public class EcaConfiguration {
                      "阵营求援最大范围（方块）：友方实体响应攻击的最大距离。")
             .defineInRange("Alert Range", 32, 2, 128);
 
+        FACTION_IMMEDIATE_MEMBER_ALERT = BUILDER
+            .comment("When enabled, allies answering a member alert drop their current target for the attacker.",
+                     "开启后，响应成员求援的友方会放弃当前目标转而攻击袭击者。")
+            .define("Immediate Member Alert", false);
+
+        FACTION_LEADER_PROTECTION_ENABLED = BUILDER
+            .comment("When enabled, a faction leader attacking or being attacked makes every member of that",
+                     "faction target the involved entity. Unlike member alerts this is not range-limited.",
+                     "开启后，阵营首领攻击他人或被攻击时，该阵营全体成员都会将相关实体设为目标。与成员求援不同，此传导不受范围限制。")
+            .define("Leader Protection Enabled", true);
+
+        FACTION_IMMEDIATE_LEADER_PROTECTION = BUILDER
+            .comment("When enabled, members answering leader protection drop their current target immediately.",
+                     "Disabled means only members without a target will engage.",
+                     "开启后，响应首领保护的成员会立即放弃当前目标。关闭时只有没有目标的成员才会响应。")
+            .define("Immediate Leader Protection", false);
+
         BUILDER.pop();
 
         SPEC = BUILDER.build();
@@ -303,6 +323,18 @@ public class EcaConfiguration {
 
     public static int getFactionAlertRangeSafely() {
         return safeGet(FACTION_ALERT_RANGE, 32);
+    }
+
+    public static boolean getFactionImmediateMemberAlertSafely() {
+        return safeGet(FACTION_IMMEDIATE_MEMBER_ALERT, false);
+    }
+
+    public static boolean getFactionLeaderProtectionEnabledSafely() {
+        return safeGet(FACTION_LEADER_PROTECTION_ENABLED, true);
+    }
+
+    public static boolean getFactionImmediateLeaderProtectionSafely() {
+        return safeGet(FACTION_IMMEDIATE_LEADER_PROTECTION, false);
     }
 
     // 将配置中的十六进制颜色字符串解析为 ARGB int

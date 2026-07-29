@@ -8,7 +8,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.scores.Team;
 
 /*
- * 阵营攻击判断工具 — 统一入口，所有 Mixin 和外部调用都通过此函数判断是否可以攻击。
+ * 阵营关系与攻击权限工具，友方关系和目标免疫状态分别判断。
  *
  * 判断优先级：
  *   1. 目标为创造/旁观        → false（不可攻击）
@@ -43,14 +43,7 @@ public class FactionUtil {
 
         if (attacker == null) return true;
 
-        // 同阵营与友好阵营均禁止攻击（getEffectiveRelation 已覆盖同阵营判定）
-        FactionRelation rel = FactionManager.getEffectiveRelation(attacker, target);
-        if (rel == FactionRelation.FRIENDLY || rel == FactionRelation.SAME_FACTION) {
-            return false;
-        }
-
-        // 原版队伍同盟
-        if (areVanillaAllies(attacker, target)) {
+        if (isFriendly(attacker, target)) {
             return false;
         }
 
@@ -60,6 +53,24 @@ public class FactionUtil {
         }
 
         return true;
+    }
+
+    // 判断两个实体是否因 ECA 阵营或原版同盟关系而互为友方
+    /**
+     * Check whether two entities are friendly through ECA faction relations or vanilla
+     * alliance rules. Immunity states such as creative mode, spectator mode, and ECA
+     * invulnerability are intentionally excluded because they do not establish an alliance.
+     *
+     * @param a first entity
+     * @param b second entity
+     * @return true if the entities are in the same or friendly ECA faction, or are vanilla allies
+     */
+    public static boolean isFriendly(Entity a, Entity b) {
+        if (a == null || b == null) return false;
+        FactionRelation relation = FactionManager.getEffectiveRelation(a, b);
+        return relation == FactionRelation.SAME_FACTION
+                || relation == FactionRelation.FRIENDLY
+                || areVanillaAllies(a, b);
     }
 
     // 判断两个实体之间是否存在原版同盟关系（同队、宠物主从）

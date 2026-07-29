@@ -31,13 +31,27 @@ public final class EcaSetHealthManager {
        warmup 后台预填，setHealth 时查询；未命中现场分析并写回，失败标记后续不再重复分析。 */
     private static final Map<Class<?>, HealthDataflowAnalyzer.AnalysisResult> DATAFLOW_TABLE = new ConcurrentHashMap<>();
 
-    /* 外部扫描已装 patch 的类：外部扫描缓存在分析器内(须零副作用)，故 install 的每类去重在管理器侧记 */
+    /* 记录已经安装外部扫描 patch 的类，安装去重由管理器维护。 */
     private static final Set<Class<?>> EXTERNAL_INSTALLED = ConcurrentHashMap.newKeySet();
 
-    /* 改血分析专用后台执行器：常驻单守护线程，承接 LoadComplete 预热与运行期外部扫描懒加载。
-       外部扫描逆向 hurt/actuallyHurt 会内联进重整合包大量类，可达数秒——放到本线程跑，服务器线程永不阻塞。 */
+    /* 预热专用后台执行器：常驻单守护线程，承接 LoadComplete 的全量预热。
+       纯分析只读，离开主线程安全。 */
     private static final ExecutorService ANALYSIS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "ECA-Health-Analysis");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /* 外部扫描与预热使用不同线程，避免全量预热使运行期扫描长期排队。 */
+    private static final ExecutorService RUNTIME_ANALYSIS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "ECA-Health-ExternalScan");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /* 有效血量模型分析不依赖外部扫描结果，使用独立线程避免两类任务相互阻塞。 */
+    private static final ExecutorService MODEL_ANALYSIS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "ECA-Health-ModelAnalysis");
         t.setDaemon(true);
         return t;
     });
@@ -45,16 +59,20 @@ public final class EcaSetHealthManager {
     /* 外部扫描异步分析去重：同类并发首改只提交一次后台分析任务 */
     private static final Set<Class<?>> EXTERNAL_SCAN_PENDING = ConcurrentHashMap.newKeySet();
 
+    /* 外部扫描诊断去重(每类一次)：提交、开始执行、失败三个节点各自记一次。
+       提交后没有开始记录表示任务仍在队列中。 */
+    private static final Set<String> EXTERNAL_SCAN_SUBMIT_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> EXTERNAL_SCAN_START_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> EXTERNAL_SCAN_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final int EXTERNAL_SCAN_FAILURE_FRAMES = 12;
+
     /* UNRESOLVED 失败诊断去重：按 getHealth 定义类只 dump 一次 */
     private static final Set<String> UNRESOLVED_DUMPED = ConcurrentHashMap.newKeySet();
 
-    /* 方法探针：HeadBridge 已烤入的类。DirectCall 分两段各自维护"已探测"标记 + 命中 writer 缓存(跨同类实例复用)：
-       legacy = 旧版已验证的反射 setter/函数式字段，在 HeadBridge 之前探测；
-       extended = 新增激进候选(MethodHandle 字段/暂存字段+提交)，在 HeadBridge 之后探测。
-       两段缓存键分离，避免一段的"已探测"标记短路另一段。 */
+    /* 记录已安装 HeadBridge 的类。基础候选和扩展候选分别维护探测状态与 writer 缓存，
+       防止一组的探测结果阻止另一组执行。 */
     private static final Set<Class<?>> METHOD_BRIDGE_INSTALLED = ConcurrentHashMap.newKeySet();
-    /* DirectCall 重探冷却：未找到 writer 或缓存 writer 写入失败时，记录下次允许重探的纳秒时间戳。
-       既不每 tick 重探(行为探测会写探测值、有开销)，又能从瞬时失败恢复，避免"一次失败永久锁死"。 */
+    /* 未找到 writer 或缓存写入失败后进入冷却，限制行为探测频率并允许瞬时失败后重试。 */
     private static final long PROBE_RETRY_COOLDOWN_NANOS = 5_000_000_000L;
     private static final Map<Class<?>, Long> DIRECT_PROBE_RETRY_LEGACY = new ConcurrentHashMap<>();
     private static final Map<Class<?>, MethodProbe.DirectWriter> DIRECT_WRITER_LEGACY = new ConcurrentHashMap<>();
@@ -75,8 +93,7 @@ public final class EcaSetHealthManager {
 
     /* ==================== 对外编排入口 ==================== */
 
-    /* 数据流改血主入口：查 DATAFLOW_TABLE，命中失败哨兵直接放弃；命中可写结构则交 HealthDataFlow 写入；
-       未命中现场分析并落表。 */
+    /* 查询 DATAFLOW_TABLE：失败结果直接返回，可写结果交由 HealthDataFlow；缓存缺失时执行分析并写入表。 */
     public static boolean applyDataflow(LivingEntity target, float targetHealth) {
         if (target == null) return false;
         HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(target.getClass());
@@ -88,9 +105,9 @@ public final class EcaSetHealthManager {
         return success;
     }
 
-    /* 外部扫描兜底入口：getHealth 数据流打不穿时，逆向 isAlive/isDeadOrDying/hurt/actuallyHurt 定位真实血量存储。
-       双门控(激进逻辑 + 外部扫描开关)任一关闭直接放弃。分析结果只非阻塞查缓存：未就绪则提交后台异步分析并跳过本次
-       (绝不阻塞服务器线程，否则会冻服数秒)，分析完成后入缓存供后续调用；就绪则 install + 写入。 */
+    /* getHealth 数据流无法定位存储时，逆向 isAlive/isDeadOrDying/hurt/actuallyHurt 定位血量存储。
+       激进逻辑或外部扫描关闭时直接返回。分析结果只从缓存读取；未就绪时提交后台任务并跳过本次
+       避免阻塞服务器线程；分析完成后写入缓存供后续调用，就绪后再安装并写入。 */
     public static boolean applyExternalScan(LivingEntity target, float targetHealth) {
         if (target == null) return false;
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
@@ -99,19 +116,170 @@ public final class EcaSetHealthManager {
         HealthDataflowAnalyzer.AnalysisResult tree = HealthDataflowAnalyzer.peekExternalScanResult(cls);
         if (tree == null) {
             submitExternalScanAnalysis(cls);
+            /* 比较表达式扫描不依赖证据，与外部扫描并行预跑。两者串行时总等待是各自耗时之和，
+               并行后证据到手时表达式往往已就绪，可当场建模。 */
+            submitComparisonPrescan(cls);
             return false;
         }
         if (EXTERNAL_INSTALLED.add(cls)) ConstOverride.install(tree);
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
         boolean success = HealthDataFlow.writeExternal(tree, target, targetHealth);
-        if (!success) snapshot.restore();
-        return success;
+        if (success) return true;
+        snapshot.restore();
+        /* 外部扫描按存储即血量处理，存储经换算才得到血量时写入值方向不对，且校验读 getHealth 也不反映。
+           此处承接同一批存储，改用有效血量表达式求逆与校验；证据正是上面写入尝试刚记录下来的。 */
+        return applyEffectiveHealth(target, targetHealth);
     }
 
-    /* 死亡门控兜底：getHealth 是常量诱饵、setHealth 空操作、生死由"编码布尔字段"门控的实体(如紫悦 isDeadOrDying=decodeBool(_twilightDone)，
-       die()/remove() 也 gate 其上)，改血各通道全打不穿。仅斩杀意图(target≤0)触发：用实体自身 encoder 把门控字段翻成"死亡值"，
-       解码回读校验；翻正后实体自身被 gate 的 die()/remove() 解锁，由调用方 kill 流程完成击杀与掉落。 */
+    /* getHealth 与实际存储解耦时，使用实体生死判定所读取的有效血量表达式作为观测锚点，
+       并通过表达式反演计算存储值。仅对已有解耦记录的类启用。
+       由 applyExternalScan 在其写入失败后调用，门控与之共用。 */
+    private static boolean applyEffectiveHealth(LivingEntity target, float targetHealth) {
+        Class<?> cls = target.getClass();
+        // 校验成功会清空解耦证据，故已装锚点的类必须继续放行，否则一旦成功就再也走不进本通道
+        if (!hasHealthAnchor(cls) && !isHealthReadDecoupled(cls)) return false;
+        HealthDataflowAnalyzer.EffectiveHealthModel model =
+                HealthDataflowAnalyzer.peekEffectiveHealthModel(cls);
+        if (model == null) {
+            /* 比较表达式已缓存时建模只剩遍历与打分，当场完成即可，省去一次改血往返；
+               未缓存则需扫描字节码，耗时较长，仍转后台并跳过本次。 */
+            if (HealthDataflowAnalyzer.hasComparisonCache(cls)) {
+                model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, unobservedSinks(cls));
+            }
+            if (model == null) {
+                submitEffectiveModelAnalysis(cls);
+                return false;
+            }
+        }
+
+        // 使用有效血量表达式校验，避免 getHealth 与存储解耦时错误接受或拒绝写入
+        HealthDataflowAnalyzer.EffectiveHealthModel resolved = model;
+        boolean anchorWasPresent = hasHealthAnchor(cls);
+        registerHealthAnchor(cls, entity -> {
+            Object value = HealthDataflowAnalyzer.evaluate(
+                    resolved.readExpr(), HealthDataflowAnalyzer.newContext(entity));
+            return value instanceof Number number ? number.floatValue() : Float.NaN;
+        });
+
+        List<Object> rollbackRoots = collectRollbackRoots(target);
+        ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
+        boolean success = HealthDataFlow.writeEffective(resolved, target, targetHealth);
+        if (success) {
+            EFFECTIVE_ANCHOR_CONFIRMED.add(cls);
+            return true;
+        }
+        snapshot.restore();
+        /* 未经成功写入确认的模型失败后立即失效，以便候选集合变化时重新分析。
+           写入失败由快照回滚；已经确认的锚点不因单次失败而移除。 */
+        if (!EFFECTIVE_ANCHOR_CONFIRMED.contains(cls)) {
+            if (!anchorWasPresent) registerHealthAnchor(cls, null);
+            HealthDataflowAnalyzer.rejectEffectiveModel(cls, resolved);
+            EFFECTIVE_MODEL_SUBMITTED.remove(cls);
+        }
+        return false;
+    }
+
+    /* 有效血量锚点已被一次成功写入证实的类 */
+    private static final Set<Class<?>> EFFECTIVE_ANCHOR_CONFIRMED = ConcurrentHashMap.newKeySet();
+
+    /* 已提交模型分析的候选签名：同一批候选只分析一次；候选随各通道失败逐步补齐，签名一变即允许重试。 */
+    private static final Map<Class<?>, String> EFFECTIVE_MODEL_SUBMITTED = new ConcurrentHashMap<>();
+
+    /* 已提交比较表达式预扫的类，每类一次。 */
+    private static final Set<Class<?>> COMPARISON_PRESCAN_SUBMITTED = ConcurrentHashMap.newKeySet();
+
+    /* 已按实体加入世界触发过预热的类，每类一次。 */
+    private static final Set<Class<?>> JOIN_PREWARM_SUBMITTED = ConcurrentHashMap.newKeySet();
+
+    /* 实体首次加入世界时按需预热外部扫描。
+       按已加载类顺序盲扫命中率很低——真正会被改血的实体在被打之前必然先出现在世界里，
+       以此为触发点，等玩家打到它时分析通常已完成，首次写入即可直接命中缓存。
+       原版实体的 getHealth 走数据流即可写入，无需外部扫描。 */
+    public static void onEntityJoinLevel(LivingEntity entity) {
+        if (entity == null) return;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return;
+        Class<?> cls = entity.getClass();
+        if (cls.getName().startsWith("net.minecraft.")) return;
+        if (!JOIN_PREWARM_SUBMITTED.add(cls)) return;
+        try {
+            RUNTIME_ANALYSIS_EXECUTOR.submit(() -> prewarmJoinedEntityClass(cls));
+        } catch (Throwable t) {
+            JOIN_PREWARM_SUBMITTED.remove(cls);
+            EcaLogger.info("[ExternalScan] join prewarm submit rejected entity={} type={} msg={}",
+                    cls.getName(), t.getClass().getName(), t.getMessage());
+        }
+    }
+
+    /* 数据流未分析过的类先补分析，再据其形态决定是否需要外部扫描。
+       写入打不穿的形态有两种：分析失败，以及 getHealth 返回常数语义——
+       后者数据流分析本身是成功的，只按失败筛会把这类实体漏掉。 */
+    private static void prewarmJoinedEntityClass(Class<?> cls) {
+        try {
+            HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(cls);
+            if (tree != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
+                    && tree.classify() != HealthDataflowAnalyzer.AnalysisResult.Kind.CONST_OVERRIDE) return;
+            EcaLogger.info("[ExternalScan] join prewarm started entity={}", cls.getName());
+            HealthDataflowAnalyzer.resolveExternalScanResult(cls);
+            // 比较表达式一并预扫，证据到手后即可当场建模，无需再等一次改血
+            HealthDataflowAnalyzer.prewarmClassComparisons(cls);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            EcaLogger.info("[ExternalScan] join prewarm threw entity={} type={} msg={}",
+                    cls.getName(), t.getClass().getName(), t.getMessage());
+        }
+    }
+
+    /* 在外部扫描进行的同时预扫比较表达式，使两段耗时重叠而非相加。 */
+    private static void submitComparisonPrescan(Class<?> cls) {
+        if (HealthDataflowAnalyzer.hasComparisonCache(cls)) return;
+        if (!COMPARISON_PRESCAN_SUBMITTED.add(cls)) return;
+        try {
+            MODEL_ANALYSIS_EXECUTOR.submit(() -> {
+                try {
+                    HealthDataflowAnalyzer.prewarmClassComparisons(cls);
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                    EcaLogger.info("[EffectiveHealth] comparison prescan threw entity={} type={} msg={}",
+                            cls.getName(), t.getClass().getName(), t.getMessage());
+                }
+            });
+        } catch (Throwable t) {
+            COMPARISON_PRESCAN_SUBMITTED.remove(cls);
+            EcaLogger.info("[EffectiveHealth] comparison prescan submit rejected entity={} type={} msg={}",
+                    cls.getName(), t.getClass().getName(), t.getMessage());
+        }
+    }
+
+    private static void submitEffectiveModelAnalysis(Class<?> cls) {
+        // 比较表达式可以直接提供候选，因此无需等待其他分析通道产生候选
+        List<HealthDataflowAnalyzer.Source> candidates = unobservedSinks(cls);
+        if (HealthDataflowAnalyzer.isEffectiveModelMiss(cls, candidates)) return;
+        String signature = HealthDataflowAnalyzer.candidateSignature(candidates);
+        if (signature.equals(EFFECTIVE_MODEL_SUBMITTED.put(cls, signature))) return;
+        EcaLogger.info("[EffectiveHealth] model analysis submitted entity={} candidates={}",
+                cls.getName(), candidates.size());
+        try {
+            MODEL_ANALYSIS_EXECUTOR.submit(() -> {
+                try {
+                    HealthDataflowAnalyzer.resolveEffectiveHealthModel(cls, candidates);
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                    EcaLogger.info("[EffectiveHealth] model analysis threw entity={} type={} msg={}",
+                            cls.getName(), t.getClass().getName(), t.getMessage());
+                }
+            });
+        } catch (Throwable t) {
+            // 提交被拒时让出签名，否则该批候选此后永远不会再分析
+            EFFECTIVE_MODEL_SUBMITTED.remove(cls);
+            EcaLogger.info("[EffectiveHealth] model analysis submit rejected entity={} type={} msg={}",
+                    cls.getName(), t.getClass().getName(), t.getMessage());
+        }
+    }
+
+    /* 常规血量路径无效且生死状态由编码布尔字段控制时，斩杀请求通过实体自身编码器写入死亡状态。
+       写入后使用解码器校验，再由调用方执行击杀和掉落流程。 */
     public static boolean applyDeathGate(LivingEntity target, float targetHealth) {
         if (target == null || targetHealth > 0.0f) return false;
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) return false;
@@ -136,28 +304,58 @@ public final class EcaSetHealthManager {
         }
     }
 
-    /* 把外部扫描分析丢到后台执行器(去重)：完成后结果入分析器缓存，本次及分析期间的调用都跳过外部扫描通道。 */
+    /* 外部扫描在后台去重执行，完成后写入分析缓存。任务异常必须记录，
+       以便区分配置关闭、分析进行中和分析失败。 */
     private static void submitExternalScanAnalysis(Class<?> cls) {
-        if (EXTERNAL_SCAN_PENDING.add(cls)) {
-            ANALYSIS_EXECUTOR.submit(() -> {
+        if (!EXTERNAL_SCAN_PENDING.add(cls)) return;
+        if (EXTERNAL_SCAN_SUBMIT_DUMPED.add(cls.getName())) {
+            EcaLogger.info("[ExternalScan] analysis submitted entity={}", cls.getName());
+        }
+        try {
+            RUNTIME_ANALYSIS_EXECUTOR.submit(() -> {
                 try {
+                    // 与 submitted 配对：只有 submitted 没有 started，说明任务卡在队列而非分析失败
+                    if (EXTERNAL_SCAN_START_DUMPED.add(cls.getName())) {
+                        EcaLogger.info("[ExternalScan] analysis started entity={}", cls.getName());
+                    }
                     HealthDataflowAnalyzer.resolveExternalScanResult(cls);
                 } catch (Throwable t) {
+                    dumpExternalScanFailure(cls, t);
                     if (t instanceof VirtualMachineError e) throw e;
                 } finally {
                     EXTERNAL_SCAN_PENDING.remove(cls);
                 }
             });
+        } catch (Throwable t) {
+            // 提交被拒时必须让出占位，否则该类此后永远跳过外部扫描
+            EXTERNAL_SCAN_PENDING.remove(cls);
+            EcaLogger.info("[ExternalScan] analysis submit rejected entity={} type={} msg={}",
+                    cls.getName(), t.getClass().getName(), t.getMessage());
         }
     }
 
-    /* 方法探针兜底入口：存储直写(数据流/外部扫描)全打不穿时，借实体自身合法 writer 改血。
-       双门控(激进逻辑 + 方法探针开关)任一关闭直接放弃。
-       分两段、严格复刻旧版生效顺序、新增激进候选后置：
-       Phase 1(旧版已验证路径)：反射 setter/函数式字段 DirectCall → HeadBridge(借实体可信帧发起 token+writer)；
-       Phase 2(新增激进候选)：MethodHandle 字段 / 暂存字段+提交 DirectCall。
-       激进候选的行为探测可能触发目标不可回滚的防御(如 accelerator checkEntityDecoys 的 lockTemporary)，
-       若置于 HeadBridge 之前会把存储锁死、令本可成功的 HeadBridge 失效，故必须后置。 */
+    /* 外部扫描失败时每类记录一次异常类型、消息和有限数量的栈帧。 */
+    private static void dumpExternalScanFailure(Class<?> cls, Throwable t) {
+        if (!EXTERNAL_SCAN_FAILURE_DUMPED.add(cls.getName())) return;
+        EcaLogger.info("[ExternalScan] analysis threw entity={} type={} msg={}",
+                cls.getName(), t.getClass().getName(), t.getMessage());
+        StackTraceElement[] frames = t.getStackTrace();
+        for (int i = 0; i < Math.min(frames.length, EXTERNAL_SCAN_FAILURE_FRAMES); i++) {
+            EcaLogger.info("[ExternalScan]   at {}", frames[i]);
+        }
+        if (frames.length > EXTERNAL_SCAN_FAILURE_FRAMES) {
+            EcaLogger.info("[ExternalScan]   ... {} more frames", frames.length - EXTERNAL_SCAN_FAILURE_FRAMES);
+        }
+        Throwable cause = t.getCause();
+        if (cause != null) {
+            EcaLogger.info("[ExternalScan]   caused by {} msg={}", cause.getClass().getName(), cause.getMessage());
+        }
+    }
+
+    /* 数据流和外部扫描无法写入存储时，尝试调用实体自身的血量 writer。
+       激进逻辑或方法探针关闭时直接返回。
+       第一阶段依次尝试反射 setter、函数式字段和 HeadBridge；第二阶段尝试 MethodHandle 字段及暂存字段提交。
+       第二阶段可能触发不可回滚的目标状态，因此必须在 HeadBridge 之后执行。 */
     public static boolean applyMethodProbe(LivingEntity target, float targetHealth) {
         if (target == null) return false;
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
@@ -165,7 +363,7 @@ public final class EcaSetHealthManager {
         Class<?> cls = target.getClass();
         List<Object> rollbackRoots = collectRollbackRoots(target);
 
-        // Phase 1：旧版已验证路径
+        // 第一阶段：基础 DirectCall 候选
         if (runDirectProbe(target, cls, targetHealth, rollbackRoots, LEGACY_DIRECT_KINDS,
                 DIRECT_PROBE_RETRY_LEGACY, DIRECT_WRITER_LEGACY)) return true;
 
@@ -176,14 +374,13 @@ public final class EcaSetHealthManager {
             if (MethodProbe.invokeBridge(target, spec, targetHealth, rollbackRoots)) return true;
         }
 
-        // Phase 2：新增激进候选，HeadBridge 之后才探测
+        // 第二阶段：在 HeadBridge 之后探测扩展候选
         return runDirectProbe(target, cls, targetHealth, rollbackRoots, EXTENDED_DIRECT_KINDS,
                 DIRECT_PROBE_RETRY_EXTENDED, DIRECT_WRITER_EXTENDED);
     }
 
-    /* 单段 DirectCall 探测：查缓存 → 无缓存且过冷却期则按候选 kind 过滤后行为探测 → 命中即写入并校验。
-       运行期函数对象/类指针可被替换，写入失败即失效本段缓存并进入冷却，冷却后重新探测——
-       既不每 tick 重探(行为探测会写探测值)，又能从瞬时失败恢复，避免"一次失败永久锁死"。 */
+    /* DirectCall 优先使用缓存；缓存缺失且冷却结束后，按候选类型执行行为探测。
+       写入失败会清除缓存并重新进入冷却，以限制探测频率并允许后续恢复。 */
     private static boolean runDirectProbe(LivingEntity target, Class<?> cls, float targetHealth,
                                           List<Object> rollbackRoots, Set<MethodProbe.WriterKind> kinds,
                                           Map<Class<?>, Long> probeRetryAfter,
@@ -214,14 +411,14 @@ public final class EcaSetHealthManager {
         float actual = Float.NaN;
         for (int attempt = 0; attempt < 3; attempt++) {
             wrote = writer.write(target, targetHealth);
-            actual = safeGetHealth(target);
+            actual = readHealthAnchor(target);
             if (wrote && Float.isFinite(actual)
                     && (targetHealth <= 0.0f ? actual <= 0.0f
                             : Math.abs(actual - targetHealth) <= Math.max(0.5f, Math.abs(targetHealth) * 0.02f))) {
                 return true;
             }
         }
-        // 诊断：打出 writer/目标/是否写成功/实读血量，定位"写没生效"还是"verify 读不到写入值"
+        // 记录 writer、目标值、写入结果和读取值，用于区分写入失败与校验读取不一致
         EcaLogger.info("[MethodProbe] direct write failed entity={} writer={} target={} wrote={} actual={}",
                 cls.getName(), writer.describe(), targetHealth, wrote, actual);
         snapshot.restore();
@@ -240,8 +437,8 @@ public final class EcaSetHealthManager {
         return out;
     }
 
-    /* HeadBridge 每类只烤入一次(warmup 与惰性共用)。
-       强制兼容模式或配置关闭时不转换(硬门——不登记 spec、不 retransform)。 */
+    /* 每个类只安装一次 HeadBridge，预热与运行期分析共用安装状态。
+       强制兼容模式或配置关闭时不登记 spec，也不执行 retransform。 */
     public static void installMethodBridgeOnce(Class<?> cls) {
         if (cls == null) return;
         if (EcaConfiguration.getForceCompatibilityModeSafely()
@@ -250,8 +447,8 @@ public final class EcaSetHealthManager {
         if (METHOD_BRIDGE_INSTALLED.add(cls)) MethodProbe.installBridge(cls);
     }
 
-    /* 数值反演兜底入口：前面通道全打不穿(通常卡在自定义非可逆解码)时，从数据流逆向的死角活对象继续向下扰动原始 cell。
-       双门控(激进逻辑 + 数值反演开关)任一关闭直接放弃；无可用死角(树失败/无死角根)直接返回 false。 */
+    /* 前置通道无法处理不可逆解码时，从无法反演的运行期对象继续搜索可写数值单元。
+       激进逻辑或数值反演关闭，以及没有可用对象根时，直接返回 false。 */
     public static boolean applyNumericInversion(LivingEntity target, float targetHealth) {
         if (target == null) return false;
         Class<?> cls = target.getClass();
@@ -282,7 +479,7 @@ public final class EcaSetHealthManager {
             EcaLogger.info("[NumericInverter] skipped entity={} reason={}", cls.getName(), reason);
     }
 
-    // 查表：命中返回结构或失败哨兵；未命中现场分析(归一化为 2 态)并原子落表
+    // 无现成分析树时的重载：先解析分析树，再收集回滚根
     private static List<Object> collectRollbackRoots(LivingEntity target) {
         HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(target.getClass());
         if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) return List.of();
@@ -357,24 +554,28 @@ public final class EcaSetHealthManager {
     /* 遍历已加载的 LivingEntity 子类(排除 Player 与抽象类)，逐个分析填表。
        晚加载的实体类不在此列，仍由 setHealth 时惰性补分析(computeIfAbsent 与本线程互不冲突)。 */
     private static void warmupAll() {
+        long startNanos = System.nanoTime();
+        AtomicInteger analyzed = new AtomicInteger();
+        boolean enumerated = false;
         WARMUP_DIAGNOSTICS_SUPPRESSED.set(true);
         try {
-            AtomicInteger analyzed = new AtomicInteger();
-            boolean enumerated = EcaTransformerManager.forEachLoadedClass(clazz -> {
+            enumerated = EcaTransformerManager.forEachLoadedClass(clazz -> {
                 warmupClass(clazz, analyzed);
             });
             if (!enumerated) {
-                boolean internalEnumerated = EcaTransformerManager.forEachLoadedInternalName(info -> {
+                enumerated = EcaTransformerManager.forEachLoadedInternalName(info -> {
                     if (info == null || !info.modifiable() || !info.livingEntity()) return;
                     Class<?> clazz = HealthDataflowAnalyzer.loadClass(info.internalName());
                     if (clazz == null) return;
                     warmupClass(clazz, analyzed);
                 });
-                if (!internalEnumerated) return;
             }
         } finally {
             WARMUP_DIAGNOSTICS_SUPPRESSED.remove();
         }
+        // 预热耗时决定运行期惰性分析要顶多久；枚举失败(analyzed=0)也必须能看出来
+        EcaLogger.info("[HealthDataflow] warmup done enumerated={} analyzed={} elapsedMs={}",
+                enumerated, analyzed.get(), (System.nanoTime() - startNanos) / 1_000_000L);
     }
 
     private static void warmupClass(Class<?> clazz, AtomicInteger analyzed) {
@@ -384,11 +585,9 @@ public final class EcaSetHealthManager {
         if (Modifier.isAbstract(clazz.getModifiers())) return;
         if (DATAFLOW_TABLE.containsKey(clazz)) return;
         try {
-            HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(clazz);
-            // 数据流打不穿的类才需要外部扫描，趁预热在后台把它分析掉，避免运行期首改再触发异步等待
-            if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
-                HealthDataflowAnalyzer.resolveExternalScanResult(clazz);
-            }
+            /* 只做数据流逆向与桥接安装：二者挡的是运行期首次改血在服务器线程上的同步分析。
+               外部扫描改由实体加入世界时触发，按已加载类顺序盲扫命中率过低。 */
+            resolveTree(clazz);
             installMethodBridgeOnce(clazz);
             analyzed.incrementAndGet();
         } catch (Throwable t) {
@@ -404,7 +603,7 @@ public final class EcaSetHealthManager {
 
     /* ==================== 校验 ==================== */
 
-    // 安全读取目标当前"真实"血量：置原始读旁路，放行 ECA 自家禁疗/血锁 hook，避免 verify 被自身锁定值劫持。异常/非有限值返回 NaN
+    // 绕过 ECA 禁疗和血量锁定读取血量，避免这些 hook 影响校验；异常或非有限值返回 NaN
     public static float safeGetHealth(LivingEntity target) {
         try {
             LivingEntityHook.beginRawHealthRead();
@@ -421,21 +620,96 @@ public final class EcaSetHealthManager {
         }
     }
 
-    // 校验改血是否生效：getHealth 落在目标值容差内
+    // 校验改血是否生效：观测锚点落在目标值容差内
     public static boolean verify(LivingEntity target, float targetHealth) {
-        float actual = safeGetHealth(target);
+        float actual = readHealthAnchor(target);
         if (!Float.isFinite(actual)) return false;
         float tolerance = Math.max(0.5f, Math.abs(targetHealth) * 0.02f);
         return Math.abs(actual - targetHealth) <= tolerance;
     }
 
-    // 外部扫描专用 RAW 实读校验(带死亡语义：target≤0 需实读血量≤0，正值走容差匹配)。
-    // 专治 ConstOverride "改读不改存储"的伪成功——符号表达式代进覆写值算得过，但真实 getHealth 没变就判失败，
-    // 与数据流通道对 CO 源的 RAW 校验对齐，让链放给方法探针真写。
+    // 外部扫描专用实读校验(带死亡语义：target≤0 需实读血量≤0，正值走容差匹配)。
+    // 外部扫描的符号表达式可能在存储未更新时通过校验，因此还需检查观测锚点
     public static boolean verifyExternalRaw(LivingEntity target, float targetHealth) {
-        float actual = safeGetHealth(target);
+        float actual = readHealthAnchor(target);
         if (!Float.isFinite(actual)) return false;
         if (targetHealth <= 0.0f) return actual <= 0.0f;
         return verify(target, targetHealth);
+    }
+
+    /* ==================== 血量观测锚点 ==================== */
+
+    /* 校验默认读取 getHealth。若 getHealth 与血量存储解耦，则使用分析器注册的替代锚点，
+       防止有效写入因观测值不变而被回滚。 */
+    public interface HealthAnchor {
+        float read(LivingEntity entity);
+    }
+
+    private static final Map<Class<?>, HealthAnchor> HEALTH_ANCHORS = new ConcurrentHashMap<>();
+
+    /* 注册实体类的替代观测锚点；anchor 为 null 表示恢复默认的 getHealth 锚点。 */
+    public static void registerHealthAnchor(Class<?> cls, HealthAnchor anchor) {
+        if (cls == null) return;
+        if (anchor == null) HEALTH_ANCHORS.remove(cls);
+        else HEALTH_ANCHORS.put(cls, anchor);
+    }
+
+    public static boolean hasHealthAnchor(Class<?> cls) {
+        return cls != null && HEALTH_ANCHORS.containsKey(cls);
+    }
+
+    /* 读锚点当前值：已注册替代锚点的类走替代量，其余回落 getHealth 原始读。异常/非有限值返回 NaN。 */
+    public static float readHealthAnchor(LivingEntity target) {
+        if (target == null) return Float.NaN;
+        HealthAnchor anchor = HEALTH_ANCHORS.get(target.getClass());
+        if (anchor == null) return safeGetHealth(target);
+        try {
+            float value = anchor.read(target);
+            return Float.isFinite(value) ? value : Float.NaN;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return Float.NaN;
+        }
+    }
+
+    /* ==================== 观测口解耦证据 ==================== */
+
+    /* 记录写入成功但锚点读数不变的源，用于识别观测值与存储解耦的实体类。
+       已经校验成功的类不再收集此类记录，避免把非血量源加入候选。 */
+    private static final Map<Class<?>, Map<String, HealthDataflowAnalyzer.Source>> UNOBSERVED_WRITES =
+            new ConcurrentHashMap<>();
+    private static final Set<Class<?>> ANCHOR_OBSERVED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> UNOBSERVED_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 写入成功、校验失败并完成回滚后记录该源。
+       sink 为 null 表示多源联写场景(无单一归属源)，只记诊断不进候选集。 */
+    static void recordUnobservedWrite(Class<?> cls, HealthDataflowAnalyzer.Source sink, String sinkLabel) {
+        if (cls == null || sinkLabel == null || ANCHOR_OBSERVED.contains(cls)) return;
+        if (sink != null) {
+            UNOBSERVED_WRITES.computeIfAbsent(cls, k -> new ConcurrentHashMap<>()).putIfAbsent(sinkLabel, sink);
+        }
+        if (!isWarmupDiagnosticsSuppressed() && UNOBSERVED_DUMPED.add(cls.getName() + "|" + sinkLabel)) {
+            EcaLogger.info("[HealthAnchor] write not observed entity={} sink={} anchor={}",
+                    cls.getName(), sinkLabel, hasHealthAnchor(cls) ? "custom" : "getHealth");
+        }
+    }
+
+    /* 返回写入后未反映到观测锚点的源，供有效血量模型选择候选存储。 */
+    static List<HealthDataflowAnalyzer.Source> unobservedSinks(Class<?> cls) {
+        Map<String, HealthDataflowAnalyzer.Source> sinks = cls == null ? null : UNOBSERVED_WRITES.get(cls);
+        return sinks == null ? List.of() : List.copyOf(sinks.values());
+    }
+
+    /* 校验通过后标记该类的观测锚点与存储联动，不再收集解耦记录。 */
+    static void recordObservedWrite(Class<?> cls) {
+        if (cls == null) return;
+        if (ANCHOR_OBSERVED.add(cls)) UNOBSERVED_WRITES.remove(cls);
+    }
+
+    /* 存在写入成功但观测不到的源，且该类从未通过校验时判定为解耦，供后续通道决定是否改用替代锚点。 */
+    public static boolean isHealthReadDecoupled(Class<?> cls) {
+        if (cls == null || ANCHOR_OBSERVED.contains(cls)) return false;
+        Map<String, HealthDataflowAnalyzer.Source> unobserved = UNOBSERVED_WRITES.get(cls);
+        return unobserved != null && !unobserved.isEmpty();
     }
 }

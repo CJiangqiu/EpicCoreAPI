@@ -27,6 +27,7 @@ import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /*
  * ECA数据流逆向分析器
@@ -56,6 +57,7 @@ public final class HealthDataflowAnalyzer {
 
     private static final String DAMAGE_SOURCE_DESC = "Lnet/minecraft/world/damagesource/DamageSource;";
     public static final McMethod GET_HEALTH       = new McMethod("m_21223_", "getHealth", "()F");
+    public static final McMethod GET_MAX_HEALTH   = new McMethod("m_21233_", "getMaxHealth", "()F");
     public static final McMethod IS_ALIVE         = new McMethod("m_6084_", "isAlive", "()Z");
     public static final McMethod IS_DEAD_OR_DYING = new McMethod("m_21224_", "isDeadOrDying", "()Z");
     public static final McMethod HURT             = new McMethod("m_6469_", "hurt", "(" + DAMAGE_SOURCE_DESC + "F)Z");
@@ -66,6 +68,8 @@ public final class HealthDataflowAnalyzer {
 
     private static final Map<Class<?>, AnalysisResult> EXTERNAL_SCAN_CACHE = new ConcurrentHashMap<>();
     private static final Set<Class<?>> EXTERNAL_SCAN_DIAG_DUMPED = ConcurrentHashMap.newKeySet();
+    /* 单个扫描入口抛出的诊断去重(每类每入口一次) */
+    private static final Set<String> EXTERNAL_ENTRY_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
 
     private HealthDataflowAnalyzer() {}
 
@@ -87,7 +91,7 @@ public final class HealthDataflowAnalyzer {
         if (lookup != null) overrideLookup = lookup;
     }
 
-    /* 注入式包装剥离：调用者登记"自己注入到 getHealth 的 hook owner 与透明静态源 label 前缀"，
+    /* 注入式包装剥离：调用者登记注入 getHealth 的 hook owner 与透明静态源 label 前缀，
        分析时从结果树中剥离，避免把调用者自己的逻辑误当作真实血量。独立运行不调用即默认不剥离。 */
     private static final Set<String> WRAPPER_CALL_OWNERS = ConcurrentHashMap.newKeySet();
     private static final Set<String> WRAPPER_SOURCE_LABEL_PREFIXES = ConcurrentHashMap.newKeySet();
@@ -286,9 +290,8 @@ public final class HealthDataflowAnalyzer {
         public abstract Object read(LivingEntity entity);
         protected abstract String canonicalKey();
 
-        /* 数值反演死角下钻的活对象锚点：默认交出 read() 精确值。带容器的子类应重写，
-           额外交出容器/根对象本身——如此下钻不依赖 read() 的白箱结构假设成功，
-           容器运行时类型未知(未实现 java.util.Map 等)也能 walk。 */
+        /* 数值反演默认使用 read() 的结果作为运行期对象锚点。
+           容器类型的子类应同时提供容器或根对象，避免依赖具体容器结构。 */
         public void collectDescentAnchors(EvalContext ctx, Consumer<Object> sink) {
             sink.accept(read(ctx.entity()));
         }
@@ -540,7 +543,7 @@ public final class HealthDataflowAnalyzer {
             this.ownerClassInternal = ownerClassInternal;
         }
 
-        /* read 提供"当前任一匹配 entry 的值"，求解期代入用；写入侧的兄弟表联写由调用者完成。
+        /* read 提供当前匹配 entry 的值供求解使用；相关 Map 的同步写入由调用者完成。
            容器既支持 java.util.Map，也鸭子类型支持不实现 Map 的自定义容器(仅依赖只读 containsKey/get 访问器)。 */
         @Override public Object read(LivingEntity entity) {
             try {
@@ -968,7 +971,7 @@ public final class HealthDataflowAnalyzer {
         return false;
     }
 
-    // 递归判断表达式树是否含 UnknownExpr，标记 getHealth 实现"过于复杂/无法符号化"
+    // 递归检查表达式树是否包含 UnknownExpr，用于标记无法符号化的 getHealth 实现
     static boolean containsUnknown(Expr e) {
         if (e instanceof UnknownExpr) return true;
         if (e instanceof Op op) {
@@ -1067,8 +1070,8 @@ public final class HealthDataflowAnalyzer {
         return new ConstOverrideSource(prov.receiver(), p.value().floatValue(), prov);
     }
 
-    /* 死角根对象收集：走 returnExpr，遇到"无逆"的 Call/Op(TABLE 无对应反演器)时，求值其参数子表达式得到运行期活对象——
-       数值反演从这些对象继续向下扰动。纯读求值、零副作用；Expr 防重入、活对象按 identity 去重；不限深度(遍历由上层超时兜)。 */
+    /* 遍历 returnExpr，遇到没有反演器的 Call 或 Op 时，求值其参数并收集运行期对象。
+       收集过程只读，表达式防止重复访问，对象按身份去重。 */
     public static List<Object> collectDeadEndRoots(Expr root, EvalContext ctx) {
         List<Object> out = new ArrayList<>();
         collectDeadEndRoots(root, ctx, out,
@@ -1096,9 +1099,8 @@ public final class HealthDataflowAnalyzer {
         }
     }
 
-    /* 从死角参数子表达式收集活对象锚点纳入根集(供数值反演向下遍历)。
-       对子树里的每个 Source 交由其 collectDescentAnchors 交出精确值 + 容器对象——不再依赖单一 evaluate 成功，
-       容器运行时类型未知也能拿到活对象。非 Source 节点整体求值当锚点，并递归下钻找内嵌 Source。 */
+    /* 从不可反演参数的子表达式收集运行期对象，供数值反演遍历。
+       Source 提供自身值及相关容器，其他节点以求值结果作为锚点并继续查找嵌套 Source。 */
     private static void addDeadEndRoot(Expr arg, EvalContext ctx, List<Object> out, Set<Object> seenObjs) {
         harvestAnchors(arg, ctx, obj -> {
             if (obj == null || obj instanceof Number || obj instanceof Boolean
@@ -1121,7 +1123,7 @@ public final class HealthDataflowAnalyzer {
         else if (e instanceof OptionalContentExpr o) harvestAnchors(o.optionalExpr(), ctx, sink);
     }
 
-    // evaluate 的静默包装：异常/失败返回 null，供锚点收集(死角活对象求值可能撞自定义解码/结构假设)
+    // 锚点求值失败时返回 null，避免自定义解码或结构差异中断收集
     private static Object safeEvaluate(Expr e, EvalContext ctx) {
         try { return evaluate(e, ctx); }
         catch (Throwable t) { if (t instanceof VirtualMachineError err) throw err; return null; }
@@ -1485,8 +1487,7 @@ public final class HealthDataflowAnalyzer {
             (t, args, idx, ctx) -> Double.valueOf(Math.log(((Number) t).doubleValue())));
         TABLE.registerCall("java/lang/Math", "log10", "(D)D",
             (t, args, idx, ctx) -> Double.valueOf(Math.pow(10.0, ((Number) t).doubleValue())));
-        //Math.max/min 双源防御 (形如 max(vanillaHp, shadowHp) 的两源取最大值)
-        //无条件返回 target,依赖 Vanilla 阶段同步写另一边,把双源防御打穿
+        // Math.max/min 的两个输入由不同阶段同步写入，此处为当前输入返回相同目标值
         TABLE.registerCall("java/lang/Math", "max", "(FF)F",
             (t, args, idx, ctx) -> Float.valueOf(((Number) t).floatValue()));
         TABLE.registerCall("java/lang/Math", "min", "(FF)F",
@@ -1557,8 +1558,8 @@ public final class HealthDataflowAnalyzer {
         TABLE.registerCall("java/util/Base64$Encoder", "encodeToString", "([B)Ljava/lang/String;",
             (t, args, idx, ctx) -> t instanceof String s ? Base64.getUrlDecoder().decode(s) : null);
 
-        // String.replace(search, "")：去掉子串。仅当替换串为空且 sink 是 receiver 时可逆——把 search 加回到 target 前缀。
-        // 要求 target 不含 search(否则去除非单射)，否则返回 null。covers "去前缀" 这类编码。
+    // String.replace(search, "") 仅在替换串为空且 sink 为 receiver 时可逆，此时将 search 加回目标前缀。
+    // target 包含 search 时变换不是单射，返回 null。
         TABLE.registerCall("java/lang/String", "replace", "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;",
             (t, args, idx, ctx) -> {
                 if (idx != 0 || !(t instanceof String target)) return null;        //sink 须为 receiver
@@ -1901,7 +1902,7 @@ public final class HealthDataflowAnalyzer {
     /* ==================== 外部扫描：isAlive/isDeadOrDying 逆推真实血量 ==================== */
 
     /*
-     * 通用数据流逆推骨架：从指定方法的指令帧提取血量表达式，统一"读字节码→跑 Analyzer→strip→封 AnalysisResult"。
+     * 通用数据流逆推骨架：从指定方法的指令帧提取血量表达式并生成 AnalysisResult。
      * getHealth 与外部扫描各自只传入 extractor（从 MethodNode + 跑完的 Frame[] 中挑出 Expr），骨架完成其余公共部分。
      */
     private static AnalysisResult analyzeForHealthExpr(Class<?> owner, String name, String desc,
@@ -1942,17 +1943,19 @@ public final class HealthDataflowAnalyzer {
         for (McMethod method : new McMethod[]{IS_ALIVE, IS_DEAD_OR_DYING}) {
             ClassAndMethod target = findMethodOwner(entityClass, method);
             if (target == null) continue;
-            scannedMethods.add(target.owner().getName() + "#" + target.name() + method.desc());
-            AnalysisResult result = analyzeExternalComparisonMethod(
-                    target.owner(), target.name(), method.desc());
+            String label = target.owner().getName() + "#" + target.name() + method.desc();
+            scannedMethods.add(label);
+            AnalysisResult result = safeExternalEntry(entityClass, label,
+                    () -> analyzeExternalComparisonMethod(target.owner(), target.name(), method.desc()));
             if (result != null && !result.isEmpty() && !result.sources.isEmpty()) candidates.add(result);
         }
         for (McMethod method : new McMethod[]{HURT, ACTUALLY_HURT}) {
             ClassAndMethod target = findMethodOwner(entityClass, method);
             if (target == null) continue;
-            scannedMethods.add(target.owner().getName() + "#" + target.name() + method.desc());
-            AnalysisResult result = analyzeDamageWriteMethod(
-                    target.owner(), target.name(), target.name(), method.desc());
+            String label = target.owner().getName() + "#" + target.name() + method.desc();
+            scannedMethods.add(label);
+            AnalysisResult result = safeExternalEntry(entityClass, label,
+                    () -> analyzeDamageWriteMethod(target.owner(), target.name(), target.name(), method.desc()));
             if (result != null && !result.isEmpty() && !result.sources.isEmpty()) candidates.add(result);
         }
         AnalysisResult combined = combineExternalScanCandidates(entityClass, candidates);
@@ -1962,6 +1965,23 @@ public final class HealthDataflowAnalyzer {
                     combined != null ? combined.sources.size() : 0);
         }
         return combined;
+    }
+
+    /* 隔离单个扫描入口的异常：不隔离时第一个抛出的入口会连带废掉其余入口，
+       整条通道对外只表现为"无结果"，无从判断是分析不出来还是中途炸了。
+       VirtualMachineError 按全局约定仍向上抛，由提交侧统一记录栈。 */
+    private static AnalysisResult safeExternalEntry(Class<?> entityClass, String label,
+                                                    Supplier<AnalysisResult> analysis) {
+        try {
+            return analysis.get();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            if (EXTERNAL_ENTRY_FAILURE_DUMPED.add(entityClass.getName() + "|" + label)) {
+                EcaLogger.info("[ExternalScan] entry threw entity={} entry={} type={} msg={}",
+                        entityClass.getName(), label, t.getClass().getName(), t.getMessage());
+            }
+            return null;
+        }
     }
 
     private static AnalysisResult analyzeExternalComparisonMethod(Class<?> owner, String name, String desc) {
@@ -1974,10 +1994,9 @@ public final class HealthDataflowAnalyzer {
     }
 
     /* ==================== 外部扫描：布尔死亡门控识别 ====================
-       有些实体 getHealth 是常量诱饵、setHealth 空操作，生死由一个"编码布尔字段"门控(如紫悦 isDeadOrDying=decodeBool(_twilightDone)，
-       die()/remove() 也 gate 在它上)。这类门控不是可扣血量，外部扫描的浮点比较/写入点提取抓不到。
-       这里识别 isDeadOrDying/isAlive 里"GETFIELD this.F -> INVOKESTATIC decoder(F)Z"且同类存在编解码对偶 encoder 的模式，
-       交出 门控字段+编码器+解码器+死亡值，供击杀时把门控翻正。只看各方法自身指令、不互相内联，规避 isAlive<->isDeadOrDying 耦合成环。 */
+       部分实体的生死状态由编码布尔字段控制，无法通过浮点比较和写入点分析定位。
+       此处识别 isDeadOrDying 或 isAlive 中的字段解码调用及其配对编码器，返回门控字段、编解码器和死亡值。
+       分析仅检查各方法自身指令，避免 isAlive 与 isDeadOrDying 相互调用形成递归。 */
 
     public record DeathGate(Field field, Method encoder, Method decoder, boolean deathValue) {}
 
@@ -2163,6 +2182,384 @@ public final class HealthDataflowAnalyzer {
                 .thenComparing(source -> source.label));
         return new AnalysisResult(combined, List.copyOf(sources), entityClass);
     }
+
+    /* ==================== 有效血量模型 ====================
+       getHealth 与实际存储解耦时，实体的生死判定仍会读取该存储并计算有效血量。
+       从比较指令中提取这一表达式后，可将其用于观测和存储值反演。 */
+
+    /* readExpr 为含 storage 的有效血量表达式；storage 是其中真正可写的存储源。 */
+    public record EffectiveHealthModel(Expr readExpr, Source storage) {}
+
+    private static final Map<Class<?>, EffectiveHealthModel> EFFECTIVE_MODEL_CACHE = new ConcurrentHashMap<>();
+    /* 分析失败按候选签名缓存，而不对实体类永久缓存；后续新增候选时仍可重新分析。 */
+    private static final Map<Class<?>, String> EFFECTIVE_MODEL_MISSES = new ConcurrentHashMap<>();
+    /* 写入失败的存储，后续分析不再将其作为候选。 */
+    private static final Map<Class<?>, Set<String>> EFFECTIVE_MODEL_REJECTED = new ConcurrentHashMap<>();
+
+    /* 仅查模型缓存、绝不触发分析(供运行期非阻塞查询)。扫全类比较指令可达数秒，必须在后台预填。 */
+    public static EffectiveHealthModel peekEffectiveHealthModel(Class<?> entityClass) {
+        return entityClass == null ? null : EFFECTIVE_MODEL_CACHE.get(entityClass);
+    }
+
+    /* 是否已有任一段比较表达式缓存。有则建模只剩遍历与打分，调用方可当场完成而无需转入后台。 */
+    public static boolean hasComparisonCache(Class<?> entityClass) {
+        return entityClass != null
+                && (PRIORITY_COMPARISON_CACHE.containsKey(entityClass)
+                    || FULL_COMPARISON_CACHE.containsKey(entityClass));
+    }
+
+    /* 判断当前候选集合是否已经分析失败，供调用方避免重复提交。
+       候选为空时仍可能从比较表达式中提取存储源，因此同样按签名缓存。 */
+    public static boolean isEffectiveModelMiss(Class<?> entityClass, List<Source> candidates) {
+        if (entityClass == null || candidates == null) return true;
+        return candidateSignature(candidates).equals(EFFECTIVE_MODEL_MISSES.get(entityClass));
+    }
+
+    public static String candidateSignature(List<Source> candidates) {
+        List<String> labels = new ArrayList<>(candidates.size());
+        for (Source source : candidates) labels.add(source.label);
+        Collections.sort(labels);
+        return String.join("|", labels);
+    }
+
+    /* 从候选存储源推导有效血量模型；无法确定时返回 null。
+       该分析需要扫描类指令，必须在后台线程调用。 */
+    public static EffectiveHealthModel resolveEffectiveHealthModel(Class<?> entityClass, List<Source> candidates) {
+        return resolveEffectiveHealthModel(entityClass, candidates, false);
+    }
+
+    /* 仅使用已缓存的比较表达式建模，不触发新的扫描，可在服务器线程直接调用。
+       未命中时不记录失败签名：这只表示扫描尚未完成，而非该批候选分析不出模型。 */
+    public static EffectiveHealthModel resolveCachedEffectiveHealthModel(Class<?> entityClass,
+                                                                         List<Source> candidates) {
+        return resolveEffectiveHealthModel(entityClass, candidates, true);
+    }
+
+    private static EffectiveHealthModel resolveEffectiveHealthModel(Class<?> entityClass, List<Source> candidates,
+                                                                    boolean cachedOnly) {
+        if (entityClass == null) return null;
+        // 正向缓存先于候选检查：模型一旦定下就长期有效，而候选证据会在校验成功后被清空
+        EffectiveHealthModel cached = EFFECTIVE_MODEL_CACHE.get(entityClass);
+        if (cached != null) return cached;
+        if (candidates == null) return null;
+        String signature = candidateSignature(candidates);
+        if (signature.equals(EFFECTIVE_MODEL_MISSES.get(entityClass))) return null;
+        EffectiveHealthModel model = null;
+        try {
+            model = computeEffectiveHealthModel(entityClass, candidates, cachedOnly);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            EcaLogger.info("[EffectiveHealth] model analysis threw entity={} type={} msg={}",
+                    entityClass.getName(), t.getClass().getName(), t.getMessage());
+        }
+        if (model != null) {
+            EFFECTIVE_MODEL_CACHE.put(entityClass, model);
+            EFFECTIVE_MODEL_MISSES.remove(entityClass);
+            EcaLogger.info("[EffectiveHealth] model entity={} storage={} readExpr={}",
+                    entityClass.getName(), model.storage().label, model.readExpr());
+        } else if (!cachedOnly) {
+            EFFECTIVE_MODEL_MISSES.put(entityClass, signature);
+            EcaLogger.info("[EffectiveHealth] no model entity={} candidates={} signature={}",
+                    entityClass.getName(), candidates.size(), signature);
+        }
+        return model;
+    }
+
+    /* 先扫外部扫描所用的同一组方法，未得到模型再回退到全类扫描。
+       优先段只分析含浮点比较指令的方法：血量判定必然表现为浮点比较，
+       而 getter、注册逻辑等方法一条都没有，据此可跳过大部分方法及其依赖类字节码。 */
+    private static EffectiveHealthModel computeEffectiveHealthModel(Class<?> entityClass, List<Source> evidence,
+                                                                    boolean cachedOnly) {
+        List<Expr> priority = cachedOnly
+                ? PRIORITY_COMPARISON_CACHE.get(entityClass) : comparisonsOf(entityClass, true);
+        if (priority != null) {
+            EffectiveHealthModel model = selectEffectiveModel(entityClass, evidence, priority, "priority");
+            if (model != null) return model;
+        }
+        List<Expr> full = cachedOnly
+                ? FULL_COMPARISON_CACHE.get(entityClass) : comparisonsOf(entityClass, false);
+        return full == null ? null : selectEffectiveModel(entityClass, evidence, full, "full");
+    }
+
+    /* 比较表达式与证据无关，只取决于类的字节码，因此可跨次复用。
+       扫描是本流程中最慢的部分，缓存后运行期只需重新匹配证据。 */
+    private static final Map<Class<?>, List<Expr>> PRIORITY_COMPARISON_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, List<Expr>> FULL_COMPARISON_CACHE = new ConcurrentHashMap<>();
+
+    private static List<Expr> comparisonsOf(Class<?> entityClass, boolean priorityOnly) {
+        Map<Class<?>, List<Expr>> cache = priorityOnly ? PRIORITY_COMPARISON_CACHE : FULL_COMPARISON_CACHE;
+        List<Expr> cached = cache.get(entityClass);
+        if (cached != null) return cached;
+        List<Expr> scanned = collectClassComparisons(entityClass, priorityOnly);
+        cache.put(entityClass, scanned);
+        return scanned;
+    }
+
+    /* 预热期只填充优先段比较表达式缓存。此时没有写入记录，无法确立模型，
+       但扫描结果可复用，运行期取得证据后即可直接匹配。
+       全类扫描要慢数倍，留到优先段确实推不出模型时再由后台补做。 */
+    public static void prewarmClassComparisons(Class<?> entityClass) {
+        if (entityClass == null) return;
+        comparisonsOf(entityClass, true);
+    }
+
+    /* 指令级筛选，不跑数据流，开销远低于逐方法完整分析。
+       浮点比较是血量判定的必要特征，据此可在优先段排除绝大多数无关方法。 */
+    private static boolean hasFloatComparison(MethodNode method) {
+        for (AbstractInsnNode insn : method.instructions) {
+            int opcode = insn.getOpcode();
+            if (opcode == Opcodes.FCMPL || opcode == Opcodes.FCMPG
+                    || opcode == Opcodes.DCMPL || opcode == Opcodes.DCMPG) return true;
+        }
+        return false;
+    }
+
+    private static EffectiveHealthModel selectEffectiveModel(Class<?> entityClass, List<Source> evidence,
+                                                             List<Expr> comparisons, String stage) {
+        Set<String> rejected = EFFECTIVE_MODEL_REJECTED.getOrDefault(entityClass, Set.of());
+        EffectiveHealthModel best = null;
+        int bestScore = Integer.MIN_VALUE;
+        int matched = 0;
+        for (Expr expr : comparisons) {
+            /* 候选由外部记录和表达式内提取的存储源共同组成。
+               直接提取可使模型分析不依赖其他通道的完成时间。 */
+            if (!isHealthShapedExpr(expr)) continue;
+            /* 候选只取有写入记录的存储。校验读的就是本模型的表达式，若存储也从同一表达式中提取，
+               写入与校验会构成闭环而必然通过；写入记录来自实际写入尝试，与表达式无关，可打破该闭环。 */
+            for (Source candidate : evidence) {
+                if (!isStorageSource(candidate)) continue;
+                if (rejected.contains(candidate.canonicalKey())) continue;
+                // 表达式即存储本身时两者同向，由原通道处理，无需模型
+                if (sameSource(expr, candidate) || !containsSink(expr, candidate)) continue;
+                matched++;
+                int score = effectiveModelScore(expr);
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = new EffectiveHealthModel(expr, candidate);
+                }
+            }
+        }
+        EcaLogger.info("[EffectiveHealth] scan entity={} stage={} comparisons={} matched={}",
+                entityClass.getName(), stage, comparisons.size(), matched);
+        // 未找到匹配项时输出样本，用于区分存储未参与比较和调用未内联两种情况。
+        // 优先段未命中属于正常回退，只在全类扫描仍无结果时输出。
+        if (matched == 0 && "full".equals(stage)) dumpComparisonSamples(entityClass, comparisons);
+        if (best == null) return null;
+        return new EffectiveHealthModel(pruneChoicesTo(best.readExpr(), best.storage()), best.storage());
+    }
+
+    /* 将 Choice 限定到包含目标存储的分支。
+       分析期的分支合并会并列存储读取与常数分支；选择常数分支会使锚点与存储失去关联。
+       反解则会主动选取含 sink 的分支，两者走法不一致会导致写入正确也无法通过校验。
+       不含存储的 Choice 保持原样，其取值不影响观测结果。 */
+    private static Expr pruneChoicesTo(Expr expr, Source storage) {
+        if (expr instanceof Choice choice) {
+            List<Expr> kept = new ArrayList<>();
+            for (Expr alternative : choice.alternatives()) {
+                if (containsSink(alternative, storage)) kept.add(pruneChoicesTo(alternative, storage));
+            }
+            if (kept.isEmpty()) return expr;
+            return kept.size() == 1 ? kept.get(0) : new Choice(List.copyOf(kept));
+        }
+        if (expr instanceof Op op) {
+            List<Expr> args = new ArrayList<>(op.args().size());
+            for (Expr arg : op.args()) args.add(pruneChoicesTo(arg, storage));
+            return new Op(op.opcode(), List.copyOf(args));
+        }
+        if (expr instanceof Call call) {
+            List<Expr> args = new ArrayList<>(call.args().size());
+            for (Expr arg : call.args()) args.add(pruneChoicesTo(arg, storage));
+            return new Call(call.owner(), call.name(), call.desc(), List.copyOf(args));
+        }
+        return expr;
+    }
+
+    private static final int COMPARISON_SAMPLE_LIMIT = 6;
+    private static final int COMPARISON_SAMPLE_CHARS = 300;
+
+    /* 优先输出含可写源的表达式，用于判断内联展开到哪一层，以及存储是否参与了比较。 */
+    private static void dumpComparisonSamples(Class<?> entityClass, List<Expr> comparisons) {
+        List<Expr> withSource = new ArrayList<>();
+        for (Expr expr : comparisons) {
+            if (containsAnySource(expr)) withSource.add(expr);
+            if (withSource.size() >= COMPARISON_SAMPLE_LIMIT) break;
+        }
+        EcaLogger.info("[EffectiveHealth]   samples withSource={} total={}", withSource.size(), comparisons.size());
+        List<Expr> samples = withSource.isEmpty() ? comparisons : withSource;
+        int limit = Math.min(samples.size(), COMPARISON_SAMPLE_LIMIT);
+        for (int i = 0; i < limit; i++) {
+            String text = String.valueOf(samples.get(i));
+            if (text.length() > COMPARISON_SAMPLE_CHARS) text = text.substring(0, COMPARISON_SAMPLE_CHARS) + "...";
+            EcaLogger.info("[EffectiveHealth]   sample#{} {}", i, text);
+        }
+    }
+
+    private static boolean containsAnySource(Expr e) {
+        if (e instanceof Source) return true;
+        if (e instanceof Op op) {
+            for (Expr a : op.args()) if (containsAnySource(a)) return true;
+        } else if (e instanceof Call call) {
+            for (Expr a : call.args()) if (containsAnySource(a)) return true;
+        } else if (e instanceof Choice choice) {
+            for (Expr a : choice.alternatives()) if (containsAnySource(a)) return true;
+        }
+        return false;
+    }
+
+    /* 同一存储可能参与冷却、计数或阶段判断，因此需要对候选表达式评分。
+       引用最大血量且结构较简单的表达式优先；已有成功写入记录的候选获得额外权重，
+       但该记录不是必需条件，以免模型分析依赖其他通道。 */
+    private static int effectiveModelScore(Expr expr) {
+        return (referencesMaxHealth(expr) ? 100 : 0) - exprNodeCount(expr);
+    }
+
+    /* 血量由存储经算术运算得出，因此表达式须为浮点算术运算的结果。
+       布尔判定、整数取值、集合判空等表达式虽然也含存储，但不表示血量。 */
+    private static boolean isHealthShapedExpr(Expr expr) {
+        return isFloatingPointExpr(expr) && containsArithmeticOp(expr);
+    }
+
+    private static boolean isFloatingPointExpr(Expr expr) {
+        if (expr instanceof Op op) return isFloatingPointOpcode(op.opcode());
+        if (expr instanceof Call call) {
+            int sort = Type.getReturnType(call.desc()).getSort();
+            return sort == Type.FLOAT || sort == Type.DOUBLE;
+        }
+        if (expr instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) {
+                if (isFloatingPointExpr(alternative)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsArithmeticOp(Expr expr) {
+        if (expr instanceof Op op) {
+            if (isFloatingPointOpcode(op.opcode())) return true;
+            for (Expr arg : op.args()) if (containsArithmeticOp(arg)) return true;
+        } else if (expr instanceof Call call) {
+            for (Expr arg : call.args()) if (containsArithmeticOp(arg)) return true;
+        } else if (expr instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) {
+                if (containsArithmeticOp(alternative)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isFloatingPointOpcode(int opcode) {
+        return opcode == Opcodes.FADD || opcode == Opcodes.FSUB || opcode == Opcodes.FMUL
+                || opcode == Opcodes.FDIV || opcode == Opcodes.FREM || opcode == Opcodes.FNEG
+                || opcode == Opcodes.DADD || opcode == Opcodes.DSUB || opcode == Opcodes.DMUL
+                || opcode == Opcodes.DDIV || opcode == Opcodes.DREM || opcode == Opcodes.DNEG;
+    }
+
+    /* 只有存储型的源可作血量载体：常数覆写源改读不改存储，静态字段为全局共享，
+       写入要么无效，要么波及同类其他实体。 */
+    private static boolean isStorageSource(Source source) {
+        return source instanceof SynchedDataSource || source instanceof FieldChainSource
+                || source instanceof ChainedFieldSource || source instanceof CapabilityDataSource
+                || source instanceof MapEntrySource || source instanceof ArrayElementSource;
+    }
+
+    /* 记录写入失败的存储并清除缓存模型。
+       只清缓存会让重新分析得到相同结果并反复失败，因此需要排除该存储后再分析。 */
+    public static void rejectEffectiveModel(Class<?> entityClass, EffectiveHealthModel model) {
+        if (entityClass == null || model == null || model.storage() == null) return;
+        EFFECTIVE_MODEL_REJECTED.computeIfAbsent(entityClass, k -> ConcurrentHashMap.newKeySet())
+                .add(model.storage().canonicalKey());
+        invalidateEffectiveModel(entityClass);
+    }
+
+    /* 清除未经写入确认的缓存模型，使后续分析可以使用更新后的候选集合。 */
+    public static void invalidateEffectiveModel(Class<?> entityClass) {
+        if (entityClass == null) return;
+        EFFECTIVE_MODEL_CACHE.remove(entityClass);
+        EFFECTIVE_MODEL_MISSES.remove(entityClass);
+    }
+
+    private static boolean referencesMaxHealth(Expr expr) {
+        if (expr instanceof Call call) {
+            if ((call.name().equals(GET_MAX_HEALTH.srg()) || call.name().equals(GET_MAX_HEALTH.mcp()))
+                    && call.desc().equals(GET_MAX_HEALTH.desc())) return true;
+            for (Expr arg : call.args()) if (referencesMaxHealth(arg)) return true;
+        } else if (expr instanceof Op op) {
+            for (Expr arg : op.args()) if (referencesMaxHealth(arg)) return true;
+        } else if (expr instanceof Choice choice) {
+            for (Expr alt : choice.alternatives()) if (referencesMaxHealth(alt)) return true;
+        }
+        return false;
+    }
+
+    private static int exprNodeCount(Expr expr) {
+        if (expr instanceof Call call) {
+            int n = 1;
+            for (Expr arg : call.args()) n += exprNodeCount(arg);
+            return n;
+        }
+        if (expr instanceof Op op) {
+            int n = 1;
+            for (Expr arg : op.args()) n += exprNodeCount(arg);
+            return n;
+        }
+        if (expr instanceof Choice choice) {
+            int n = 1;
+            for (Expr alt : choice.alternatives()) n += exprNodeCount(alt);
+            return n;
+        }
+        return 1;
+    }
+
+    /* 扫描类实例方法中的比较指令，收集与常数比较的表达式；生死判定通常表现为剩余量小于等于零。
+       单个方法分析失败不影响其余方法，整体尽力而为。 */
+    private static List<Expr> collectClassComparisons(Class<?> entityClass, boolean priorityOnly) {
+        List<Expr> out = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
+        byte[] bytes = classBytes(entityClass);
+        if (bytes == null) return out;
+        ClassNode classNode = new ClassNode();
+        new ClassReader(bytes).accept(classNode, ClassReader.EXPAND_FRAMES);
+        String ownerInternal = internalName(entityClass);
+        // 后台分析串行执行，单个类达到时间预算后使用已经收集的结果
+        long deadline = System.nanoTime() + COMPARISON_SCAN_BUDGET_NANOS;
+        boolean timedOut = false;
+        for (MethodNode method : classNode.methods) {
+            if (method.instructions.size() == 0 || method.name.startsWith("<")) continue;
+            if ((method.access & Opcodes.ACC_STATIC) != 0) continue;
+            if (priorityOnly && !hasFloatComparison(method)) continue;
+            if (System.nanoTime() > deadline) { timedOut = true; break; }
+            /* 每个方法使用独立的预算和递归检测集，避免前序方法耗尽预算或残留状态影响后续分析。 */
+            AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+            ctx.inheritedInline = true;
+            try {
+                TaintValue[] seed = seedMethodInputs(method.desc, false);
+                TaintInterpreter interpreter = new TaintInterpreter(ctx, 0, ownerInternal, method, seed);
+                Frame<TaintValue>[] frames = new Analyzer<>(interpreter).analyze(ownerInternal, method);
+                int index = 0;
+                for (AbstractInsnNode insn : method.instructions) {
+                    collectComparisonOperands(out, frames[index++], insn.getOpcode());
+                }
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                // 大型方法可能包含生死判定，分析失败时记录诊断以区分无匹配结果
+                if (failures.size() < COMPARISON_FAILURE_LIMIT) {
+                    failures.add(method.name + method.desc + " -> " + t.getClass().getSimpleName());
+                }
+            }
+        }
+        if (timedOut) {
+            EcaLogger.info("[EffectiveHealth]   scan timed out entity={} budgetMs={} collected={}",
+                    entityClass.getName(), COMPARISON_SCAN_BUDGET_NANOS / 1_000_000L, out.size());
+        }
+        if (!failures.isEmpty()) {
+            EcaLogger.info("[EffectiveHealth]   method analysis failures entity={} count={} {}",
+                    entityClass.getName(), failures.size(), failures);
+        }
+        return out;
+    }
+
+    private static final int COMPARISON_FAILURE_LIMIT = 8;
+    private static final long COMPARISON_SCAN_BUDGET_NANOS = 15_000_000_000L;
 
     private static int externalSourcePriority(Source source) {
         if (source instanceof SynchedDataSource) return 0;
@@ -2525,7 +2922,7 @@ public final class HealthDataflowAnalyzer {
 
     public static final class AnalysisResult {
         public static final AnalysisResult EMPTY = new AnalysisResult(UnknownExpr.UNKNOWN, List.of(), null);
-        /* 数据流分析失败哨兵：调用者管理器用 == 比较区分"分析成功结构"与"分析失败"，独立实例以表达明确语义 */
+        /* 数据流分析失败哨兵，调用方通过身份比较区分成功结果与分析失败。 */
         public static final AnalysisResult DATA_FLOW_ANALYZER_FAILED = new AnalysisResult(UnknownExpr.UNKNOWN, List.of(), null);
         public final Expr returnExpr;
         public final List<Source> sources;
@@ -2540,7 +2937,7 @@ public final class HealthDataflowAnalyzer {
 
         // getHealth 返回值的分类语义，决定改血手段的分流
         // CONST_OVERRIDE：树中存在常数语义（纯常数或 Choice 含常数分支），走常数覆写 patch
-        // DATAFLOW：含可写 Source，走 dataflow 真写存储
+        // DATAFLOW：包含可写 Source，使用数据流结果写入存储
         // UNRESOLVED：含 Unknown 或无法符号化的非常数计算，留给后续模块
         public enum Kind { DATAFLOW, CONST_OVERRIDE, UNRESOLVED }
 
@@ -2643,7 +3040,7 @@ public final class HealthDataflowAnalyzer {
         RETURN_VALUE,
         /* 所有 PUTFIELD/PUTSTATIC/SynchedData.set/Map.put → 写位置与写值。适用：hurt/actuallyHurt 等修改血量的方法 */
         METHOD_WRITES,
-        /* FCMPL/FCMPG 前栈上非常数侧 → 与阈值比较的实际表达式。适用：isAlive/isDeadOrDying 等"血量比较"方法 */
+    /* FCMPL/FCMPG 前栈上的非常数侧是与阈值比较的表达式，适用于 isAlive 和 isDeadOrDying 等方法。 */
         COMPARISON_OPERANDS,
     }
 
@@ -2845,12 +3242,36 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static boolean isEcaHealthWrapperCall(Call call) {
-        return WRAPPER_CALL_OWNERS.contains(call.owner());
+        return isWrapperOwner(call.owner());
     }
 
     private static boolean isEcaHealthWrapperSource(Source source) {
         for (String prefix : WRAPPER_SOURCE_LABEL_PREFIXES) {
             if (source.label.startsWith(prefix)) return true;
+        }
+        return hasWrapperOwnedFieldStep(source);
+    }
+
+    /* 调用者 hook 的中转存储会被建模成字段链源，字段名与实体自身的血量字段无法区分，
+       只能按 chain 上的 owner 归属剥离。这类源写入无效，也不代表目标实体的存储。 */
+    private static boolean hasWrapperOwnedFieldStep(Source source) {
+        List<FieldStep> chain = source instanceof FieldChainSource fieldChain ? fieldChain.chain
+                : source instanceof ChainedFieldSource chained ? chained.chain : null;
+        if (chain == null) return false;
+        for (FieldStep step : chain) {
+            if (isWrapperOwner(step.ownerInternal())) return true;
+        }
+        return false;
+    }
+
+    /* hook 的私有 record 与内部类以嵌套类形式出现，登记 owner 的嵌套类同属调用者注入 */
+    private static boolean isWrapperOwner(String ownerInternal) {
+        if (ownerInternal == null) return false;
+        if (WRAPPER_CALL_OWNERS.contains(ownerInternal)) return true;
+        for (String owner : WRAPPER_CALL_OWNERS) {
+            if (ownerInternal.length() > owner.length()
+                    && ownerInternal.charAt(owner.length()) == '$'
+                    && ownerInternal.startsWith(owner)) return true;
         }
         return false;
     }
@@ -2872,7 +3293,10 @@ public final class HealthDataflowAnalyzer {
         return false;
     }
 
+    /* GETSTATIC 常量折叠会把 hook 的 MethodHandle 与 ThreadLocal 常量变成 Reference，
+       此时 value 不是 String，只有 className 表明其来源，需要一并判定。 */
     private static boolean isEcaHealthWrapperReference(Reference reference) {
+        if (isWrapperOwner(reference.className())) return true;
         Object value = reference.value();
         return value instanceof String s && WRAPPER_REFERENCE_VALUES.contains(s);
     }
@@ -2948,7 +3372,7 @@ public final class HealthDataflowAnalyzer {
         return false;
     }
 
-    /* 走注入式 ClassBytesProvider：调用者可注入"运行期转换后字节码"(看见 mixin/coremod 修改)，未注入则用 defaultClassBytes 读磁盘 */
+    /* 通过 ClassBytesProvider 读取字节码；调用者可提供运行期转换结果，否则从类资源读取。 */
     private static byte[] classBytes(Class<?> clazz) {
         return bytesProvider.get(clazz);
     }
@@ -2980,6 +3404,9 @@ public final class HealthDataflowAnalyzer {
         int inlineBudget = DEFAULT_INLINE_BUDGET;
         //表达式节点预算：构造组合表达式时递减,耗尽即坍缩 Unknown
         int nodeBudget = DEFAULT_NODE_BUDGET;
+        /* 方法在当前类找不到时是否沿继承链上溯查找。默认关闭，保持既有各通道的分析结果不变；
+           有效血量模型扫描需要展开继承自基类的访问器，单独开启。 */
+        boolean inheritedInline = false;
         AnalysisCtx(int maxDepth) { this.maxDepth = maxDepth; }
     }
 
@@ -3006,6 +3433,10 @@ public final class HealthDataflowAnalyzer {
             MethodNode mn = null;
             for (MethodNode m : cn.methods) {
                 if (m.name.equals(name) && m.desc.equals(desc)) { mn = m; break; }
+            }
+            // 子类未声明该方法时上溯基类，否则继承的访问器不展开，血量表达式会停在 Call 节点
+            if (mn == null && ctx.inheritedInline && owner.getSuperclass() != null) {
+                return analyzeMethod(owner.getSuperclass(), name, desc, seedLocals, ctx, depth);
             }
             if (mn == null || mn.instructions.size() == 0) return null;
 
@@ -3429,7 +3860,7 @@ public final class HealthDataflowAnalyzer {
                 }
             }
 
-            // 兜底 Call 节点
+            // 无法内联时保留 Call 节点
             List<Expr> argExprs = new ArrayList<>(values.size());
             for (TaintValue v : values) argExprs.add(v.expr);
             return new TaintValue(sz, new Call(m.owner, m.name, m.desc, argExprs));
@@ -3787,8 +4218,12 @@ public final class HealthDataflowAnalyzer {
             Class<?> owner = loadClass(m.owner);
             if (owner == null) return null;
             if (shouldKeepAsRuntimeCall(owner, m.name, m.desc)) return null;
-            if (m.owner.startsWith("java/") || m.owner.startsWith("net/minecraft/")) {
-                Method jm = findAnyMethod(owner, m.name, m.desc);
+            /* 按实际声明类判定，而非调用点 owner。子类调用继承自原版基类的方法时调用点 owner 是子类，
+               据此判断会绕过对原版方法的限制，展开属性系统等实现链，结果通常坍缩为 Unknown。 */
+            Method jm = findAnyMethod(owner, m.name, m.desc);
+            Class<?> declaring = jm == null ? owner : jm.getDeclaringClass();
+            String declaringInternal = internalName(declaring);
+            if (declaringInternal.startsWith("java/") || declaringInternal.startsWith("net/minecraft/")) {
                 if (jm == null) return null;
                 int mods = jm.getModifiers();
                 if (!(Modifier.isFinal(mods) || Modifier.isStatic(mods) || Modifier.isPrivate(mods))) return null;
@@ -4281,7 +4716,7 @@ public final class HealthDataflowAnalyzer {
         return new SimpleEvalContext(entity);
     }
 
-    /* 公开反演入口：等价 solveDetailed，新命名贴合"逆向构建可写路径"语义。
+    /* 公开反演入口，行为等同于 solveDetailed。
        输入 IR 根 + 一个候选 sink + 目标值 + 求值上下文，返回 sink 应被写入的具体值或失败枚举。 */
     public static HealthSolveResult buildWritePath(Expr root, Source sink, Object target, EvalContext ctx) {
         return solveDetailed(root, sink, target, ctx);

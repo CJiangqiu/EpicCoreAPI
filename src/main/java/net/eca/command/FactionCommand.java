@@ -7,6 +7,7 @@ import com.mojang.brigadier.suggestion.SuggestionProvider;
 import net.eca.api.EcaAPI;
 import net.eca.util.faction.Faction;
 import net.eca.util.faction.FactionManager;
+import net.eca.util.faction.FactionMember;
 import net.eca.util.faction.FactionRelation;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -17,7 +18,6 @@ import net.minecraft.world.entity.Entity;
 
 import java.util.Collection;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -113,7 +113,102 @@ public class FactionCommand {
                         )
                     )
                 )
+            )
+            // /eca faction leader <factionId> set|clear [targets]
+            .then(Commands.literal("leader")
+                .then(Commands.argument("factionId", StringArgumentType.word())
+                    .executes(FactionCommand::showLeader)
+                    .then(Commands.literal("set")
+                        .executes(FactionCommand::setLeaderSelf)
+                        .then(Commands.argument("targets", EntityArgument.entity())
+                            .executes(FactionCommand::setLeaderTarget)
+                        )
+                    )
+                    .then(Commands.literal("clear")
+                        .executes(FactionCommand::clearLeader)
+                    )
+                )
             );
+    }
+
+    // ==================== leader ====================
+
+    private static int showLeader(CommandContext<CommandSourceStack> context) {
+        CommandSourceStack source = context.getSource();
+        String factionId = StringArgumentType.getString(context, "factionId");
+
+        if (EcaAPI.getFaction(factionId) == null) {
+            source.sendFailure(Component.literal("§cFaction '" + factionId + "' not found"));
+            return 0;
+        }
+
+        FactionMember leader = EcaAPI.getFactionLeader(factionId);
+        if (leader == null) {
+            source.sendSuccess(() -> Component.literal(
+                String.format("§7Faction '%s' has no leader", factionId)), false);
+            return 0;
+        }
+
+        Entity resolved = EcaAPI.resolveFactionLeader(factionId, source.getServer());
+        String state = resolved != null ? "§aonline" : "§7offline/unloaded";
+        source.sendSuccess(() -> Component.literal(String.format(
+            "§7Leader of '%s': §f%s §7(%s) %s", factionId, leader.getTypeId(), leader.getUuid(), state)
+        ), false);
+        return 1;
+    }
+
+    private static int setLeaderSelf(CommandContext<CommandSourceStack> context) {
+        CommandSourceStack source = context.getSource();
+        Entity entity = source.getEntity();
+        if (entity == null) {
+            source.sendFailure(Component.literal("§cThis command must be run by an entity"));
+            return 0;
+        }
+        return applyLeader(context, entity);
+    }
+
+    private static int setLeaderTarget(CommandContext<CommandSourceStack> context) {
+        CommandSourceStack source = context.getSource();
+        try {
+            return applyLeader(context, EntityArgument.getEntity(context, "targets"));
+        } catch (Exception e) {
+            source.sendFailure(Component.literal("§cFailed to resolve target: " + e.getMessage()));
+            return 0;
+        }
+    }
+
+    private static int applyLeader(CommandContext<CommandSourceStack> context, Entity leader) {
+        CommandSourceStack source = context.getSource();
+        String factionId = StringArgumentType.getString(context, "factionId");
+
+        if (EcaAPI.getFaction(factionId) == null) {
+            source.sendFailure(Component.literal("§cFaction '" + factionId + "' not found"));
+            return 0;
+        }
+        if (!EcaAPI.setFactionLeader(factionId, leader, source.getLevel())) {
+            source.sendFailure(Component.literal("§cFailed to set leader of '" + factionId + "'"));
+            return 0;
+        }
+
+        String name = leader.getName().getString();
+        source.sendSuccess(() -> Component.literal(String.format(
+            "§a%s is now the leader of '%s' §7(joined the faction automatically if needed)", name, factionId)
+        ), true);
+        return 1;
+    }
+
+    private static int clearLeader(CommandContext<CommandSourceStack> context) {
+        CommandSourceStack source = context.getSource();
+        String factionId = StringArgumentType.getString(context, "factionId");
+
+        if (!EcaAPI.clearFactionLeader(factionId, source.getLevel())) {
+            source.sendFailure(Component.literal(
+                "§cFaction '" + factionId + "' not found or has no leader"));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal(String.format(
+            "§aCleared the leader of '%s' §7(former leader remains a member)", factionId)), true);
+        return 1;
     }
 
     // ==================== create ====================
@@ -382,7 +477,7 @@ public class FactionCommand {
             return 0;
         }
 
-        List<Entity> members = EcaAPI.getFactionMembers(source.getLevel(), factionId);
+        Collection<FactionMember> records = EcaAPI.getFactionMemberRecords(factionId);
         String colorHex = String.format("#%08X", faction.getColor());
 
         source.sendSuccess(() -> Component.literal(
@@ -411,16 +506,25 @@ public class FactionCommand {
             }
         }
 
-        // 成员列表
+        // 首领
+        FactionMember leader = faction.getLeader();
         source.sendSuccess(() -> Component.literal(
-            String.format("§7  Members (%d):", members.size())
+            leader == null
+                ? "§7  Leader: §8none"
+                : String.format("§7  Leader: §f%s §7(%s)", leader.getTypeId(), leader.getUuid())
         ), false);
-        for (Entity member : members) {
+
+        // 成员列表走成员表，未加载与跨维度的成员同样可见
+        source.sendSuccess(() -> Component.literal(
+            String.format("§7  Members (%d):", records.size())
+        ), false);
+        for (FactionMember member : records) {
+            boolean loaded = source.getLevel().getEntity(member.getUuid()) != null;
             source.sendSuccess(() -> Component.literal(
-                String.format("§b    - §f%s §7(%s, id=%d)",
-                    member.getName().getString(),
-                    member.getType().getDescriptionId(),
-                    member.getId())
+                String.format("§b    - §f%s §7%s %s",
+                    member.getTypeId(),
+                    member.getUuid(),
+                    loaded ? "§aloaded" : "§8unloaded")
             ), false);
         }
 

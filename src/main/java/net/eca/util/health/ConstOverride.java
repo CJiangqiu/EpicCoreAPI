@@ -31,8 +31,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 /*
  * 常数覆写模块：把返回常数的 getHealth(及内联链)里的常数加载点精准 patch 为 resolveHealth(this, 原常数)，
  * 运行期改读按持有者身份的覆写表——命中返回覆写值，否则原样返回原常数。自成一体：
- *   覆写表(resolveHealth/setOverride/...) + 字节码改写器(registerSite/transform) + 安装(install: 登记 + retransform 烤入)。
- * install 在 warmup/惰性无条件执行(默认转换)；运行期是否改血由 resolveHealth 的配置双门控决定，关闭时返回原常数、无害。
+ *   覆写表(resolveHealth/setOverride/...) + 字节码改写器(registerSite/transform) + 安装(install: 登记 + retransform)。
+ * install 在预热和运行期分析中执行；resolveHealth 根据配置决定是否返回覆写值，关闭时返回原常数。
  */
 public final class ConstOverride {
 
@@ -234,10 +234,10 @@ public final class ConstOverride {
         }
     }
 
-    // ==================== 安装(登记 + retransform 烤入) ====================
+    // ==================== 安装(登记 + retransform) ====================
 
     /* 把树内 ConstOverrideSource 的常数点登记并对其 owner 类触发 retransform 使 patch 生效。
-       强制兼容模式或配置关闭时不转换(硬门——不登记 site、不 retransform)。仅含 DATAFLOW 源(无 ConstOverrideSource)的树收集不到 owner 时提前返回，零开销。 */
+       强制兼容模式或配置关闭时不登记 site，也不执行 retransform。没有 ConstOverrideSource 时直接返回。 */
     public static void install(AnalysisResult tree) {
         if (tree == null || tree.sources.isEmpty()) return;
         // 强制兼容模式 → 跳过全部转换；配置关闭 → 不登记不 retransform

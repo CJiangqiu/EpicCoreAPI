@@ -57,6 +57,7 @@ public class RaidInstance {
     private static final String NBT_CENTER_Z = "centerZ";
     private static final String NBT_STATUS = "status";
     private static final String NBT_WAVES_SPAWNED = "wavesSpawned";
+    private static final String NBT_WAVES_COMPLETED = "wavesCompleted";
     private static final String NBT_TICKS_ACTIVE = "ticksActive";
     private static final String NBT_WAVE_COOLDOWN = "waveCooldown";
     private static final String NBT_CELEBRATION = "celebrationTicks";
@@ -69,6 +70,7 @@ public class RaidInstance {
     private BlockPos center;
     private RaidStatus status = RaidStatus.ONGOING;
     private int wavesSpawned = 0;
+    private int wavesCompleted = 0;
     private long ticksActive = 0L;
     private int waveCooldown = 0;
     private int celebrationTicks = 0;
@@ -79,6 +81,9 @@ public class RaidInstance {
 
     private List<RaidWave> cachedWaves;
     private ServerBossEvent bossEvent;
+
+    // 阵营绑定失败只警告一次，避免每个袭击者刷一条日志
+    private boolean factionBindingWarned = false;
 
     // 上次已同步到客户端的状态，用于只在内容变化时发包而非每 tick 广播
     private int lastSyncedWaves = -1;
@@ -260,6 +265,8 @@ public class RaidInstance {
             return;
         }
 
+        notifyWaveEnd(def, ctx);
+
         if (started && def.checkVictory(ctx)) {
             setVictory(level, def);
             return;
@@ -278,6 +285,21 @@ public class RaidInstance {
             return;
         }
         spawnNextWave(level, def);
+    }
+
+    // 结束回调必须早于胜利与下一波开始，并通过持久化计数保证只触发一次
+    private void notifyWaveEnd(RaidDefinition def, RaidContext ctx) {
+        if (!started || !raiderUuids.isEmpty() || wavesCompleted >= wavesSpawned) {
+            return;
+        }
+
+        int completedWaveNumber = wavesSpawned - 1;
+        int waveCount = getWaveCount();
+        int waveIndex = def.isEndless() && waveCount > 0
+                ? completedWaveNumber % waveCount
+                : completedWaveNumber;
+        wavesCompleted = wavesSpawned;
+        def.onWaveEnd(ctx, waveIndex);
     }
 
     private void tickCelebration(ServerLevel level, RaidDefinition def) {
@@ -311,7 +333,7 @@ public class RaidInstance {
 
         for (RaidSpawnEntry entry : wave.getEntries()) {
             for (int i = 0; i < entry.getCount(); i++) {
-                if (spawnRaider(level, def, entry.getType(), wave, random, entry.getPostSpawn())) {
+                if (spawnRaider(level, def, entry.getType(), wave, random, entry.getPostSpawn()) != null) {
                     spawned++;
                 }
             }
@@ -325,10 +347,14 @@ public class RaidInstance {
                     // 类型池不可用，跳过该阵营在本波的剩余数量（rollMemberType 已记录原因）
                     break;
                 }
-                if (spawnRaider(level, def, type, wave, random, null)) {
+                if (spawnRaider(level, def, type, wave, random, null) != null) {
                     spawned++;
                 }
             }
+        }
+
+        if (spawnWaveLeader(level, def, wave, random)) {
+            spawned++;
         }
 
         wavesSpawned++;
@@ -340,19 +366,41 @@ public class RaidInstance {
         updateBossBarDisplay(level, def);
     }
 
-    private boolean spawnRaider(ServerLevel level, RaidDefinition def, EntityType<?> type,
-                                RaidWave wave, RandomSource random, Consumer<Mob> postSpawn) {
-        if (type == null) return false;
+    // 生成本波声明的首领，并将其设为袭击者阵营的首领
+    private boolean spawnWaveLeader(ServerLevel level, RaidDefinition def, RaidWave wave, RandomSource random) {
+        RaidSpawnEntry leaderEntry = wave.getLeaderEntry();
+        if (leaderEntry == null) return false;
+
+        Entity leader = spawnRaider(level, def, leaderEntry.getType(), wave, random, leaderEntry.getPostSpawn());
+        if (leader == null) return false;
+
+        String factionId = def.getRaiderFactionId();
+        if (factionId == null || factionId.isEmpty()) {
+            // 没有阵营就没有可领导的对象，该实体作为普通袭击者存在
+            EcaLogger.info("[Raid] Raid {} ('{}') declares a wave leader but no raider faction — spawned as an ordinary raider",
+                    id, definitionId);
+            return true;
+        }
+        if (!FactionManager.setLeader(factionId, leader, level)) {
+            EcaLogger.error("[Raid] Raid {} ('{}') could not promote its wave leader in faction '{}'",
+                    id, definitionId, factionId);
+        }
+        return true;
+    }
+
+    private Entity spawnRaider(ServerLevel level, RaidDefinition def, EntityType<?> type,
+                               RaidWave wave, RandomSource random, Consumer<Mob> postSpawn) {
+        if (type == null) return null;
 
         BlockPos pos = findSpawnPos(level, wave.getSpawnRadius(), type, random);
         if (pos == null) {
             EcaLogger.info("[Raid] Raid {} found no valid spawn position for {} within {} blocks",
                     id, type.getDescriptionId(), wave.getSpawnRadius());
-            return false;
+            return null;
         }
 
         Entity entity = type.create(level);
-        if (entity == null) return false;
+        if (entity == null) return null;
 
         entity.setPos(pos.getX() + 0.5, pos.getY() + 1.0, pos.getZ() + 0.5);
         if (entity instanceof Mob mob) {
@@ -367,7 +415,7 @@ public class RaidInstance {
         if (postSpawn != null && entity instanceof Mob mob) {
             postSpawn.accept(mob);
         }
-        return true;
+        return entity;
     }
 
     // 将实体登记为本场袭击的袭击者：跟踪、入营、注入寻路 Goal
@@ -375,8 +423,12 @@ public class RaidInstance {
         raiderUuids.add(entity.getUUID());
 
         String factionId = def.getRaiderFactionId();
-        if (factionId != null && !factionId.isEmpty()) {
-            FactionManager.joinFaction(entity, factionId);
+        if (factionId != null && !factionId.isEmpty()
+                && !FactionManager.joinFaction(entity, factionId) && !factionBindingWarned) {
+            // 每场袭击只警告一次：绑定失败会让整批袭击者都失去敌我判定，逐个刷屏没有意义
+            factionBindingWarned = true;
+            EcaLogger.error("[Raid] Raid {} ('{}') could not bind raiders to faction '{}' — they will ignore "
+                    + "faction rules and defenders will not recognise them", id, definitionId, factionId);
         }
 
         int priority = def.getRaiderGoalPriority();
@@ -591,6 +643,7 @@ public class RaidInstance {
         tag.putInt(NBT_CENTER_Z, center.getZ());
         tag.putString(NBT_STATUS, status.name());
         tag.putInt(NBT_WAVES_SPAWNED, wavesSpawned);
+        tag.putInt(NBT_WAVES_COMPLETED, wavesCompleted);
         tag.putLong(NBT_TICKS_ACTIVE, ticksActive);
         tag.putInt(NBT_WAVE_COOLDOWN, waveCooldown);
         tag.putInt(NBT_CELEBRATION, celebrationTicks);
@@ -637,6 +690,9 @@ public class RaidInstance {
                 // 非法 UUID 字符串，跳过
             }
         }
+        raid.wavesCompleted = tag.contains(NBT_WAVES_COMPLETED)
+                ? Mth.clamp(tag.getInt(NBT_WAVES_COMPLETED), 0, raid.wavesSpawned)
+                : Math.max(0, raid.wavesSpawned - (raid.raiderUuids.isEmpty() ? 0 : 1));
         return raid;
     }
 }

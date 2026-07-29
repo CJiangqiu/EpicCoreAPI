@@ -2,7 +2,6 @@ package net.eca;
 
 import net.eca.agent.EcaAgent;
 import net.eca.compat.GeckoLibCompat;
-import net.eca.coremod.EcaClassTransformer;
 import net.eca.event.EcaEventHandler;
 import net.eca.event.LoadCompleteHandler;
 import net.eca.init.ModConfigs;
@@ -35,8 +34,6 @@ public final class EcaMod {
 
         // 从 CoreMod ClassLoader 桥接 Instrumentation 到 GAME layer
         bridgeInstrumentationFromCoremod();
-        // 仅注册 ClassFileTransformer；全量 retransform 推迟到 LoadComplete（避免与并发构造的 mod 死锁）
-        EcaClassTransformer.register();
         // 注册配置
         ModConfigs.register();
         // 注册网络处理器

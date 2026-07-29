@@ -1,17 +1,20 @@
 package net.eca.util.faction;
 
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.saveddata.SavedData;
 
-import java.util.*;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /*
  * 阵营全局持久化 — SavedData 存储于主世界 DataStorage。
  *
- * 存储内容：
- *   - 阵营定义：id → { displayName, color, defaultRelation, relations }
- *   - 实体绑定：entity UUID string → factionId
+ * 每个阵营是一个自包含的 tag：定义、关系、首领、成员表全部嵌套其中。
+ * 不再维护独立的成员映射表，成员归属只有阵营内的 members 一个权威来源，
+ * 成员→阵营的反向索引由 FactionManager 在加载时派生。
  *
  * 不存储于实体 NBT；所有阵营信息由本类统一管理。
  */
@@ -19,17 +22,16 @@ public class FactionSavedData extends SavedData {
 
     private static final String DATA_NAME = "eca_factions";
     private static final String NBT_FACTIONS = "factions";
-    private static final String NBT_MEMBERS  = "members";
 
-    static final String NBT_DISPLAY_NAME    = "displayName";
-    static final String NBT_COLOR           = "color";
-    static final String NBT_DEFAULT_REL     = "defaultRelation";
-    static final String NBT_RELATIONS       = "relations";
+    static final String NBT_DISPLAY_NAME = "displayName";
+    static final String NBT_COLOR        = "color";
+    static final String NBT_DEFAULT_REL  = "defaultRelation";
+    static final String NBT_RELATIONS    = "relations";
+    static final String NBT_LEADER       = "leader";
+    static final String NBT_MEMBERS      = "members";
 
-    // 阵营定义
+    // factionId → 该阵营的完整 tag
     private final Map<String, CompoundTag> factionTags = new LinkedHashMap<>();
-    // 实体 UUID → factionId
-    private final Map<UUID, String> memberMap = new HashMap<>();
 
     // ==================== SavedData 生命周期 ====================
 
@@ -37,8 +39,7 @@ public class FactionSavedData extends SavedData {
 
     public static FactionSavedData load(CompoundTag tag) {
         FactionSavedData data = new FactionSavedData();
-
-        if (tag.contains(NBT_FACTIONS, 10)) {
+        if (tag.contains(NBT_FACTIONS, Tag.TAG_COMPOUND)) {
             CompoundTag factionsTag = tag.getCompound(NBT_FACTIONS);
             for (String factionId : factionsTag.getAllKeys()) {
                 CompoundTag factionTag = factionsTag.getCompound(factionId);
@@ -47,22 +48,6 @@ public class FactionSavedData extends SavedData {
                 }
             }
         }
-
-        if (tag.contains(NBT_MEMBERS, 10)) {
-            CompoundTag membersTag = tag.getCompound(NBT_MEMBERS);
-            for (String uuidStr : membersTag.getAllKeys()) {
-                try {
-                    UUID uuid = UUID.fromString(uuidStr);
-                    String factionId = membersTag.getString(uuidStr);
-                    if (!factionId.isEmpty()) {
-                        data.memberMap.put(uuid, factionId);
-                    }
-                } catch (IllegalArgumentException ignored) {
-                    // 非法 UUID 字符串，跳过
-                }
-            }
-        }
-
         return data;
     }
 
@@ -75,15 +60,6 @@ public class FactionSavedData extends SavedData {
         if (!factionsTag.isEmpty()) {
             tag.put(NBT_FACTIONS, factionsTag);
         }
-
-        CompoundTag membersTag = new CompoundTag();
-        for (Map.Entry<UUID, String> entry : memberMap.entrySet()) {
-            membersTag.putString(entry.getKey().toString(), entry.getValue());
-        }
-        if (!membersTag.isEmpty()) {
-            tag.put(NBT_MEMBERS, membersTag);
-        }
-
         return tag;
     }
 
@@ -95,21 +71,11 @@ public class FactionSavedData extends SavedData {
         );
     }
 
-    // ==================== 阵营定义操作 ====================
+    // ==================== 阵营序列化 ====================
 
+    // 将一个阵营完整写入（定义 + 关系 + 首领 + 成员）
     void putFaction(Faction faction) {
-        CompoundTag tag = new CompoundTag();
-        tag.putString(NBT_DISPLAY_NAME, faction.getDisplayName());
-        tag.putInt(NBT_COLOR, faction.getColor());
-        tag.putString(NBT_DEFAULT_REL, faction.getDefaultRelation().name());
-        CompoundTag relTag = new CompoundTag();
-        for (Map.Entry<String, FactionRelation> rel : faction.getRelations().entrySet()) {
-            relTag.putString(rel.getKey(), rel.getValue().name());
-        }
-        if (!relTag.isEmpty()) {
-            tag.put(NBT_RELATIONS, relTag);
-        }
-        factionTags.put(faction.getId(), tag);
+        factionTags.put(faction.getId(), serialize(faction));
         setDirty();
     }
 
@@ -119,69 +85,76 @@ public class FactionSavedData extends SavedData {
         }
     }
 
-    void putRelation(String factionId, Faction faction) {
-        // 全量重写该阵营的 tag
-        putFaction(faction);
+    private static CompoundTag serialize(Faction faction) {
+        CompoundTag tag = new CompoundTag();
+        tag.putString(NBT_DISPLAY_NAME, faction.getDisplayName());
+        tag.putInt(NBT_COLOR, faction.getColor());
+        tag.putString(NBT_DEFAULT_REL, faction.getDefaultRelation().name());
+
+        CompoundTag relTag = new CompoundTag();
+        for (Map.Entry<String, FactionRelation> rel : faction.getRelations().entrySet()) {
+            relTag.putString(rel.getKey(), rel.getValue().name());
+        }
+        if (!relTag.isEmpty()) {
+            tag.put(NBT_RELATIONS, relTag);
+        }
+
+        FactionMember leader = faction.getLeader();
+        if (leader != null) {
+            tag.put(NBT_LEADER, leader.save(new CompoundTag()));
+        }
+
+        ListTag memberList = new ListTag();
+        for (FactionMember member : faction.getMembers().values()) {
+            memberList.add(member.save(new CompoundTag()));
+        }
+        if (!memberList.isEmpty()) {
+            tag.put(NBT_MEMBERS, memberList);
+        }
+        return tag;
     }
 
-    // 加载全部阵营定义到 FactionManager
-    void loadFactions() {
-        for (Map.Entry<String, CompoundTag> entry : factionTags.entrySet()) {
-            String id = entry.getKey();
-            CompoundTag tag = entry.getValue();
-            String displayName = tag.getString(NBT_DISPLAY_NAME);
-            int color = tag.getInt(NBT_COLOR);
-            FactionRelation defaultRel;
-            try {
-                defaultRel = FactionRelation.valueOf(tag.getString(NBT_DEFAULT_REL));
-            } catch (IllegalArgumentException e) {
-                defaultRel = FactionRelation.HOSTILE;
-            }
-            Faction faction = new Faction(id, displayName, color, defaultRel);
-            if (tag.contains(NBT_RELATIONS, 10)) {
-                CompoundTag relTag = tag.getCompound(NBT_RELATIONS);
-                for (String otherId : relTag.getAllKeys()) {
-                    try {
-                        faction.setRelation(otherId, FactionRelation.valueOf(relTag.getString(otherId)));
-                    } catch (IllegalArgumentException ignored) {}
+    private static Faction deserialize(String id, CompoundTag tag) {
+        FactionRelation defaultRel;
+        try {
+            defaultRel = FactionRelation.valueOf(tag.getString(NBT_DEFAULT_REL));
+        } catch (IllegalArgumentException e) {
+            defaultRel = FactionRelation.HOSTILE;
+        }
+
+        Faction faction = new Faction(id, tag.getString(NBT_DISPLAY_NAME), tag.getInt(NBT_COLOR), defaultRel);
+
+        if (tag.contains(NBT_RELATIONS, Tag.TAG_COMPOUND)) {
+            CompoundTag relTag = tag.getCompound(NBT_RELATIONS);
+            for (String otherId : relTag.getAllKeys()) {
+                try {
+                    faction.setRelation(otherId, FactionRelation.valueOf(relTag.getString(otherId)));
+                } catch (IllegalArgumentException ignored) {
+                    // 非法关系名，跳过该条覆盖
                 }
             }
-            FactionManager.putLoadedFaction(faction);
         }
-    }
 
-    // 是否有阵营定义（用于判断是否需要初始化加载）
-    boolean hasFactions() {
-        return !factionTags.isEmpty();
-    }
-
-    // ==================== 实体绑定操作 ====================
-
-    void addMember(UUID entityUuid, String factionId) {
-        String old = memberMap.put(entityUuid, factionId);
-        if (!factionId.equals(old)) {
-            setDirty();
+        if (tag.contains(NBT_LEADER, Tag.TAG_COMPOUND)) {
+            faction.setLeader(FactionMember.load(tag.getCompound(NBT_LEADER)));
         }
-    }
 
-    void removeMember(UUID entityUuid) {
-        if (memberMap.remove(entityUuid) != null) {
-            setDirty();
+        if (tag.contains(NBT_MEMBERS, Tag.TAG_LIST)) {
+            ListTag memberList = tag.getList(NBT_MEMBERS, Tag.TAG_COMPOUND);
+            for (int i = 0; i < memberList.size(); i++) {
+                FactionMember member = FactionMember.load(memberList.getCompound(i));
+                if (member != null) {
+                    faction.addMember(member);
+                }
+            }
         }
+        return faction;
     }
 
-    String getMemberFaction(UUID entityUuid) {
-        return memberMap.get(entityUuid);
-    }
-
-    // 加载全部成员映射到 FactionManager
-    void loadMembers() {
-        for (Map.Entry<UUID, String> entry : memberMap.entrySet()) {
-            FactionManager.putLoadedMember(entry.getKey(), entry.getValue());
+    // 加载全部阵营到 FactionManager
+    void loadFactions() {
+        for (Map.Entry<String, CompoundTag> entry : factionTags.entrySet()) {
+            FactionManager.putLoadedFaction(deserialize(entry.getKey(), entry.getValue()));
         }
-    }
-
-    boolean hasMember(UUID entityUuid) {
-        return memberMap.containsKey(entityUuid);
     }
 }

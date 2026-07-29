@@ -21,10 +21,9 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /*
- * 数值反演：数据流逆向的死角接管层。静态逆向撞上无法符号反演的节点(自定义解码 Call/Op)后，
- * 从该节点的活对象继续向下走运行期对象图，收集可扰动的原始 cell，扰动测斜率、梯度逼近使 getHealth 命中目标。
- * 副作用全在本类。写回一律"引用替换"(装箱/不可变绝不原地改共享对象)；快照回滚、超时、异常硬隔离保证崩溃安全。
- * 搜索范围由静态死角框定，不盲扫全内存；对象图遍历设递归深度上限防栈溢出(deadline 只兜 wall-clock，挡不住深图爆栈)，超时兜运行时间边界。
+ * 数值反演处理无法符号求逆的自定义解码节点。它从相关运行期对象中收集可写数值单元，
+ * 通过扰动估算斜率并迭代逼近目标血量。写入使用引用替换，并由快照、超时和异常处理限制副作用。
+ * 搜索范围由静态分析结果限定，对象图遍历还设有深度和时间上限。
  */
 public final class NumericInverter {
 
@@ -44,16 +43,14 @@ public final class NumericInverter {
             EcaLogger.info("[NumericInverter] {} entity={}", reason, entity.getClass().getName());
     }
 
-    /* 入口：从死角活对象出发，扰动其可达原始 cell，令 getHealth 逼近 target；命中 verify 返回 true，否则回滚返回 false。 */
+    /* 从无法反演节点的运行期对象开始搜索；校验失败时恢复所有改动。 */
     public static boolean search(LivingEntity entity, float target, List<Object> roots) {
         if (entity == null || roots == null || roots.isEmpty()) return false;
         long deadline = System.nanoTime() + TIME_BUDGET_NANOS;
 
         List<Cell> cells = new ArrayList<>();
         Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-        // 先遍历数据流框定的精确容器根(非实体)，再受限遍历实体根：
-        // 实体根会顺 vanilla 对象图(Codec/属性/装备/AI 等)扩散出海量的诱饵 cell，若不隔离会耗光预算，
-        // 使真正的存储 cell(如静态 map 数位)排不到扰动。精确容器根优先且不限，实体根加单元上限兜底。
+        // 优先遍历数据流定位的容器根，再限制实体对象图的候选数量，避免无关对象耗尽搜索预算
         for (Object root : roots) {
             if (!(root instanceof Entity)) walk(root, cells, visited, deadline, 0, Integer.MAX_VALUE);
         }
@@ -70,9 +67,9 @@ public final class NumericInverter {
         for (int i = 0; i < cells.size(); i++) snapshot[i] = cells.get(i).snapshot();
 
         try {
-            float baseline = EcaSetHealthManager.safeGetHealth(entity);
+            float baseline = EcaSetHealthManager.readHealthAnchor(entity);
             if (!Float.isFinite(baseline)) {
-                diag(entity, "baseline getHealth non-finite");
+                diag(entity, "baseline health anchor non-finite");
                 rollback(cells, snapshot);
                 return false;
             }
@@ -84,23 +81,23 @@ public final class NumericInverter {
                 if (System.nanoTime() > deadline) break;
                 double cur = cell.read();
                 if (!Double.isFinite(cur)) continue;
-                Object exact = cell.snapshot();   // 精确原值：避免 long→double 往返丢精度改坏旁观 cell(如 UUID 键)
+                Object exact = cell.snapshot();   // 保留原始类型和值，避免 long 与 double 转换造成精度损失
                 if (!cell.write(cur + PERTURB)) continue;
-                float h = EcaSetHealthManager.safeGetHealth(entity);
-                cell.restore(exact);              // 精确复位，绝不经 double 往返
+                float h = EcaSetHealthManager.readHealthAnchor(entity);
+                cell.restore(exact);              // 使用快照恢复，避免数值类型转换
                 if (!Float.isFinite(h)) continue;
                 double slope = (h - baseline) / PERTURB;
                 if (Math.abs(slope) > 1e-9) { relevant.add(cell); slopes.add(slope); }
             }
             if (relevant.isEmpty()) {
-                diag(entity, "no cell influences getHealth (all slopes ~0, cells=" + cells.size() + ")");
+                diag(entity, "no cell influences health anchor (all slopes ~0, cells=" + cells.size() + ")");
                 rollback(cells, snapshot);
                 return false;
             }
 
             for (int pass = 0; pass < MAX_PASSES; pass++) {
                 if (System.nanoTime() > deadline) break;
-                float h = EcaSetHealthManager.safeGetHealth(entity);
+                float h = EcaSetHealthManager.readHealthAnchor(entity);
                 if (hit(h, target)) break;
                 double err = target - h;
                 for (int i = 0; i < relevant.size(); i++) {
@@ -142,7 +139,7 @@ public final class NumericInverter {
         for (int attempt = 0; attempt < 12; attempt++, scale *= 0.5) {
             cell.restore(exact);
             if (!cell.write(current + delta * scale)) continue;
-            float after = EcaSetHealthManager.safeGetHealth(entity);
+            float after = EcaSetHealthManager.readHealthAnchor(entity);
             if (!Float.isFinite(after)) continue;
             double afterError = Math.abs((double) target - after);
             if (hit(after, target) || afterError < beforeError) return after;
@@ -208,9 +205,7 @@ public final class NumericInverter {
                 || t == double.class || t == short.class || t == byte.class;
     }
 
-    // 跳过 JDK 内部反射/类加载/线程等对象(安全考量)、com.mojang 的 DFU/Codec 图与世界/注册表等重型容器：
-    // 自定义血量不可能存于其中，但实体对象图会经 Codec/DFU/level 扩散出数十万诱饵 cell(且 record 字段写入刷屏报错)、
-    // 耗光预算，使数据流框定的真实存储(如静态 map 数位)排不到扰动。
+    // 跳过 JDK 内部对象、DFU/Codec 图以及世界和注册表等大型对象图，避免无关候选耗尽搜索预算
     private static boolean isSkippable(Class<?> cls) {
         String n = cls.getName();
         if (n.startsWith("java.lang.Class") || n.startsWith("java.lang.ClassLoader")
@@ -261,7 +256,7 @@ public final class NumericInverter {
             try { field.set(owner, value); return true; }
             catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                return UnsafeUtil.unsafePutField(owner, field, value);   // final / 模块限制兜底
+                return UnsafeUtil.unsafePutField(owner, field, value);   // final 字段或模块访问受限时尝试 Unsafe
             }
         }
     }

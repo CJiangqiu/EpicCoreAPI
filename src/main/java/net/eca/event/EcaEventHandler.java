@@ -6,6 +6,7 @@ import net.eca.network.FactionGlowSyncPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
+import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
 import net.eca.util.bossshow.BossShowPlaybackTracker;
@@ -54,6 +55,8 @@ public class EcaEventHandler {
             event.getEntity() instanceof LivingEntity living) {
             EntityExtensionManager.onEntityJoin(living, serverLevel);
             ForceLoadingManager.onEntityJoin(living, serverLevel);
+            // 按实体实际出现来预热改血分析，比按已加载类顺序盲扫命中率高得多
+            EcaSetHealthManager.onEntityJoinLevel(living);
         }
     }
 

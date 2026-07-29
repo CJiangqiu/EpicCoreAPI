@@ -2,6 +2,7 @@ package net.eca.util.raid;
 
 import net.eca.api.RegisterRaid;
 import net.eca.util.EcaLogger;
+import net.eca.util.faction.FactionManager;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -214,8 +215,49 @@ public class RaidManager {
         return pos;
     }
 
+    /*
+     * 启动前校验袭击定义引用的阵营。
+     *
+     * 袭击者阵营缺失会让整场袭击的敌我判定失效——袭击者不攻击防守方、防守方也不认识它们，
+     * 表现为"袭击开始了但怪在发呆"，且原因只埋在日志里，因此直接拒绝启动。
+     * 波次抽取阵营的问题只影响该波的一部分，记录错误但允许启动。
+     *
+     * 必须先触发阵营加载：isFactionRegistered 不会自行加载存档，否则动态创建的阵营
+     * 会在这里被误判为未注册。
+     */
+    private static boolean validateFactions(ServerLevel level, RaidDefinition def) {
+        FactionManager.ensureLoaded(level);
+
+        String raiderFaction = def.getRaiderFactionId();
+        if (raiderFaction != null && !raiderFaction.isEmpty()
+                && !FactionManager.isFactionRegistered(raiderFaction)) {
+            EcaLogger.error("[Raid] Cannot start raid '{}': raider faction '{}' is not registered — "
+                    + "raiders would spawn without faction bindings and ignore defenders",
+                    def.getId(), raiderFaction);
+            return false;
+        }
+
+        List<RaidWave> waves = def.getWaves();
+        if (waves == null) return true;
+        for (int i = 0; i < waves.size(); i++) {
+            for (String drawId : waves.get(i).getFactionCounts().keySet()) {
+                if (!FactionManager.isFactionRegistered(drawId)) {
+                    EcaLogger.error("[Raid] Raid '{}' wave {} draws from unregistered faction '{}' — "
+                            + "that group will be skipped", def.getId(), i, drawId);
+                } else if (FactionManager.getMemberEntityTypes(drawId).isEmpty()) {
+                    EcaLogger.error("[Raid] Raid '{}' wave {} draws from faction '{}' which declares no "
+                            + "member entity types — that group will be skipped", def.getId(), i, drawId);
+                }
+            }
+        }
+        return true;
+    }
+
     private static RaidInstance createRaid(ServerLevel level, RaidDefinition def, BlockPos center) {
         ensureLoaded(level);
+        if (!validateFactions(level, def)) {
+            return null;
+        }
         RaidSavedData data = RaidSavedData.get(level);
         int raidId = data.nextRaidId();
 

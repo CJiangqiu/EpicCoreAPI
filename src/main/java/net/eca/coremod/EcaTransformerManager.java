@@ -26,13 +26,6 @@ public final class EcaTransformerManager {
         return backend;
     }
 
-    public static void registerClassTransformer() {
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (EcaClassTransformer.registerWithInstrumentation(inst)) {
-            backend = Backend.AGENT;
-        }
-    }
-
     public static void activateJvmTiIfNeeded() {
         if (!EcaConfiguration.getDefenceEnableRadicalLogicSafely()) return;
         try {

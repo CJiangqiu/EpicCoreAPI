@@ -45,9 +45,9 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /*
- * 方法探针模块：不碰存储，借实体自身的合法血量写方法改血——数据流/外部扫描直写存储都打不穿时的兜底。
+ * 方法探针模块：数据流和外部扫描无法直接写入存储时，调用实体自身的血量写方法。
  * 两种策略：
- *  DirectCall：静态枚举 1 参数数值 setter/函数式字段候选，运行期行为探测(写探测值→观察 getHealth→回滚)选出真 writer。
+ *  DirectCall：静态枚举单参数数值 setter 和函数式字段，通过写入、读取与回滚确定有效 writer。
  *  HeadBridge：扫 void(float) 方法体识别 token(entity):long + writer(entity,float,long):void 授权写模式，
  *              warmup 在方法 HEAD 注入授权调用(惰性)，运行期借实体自身可信帧发起、绕过后续栈守护/门控。
  * 发现只读字节码/反射签名；注入/retransform/激活态/反射调用等副作用亦收拢于本类，模块自成一体。
@@ -85,11 +85,11 @@ public final class MethodProbe {
     public enum WriterKind { METHOD, FUNCTIONAL_FIELD, METHOD_HANDLE_FIELD, FIELD_COMMIT }
 
     /* DirectCall 候选：METHOD=实体自身 1 参数数值方法；FUNCTIONAL_FIELD=持单数值 SAM 的函数式字段。
-       仅静态签名信息，真正命中由运行期行为探测判定。 */
+       此处仅记录静态签名，是否有效由运行期行为探测判定。 */
     public record DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc,
                                   String fieldDesc, boolean fieldStatic) {}
 
-    /* 命中的直调 writer：绑定到某方法或函数式字段，可跨同类实例复用。 */
+    /* 已验证的直调 writer，绑定到方法或函数式字段，可供同类实例复用。 */
     public interface DirectWriter {
         boolean write(LivingEntity entity, float value);
         float representable(float value);
@@ -204,9 +204,8 @@ public final class MethodProbe {
             findBytecodeFieldCandidates(c, ownerInternal, out, seen);
             findFieldCommitCandidates(c, ownerInternal, out, seen);
         }
-        /* 排序即探测次序：旧版已验证的反射 setter/函数式字段在前(复刻 1.1.6)，新增激进候选后置。
-           FIELD_COMMIT 排最后——其行为探测可能触发目标不可回滚的防御(如 accelerator checkEntityDecoys
-           的 lockTemporary)，必须在 HeadBridge 之后才允许跑，否则会锁死本可成功的 HeadBridge。 */
+        /* 排序决定探测顺序：反射 setter 和函数式字段优先，MethodHandle 字段与 FIELD_COMMIT 后置。
+           FIELD_COMMIT 可能触发不可回滚的目标状态，因此只能在 HeadBridge 之后执行。 */
         out.sort(Comparator.comparingInt(candidate -> switch (candidate.kind()) {
             case METHOD -> 0;
             case FUNCTIONAL_FIELD -> 1;
@@ -244,7 +243,7 @@ public final class MethodProbe {
     }
 
     /* 暂存字段+无参提交：void() 方法体读取本类 float/double 字段后经调用提交(加密写入/委托等)。
-       行为探测最终判定是否真正控血，此处只做静态签名筛选。 */
+           此处只做静态签名筛选，运行期行为探测负责验证写入效果。 */
     private static void findFieldCommitCandidates(Class<?> owner, String ownerInternal,
                                                   List<DirectCandidate> out, Set<String> seen) {
         byte[] bytes = bytesProvider.get(owner);
@@ -469,10 +468,10 @@ public final class MethodProbe {
 
     // ==================== DirectCall：行为探测 ====================
 
-    /* 逐候选行为探测，返回首个真正控血的 writer；无则 null。探测会临时改动活体血量并回滚。 */
+    /* 依次探测候选并返回首个通过血量校验的 writer；没有匹配项时返回 null。探测结束后恢复临时改动。 */
     public static DirectWriter resolveDirect(LivingEntity entity, List<DirectCandidate> candidates,
                                              float target, List<Object> rollbackRoots) {
-        float baseline = EcaSetHealthManager.safeGetHealth(entity);
+        float baseline = EcaSetHealthManager.readHealthAnchor(entity);
         if (!Float.isFinite(baseline)) return null;
         float[] probes = selectProbeValues(baseline, target, safeGetMaxHealth(entity));
         if (probes == null) return null;
@@ -523,18 +522,18 @@ public final class MethodProbe {
             float b = writer.representable(probeB);
             if (tooClose(a, b) || tooClose(a, baseline) || tooClose(b, baseline)) return false;
             boolean wroteA = writer.writeAssociated(entity, a);
-            float actualA = EcaSetHealthManager.safeGetHealth(entity);
+            float actualA = EcaSetHealthManager.readHealthAnchor(entity);
             if (diagnostic) EcaLogger.info("[MethodProbe] associated probeA wrote={} expected={} actual={}",
                     wroteA, a, actualA);
             if (!wroteA || !matches(actualA, a)) return false;
             boolean wroteB = writer.writeAssociated(entity, b);
-            float actualB = EcaSetHealthManager.safeGetHealth(entity);
+            float actualB = EcaSetHealthManager.readHealthAnchor(entity);
             if (diagnostic) EcaLogger.info("[MethodProbe] associated probeB wrote={} expected={} actual={}",
                     wroteB, b, actualB);
             if (!wroteB || !matches(actualB, b)) return false;
             if (!writer.writeAssociated(entity, baseline) || !EcaSetHealthManager.verify(entity, baseline)) return false;
             boolean wroteTarget = writer.writeAssociated(entity, target);
-            float actualTarget = EcaSetHealthManager.safeGetHealth(entity);
+            float actualTarget = EcaSetHealthManager.readHealthAnchor(entity);
             if (diagnostic) EcaLogger.info("[MethodProbe] associated target wrote={} expected={} actual={}",
                     wroteTarget, target, actualTarget);
             return wroteTarget && matchesTarget(actualTarget, target);
@@ -555,7 +554,7 @@ public final class MethodProbe {
             SynchedDataState beforeA = diagnostic ? SynchedDataState.capture(entity) : null;
             boolean wroteA = writer.write(entity, a);
             SynchedDataState stateA = diagnostic ? SynchedDataState.capture(entity) : null;
-            float actualA = EcaSetHealthManager.safeGetHealth(entity);
+            float actualA = EcaSetHealthManager.readHealthAnchor(entity);
             if (diagnostic) {
                 SynchedDataState afterReadA = SynchedDataState.capture(entity);
                 EcaLogger.info("[MethodProbe] MethodHandle probeA wrote={} expected={} actual={} writeState={} readState={}",
@@ -566,7 +565,7 @@ public final class MethodProbe {
                 return false;
             }
             boolean wroteB = writer.write(entity, b);
-            float actualB = EcaSetHealthManager.safeGetHealth(entity);
+            float actualB = EcaSetHealthManager.readHealthAnchor(entity);
             if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle probeB wrote={} expected={} actual={}", wroteB, b, actualB);
             if (!wroteB || !matches(actualB, b)) {
                 restore(entity, writer, baseline);
@@ -578,7 +577,7 @@ public final class MethodProbe {
                 return false;
             }
             boolean wroteTarget = writer.write(entity, target);
-            float actualTarget = EcaSetHealthManager.safeGetHealth(entity);
+            float actualTarget = EcaSetHealthManager.readHealthAnchor(entity);
             if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle target wrote={} expected={} actual={}",
                     wroteTarget, target, actualTarget);
             if (wroteTarget && matchesTarget(actualTarget, target)) return true;
@@ -774,7 +773,7 @@ public final class MethodProbe {
         if (entity == null || spec == null) return false;
         TrustedBridge bridge = trustedBridge(spec);
         if (bridge == null) return false;
-        float baseline = EcaSetHealthManager.safeGetHealth(entity);
+        float baseline = EcaSetHealthManager.readHealthAnchor(entity);
         try {
             bridge.apply().invokeExact((Entity) entity, target);
             if (EcaSetHealthManager.verify(entity, target)) {

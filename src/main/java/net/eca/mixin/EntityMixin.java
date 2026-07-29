@@ -170,8 +170,7 @@ public class EntityMixin {
     @Inject(method = "isAlliedTo", at = @At("HEAD"), cancellable = true)
     private void eca$checkFactionAllied(Entity other, CallbackInfoReturnable<Boolean> cir) {
         Entity self = (Entity) (Object) this;
-        // canAttack 已覆盖同阵营与友好阵营判定
-        if (!FactionUtil.canAttack(self, other)) {
+        if (FactionUtil.isFriendly(self, other)) {
             cir.setReturnValue(true);
         }
     }
