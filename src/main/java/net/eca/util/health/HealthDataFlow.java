@@ -162,9 +162,10 @@ public final class HealthDataFlow {
             }
             return false;
         }
-        boolean anchorAgrees = EcaSetHealthManager.verify(entity, target);
-        boolean deathAgrees = deathSemanticsAgree(entity, target);
-        if (anchorAgrees && deathAgrees) {
+        /* 校验只用模型自身的表达式，选错存储时恒真。但生死判定同样可能是诱饵(getHealth 恒等
+           maxHealth、死亡改在 tick 里判)，拿它交叉验证会误杀正确模型。
+           模型是否可信改由 applyEffectiveHealth 的结构判据在建模阶段裁决。 */
+        if (EcaSetHealthManager.verify(entity, target)) {
             EcaSetHealthManager.recordObservedWrite(cls);
             if (EFFECTIVE_SUCCESS_DUMPED.add(cls.getName())) {
                 EcaLogger.info("[EffectiveHealth] success entity={} storage={} solved={} target={}",
@@ -175,25 +176,11 @@ public final class HealthDataFlow {
 
         boolean restored = dispatchWrite(model.storage(), entity, snapshot);
         if (EFFECTIVE_DUMPED.add(cls.getName())) {
-            EcaLogger.info("[EffectiveHealth] {}=FAIL entity={} storage={} solved={} target={} anchor={} restore={}",
-                    anchorAgrees ? "deathSemantics" : "verify",
+            EcaLogger.info("[EffectiveHealth] verify=FAIL entity={} storage={} solved={} target={} anchor={} restore={}",
                     cls.getName(), model.storage().label, solved.value(), target,
                     EcaSetHealthManager.readHealthAnchor(entity), restored ? "OK" : "FAIL");
         }
         return false;
-    }
-
-    /* 模型的求解与校验共用同一个表达式，存储选错时二者恒相符，锚点无法自证。
-       实体自身的生死判定不经过模型表达式，可作为独立观测：目标≤0 时实体必须确实转为死亡。
-       目标为正时不作要求——复活未必只取决于血量，据此拒绝会误伤正常写入。 */
-    private static boolean deathSemanticsAgree(LivingEntity entity, float target) {
-        if (target > 0.0f) return true;
-        try {
-            return entity.isDeadOrDying();
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            return false;
-        }
     }
 
     private static final Set<String> EFFECTIVE_DUMPED = ConcurrentHashMap.newKeySet();
@@ -362,12 +349,15 @@ public final class HealthDataFlow {
 
             Object snapshot = sink.read(entity);
             solvedWrites.add(new PreparedSourceWrite(sink, snapshot, solved.value()));
+            float anchorBefore = EcaSetHealthManager.readHealthAnchor(entity);
             if (!dispatchWrite(sink, entity, solved.value())) {
                 boolean restored = dispatchWrite(sink, entity, snapshot);
                 diag.add("    [" + sink.label + "] solved=" + solved.value()
                         + " write=FAIL restore=" + (restored ? "OK" : "FAIL"));
                 continue;
             }
+            // 锚点若随本次写入位移到目标值，即为它反映真实存储的证据，据此补正弱取证的误判
+            EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected);
             if (verifier.verify(entity, expected, sink)) {
                 EcaSetHealthManager.recordObservedWrite(cls);
                 if (logSuccess) {

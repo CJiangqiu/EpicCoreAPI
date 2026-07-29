@@ -574,6 +574,9 @@ public final class MethodProbe {
                 restore(entity, writer, baseline);
                 return false;
             }
+            /* 锚点分别读回了两个不同的写入值，已直接证明它反映真实存储。
+               读自定义存储的 getHealth 不跟随原版字段，弱取证会误判其不可信，在此补正。 */
+            EcaSetHealthManager.promoteAnchorTrust(entity.getClass());
             writer.write(entity, baseline);
             if (!EcaSetHealthManager.verify(entity, baseline)) {
                 restore(entity, writer, baseline);
@@ -737,9 +740,11 @@ public final class MethodProbe {
         Method method = resolveBridgeMethod(entity.getClass(), spec);
         if (method == null) return false;
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+        float baseline = EcaSetHealthManager.readHealthAnchor(entity);
         try {
             ACTIVE_ENTITY.set(entity);
             method.invoke(entity, target);
+            EcaSetHealthManager.noteAnchorResponse(entity, baseline, target);
             boolean ok = EcaSetHealthManager.verify(entity, target);
             if (ok) EcaLogger.info("[MethodProbe] head bridge hit entity={} method={}",
                     entity.getClass().getName(), spec.methodName());
@@ -779,6 +784,8 @@ public final class MethodProbe {
         float baseline = EcaSetHealthManager.readHealthAnchor(entity);
         try {
             bridge.apply().invokeExact((Entity) entity, target);
+            // 桥没有两点探测，改用写入前后的锚点位移取证，否则读自定义存储的 getHealth 会被弱取证永久判死
+            EcaSetHealthManager.noteAnchorResponse(entity, baseline, target);
             if (EcaSetHealthManager.verify(entity, target)) {
                 EcaLogger.info("[MethodProbe] trusted bridge hit entity={} bridge={}",
                         entity.getClass().getName(), bridge.className());

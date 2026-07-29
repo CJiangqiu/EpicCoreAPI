@@ -1050,6 +1050,39 @@ public final class HealthDataflowAnalyzer {
         return out;
     }
 
+    /* 有效血量表达式是否依赖"当次伤害量"。血量是实体状态，伤害是方法入参：
+       WriteInput 代表被内联方法的数值形参(hurt/actuallyHurt 的 damage)，伤害事件的 getAmount 同理。
+       含此类节点的式子算的是这一击之后的值而非当前血量，用作锚点会解出偏移一个伤害量的存储值。 */
+    public static boolean dependsOnDamageInput(Expr e) {
+        if (e == null) return false;
+        if (e instanceof WriteInput) return true;
+        if (e instanceof Call call) {
+            if (isDamageAmountCall(call)) return true;
+            for (Expr a : call.args()) if (dependsOnDamageInput(a)) return true;
+            return false;
+        }
+        if (e instanceof Op op) {
+            for (Expr a : op.args()) if (dependsOnDamageInput(a)) return true;
+            return false;
+        }
+        if (e instanceof Choice c) {
+            for (Expr a : c.alternatives()) if (dependsOnDamageInput(a)) return true;
+            return false;
+        }
+        if (e instanceof Closure closure) {
+            for (Expr a : closure.captured()) if (dependsOnDamageInput(a)) return true;
+            return false;
+        }
+        if (e instanceof OptionalContentExpr optional) return dependsOnDamageInput(optional.optionalExpr());
+        if (e instanceof StoreWrite write) return dependsOnDamageInput(write.valueExpr());
+        return false;
+    }
+
+    private static boolean isDamageAmountCall(Call call) {
+        return call.owner().startsWith("net/minecraftforge/event/entity/living/")
+                && call.name().equals("getAmount");
+    }
+
     private static void collect(Expr e, Set<Source> out) {
         if (e instanceof Source s) out.add(s);
         else if (e instanceof Op op) for (Expr a : op.args()) collect(a, out);

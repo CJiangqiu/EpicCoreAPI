@@ -155,9 +155,13 @@ public final class EcaSetHealthManager {
         }
 
         HealthDataflowAnalyzer.EffectiveHealthModel resolved = model;
-        /* 差分不过说明该存储不控制生死，模型误选。此时必须连同已确认状态一并撤销：
-           错误锚点一旦留下，后续每次 verify 都会读它而恒真，改血将永久假成功。 */
-        if (!probeEffectiveModel(target, resolved)) {
+        /* 依赖当次伤害量的式子不是血量读取，误选它做锚点会因求解与校验共用同一表达式而恒真。
+           此时必须连同已确认状态一并撤销：错误锚点一旦留下，改血将永久假成功。 */
+        if (HealthDataflowAnalyzer.dependsOnDamageInput(resolved.readExpr())) {
+            if (EFFECTIVE_MODEL_REJECT_DUMPED.add(cls.getName() + "|" + resolved.storage().label)) {
+                EcaLogger.info("[EffectiveHealth] model rejected entity={} storage={} reason=depends on damage input",
+                        cls.getName(), resolved.storage().label);
+            }
             EFFECTIVE_ANCHOR_CONFIRMED.remove(cls);
             if (EFFECTIVE_ANCHOR_OWNED.remove(cls)) registerHealthAnchor(cls, null);
             HealthDataflowAnalyzer.rejectEffectiveModel(cls, resolved);
@@ -195,53 +199,8 @@ public final class EcaSetHealthManager {
         return false;
     }
 
-    /* 已通过生死翻转差分的模型，按类与存储标识去重，避免每次改血重复探测。 */
-    private static final Set<String> EFFECTIVE_MODEL_PROBED = ConcurrentHashMap.newKeySet();
-    private static final Set<String> EFFECTIVE_MODEL_PROBE_DUMPED = ConcurrentHashMap.newKeySet();
-
-    /* 把存储改成使模型输出为 0 的值，观察实体是否转为死亡：不转说明该存储不参与生死判定，
-       模型是误选(伤害中间量、吸收值等同样会被比较指令扫描命中)。
-       观测用实体自身的 isDeadOrDying，不经过模型表达式，因而能证伪模型。
-       实体已处于死亡状态时取不到翻转证据，直接放行，留给写入后的死亡语义校验判定。 */
-    private static boolean probeEffectiveModel(LivingEntity target,
-                                               HealthDataflowAnalyzer.EffectiveHealthModel model) {
-        Class<?> cls = target.getClass();
-        String key = cls.getName() + "|" + model.storage().label;
-        if (EFFECTIVE_MODEL_PROBED.contains(key)) return true;
-        try {
-            if (target.isDeadOrDying()) return true;
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            return false;
-        }
-
-        Object snapshot = model.storage().read(target);
-        boolean flipped = false;
-        boolean restored;
-        try {
-            HealthSolveResult solved = HealthDataflowAnalyzer.buildWritePath(
-                    model.readExpr(), model.storage(), Float.valueOf(0.0f),
-                    HealthDataflowAnalyzer.newContext(target));
-            if (solved.solved() && solved.value() != null
-                    && HealthDataFlow.dispatchWrite(model.storage(), target, solved.value())) {
-                flipped = target.isDeadOrDying();
-            }
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-        } finally {
-            restored = HealthDataFlow.dispatchWrite(model.storage(), target, snapshot);
-        }
-
-        if (flipped && restored) {
-            EFFECTIVE_MODEL_PROBED.add(key);
-            return true;
-        }
-        if (EFFECTIVE_MODEL_PROBE_DUMPED.add(key)) {
-            EcaLogger.info("[EffectiveHealth] model rejected entity={} storage={} flipped={} restore={}",
-                    cls.getName(), model.storage().label, flipped, restored ? "OK" : "FAIL");
-        }
-        return false;
-    }
+    /* 结构判据拒绝模型的诊断去重，按类与存储标识。 */
+    private static final Set<String> EFFECTIVE_MODEL_REJECT_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* 有效血量锚点已被一次成功写入证实的类 */
     private static final Set<Class<?>> EFFECTIVE_ANCHOR_CONFIRMED = ConcurrentHashMap.newKeySet();
@@ -680,10 +639,11 @@ public final class EcaSetHealthManager {
 
     /* ==================== 锚点可信度 ==================== */
 
-    /* getHealth 是否跟随原版 DATA_HEALTH_ID，按实体类探测一次并缓存。
-       被改写成常量或改读自定义存储的 getHealth 与真实血量脱钩，它证明不了任何写入生效；
-       此时凡是目标值恰好等于该常量的改血都会无条件通过校验。 */
-    private static final Map<Class<?>, Boolean> GET_HEALTH_TRACKS_VANILLA = new ConcurrentHashMap<>();
+    /* 锚点是否确实随写入变化，按实体类缓存。恒返回常量的 getHealth 证明不了任何写入生效，
+       凡是目标值恰好等于该常量的改血都会无条件通过校验。
+       注意"不跟随原版字段"不等于"不可信"——读自定义存储的真实 getHealth 同样不跟随，
+       故此处只是初始弱取证，真正的证据由 promoteAnchorTrust 在观察到联动后补齐。 */
+    private static final Map<Class<?>, Boolean> ANCHOR_REFLECTS_WRITES = new ConcurrentHashMap<>();
     private static final Set<String> ANCHOR_TRUST_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* 探测本身要写原版血量，混在通道事务里会污染快照，故须在任何写入之前先把结论预热进缓存。 */
@@ -691,18 +651,36 @@ public final class EcaSetHealthManager {
         if (target != null) isAnchorTrustworthy(target);
     }
 
-    /* 锚点能否作为写入生效的证据。替代锚点已由生死翻转差分证实，直接放行；
-       其余按类探测 getHealth 与原版血量的联动性。 */
+    /* 观测到锚点随两个不同写入分别读回对应值时提升为可信。这比原版字段探测强：
+       写入经由目标自身的 writer 驱动，直接证明了锚点反映真实存储。 */
+    public static void promoteAnchorTrust(Class<?> cls) {
+        if (cls != null) ANCHOR_REFLECTS_WRITES.put(cls, Boolean.TRUE);
+    }
+
+    /* 单次写入的取证形式：锚点读数从 before 位移到 expected，即证明它反映本次写入。
+       两者本就相近时取不到位移，不作判定——没有证据不等于反证。 */
+    public static void noteAnchorResponse(LivingEntity target, float before, float expected) {
+        if (target == null || !Float.isFinite(before) || !Float.isFinite(expected)) return;
+        float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
+        if (Math.abs(before - expected) <= tolerance) return;
+        float actual = readHealthAnchor(target);
+        if (Float.isFinite(actual) && Math.abs(actual - expected) <= tolerance) {
+            promoteAnchorTrust(target.getClass());
+        }
+    }
+
+    /* 锚点能否作为写入生效的证据。替代锚点由建模阶段的结构判据裁决过，直接放行；
+       其余先做一次原版字段联动的弱取证。 */
     private static boolean isAnchorTrustworthy(LivingEntity target) {
         if (target == null) return false;
         Class<?> cls = target.getClass();
         if (hasHealthAnchor(cls)) return true;
-        Boolean cached = GET_HEALTH_TRACKS_VANILLA.get(cls);
+        Boolean cached = ANCHOR_REFLECTS_WRITES.get(cls);
         if (cached != null) return cached;
         boolean tracks = probeVanillaHealthTracking(target);
-        GET_HEALTH_TRACKS_VANILLA.put(cls, tracks);
+        ANCHOR_REFLECTS_WRITES.put(cls, tracks);
         if (!tracks && ANCHOR_TRUST_DUMPED.add(cls.getName())) {
-            EcaLogger.info("[HealthAnchor] getHealth decoupled from vanilla storage entity={} (rejected as evidence)",
+            EcaLogger.info("[HealthAnchor] getHealth did not follow vanilla write entity={} (awaiting stronger evidence)",
                     cls.getName());
         }
         return tracks;
