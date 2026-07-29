@@ -973,9 +973,9 @@ public class UndeadLegionFaction extends FactionDefinition {
 }
 ```
 
-**Leaders.** A faction may designate one member as its leader. Setting a leader adds it to the faction automatically if it was not a member — a leader outside its own faction would be a contradictory state. Leaving the faction also vacates the post, and a leader that is permanently removed is cleared automatically.
+**Leaders:** A faction may designate one member as its leader. Setting a leader adds it to the faction automatically if it was not a member — a leader outside its own faction would be a contradictory state. Leaving the faction also vacates the post, and a leader that is permanently removed is cleared automatically.
 
-**Threat propagation.** When a leader attacks something, or is attacked, that entity is offered as the target of every resolvable mob in the faction member table. Existing targets and faction target permissions may still prevent a switch. Two mechanisms coexist:
+**Threat propagation:** When a leader attacks something, or is attacked, that entity is offered as the target of every resolvable mob in the faction member table. Existing targets and faction target permissions may still prevent a switch. Two mechanisms coexist:
 
 | | Trigger | Range |
 |---|---|---|
@@ -992,7 +992,7 @@ Both mechanisms are governed **entirely by config** — there are no per-faction
 
 "Immediate" off means only members that currently have no target will engage; on means they abandon whatever they were fighting.
 
-**Querying.** Membership can be inspected from either direction, and the methods that do not resolve entities work entirely offline:
+**Querying:** Membership can be inspected from either direction, and the methods that do not resolve entities work entirely offline:
 
 | Direction | Methods |
 |---|---|
@@ -1013,23 +1013,23 @@ ECA provides a customizable raid system. The vanilla raid only works on villages
 
 Raids are registered by extending `RaidDefinition` and annotating with `@RegisterRaid`. Scanning runs after faction scanning, so a raid definition may freely reference faction ids. Only `getId()`, `getDisplayName()` and `getWaves()` are required — everything else has a working default modelled on the vanilla raid.
 
-**Targeting.** Override `getTargetStructure()` for a single structure, or `getTargetStructureTag()` to match any structure carrying a tag so one raid applies to several structure types. Anchoring drives the default defeat condition: the raid is lost when the target structure no longer covers the raid center. Declaring neither runs the raid unanchored, in which case it can only end by victory, timeout, or an explicit end call.
+**Targeting:** Override `getTargetStructure()` for a single structure, or `getTargetStructureTag()` to match any structure carrying a tag so one raid applies to several structure types. Anchoring drives the default defeat condition: the raid is lost when the target structure no longer covers the raid center. Declaring neither runs the raid unanchored, in which case it can only end by victory, timeout, or an explicit end call.
 
-**Waves.** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws that pull from a faction's `getMemberEntityTypes()` pool by weight.
+**Waves:** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws that pull from a faction's `getMemberEntityTypes()` pool by weight.
 
-**Raiders.** Spawned raiders are bound to `getRaiderFactionId()`. Spawned `Mob` instances also receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight an already acquired target and otherwise advance. Any entity type can be spawned and no interface is required, but faction hostility does not create target-acquisition AI; non-`Mob` entities receive neither the navigation goal nor mob callbacks. Override `getRaiderGoalPriority()` or return a negative value to change or disable goal injection.
+**Raiders:** Spawned raiders are bound to `getRaiderFactionId()`. Spawned `Mob` instances also receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight an already acquired target and otherwise advance. Any entity type can be spawned and no interface is required, but faction hostility does not create target-acquisition AI; non-`Mob` entities receive neither the navigation goal nor mob callbacks. Override `getRaiderGoalPriority()` or return a negative value to change or disable goal injection.
 
-**Boss.** A wave may declare a leader with `RaidWave.setLeader(type)`. The spawned entity becomes the leader of the raid's raider faction, so the faction's threat propagation applies to it for free. Eligible, loaded mobs without an existing target respond by default; `Immediate Leader Protection` allows them to replace an existing target. Declaring a leader requires `getRaiderFactionId()`; without a faction there is nothing to lead and the entry spawns as an ordinary raider.
+**Boss:** A wave may declare a leader with `RaidWave.setLeader(type)`. The spawned entity becomes the leader of the raid's raider faction, so the faction's threat propagation applies to it for free. Eligible, loaded mobs without an existing target respond by default; `Immediate Leader Protection` allows them to replace an existing target. Declaring a leader requires `getRaiderFactionId()`; without a faction there is nothing to lead and the entry spawns as an ordinary raider.
 
 Note that propagation walks the **entire faction member table**, not just this raid's participants. If the raider faction has other members elsewhere in the world, they answer too. Use a raid-specific faction if you want the response confined to the raid.
 
-**Validation.** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction **refuses the start** outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
+**Validation:** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction **refuses the start** outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
 
-**Progression.** `shouldAdvanceWave`, `checkVictory` and `checkDefeat` are all overridable. The defaults reproduce vanilla semantics: the next wave spawns once the previous one is dead, and the defenders win when every wave has spawned and every raider is gone.
+**Progression:** `shouldAdvanceWave`, `checkVictory` and `checkDefeat` are all overridable. The defaults reproduce vanilla semantics: the next wave spawns once the previous one is dead, and the defenders win when every wave has spawned and every raider is gone.
 
-**Timing and callbacks.** `getMaxDurationTicks()` defaults to 48000, `getWaveCooldownTicks()` to 300, `getParticipantRadius()` to 96 blocks and `getCelebrationTicks()` to 600. A wave can add its own `spawnDelay()` and `spawnRadius()`. Lifecycle hooks are `onStart`, `onWaveStart`, `onWaveEnd`, `onVictory`, `onDefeat` and `onStop`. Client-side `bossBarExtension()` can replace the raid bar appearance while retaining server-synced raid state.
+**Timing and callbacks:** `getMaxDurationTicks()` defaults to 48000, `getWaveCooldownTicks()` to 300, `getParticipantRadius()` to 96 blocks and `getCelebrationTicks()` to 600. A wave can add its own `spawnDelay()` and `spawnRadius()`. Lifecycle hooks are `onStart`, `onWaveStart`, `onWaveEnd`, `onVictory`, `onDefeat` and `onStop`. Client-side `bossBarExtension()` can replace the raid bar appearance while retaining server-synced raid state.
 
-**Endless raids.** `isEndless()` cycles the wave list forever and never satisfies the default victory condition. Finish one with `EcaAPI.endRaid`, which discards every surviving raider.
+**Endless raids:** `isEndless()` cycles the wave list forever and never satisfies the default victory condition. Finish one with `EcaAPI.endRaid`, which discards every surviving raider.
 
 Raids run per dimension and automatically restore their latest periodic checkpoint after a restart. Permanent casualties and terminal operations are saved immediately; ordinary progression is checkpointed once per second. The center chunk is force-loaded for the duration, but raiders that travel into other unloaded chunks are not force-loaded with it.
 
