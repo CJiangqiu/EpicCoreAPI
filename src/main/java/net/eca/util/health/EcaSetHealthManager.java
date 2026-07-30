@@ -133,6 +133,21 @@ public final class EcaSetHealthManager {
         return applyEffectiveHealth(target, targetHealth);
     }
 
+    /* 外部扫描第三阶段：实体存储写对了、当场校验也过了，却在下一 tick 被改回——
+       说明真实血量另有一份实体之外的镜像。仅对延迟复查检出过回滚的类启用：
+       普通实体既不承担扫描开销，也不会无故去改世界存档。门控与一二阶段共用。
+       beforeHealth 取写入之前的锚点读数，镜像此刻仍持有该值，是唯一可用的匹配依据。 */
+    public static boolean applyExternalMirror(LivingEntity target, float beforeHealth, float targetHealth) {
+        if (target == null) return false;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return false;
+        if (!ROLLBACK_OBSERVED.contains(target.getClass())) return false;
+        return ExternalMirrorWriter.write(target, beforeHealth, targetHealth);
+    }
+
+    /* 延迟复查检出过回滚的实体类，即第三阶段的准入名单。 */
+    private static final Set<Class<?>> ROLLBACK_OBSERVED = ConcurrentHashMap.newKeySet();
+
     /* getHealth 与实际存储解耦时，使用实体生死判定所读取的有效血量表达式作为观测锚点，
        并通过表达式反演计算存储值。仅对已有解耦记录的类启用。
        由 applyExternalScan 在其写入失败后调用，门控与之共用。 */
@@ -169,18 +184,34 @@ public final class EcaSetHealthManager {
             return false;
         }
 
+        /* 模型可能取自与血量反向的内部计数，按原版极性求逆会写出镜像值并当场判死。
+           求解与校验共用同一表达式，方向错了两边一起错，因此必须在写入前校正。 */
+        HealthDataflowAnalyzer.EffectiveHealthModel oriented =
+                HealthDataflowAnalyzer.orientToAliveSide(resolved, target);
+        if (oriented == null) {
+            if (EFFECTIVE_MODEL_REJECT_DUMPED.add(cls.getName() + "|polarity|" + resolved.storage().label)) {
+                EcaLogger.info("[EffectiveHealth] model rejected entity={} storage={} reason=reading sits on zero boundary",
+                        cls.getName(), resolved.storage().label);
+            }
+            return false;
+        }
+        if (oriented != resolved && EFFECTIVE_POLARITY_DUMPED.add(cls.getName() + "|" + oriented.storage().label)) {
+            EcaLogger.info("[EffectiveHealth] polarity inverted entity={} storage={} readExpr={}",
+                    cls.getName(), oriented.storage().label, oriented.readExpr());
+        }
+
         // 使用有效血量表达式校验，避免 getHealth 与存储解耦时错误接受或拒绝写入
         boolean anchorWasPresent = hasHealthAnchor(cls);
         registerHealthAnchor(cls, entity -> {
             Object value = HealthDataflowAnalyzer.evaluate(
-                    resolved.readExpr(), HealthDataflowAnalyzer.newContext(entity));
+                    oriented.readExpr(), HealthDataflowAnalyzer.newContext(entity));
             return value instanceof Number number ? number.floatValue() : Float.NaN;
         });
         EFFECTIVE_ANCHOR_OWNED.add(cls);
 
         List<Object> rollbackRoots = collectRollbackRoots(target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
-        boolean success = HealthDataFlow.writeEffective(resolved, target, targetHealth);
+        boolean success = HealthDataFlow.writeEffective(oriented, target, targetHealth);
         if (success) {
             EFFECTIVE_ANCHOR_CONFIRMED.add(cls);
             return true;
@@ -193,7 +224,7 @@ public final class EcaSetHealthManager {
                 EFFECTIVE_ANCHOR_OWNED.remove(cls);
                 registerHealthAnchor(cls, null);
             }
-            HealthDataflowAnalyzer.rejectEffectiveModel(cls, resolved);
+            HealthDataflowAnalyzer.rejectEffectiveModel(cls, oriented);
             EFFECTIVE_MODEL_SUBMITTED.remove(cls);
         }
         return false;
@@ -201,6 +232,9 @@ public final class EcaSetHealthManager {
 
     /* 结构判据拒绝模型的诊断去重，按类与存储标识。 */
     private static final Set<String> EFFECTIVE_MODEL_REJECT_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 极性校正的诊断去重，按类与存储标识。 */
+    private static final Set<String> EFFECTIVE_POLARITY_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* 有效血量锚点已被一次成功写入证实的类 */
     private static final Set<Class<?>> EFFECTIVE_ANCHOR_CONFIRMED = ConcurrentHashMap.newKeySet();
@@ -787,6 +821,17 @@ public final class EcaSetHealthManager {
     static void recordObservedWrite(Class<?> cls) {
         if (cls == null) return;
         if (ANCHOR_OBSERVED.add(cls)) UNOBSERVED_WRITES.remove(cls);
+    }
+
+    /* 延迟复查发现写入被实体自身逻辑改回：解除该类"已验证可写"的两处闭锁，
+       使后续改血重新收集解耦证据、并允许重新裁决有效血量模型。
+       不撤销模型与桥接本身——值没留住说明防护把它改回去了，不说明存储定位错了。 */
+    static void onDelayedRollback(Class<?> cls) {
+        if (cls == null) return;
+        ANCHOR_OBSERVED.remove(cls);
+        EFFECTIVE_ANCHOR_CONFIRMED.remove(cls);
+        // 下次改血时放行第三阶段，去实体之外找持有真实血量的镜像
+        ROLLBACK_OBSERVED.add(cls);
     }
 
     /* 存在写入成功但观测不到的源，且该类从未通过校验时判定为解耦，供后续通道决定是否改用替代锚点。 */

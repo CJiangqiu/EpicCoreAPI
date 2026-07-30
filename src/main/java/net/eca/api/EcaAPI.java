@@ -50,6 +50,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
@@ -247,13 +248,59 @@ public final class EcaAPI {
      * Dynamic: runtime bytecode instrumentation to trace the storage getHealth() actually reads
      *          (heaviest; requires "Enable Radical Logic" in the Attack config).
      * Players only undergo the Vanilla stage. Each stage is verified against entity.getHealth() with a
-     * tolerance of max(1.0, abs(target) * 2%); the first stage to pass wins and is cached per entity class.
+     * tolerance of max(0.5, abs(target) * 2%); the first stage to pass wins and is cached per entity class.
      * @param entity the living entity
      * @param health the target health value
      * @return true if the post-modification verify passed
      */
     public static boolean setHealth(LivingEntity entity, float health) {
         return EntityUtil.setHealth(entity, health);
+    }
+
+    // 强制实体受伤（原版 hurt 未正确扣血时，补记伤害源并用 ECA 改血兜底）
+    /**
+     * Damage an entity, guaranteeing the health loss actually lands.
+     * Vanilla {@code hurt} performs its only real health write inside {@code actuallyHurt} as
+     * {@code setHealth(getHealth() - damage)}, going through the entity's own getters and setters. When those
+     * are overridden or decoupled from the real storage, the whole pipeline runs and the events still fire
+     * while no health is lost. This method therefore does three things in order:
+     * 1. Clears the invulnerability cooldown and calls vanilla {@code hurt}, so mitigation (armor, resistance,
+     *    absorption, shields), knockback, aggro and hurt animation all happen normally.
+     * 2. Re-reads the health anchor and compares it against {@code before - amount}, with a tolerance of
+     *    {@code min(1.0, amount * 50%)}.
+     * 3. On mismatch, restores the damage-source bookkeeping vanilla would have left behind
+     *    (lastHurtByMob, lastHurtByPlayer/Time, lastDamageSource/Stamp, combat tracker, hurt animation)
+     *    and forces the health through {@link #setHealth}; if the expected health is at or below zero it
+     *    routes to {@link #kill} instead, so the death path, loot table and experience drops all run.
+     * Entities protected by ECA's own health lock or invulnerability are left to those systems: vanilla
+     * {@code hurt} is still called, but no forced write is attempted.
+     * Server side only; clients receive the result through the existing health sync packet.
+     * @param entity the living entity to damage
+     * @param damageSource the damage source, used for both mitigation and kill credit
+     * @param amount the damage amount, must be finite and greater than 0
+     * @return true if the entity ended up at the expected health, or was killed as expected
+     */
+    public static boolean hurt(LivingEntity entity, DamageSource damageSource, float amount) {
+        return EntityUtil.hurt(entity, damageSource, amount);
+    }
+
+    // 强制实体受伤的便捷重载：由攻击者自动取伤害类型
+    /**
+     * Damage an entity using a damage source derived from the attacker.
+     * Players use {@code playerAttack}, every other living entity uses {@code mobAttack}, matching what
+     * vanilla melee would produce, so kill credit and loot attribution behave as expected.
+     * See {@link #hurt(LivingEntity, DamageSource, float)} for the full pipeline.
+     * @param entity the living entity to damage
+     * @param attacker the attacking living entity, must not be null
+     * @param amount the damage amount, must be finite and greater than 0
+     * @return true if the entity ended up at the expected health, or was killed as expected
+     */
+    public static boolean hurt(LivingEntity entity, LivingEntity attacker, float amount) {
+        if (entity == null || attacker == null) return false;
+        DamageSource damageSource = attacker instanceof Player player
+                ? attacker.damageSources().playerAttack(player)
+                : attacker.damageSources().mobAttack(attacker);
+        return EntityUtil.hurt(entity, damageSource, amount);
     }
 
 
@@ -1507,8 +1554,8 @@ public final class EcaAPI {
      * Get a registered custom shader preset by its resource id (client only).
      * ECA auto-discovers presets from standard five-file sets under
      * {@code config/eca/shadergenerator/} or {@code assets/<namespace>/shaders/core/}.
-     * The returned object exposes four ready-made RenderTypes ({@code skybox()}, {@code bossBar()}, {@code bossLayer()}, {@code item()})
-     * for use in Entity/Item extensions. Entity texture overlays are handled through {@code EntityLayerExtension.getTexture()}.
+     * The returned object exposes BLOCK-profile RenderTypes for skyboxes, boss bars, and block extensions,
+     * plus NEW_ENTITY-profile RenderTypes for entity, item, and GeckoLib block extension passes.
      * @param id the preset resource id
      * @return the shader preset, or null if no preset is registered for the id
      */

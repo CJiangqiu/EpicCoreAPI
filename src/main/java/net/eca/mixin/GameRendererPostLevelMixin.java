@@ -7,8 +7,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.math.Axis;
-import net.eca.client.render.EntityLayerRenderQueue;
-import net.eca.client.render.ItemLayerRenderQueue;
+import net.eca.client.render.ShaderMaskRenderQueue;
 import net.eca.client.render.shader.EcaShaderInstance;
 import net.eca.util.entity_extension.EntityExtensionClientState;
 import net.eca.util.entity_extension.GlobalSkyboxExtension;
@@ -56,9 +55,8 @@ public class GameRendererPostLevelMixin {
             renderPostSkybox(poseStack);
         }
 
-        // 刷新延迟的实体渲染层与物品着色层（Oculus光影模式下缓存的效果层）
-        EntityLayerRenderQueue.flush();
-        ItemLayerRenderQueue.flush();
+        // 所有扩展遮罩层共用一条延迟队列，保证矩阵与遮罩状态按 pass 成组恢复
+        ShaderMaskRenderQueue.flush();
     }
 
     @Inject(method = "renderLevel",
@@ -67,7 +65,7 @@ public class GameRendererPostLevelMixin {
                      shift = At.Shift.AFTER))
     private void eca$flushItemLayersAfterWorld(float partialTick, long nanoTime, PoseStack poseStack, CallbackInfo ci) {
         if (!EcaShaderInstance.isOculusShadersActive()) {
-            ItemLayerRenderQueue.flush();
+            ShaderMaskRenderQueue.flush();
         }
     }
 

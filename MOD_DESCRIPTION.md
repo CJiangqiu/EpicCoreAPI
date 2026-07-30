@@ -18,6 +18,7 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
  - `/eca lockMaxHealth <targets> false` - Unlock entity max health
  - `/eca banHealing <targets> true [value]` - Ban healing for entities (value optional, defaults to current health)
  - `/eca banHealing <targets> false` - Unban healing for entities
+ - `/eca hurt <targets> <amount>` - Force entity damage (vanilla hurt first, forced write when the health loss does not land; kill credit goes to the executor when run by a living entity)
  - `/eca kill <targets>` - Kill entities
 - `/eca remove <targets> [reason]` - Remove entities from world
 - `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities via LWJGL internal channel
@@ -129,6 +130,8 @@ side="BOTH"
 - `addHealthBlacklistKeyword(keyword)` - Add keyword to health modification blacklist
 - `removeHealthBlacklistKeyword(keyword)` - Remove keyword from health modification blacklist
 - `getHealthBlacklistKeywords()` - Get all health blacklist keywords
+- `hurt(entity, damageSource, amount)` - Damage an entity and guarantee the health loss lands. Vanilla `hurt` writes health only once, inside `actuallyHurt`, as `setHealth(getHealth() - damage)` — through the entity's own getter and setter, so an overridden or storage-decoupled entity runs the whole pipeline and fires all events while losing no health. This method clears the invulnerability cooldown and calls vanilla `hurt` first (mitigation, knockback, aggro and hurt animation all happen normally), then compares the health anchor against `before - amount` within `min(1.0, amount * 50%)`. On mismatch it restores the damage-source bookkeeping vanilla would have left (lastHurtByMob, lastHurtByPlayer/Time, lastDamageSource/Stamp, combat tracker, hurt animation) and forces the health through `setHealth`; when the expected health is at or below zero it routes to `kill` instead, so the death path, loot table and experience drops all run. Entities under ECA's own health lock or invulnerability are left to those systems — vanilla `hurt` still runs, but no forced write is attempted.
+- `hurt(entity, attacker, amount)` - Same pipeline with the damage source derived from the attacker: `playerAttack` for players, `mobAttack` for every other living entity, so kill credit and loot attribution behave as expected
 - `kill(entity, damageSource)` - Kill entity (loot + advancements + removal)
 - `revive(entity)` - Clear death state and restore health
 - `revive(level, uuid)` - Clear death state and restore health by UUID in specified level
@@ -266,10 +269,16 @@ Here is a simple example:
 
 This mod also provides a customizable entity type extension feature for adding special visual effects to your entities. You need to create a subclass extending `EntityExtension` and annotate it with `@RegisterEntityExtension` to register the extension. Here is a quick start example:
 
+Entity shader layers use ordered `ShaderMaskPass` lists. Each pass can select a different color from the same UV-aligned mask and render that region with a different shader; black is the default target color and near-color tolerance is configurable. The same mask pipeline works with vanilla and GeckoLib entity renderers, while Geo masks also intersect with bone filtering.
+
+
+### Block Extensions
+
+Block extensions use the same ordered mask-pass pipeline for ordinary baked models, falling blocks, and GeckoLib block entities. World and falling blocks use BLOCK-profile passes with atlas UVs converted per sprite; Geo blocks use NEW_ENTITY-profile passes and model-local UVs. Multiple mask colors may select different shaders, and legacy Color-Key/single-mask getters remain only as deprecated adapters. Section-based sparse indexing and Oculus-compatible delayed drawing are retained. Block items continue to use Item Extensions; custom non-Gecko block entity renderers require their own integration.
 
 ### Item Extensions
 
-You can create item extensions to add shader rendering effects to specific items: create a subclass extending `ItemExtension` and annotate it with `@RegisterItemExtension` to register.
+Item extensions return ordered `ShaderMaskPass` lists. Multiple passes may share one mask texture while selecting different colors and shaders; baked item atlas UVs are converted per sprite before external masks are sampled. The former single RenderType, Color-Key, and single-mask methods are deprecated compatibility adapters.
 
 
 Structured tooltip lines can choose their own insertion position:

@@ -2187,7 +2187,7 @@ public final class HealthDataflowAnalyzer {
             int index = 0;
             for (AbstractInsnNode instruction : method.instructions) {
                 Frame<TaintValue> frame = frames[index++];
-                collectComparisonOperands(expressions, frame, instruction.getOpcode());
+                collectComparisonOperands(expressions, frame, instruction);
                 if (!(instruction instanceof MethodInsnNode call)
                         || Type.getReturnType(call.desc) != Type.VOID_TYPE
                         || call.name.startsWith("<") || frame == null) continue;
@@ -2239,8 +2239,14 @@ public final class HealthDataflowAnalyzer {
        getHealth 与实际存储解耦时，实体的生死判定仍会读取该存储并计算有效血量。
        从比较指令中提取这一表达式后，可将其用于观测和存储值反演。 */
 
-    /* readExpr 为含 storage 的有效血量表达式；storage 是其中真正可写的存储源。 */
-    public record EffectiveHealthModel(Expr readExpr, Source storage) {}
+    /* 比较指令事实：跳转成立的条件为 operand <predicate> threshold。
+       predicate 取 IFEQ..IFLE 形式的操作码，0 表示方向不可判定(比较后未紧跟条件跳转，或阈值非常数)。
+       只保留操作数会丢失阈值与方向，而血量的正负极性正是由"与零比较"这一事实支撑的。 */
+    public record ComparisonFact(Expr operand, int predicate, float threshold) {}
+
+    /* readExpr 为含 storage 的有效血量表达式；storage 是其中真正可写的存储源。
+       predicate/threshold 承自 readExpr 所在的比较指令，用于判定血量的正负极性。 */
+    public record EffectiveHealthModel(Expr readExpr, Source storage, int predicate, float threshold) {}
 
     private static final Map<Class<?>, EffectiveHealthModel> EFFECTIVE_MODEL_CACHE = new ConcurrentHashMap<>();
     /* 分析失败按候选签名缓存，而不对实体类永久缓存；后续新增候选时仍可重新分析。 */
@@ -2322,27 +2328,27 @@ public final class HealthDataflowAnalyzer {
        而 getter、注册逻辑等方法一条都没有，据此可跳过大部分方法及其依赖类字节码。 */
     private static EffectiveHealthModel computeEffectiveHealthModel(Class<?> entityClass, List<Source> evidence,
                                                                     boolean cachedOnly) {
-        List<Expr> priority = cachedOnly
+        List<ComparisonFact> priority = cachedOnly
                 ? PRIORITY_COMPARISON_CACHE.get(entityClass) : comparisonsOf(entityClass, true);
         if (priority != null) {
             EffectiveHealthModel model = selectEffectiveModel(entityClass, evidence, priority, "priority");
             if (model != null) return model;
         }
-        List<Expr> full = cachedOnly
+        List<ComparisonFact> full = cachedOnly
                 ? FULL_COMPARISON_CACHE.get(entityClass) : comparisonsOf(entityClass, false);
         return full == null ? null : selectEffectiveModel(entityClass, evidence, full, "full");
     }
 
     /* 比较表达式与证据无关，只取决于类的字节码，因此可跨次复用。
        扫描是本流程中最慢的部分，缓存后运行期只需重新匹配证据。 */
-    private static final Map<Class<?>, List<Expr>> PRIORITY_COMPARISON_CACHE = new ConcurrentHashMap<>();
-    private static final Map<Class<?>, List<Expr>> FULL_COMPARISON_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, List<ComparisonFact>> PRIORITY_COMPARISON_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, List<ComparisonFact>> FULL_COMPARISON_CACHE = new ConcurrentHashMap<>();
 
-    private static List<Expr> comparisonsOf(Class<?> entityClass, boolean priorityOnly) {
-        Map<Class<?>, List<Expr>> cache = priorityOnly ? PRIORITY_COMPARISON_CACHE : FULL_COMPARISON_CACHE;
-        List<Expr> cached = cache.get(entityClass);
+    private static List<ComparisonFact> comparisonsOf(Class<?> entityClass, boolean priorityOnly) {
+        Map<Class<?>, List<ComparisonFact>> cache = priorityOnly ? PRIORITY_COMPARISON_CACHE : FULL_COMPARISON_CACHE;
+        List<ComparisonFact> cached = cache.get(entityClass);
         if (cached != null) return cached;
-        List<Expr> scanned = collectClassComparisons(entityClass, priorityOnly);
+        List<ComparisonFact> scanned = collectClassComparisons(entityClass, priorityOnly);
         cache.put(entityClass, scanned);
         return scanned;
     }
@@ -2367,12 +2373,13 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static EffectiveHealthModel selectEffectiveModel(Class<?> entityClass, List<Source> evidence,
-                                                             List<Expr> comparisons, String stage) {
+                                                             List<ComparisonFact> comparisons, String stage) {
         Set<String> rejected = EFFECTIVE_MODEL_REJECTED.getOrDefault(entityClass, Set.of());
         EffectiveHealthModel best = null;
         int bestScore = Integer.MIN_VALUE;
         int matched = 0;
-        for (Expr expr : comparisons) {
+        for (ComparisonFact fact : comparisons) {
+            Expr expr = fact.operand();
             /* 候选由外部记录和表达式内提取的存储源共同组成。
                直接提取可使模型分析不依赖其他通道的完成时间。 */
             if (!isHealthShapedExpr(expr)) continue;
@@ -2387,7 +2394,7 @@ public final class HealthDataflowAnalyzer {
                 int score = effectiveModelScore(expr);
                 if (score > bestScore) {
                     bestScore = score;
-                    best = new EffectiveHealthModel(expr, candidate);
+                    best = new EffectiveHealthModel(expr, candidate, fact.predicate(), fact.threshold());
                 }
             }
         }
@@ -2397,7 +2404,8 @@ public final class HealthDataflowAnalyzer {
         // 优先段未命中属于正常回退，只在全类扫描仍无结果时输出。
         if (matched == 0 && "full".equals(stage)) dumpComparisonSamples(entityClass, comparisons);
         if (best == null) return null;
-        return new EffectiveHealthModel(pruneChoicesTo(best.readExpr(), best.storage()), best.storage());
+        return new EffectiveHealthModel(pruneChoicesTo(best.readExpr(), best.storage()), best.storage(),
+                best.predicate(), best.threshold());
     }
 
     /* 将 Choice 限定到包含目标存储的分支。
@@ -2430,14 +2438,14 @@ public final class HealthDataflowAnalyzer {
     private static final int COMPARISON_SAMPLE_CHARS = 300;
 
     /* 优先输出含可写源的表达式，用于判断内联展开到哪一层，以及存储是否参与了比较。 */
-    private static void dumpComparisonSamples(Class<?> entityClass, List<Expr> comparisons) {
-        List<Expr> withSource = new ArrayList<>();
-        for (Expr expr : comparisons) {
-            if (containsAnySource(expr)) withSource.add(expr);
+    private static void dumpComparisonSamples(Class<?> entityClass, List<ComparisonFact> comparisons) {
+        List<ComparisonFact> withSource = new ArrayList<>();
+        for (ComparisonFact fact : comparisons) {
+            if (containsAnySource(fact.operand())) withSource.add(fact);
             if (withSource.size() >= COMPARISON_SAMPLE_LIMIT) break;
         }
         EcaLogger.info("[EffectiveHealth]   samples withSource={} total={}", withSource.size(), comparisons.size());
-        List<Expr> samples = withSource.isEmpty() ? comparisons : withSource;
+        List<ComparisonFact> samples = withSource.isEmpty() ? comparisons : withSource;
         int limit = Math.min(samples.size(), COMPARISON_SAMPLE_LIMIT);
         for (int i = 0; i < limit; i++) {
             String text = String.valueOf(samples.get(i));
@@ -2523,6 +2531,40 @@ public final class HealthDataflowAnalyzer {
         invalidateEffectiveModel(entityClass);
     }
 
+    /* 校正模型极性，使 readExpr 与"越大越健康"一致；方向无从判定时返回 null。
+       比较式的操作数可能是与血量反向的内部计数——存活为负、归零即死。按原版极性对这类模型求逆
+       会写出镜像值：数值上满足目标，却把实体推进判死区间而当场毙命。
+       判据取"活体的血量读数不可能为负"，它自身即可定向，不依赖能否另找到一处与零的比较：
+       生死判定常定义在父类，而比较扫描只覆盖实体类自身的方法。 */
+    public static EffectiveHealthModel orientToAliveSide(EffectiveHealthModel model, LivingEntity entity) {
+        if (model == null || entity == null) return model;
+        Object value = evaluate(model.readExpr(), newContext(entity));
+        if (!(value instanceof Number number)) return model;
+        float current = number.floatValue();
+        if (Float.isNaN(current)) return model;
+        if (current > 0.0f) return model;
+        // 读数落在零边界上时两个方向都自洽，而方向选错会立即杀死实体，因此不猜
+        if (current == 0.0f) return null;
+        // 取反后 expr < T 等价于 -expr > -T，比较语义与阈值须一并取反才仍描述同一处比较
+        return new EffectiveHealthModel(new Op(negationOpcode(model.readExpr()), List.of(model.readExpr())),
+                model.storage(), mirrorPredicate(model.predicate()), -model.threshold());
+    }
+
+    // 取反指令须与表达式自身的浮点宽度一致，否则求值与反解都会在 double 上丢精度
+    private static int negationOpcode(Expr expr) {
+        if (expr instanceof Op op) {
+            return switch (op.opcode()) {
+                case Opcodes.DADD, Opcodes.DSUB, Opcodes.DMUL, Opcodes.DDIV, Opcodes.DREM, Opcodes.DNEG,
+                     Opcodes.I2D, Opcodes.L2D, Opcodes.F2D -> Opcodes.DNEG;
+                default -> Opcodes.FNEG;
+            };
+        }
+        if (expr instanceof Call call) {
+            return Type.getReturnType(call.desc()).getSort() == Type.DOUBLE ? Opcodes.DNEG : Opcodes.FNEG;
+        }
+        return Opcodes.FNEG;
+    }
+
     /* 清除未经写入确认的缓存模型，使后续分析可以使用更新后的候选集合。 */
     public static void invalidateEffectiveModel(Class<?> entityClass) {
         if (entityClass == null) return;
@@ -2564,8 +2606,8 @@ public final class HealthDataflowAnalyzer {
 
     /* 扫描类实例方法中的比较指令，收集与常数比较的表达式；生死判定通常表现为剩余量小于等于零。
        单个方法分析失败不影响其余方法，整体尽力而为。 */
-    private static List<Expr> collectClassComparisons(Class<?> entityClass, boolean priorityOnly) {
-        List<Expr> out = new ArrayList<>();
+    private static List<ComparisonFact> collectClassComparisons(Class<?> entityClass, boolean priorityOnly) {
+        List<ComparisonFact> out = new ArrayList<>();
         List<String> failures = new ArrayList<>();
         ClassNode classNode = classNode(entityClass);
         if (classNode == null) return out;
@@ -2593,7 +2635,7 @@ public final class HealthDataflowAnalyzer {
                 Frame<TaintValue>[] frames = new Analyzer<>(interpreter).analyze(ownerInternal, method);
                 int index = 0;
                 for (AbstractInsnNode insn : method.instructions) {
-                    collectComparisonOperands(out, frames[index++], insn.getOpcode());
+                    collectComparisonFacts(out, frames[index++], insn);
                 }
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
@@ -3163,34 +3205,97 @@ public final class HealthDataflowAnalyzer {
         int idx = 0;
         for (AbstractInsnNode insn : mn.instructions) {
             Frame<TaintValue> frame = frames[idx];
-            collectComparisonOperands(candidates, frame, insn.getOpcode());
+            collectComparisonOperands(candidates, frame, insn);
             idx++;
         }
         if (candidates.isEmpty()) return null;
         return candidates.size() == 1 ? candidates.get(0) : new Choice(List.copyOf(candidates));
     };
 
-    private static void collectComparisonOperands(List<Expr> candidates, Frame<TaintValue> frame, int opcode) {
-        if (frame == null) return;
-        boolean twoOperands = opcode == Opcodes.FCMPL || opcode == Opcodes.FCMPG
-                || opcode == Opcodes.DCMPL || opcode == Opcodes.DCMPG || opcode == Opcodes.LCMP
-                || opcode >= Opcodes.IF_ICMPEQ && opcode <= Opcodes.IF_ACMPNE;
+    /* 只要操作数、不关心方向的调用方(生死判定候选提取)沿用本形态；比较指令处才建临时表，避免逐指令分配。 */
+    private static void collectComparisonOperands(List<Expr> candidates, Frame<TaintValue> frame,
+                                                  AbstractInsnNode insn) {
+        if (frame == null || insn == null || !isComparisonOpcode(insn.getOpcode())) return;
+        List<ComparisonFact> facts = new ArrayList<>();
+        collectComparisonFacts(facts, frame, insn);
+        for (ComparisonFact fact : facts) addUniqueExpr(candidates, fact.operand());
+    }
+
+    private static boolean isComparisonOpcode(int opcode) {
+        return opcode == Opcodes.FCMPL || opcode == Opcodes.FCMPG || opcode == Opcodes.DCMPL
+                || opcode == Opcodes.DCMPG || opcode == Opcodes.LCMP
+                || opcode >= Opcodes.IFEQ && opcode <= Opcodes.IF_ACMPNE;
+    }
+
+    private static void collectComparisonFacts(List<ComparisonFact> facts, Frame<TaintValue> frame,
+                                               AbstractInsnNode insn) {
+        if (frame == null || insn == null) return;
+        int opcode = insn.getOpcode();
+        boolean numericCompare = opcode == Opcodes.FCMPL || opcode == Opcodes.FCMPG
+                || opcode == Opcodes.DCMPL || opcode == Opcodes.DCMPG || opcode == Opcodes.LCMP;
+        boolean twoOperands = numericCompare || opcode >= Opcodes.IF_ICMPEQ && opcode <= Opcodes.IF_ACMPNE;
         if (twoOperands && frame.getStackSize() >= 2) {
+            /* xCMPx 只把比较结果压栈，方向由紧随其后的条件跳转决定；直接比较指令自带方向。 */
+            int predicate = numericCompare ? predicateAfterCompare(insn) : directPredicate(opcode);
             Expr left = frame.getStack(frame.getStackSize() - 2).expr;
             Expr right = frame.getStack(frame.getStackSize() - 1).expr;
-            addComparisonCandidate(candidates, left, right);
-            addComparisonCandidate(candidates, right, left);
+            addComparisonFact(facts, left, right, predicate);
+            addComparisonFact(facts, right, left, mirrorPredicate(predicate));
             return;
         }
         if (opcode >= Opcodes.IFEQ && opcode <= Opcodes.IFLE && frame.getStackSize() >= 1) {
-            addComparisonCandidate(candidates, frame.getStack(frame.getStackSize() - 1).expr, null);
+            addComparisonFact(facts, frame.getStack(frame.getStackSize() - 1).expr, null, opcode);
         }
     }
 
-    private static void addComparisonCandidate(List<Expr> candidates, Expr candidate, Expr counterpart) {
+    /* xCMPx 之后的第一条真实指令若是条件跳转，其操作码即"跳转成立"时左右操作数的关系。
+       编译器常把源码条件取反后跳转，因此这里得到的未必是源码写法，只是同一处比较的等价事实。 */
+    private static int predicateAfterCompare(AbstractInsnNode insn) {
+        for (AbstractInsnNode next = insn.getNext(); next != null; next = next.getNext()) {
+            int opcode = next.getOpcode();
+            if (opcode < 0) continue;
+            return opcode >= Opcodes.IFEQ && opcode <= Opcodes.IFLE ? opcode : 0;
+        }
+        return 0;
+    }
+
+    // IF_ICMPxx 与 IFxx 的操作码顺序一致，仅相差固定偏移；引用比较不含数值语义
+    private static int directPredicate(int opcode) {
+        return opcode >= Opcodes.IF_ICMPEQ && opcode <= Opcodes.IF_ICMPLE
+                ? opcode - (Opcodes.IF_ICMPEQ - Opcodes.IFEQ) : 0;
+    }
+
+    // 交换比较两侧(或对操作数取反)后的等价比较语义
+    private static int mirrorPredicate(int predicate) {
+        return switch (predicate) {
+            case Opcodes.IFLT -> Opcodes.IFGT;
+            case Opcodes.IFGT -> Opcodes.IFLT;
+            case Opcodes.IFLE -> Opcodes.IFGE;
+            case Opcodes.IFGE -> Opcodes.IFLE;
+            case Opcodes.IFEQ, Opcodes.IFNE -> predicate;
+            default -> 0;
+        };
+    }
+
+    /* 只有与常数比较的操作数才是候选：阈值未知时无法判定血量极性，此时记录事实但不带方向。
+       counterpart 为 null 表示单操作数条件跳转，阈值即 0。 */
+    private static void addComparisonFact(List<ComparisonFact> facts, Expr candidate, Expr counterpart,
+                                          int predicate) {
         if (candidate == null || candidate instanceof Primitive || candidate instanceof UnknownExpr) return;
         if (counterpart != null && !(counterpart instanceof Primitive) && !(counterpart instanceof UnknownExpr)) return;
-        addUniqueExpr(candidates, candidate);
+        float threshold = 0.0f;
+        int resolved = predicate;
+        if (counterpart instanceof Primitive primitive && primitive.value() != null) {
+            threshold = primitive.value().floatValue();
+        } else if (counterpart != null) {
+            resolved = 0;
+        }
+        List<Expr> flattened = new ArrayList<>();
+        addUniqueExpr(flattened, candidate);
+        for (Expr expr : flattened) {
+            ComparisonFact fact = new ComparisonFact(expr, resolved, threshold);
+            if (!facts.contains(fact)) facts.add(fact);
+        }
     }
 
     /* 通用分析入口(查表版)：传入方法表项 + 提取策略即可分析。method.matchIn(cls) 内置 SRG 优先 MCP 后备查找。 */

@@ -44,18 +44,12 @@ import java.lang.annotation.Target;
  *     }
  *
  *     @Override
- *     public RenderType getRenderType() {
- *         return ArcaneRenderTypes.ITEM;
- *     }
- *
- *     @Override
- *     public float[] getColorKey() {
- *         return new float[]{1.0f, 0.0f, 1.0f};  // target magenta pixels
- *     }
- *
- *     @Override
- *     public float getColorKeyTolerance() {
- *         return 0.15f;
+ *     public List&lt;ShaderMaskPass&gt; getShaderPasses() {
+ *         ResourceLocation mask = texture("item/diamond_sword_mask.png");
+ *         return List.of(
+ *             ShaderMaskPass.masked(ArcaneRenderTypes.ITEM, mask, 0x000000, 0.05f, 1.0f),
+ *             ShaderMaskPass.masked(VolcanoRenderTypes.ITEM, mask, 0xFF0000, 0.05f, 1.0f)
+ *         );
  *     }
  * }
  * }</pre>
@@ -65,7 +59,9 @@ import java.lang.annotation.Target;
  *   <li>Each {@code Item} can only have ONE extension. Duplicate registrations will be rejected with an error log.</li>
  *   <li>Item rendering is entirely client-side — no network synchronization is needed.</li>
  *   <li>The shader is rendered as an additional overlay pass on top of the normal item rendering.</li>
- *   <li>Use Color-Key masking to apply the shader effect only to specific colored regions of the item texture.</li>
+ *   <li>Each pass can select a different color from the same mask texture and use a different shader.</li>
+ *   <li>Passes render in list order; later passes are drawn over earlier passes when regions overlap.</li>
+ *   <li>Legacy Color-Key and single-mask methods remain available but are deprecated compatibility adapters.</li>
  * </ul>
  *
  * @see net.eca.util.item_extension.ItemExtension

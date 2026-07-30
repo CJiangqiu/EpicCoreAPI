@@ -47,7 +47,8 @@ public record ShaderProject(
     public enum Capability {
         CAMERA_ORIENTATION,
         COLOR_KEY,
-        LOCAL_UV_BOUNDS
+        LOCAL_UV_BOUNDS,
+        ENTITY_MASK
     }
 
     public record TextureBinding(String samplerName, String projectPath) {

@@ -1,19 +1,15 @@
 package net.eca;
 
 import net.eca.agent.EcaAgent;
-import net.eca.compat.GeckoLibCompat;
 import net.eca.event.EcaEventHandler;
 import net.eca.event.LoadCompleteHandler;
 import net.eca.init.ModConfigs;
 import net.eca.network.NetworkHandler;
 import net.eca.util.selector.EcaSelectorRegistry;
 import net.eca.util.entity_extension.ForceLoadingManager;
-import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
-import net.minecraftforge.fml.loading.FMLEnvironment;
 
 @SuppressWarnings("removal")
 @Mod(EcaMod.MOD_ID)
@@ -42,10 +38,6 @@ public final class EcaMod {
         MinecraftForge.EVENT_BUS.register(new EcaEventHandler());
         // 注册全局 ECA 实体选择器（@eca_e / @eca_p）
         EcaSelectorRegistry.register();
-        // GeckoLib 兼容：仅客户端且 GeckoLib 存在时注册渲染层
-        if (FMLEnvironment.dist == Dist.CLIENT && ModList.get().isLoaded("geckolib")) {
-            GeckoLibCompat.register();
-        }
         // 注册强加载区块票据验证回调
         ForceLoadingManager.registerValidationCallback();
         // 注册 Forge 生命周期事件

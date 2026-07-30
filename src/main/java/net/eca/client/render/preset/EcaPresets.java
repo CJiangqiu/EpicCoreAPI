@@ -8,7 +8,7 @@ import net.minecraftforge.api.distmarker.OnlyIn;
 import java.util.Set;
 
 /* 着色器预设 RenderType 运行时查表。用预设 id ("modid:name") 获取对应的 RenderType，
-   供 Boss 扩展、实体扩展、物品扩展等直接调用。
+   供 Boss 扩展、实体扩展、物品扩展和方块扩展直接调用。
    ECA 启动时自动发现所有可用预设，可用 getPresetIds() 枚举。 */
 @OnlyIn(Dist.CLIENT)
 public final class EcaPresets {
@@ -43,6 +43,18 @@ public final class EcaPresets {
     public static RenderType item(String id) {
         ShaderPreset preset = resolve(id);
         return preset != null ? preset.item() : null;
+    }
+
+    /** 方块模型额外渲染层 */
+    public static RenderType block(String id) {
+        ShaderPreset preset = resolve(id);
+        return preset != null ? preset.block() : null;
+    }
+
+    /** GeckoLib 方块实体额外渲染层 */
+    public static RenderType geoBlock(String id, ResourceLocation texture) {
+        ShaderPreset preset = resolve(id);
+        return preset != null ? preset.geoBlock(texture) : null;
     }
 
     /** 枚举所有已注册的预设 id */

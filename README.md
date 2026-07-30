@@ -18,6 +18,7 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
  - `/eca lockMaxHealth <targets> false` - Unlock entity max health
  - `/eca banHealing <targets> true [value]` - Ban healing for entities (value optional, defaults to current health)
  - `/eca banHealing <targets> false` - Unban healing for entities
+ - `/eca hurt <targets> <amount>` - Force entity damage (vanilla hurt first, forced write when the health loss does not land; kill credit goes to the executor when run by a living entity)
  - `/eca kill <targets>` - Kill entities
 - `/eca remove <targets> [reason]` - Remove entities from world
 - `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities via LWJGL internal channel
@@ -129,6 +130,8 @@ side="BOTH"
 - `addHealthBlacklistKeyword(keyword)` - Add keyword to health modification blacklist
 - `removeHealthBlacklistKeyword(keyword)` - Remove keyword from health modification blacklist
 - `getHealthBlacklistKeywords()` - Get all health blacklist keywords
+- `hurt(entity, damageSource, amount)` - Damage an entity and guarantee the health loss lands. Vanilla `hurt` writes health only once, inside `actuallyHurt`, as `setHealth(getHealth() - damage)` — through the entity's own getter and setter, so an overridden or storage-decoupled entity runs the whole pipeline and fires all events while losing no health. This method clears the invulnerability cooldown and calls vanilla `hurt` first (mitigation, knockback, aggro and hurt animation all happen normally), then compares the health anchor against `before - amount` within `min(1.0, amount * 50%)`. On mismatch it restores the damage-source bookkeeping vanilla would have left (lastHurtByMob, lastHurtByPlayer/Time, lastDamageSource/Stamp, combat tracker, hurt animation) and forces the health through `setHealth`; when the expected health is at or below zero it routes to `kill` instead, so the death path, loot table and experience drops all run. Entities under ECA's own health lock or invulnerability are left to those systems — vanilla `hurt` still runs, but no forced write is attempted.
+- `hurt(entity, attacker, amount)` - Same pipeline with the damage source derived from the attacker: `playerAttack` for players, `mobAttack` for every other living entity, so kill credit and loot attribution behave as expected
 - `kill(entity, damageSource)` - Kill entity (loot + advancements + removal)
 - `revive(entity)` - Clear death state and restore health
 - `revive(level, uuid)` - Clear death state and restore health by UUID in specified level
@@ -307,6 +310,8 @@ EcaAPI.removeHealthWhitelistKeyword("mana");
 EcaAPI.removeHealthBlacklistKeyword("timer");
 
 // Entity Control
+EcaAPI.hurt(entity, damageSource, 50.0f);
+EcaAPI.hurt(entity, player, 50.0f);  // Damage source derived from the attacker
 EcaAPI.kill(entity, damageSource);
 EcaAPI.revive(entity);
 EcaAPI.revive(serverLevel, uuid);  // Revive by UUID
@@ -414,6 +419,8 @@ EcaAPI.endRaid(serverLevel, raid, true);                                       /
 
 This mod also provides a customizable entity type extension feature for adding special visual effects to your entities. You need to create a subclass extending `EntityExtension` and annotate it with `@RegisterEntityExtension` to register the extension. Here is a quick start example:
 
+Entity, item, and block shader overlays share the same `ShaderMaskPass` pipeline. Every pass supplies a RenderType, an optional UV-aligned mask texture, a target RGB color (black by default), a near-color tolerance, and opacity. An extension may return multiple passes so different colors in one mask use different shaders. Passes render in list order, and later passes draw over earlier passes where selected regions overlap. Transparent and non-matching mask pixels are discarded.
+
 ```java
 @RegisterEntityExtension
 public class MyBossExtension extends EntityExtension {
@@ -492,10 +499,16 @@ public class MyBossExtension extends EntityExtension {
     public EntityLayerExtension entityLayerExtension() {
         return new EntityLayerExtension() {
             @Override public boolean enabled() { return true; }  // enable render layer
-            @Override public RenderType getRenderType() { return CustomRenderTypes.BOSS_LAYER; }  // render layer shader/render type
+            @Override public List<ShaderMaskPass> getShaderPasses() {
+                ResourceLocation mask = texture("entity/boss_mask.png");
+                return List.of(
+                    ShaderMaskPass.masked(ArcaneRenderTypes.BOSS_LAYER, mask, 0x000000, 0.05f, 0.8f),
+                    ShaderMaskPass.masked(VolcanoRenderTypes.BOSS_LAYER, mask, 0xFF0000, 0.05f, 0.8f),
+                    ShaderMaskPass.masked(OceanRenderTypes.BOSS_LAYER, mask, 0x0000FF, 0.05f, 0.8f)
+                );
+            }
             @Override public boolean isGlow() { return true; }  // extra render layer glowing
             @Override public boolean isHurtOverlay() { return true; }  // show hurt overlay effect on this layer
-            @Override public float getAlpha() { return 0.8f; }  // render layer transparency (0.0 ~ 1.0)
         };
     }
 
@@ -579,18 +592,59 @@ public class MyBossExtension extends EntityExtension {
 }
 ```
 
+### Block Extensions
+
+Block extensions add shader overlays without replacing the normal model. Ordinary baked and falling blocks use BLOCK-profile passes from `getBlockShaderPasses()`; GeckoLib block entities use NEW_ENTITY-profile passes from `getGeoShaderPasses(texture)`. A logical preset id still supplies the default RenderTypes for both profiles.
+
+```java
+@RegisterBlockExtension
+public final class AmethystBlockExtension extends BlockExtension {
+    static {
+        BlockExtensionManager.register(new AmethystBlockExtension());
+    }
+
+    private AmethystBlockExtension() {
+        super(Blocks.AMETHYST_BLOCK);
+    }
+
+    @Override
+    public boolean enabled() {
+        return true;
+    }
+
+    @Override
+    public ResourceLocation getShaderPresetId() {
+        return new ResourceLocation("example", "amethyst_glow");
+    }
+
+    @Override
+    public List<ShaderMaskPass> getBlockShaderPasses() {
+        ResourceLocation mask = new ResourceLocation("example", "textures/block/amethyst_mask.png");
+        return List.of(
+            ShaderMaskPass.masked(getBlockRenderType(), mask, 0x000000, 0.05f, 1.0f),
+            ShaderMaskPass.masked(CustomRenderTypes.BLOCK_FIRE, mask, 0xFF0000, 0.05f, 1.0f)
+        );
+    }
+}
+```
+
+External masks on baked blocks are sampled with sprite-local UVs even though the model uses an atlas. Geo masks use the model texture's normal UV layout and combine with `overlayGeoBones()` as an intersection. Normal world blocks are indexed by section and batched into a separate overlay pass; falling blocks and GeckoLib block entities are handled automatically. Block items remain part of `ItemExtension`. The old Color-Key and single-mask getters are deprecated compatibility adapters.
+
 ### Item Extensions
 
 You can create item extensions to add shader rendering effects to specific items: create a subclass extending `ItemExtension` and annotate it with `@RegisterItemExtension` to register.
 
 ```java
 import net.eca.api.RegisterItemExtension;
+import net.eca.client.render.ArcaneRenderTypes;
+import net.eca.client.render.ShaderMaskPass;
 import net.eca.client.render.StarlightRenderTypes;
+import net.eca.client.render.VolcanoRenderTypes;
 import net.eca.util.ItemUtil;
 import net.eca.util.item_extension.EcaTooltipLine;
 import net.eca.util.item_extension.ItemExtension;
 import net.eca.util.item_extension.ItemExtensionManager;
-import net.minecraft.client.renderer.RenderType;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.TooltipFlag;
@@ -624,27 +678,13 @@ public class DiamondSwordExtension extends ItemExtension {
     }
 
     @Override
-    public RenderType getRenderType() {
-        return StarlightRenderTypes.ITEM;  // shader overlay RenderType
-    }
-
-    @Override
-    public float[] getColorKey() {
-        /*
-         * Only pixels matching this RGB (0.0~1.0) will be overlaid with the shader.
-         * Return null to apply the shader to the entire item texture.
-         */
-        return new float[]{0.25f, 0.83f, 0.73f};
-    }
-
-    @Override
-    public float getColorKeyTolerance() {
-        return 0.3f;  // RGB distance tolerance, 0.0~1.0
-    }
-
-    @Override
-    public float getAlpha() {
-        return 0.8f;  // shader layer transparency, 0.0~1.0 (default 1.0 = fully opaque)
+    public List<ShaderMaskPass> getShaderPasses() {
+        ResourceLocation mask = texture("item/diamond_sword_mask.png");
+        return List.of(
+            ShaderMaskPass.masked(ArcaneRenderTypes.ITEM, mask, 0x000000, 0.05f, 0.8f),
+            ShaderMaskPass.masked(VolcanoRenderTypes.ITEM, mask, 0xFF0000, 0.05f, 0.8f),
+            ShaderMaskPass.masked(StarlightRenderTypes.ITEM, mask, 0x0000FF, 0.05f, 0.8f)
+        );
     }
 
     @Override
@@ -670,6 +710,8 @@ Structured tooltip lines can choose their own insertion position:
 - `EcaTooltipLine.tail(...)`: at the end of the tooltip.
 
 Each line accepts either a normal `Component` or an `EcaText` built through `ItemUtil.of(...)`, so tooltip text supports the same rich effects as item names: gradient, rainbow, solid color, shimmer, glitch, bold, italic, underline, and strikethrough. The older `appendTooltip(ItemStack, TooltipFlag, List<Component>)` hook is still available when you need to directly edit the final tooltip list.
+
+Item mask passes use sprite-local UVs automatically. `ShaderMaskPass.masked(...)` samples an external mask texture, while `ShaderMaskPass.baseTexture(...)` selects colors directly from the item texture. The old `getRenderType()`, Color-Key, and single-mask getters are deprecated compatibility adapters.
 
 Note: Like entity extensions, each item can only have one extension. Duplicate registrations are rejected with an error log. Both entity layer extensions (`EntityLayerExtension.getAlpha()`, default 0.5) and item extensions (`ItemExtension.getAlpha()`, default 1.0) support adjustable transparency for their shader overlay layers.
 
@@ -1142,6 +1184,7 @@ Any `.json` filename works, and you can have multiple files.
  - `/eca lockMaxHealth <目标> false` - 解锁实体最大生命值
  - `/eca banHealing <目标> true [血量值]` - 禁止实体治疗（血量值可选，默认使用当前血量）
  - `/eca banHealing <目标> false` - 解除禁疗
+ - `/eca hurt <目标> <伤害值>` - 强制实体受伤（先走原版 hurt，血没扣对时强制写入；由生物执行时掉落与经验归属给执行者）
  - `/eca kill <目标>` - 击杀实体
 - `/eca remove <目标> [原因]` - 从世界中移除实体
 - `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 内部通道清除实体
@@ -1253,6 +1296,8 @@ side="BOTH"
 - `addHealthBlacklistKeyword(keyword)` - 添加血量值修改黑名单关键词
 - `removeHealthBlacklistKeyword(keyword)` - 移除血量值修改黑名单关键词
 - `getHealthBlacklistKeywords()` - 获取全部黑名单关键词
+- `hurt(entity, damageSource, amount)` - 强制实体受伤并保证血量确实扣掉。原版 `hurt` 的实际扣血只有 `actuallyHurt` 末尾的 `setHealth(getHealth() - damage)` 一处，走的是实体自己的 getter 与 setter：两者被重写或与真实存储解耦时，整套流程照常跑完、事件照常发出，血却没掉。本方法先清无敌帧并调用原版 `hurt`（减免、击退、仇恨与受击表现均正常发生），再以 `min(1.0, 伤害值 * 50%)` 容差比对血量锚点与 `受伤前 - 伤害值`。不符时补齐原版本该留下的伤害源记账（lastHurtByMob、lastHurtByPlayer/Time、lastDamageSource/Stamp、战斗记录、受击动画）并通过 `setHealth` 强制落血量；预期血量小于等于 0 时改走 `kill`，使死亡流程、战利品表与经验掉落全部执行。处于 ECA 锁血或无敌状态的实体交由那两套系统处理——原版 `hurt` 照常调用，但不做强制写入。
+- `hurt(entity, attacker, amount)` - 同一流程，伤害源由攻击者推导：玩家用 `playerAttack`，其他生物用 `mobAttack`，使击杀归属与掉落归属符合预期
 - `kill(entity, damageSource)` - 击杀实体（掉落 + 成就 + 移除）
 - `revive(entity)` - 复活实体（清除死亡状态）
 - `revive(level, uuid)` - 在指定维度按 UUID 复活实体
@@ -1431,6 +1476,8 @@ EcaAPI.removeHealthWhitelistKeyword("mana");
 EcaAPI.removeHealthBlacklistKeyword("timer");
 
 // 实体控制
+EcaAPI.hurt(entity, damageSource, 50.0f);
+EcaAPI.hurt(entity, player, 50.0f);  // 伤害源由攻击者推导
 EcaAPI.kill(entity, damageSource);
 EcaAPI.revive(entity);
 EcaAPI.revive(serverLevel, uuid);  // 按 UUID 复活
@@ -1538,6 +1585,8 @@ EcaAPI.endRaid(serverLevel, raid, true);                                       /
 
 本 Mod 还提供了一个可自定义的实体类型扩展功能，用于为你的实体增加一些特殊的视觉效果。你需要创建继承 `EntityExtension` 的子类，并在类上标注 `@RegisterEntityExtension` 进行注册扩展。以下是一个快速上手的示例：
 
+实体、物品和方块着色器覆盖层共用同一套 `ShaderMaskPass` 流程。每个 pass 包含一个 RenderType、可选的 UV 对齐遮罩贴图、目标 RGB 颜色（默认黑色）、近色容差和透明度。一个扩展可以返回多个 pass，让同一张遮罩中的不同颜色分别使用不同着色器。pass 按列表顺序绘制，选区重叠时后面的 pass 覆盖在前面的 pass 之上；透明或颜色不匹配的像素不会渲染。
+
 ```java
 @RegisterEntityExtension
 public class MyBossExtension extends EntityExtension {
@@ -1616,10 +1665,16 @@ public class MyBossExtension extends EntityExtension {
     public EntityLayerExtension entityLayerExtension() {
         return new EntityLayerExtension() {
             @Override public boolean enabled() { return true; }  // 启用渲染层
-            @Override public RenderType getRenderType() { return CustomRenderTypes.BOSS_LAYER; }  // 渲染层着色器/渲染类型
+            @Override public List<ShaderMaskPass> getShaderPasses() {
+                ResourceLocation mask = texture("entity/boss_mask.png");
+                return List.of(
+                    ShaderMaskPass.masked(ArcaneRenderTypes.BOSS_LAYER, mask, 0x000000, 0.05f, 0.8f),
+                    ShaderMaskPass.masked(VolcanoRenderTypes.BOSS_LAYER, mask, 0xFF0000, 0.05f, 0.8f),
+                    ShaderMaskPass.masked(OceanRenderTypes.BOSS_LAYER, mask, 0x0000FF, 0.05f, 0.8f)
+                );
+            }
             @Override public boolean isGlow() { return true; }  // 额外渲染层发光
             @Override public boolean isHurtOverlay() { return true; }  // 在该层上显示受伤覆盖效果
-            @Override public float getAlpha() { return 0.8f; }  // 渲染层透明度（0.0 ~ 1.0）
         };
     }
 
@@ -1702,18 +1757,59 @@ public class MyBossExtension extends EntityExtension {
 }
 ```
 
+### 方块扩展
+
+方块扩展会在原方块模型之上附加着色器层，不会替换正常模型。普通烘焙方块和下落方块使用 `getBlockShaderPasses()` 返回的 BLOCK profile pass；GeckoLib 方块实体使用 `getGeoShaderPasses(texture)` 返回的 NEW_ENTITY profile pass。逻辑预设 ID 仍会为两个 profile 提供默认 RenderType。
+
+```java
+@RegisterBlockExtension
+public final class AmethystBlockExtension extends BlockExtension {
+    static {
+        BlockExtensionManager.register(new AmethystBlockExtension());
+    }
+
+    private AmethystBlockExtension() {
+        super(Blocks.AMETHYST_BLOCK);
+    }
+
+    @Override
+    public boolean enabled() {
+        return true;
+    }
+
+    @Override
+    public ResourceLocation getShaderPresetId() {
+        return new ResourceLocation("example", "amethyst_glow");
+    }
+
+    @Override
+    public List<ShaderMaskPass> getBlockShaderPasses() {
+        ResourceLocation mask = new ResourceLocation("example", "textures/block/amethyst_mask.png");
+        return List.of(
+            ShaderMaskPass.masked(getBlockRenderType(), mask, 0x000000, 0.05f, 1.0f),
+            ShaderMaskPass.masked(CustomRenderTypes.BLOCK_FIRE, mask, 0xFF0000, 0.05f, 1.0f)
+        );
+    }
+}
+```
+
+烘焙方块虽然使用图集，但外部遮罩会自动获得按 sprite 转换后的局部 UV。Geo 遮罩直接使用模型纹理的 UV 布局，并与 `overlayGeoBones()` 的骨骼范围取交集。普通世界方块按 section 建立稀疏索引并批量绘制覆盖层；下落方块与 GeckoLib 方块实体会自动接入。方块物品仍属于 `ItemExtension`。旧颜色键和单遮罩 getter 已标记为废弃兼容入口。
+
 ### 物品扩展
 
 你可以创建物品扩展为指定物品附加着色器渲染效果：首先创建继承 `ItemExtension` 的子类，并在类上标注 `@RegisterItemExtension` 即可注册。
 
 ```java
 import net.eca.api.RegisterItemExtension;
+import net.eca.client.render.ArcaneRenderTypes;
+import net.eca.client.render.ShaderMaskPass;
 import net.eca.client.render.StarlightRenderTypes;
+import net.eca.client.render.VolcanoRenderTypes;
 import net.eca.util.ItemUtil;
 import net.eca.util.item_extension.EcaTooltipLine;
 import net.eca.util.item_extension.ItemExtension;
 import net.eca.util.item_extension.ItemExtensionManager;
-import net.minecraft.client.renderer.RenderType;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.TooltipFlag;
@@ -1747,27 +1843,13 @@ public class DiamondSwordExtension extends ItemExtension {
     }
 
     @Override
-    public RenderType getRenderType() {
-        return StarlightRenderTypes.ITEM;  // 着色器叠加 RenderType
-    }
-
-    @Override
-    public float[] getColorKey() {
-        /*
-         * 仅对匹配该 RGB（0.0~1.0）的像素叠加着色器。
-         * 返回 null 则对整个物品贴图应用着色器。
-         */
-        return new float[]{0.25f, 0.83f, 0.73f};
-    }
-
-    @Override
-    public float getColorKeyTolerance() {
-        return 0.3f;  // RGB 距离容差，0.0~1.0
-    }
-
-    @Override
-    public float getAlpha() {
-        return 0.8f;  // 着色器层透明度，0.0~1.0（默认 1.0 = 完全不透明）
+    public List<ShaderMaskPass> getShaderPasses() {
+        ResourceLocation mask = texture("item/diamond_sword_mask.png");
+        return List.of(
+            ShaderMaskPass.masked(ArcaneRenderTypes.ITEM, mask, 0x000000, 0.05f, 0.8f),
+            ShaderMaskPass.masked(VolcanoRenderTypes.ITEM, mask, 0xFF0000, 0.05f, 0.8f),
+            ShaderMaskPass.masked(StarlightRenderTypes.ITEM, mask, 0x0000FF, 0.05f, 0.8f)
+        );
     }
 
     @Override
@@ -1793,6 +1875,9 @@ public class DiamondSwordExtension extends ItemExtension {
 - `EcaTooltipLine.tail(...)`：插入到 tooltip 末尾。
 
 每一行都可以传入普通 `Component`，也可以传入 `ItemUtil.of(...)` 创建的 `EcaText`，因此 tooltip 支持和物品名相同的富文本效果：渐变、彩虹、纯色、闪烁、乱码、粗体、斜体、下划线和删除线。旧的 `appendTooltip(ItemStack, TooltipFlag, List<Component>)` 仍然保留，适合需要直接修改最终 tooltip 列表的高级用法。
+
+物品遮罩 pass 会自动使用 sprite 局部 UV。`ShaderMaskPass.masked(...)` 采样外部遮罩贴图，`ShaderMaskPass.baseTexture(...)` 则直接从物品贴图选择颜色。旧 `getRenderType()`、颜色键和单遮罩 getter 已标记为废弃兼容入口。
+
 注意：和实体扩展一样，每个物品只能有一个扩展，重复注册会被拒绝并输出错误日志。实体层扩展（`EntityLayerExtension.getAlpha()`，默认 0.5）和物品扩展（`ItemExtension.getAlpha()`，默认 1.0）均支持调整着色器叠加层的透明度。
 
 

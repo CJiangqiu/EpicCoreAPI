@@ -42,7 +42,7 @@ public final class StandardShaderJsonGenerator {
         root.addProperty("vertex", vertexProgram);
         root.addProperty("fragment", fragmentProgram);
         root.add("attributes", createAttributes(targetProfile));
-        root.add("samplers", createSamplers(project));
+        root.add("samplers", createSamplers(project, exportMode));
         root.add("uniforms", createUniforms(project, exportMode));
         return GSON.toJson(root) + "\n";
     }
@@ -63,10 +63,14 @@ public final class StandardShaderJsonGenerator {
         return attributes;
     }
 
-    private static JsonArray createSamplers(ShaderProject project) {
+    private static JsonArray createSamplers(ShaderProject project, ShaderExportMode exportMode) {
         JsonArray samplers = new JsonArray();
         samplers.add(namedObject("Sampler0"));
         samplers.add(namedObject("Sampler2"));
+        if (exportMode.includesEcaUniforms()
+            && project.capabilities().contains(ShaderProject.Capability.ENTITY_MASK)) {
+            samplers.add(namedObject("MaskSampler"));
+        }
         for (ShaderProject.TextureBinding texture : project.textures()) {
             samplers.add(namedObject(texture.samplerName()));
         }
@@ -93,9 +97,14 @@ public final class StandardShaderJsonGenerator {
             uniforms.add(uniform("ColorKeyColor", "float", 0.0F, 0.0F, 0.0F, 0.0F));
             uniforms.add(uniform("ColorKeyTolerance", "float", 0.1F));
         }
-        if (capabilities.contains(ShaderProject.Capability.LOCAL_UV_BOUNDS)) {
+        if (capabilities.contains(ShaderProject.Capability.LOCAL_UV_BOUNDS)
+            || capabilities.contains(ShaderProject.Capability.ENTITY_MASK)) {
             uniforms.add(uniform("LocalUvMin", "float", 0.0F, 0.0F));
             uniforms.add(uniform("LocalUvScale", "float", 1.0F, 1.0F));
+        }
+        if (capabilities.contains(ShaderProject.Capability.ENTITY_MASK)) {
+            uniforms.add(uniform("MaskColor", "float", 0.0F, 0.0F, 0.0F, 0.0F));
+            uniforms.add(uniform("MaskTolerance", "float", 0.05F));
         }
         return uniforms;
     }

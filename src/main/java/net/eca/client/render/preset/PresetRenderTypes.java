@@ -82,6 +82,25 @@ public final class PresetRenderTypes {
         );
     }
 
+    public static RenderType block(String name, RenderStateShard.ShaderStateShard shaderState) {
+        return RenderType.create(name + "_block_overlay",
+            DefaultVertexFormat.BLOCK,
+            VertexFormat.Mode.QUADS,
+            2097152,
+            true,
+            true,
+            RenderType.CompositeState.builder()
+                .setShaderState(shaderState)
+                .setTextureState(RenderType.BLOCK_SHEET_MIPPED)
+                .setTransparencyState(RenderType.TRANSLUCENT_TRANSPARENCY)
+                .setDepthTestState(RenderType.LEQUAL_DEPTH_TEST)
+                .setLightmapState(RenderType.LIGHTMAP)
+                .setCullState(RenderType.NO_CULL)
+                .setWriteMaskState(RenderType.COLOR_WRITE)
+                .createCompositeState(true)
+        );
+    }
+
     static RenderType entityEffect(String name, RenderStateShard.ShaderStateShard shaderState, ResourceLocation texture) {
         return RenderType.create(name + "_entity_effect",
             DefaultVertexFormat.NEW_ENTITY,

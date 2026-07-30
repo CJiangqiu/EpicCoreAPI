@@ -53,7 +53,8 @@ public final class StandardShaderSourceAssembler {
             ShaderProject.Capability.CAMERA_ORIENTATION
         );
         boolean colorKey = includes(exportMode, capabilities, ShaderProject.Capability.COLOR_KEY);
-        boolean localUvBounds = includes(
+        boolean entityMask = includes(exportMode, capabilities, ShaderProject.Capability.ENTITY_MASK);
+        boolean localUvBounds = entityMask || includes(
             exportMode,
             capabilities,
             ShaderProject.Capability.LOCAL_UV_BOUNDS
@@ -76,6 +77,11 @@ public final class StandardShaderSourceAssembler {
         if (localUvBounds) {
             source.append("uniform vec2 LocalUvMin;\n")
                 .append("uniform vec2 LocalUvScale;\n");
+        }
+        if (entityMask) {
+            source.append("uniform sampler2D MaskSampler;\n")
+                .append("uniform vec4 MaskColor;\n")
+                .append("uniform float MaskTolerance;\n");
         }
         for (ShaderProject.TextureBinding texture : project.textures()) {
             source.append("uniform sampler2D ").append(texture.samplerName()).append(";\n");
@@ -103,6 +109,16 @@ public final class StandardShaderSourceAssembler {
         }
 
         source.append("void main() {\n");
+
+        if (entityMask) {
+            source.append("    if (MaskColor.a > 0.5) {\n")
+                .append("        vec2 maskUv = (texCoord0 - LocalUvMin) * LocalUvScale;\n")
+                .append("        vec4 maskSample = texture(MaskSampler, maskUv);\n")
+                .append("        if (maskSample.a < 0.1 || distance(maskSample.rgb, MaskColor.rgb) > MaskTolerance) {\n")
+                .append("            discard;\n")
+                .append("        }\n")
+                .append("    }\n\n");
+        }
 
         if (colorKey) {
             source.append("    if (ColorKeyColor.a > 0.5) {\n")

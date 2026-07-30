@@ -21,7 +21,9 @@
     "LocalPlayerMixin",
     "MinecraftMixin",
     "SoundManagerMixin",
-    "ItemRendererMixin"
+    "ItemStackClientMixin",
+    "ItemRendererMixin",
+    "FallingBlockRendererMixin"
   ],
   "mixins": [
     "CapabilityDispatcherMixin",

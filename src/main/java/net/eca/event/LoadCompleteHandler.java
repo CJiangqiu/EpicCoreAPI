@@ -3,7 +3,6 @@ package net.eca.event;
 import net.eca.EcaMod;
 import net.eca.agent.AgentLogWriter;
 import net.eca.agent.EcaAgent;
-import net.eca.client.render.preset.ShaderPresetRegistry;
 import net.eca.coremod.EcaClassTransformer;
 
 import net.eca.config.EcaConfiguration;
@@ -13,10 +12,8 @@ import net.eca.util.health.HealthDataFlow;
 import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.faction.FactionManager;
-import net.eca.util.item_extension.ItemExtensionManager;
 import net.eca.util.raid.RaidManager;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
-import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
@@ -67,13 +64,6 @@ public final class LoadCompleteHandler {
         // 袭击定义引用阵营 ID（袭击者绑定与按阵营抽取波次），必须排在阵营扫描之后
         event.enqueueWork(RaidManager::scanAndRegisterAll);
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
-        // Item Extension 系统纯客户端：ItemExtensionManager 标记 @OnlyIn(Dist.CLIENT)，
-        // 在专用服务端形成该方法引用会触发 RuntimeDistCleaner 崩溃
-        if (FMLEnvironment.dist.isClient()) {
-            event.enqueueWork(ItemExtensionManager::scanAndRegisterAll);
-            // 着色器预设系统纯客户端：扫描入口同样受 dist 门控，避免在专用服务端形成客户端类引用
-            event.enqueueWork(ShaderPresetRegistry::scanAndRegisterAll);
-        }
         event.enqueueWork(BossShowManager::scanAndRegisterAll);
 
         // 实体健康 hook 收尾：普通与激进模式都在所有 mod 构造完成后施加，确保 ECA 排在其他 mod 的字节码处理之后

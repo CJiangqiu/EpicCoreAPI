@@ -224,11 +224,28 @@ public final class NumericInverter {
 
     // ==================== Cell：读/写(引用替换)/快照/回滚 ====================
 
-    private interface Cell {
+    /* 外部镜像通道复用同一套 cell 抽象，故为包内可见。
+       label 供写入世界级数据时逐单元记账——那类写入会存盘，事后必须能核对改了什么。 */
+    interface Cell {
         double read();
         boolean write(double v);
         Object snapshot();
         void restore(Object snap);
+        String label();
+    }
+
+    /* 从给定根收集可写数值 cell，不做斜率筛选。
+       外部镜像对血量的作用延迟一个 tick，微扰当场测不出斜率，只能由调用方按值吻合挑选。 */
+    static List<Cell> collectCells(List<Object> roots, long deadline, int cellCap) {
+        List<Cell> cells = new ArrayList<>();
+        Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Object root : roots) walk(root, cells, visited, deadline, 0, cellCap);
+        return cells;
+    }
+
+    // 静态数值字段的 cell：walk 只走实例字段，而全局单例持血量的写法需要单独成 cell
+    static Cell staticFieldCell(Field field) {
+        return new FieldCell(null, field);
     }
 
     private static final class FieldCell implements Cell {
@@ -254,6 +271,10 @@ public final class NumericInverter {
         }
 
         @Override public void restore(Object snap) { put(snap); }
+
+        @Override public String label() {
+            return field.getDeclaringClass().getSimpleName() + "." + field.getName();
+        }
 
         private boolean put(Object value) {
             try { field.set(owner, value); return true; }
@@ -291,6 +312,10 @@ public final class NumericInverter {
 
         @Override public void restore(Object snap) {
             try { Array.set(array, index, snap); } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
+        }
+
+        @Override public String label() {
+            return array.getClass().getComponentType().getSimpleName() + "[" + index + "]";
         }
     }
 

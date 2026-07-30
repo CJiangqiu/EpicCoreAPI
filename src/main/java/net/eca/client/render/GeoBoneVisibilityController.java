@@ -13,12 +13,16 @@ final class GeoBoneVisibilityController {
     private final Map<GeoBone, BoneVisibility> originalVisibility = new IdentityHashMap<>();
 
     void begin(BakedGeoModel model, EntityLayerExtension extension) {
+        begin(model, extension.hiddenGeoBones());
+    }
+
+    void begin(BakedGeoModel model, Set<String> hiddenBones) {
         restore();
         for (GeoBone bone : model.topLevelBones()) {
             capture(bone);
         }
         for (GeoBone bone : model.topLevelBones()) {
-            hideConfiguredBones(bone, extension.hiddenGeoBones());
+            hideConfiguredBones(bone, hiddenBones);
         }
     }
 

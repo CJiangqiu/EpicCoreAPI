@@ -1,8 +1,12 @@
 package net.eca.client.render.shader;
 
 import com.mojang.blaze3d.shaders.Uniform;
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.VertexFormat;
+import net.eca.client.render.ShaderMaskSource;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ShaderInstance;
+import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.ResourceProvider;
 import org.lwjgl.opengl.GL11;
@@ -124,12 +128,46 @@ public class EcaShaderInstance extends ShaderInstance {
 
     private static float ecaOpacity = 1.0f;
 
+    private static ShaderMaskSource shaderMaskSource = ShaderMaskSource.NONE;
+    private static ResourceLocation shaderMaskTexture;
+    private static int shaderMaskColor;
+    private static float shaderMaskTolerance = 0.05f;
+
+    private final Uniform maskColorUniform;
+    private final Uniform maskToleranceUniform;
+
     public static void setOpacity(float opacity) {
         ecaOpacity = Math.max(0.0f, Math.min(1.0f, opacity));
     }
 
     public static void clearOpacity() {
         ecaOpacity = 1.0f;
+    }
+
+    public static void setShaderMask(ShaderMaskSource source, ResourceLocation texture,
+                                     int color, float tolerance) {
+        shaderMaskSource = source == null ? ShaderMaskSource.NONE : source;
+        shaderMaskTexture = texture;
+        shaderMaskColor = color & 0xFFFFFF;
+        shaderMaskTolerance = Math.max(0.0f, tolerance);
+    }
+
+    public static void clearShaderMask() {
+        shaderMaskSource = ShaderMaskSource.NONE;
+        shaderMaskTexture = null;
+        shaderMaskColor = 0;
+        shaderMaskTolerance = 0.05f;
+    }
+
+    @Deprecated
+    public static void setEntityMask(ResourceLocation texture, int color, float tolerance) {
+        setShaderMask(texture == null ? ShaderMaskSource.NONE : ShaderMaskSource.TEXTURE,
+            texture, color, tolerance);
+    }
+
+    @Deprecated
+    public static void clearEntityMask() {
+        clearShaderMask();
     }
 
     public static void applyLocalUvBoundsUniforms(Uniform localUvMinUniform, Uniform localUvScaleUniform) {
@@ -159,6 +197,8 @@ public class EcaShaderInstance extends ShaderInstance {
 
     public EcaShaderInstance(ResourceProvider resourceProvider, ResourceLocation location, VertexFormat format) throws IOException {
         super(resourceProvider, location, format);
+        this.maskColorUniform = getUniform("MaskColor");
+        this.maskToleranceUniform = getUniform("MaskTolerance");
     }
 
     public static EcaShaderInstance create(ResourceProvider resourceProvider, ResourceLocation location, VertexFormat format) throws IOException {
@@ -167,6 +207,7 @@ public class EcaShaderInstance extends ShaderInstance {
 
     @Override
     public void apply() {
+        applyShaderMask();
         super.apply();
         // 覆写 COLOR_MODULATOR.a 为 ECA 不透明度：ColorModulator 在父类 apply() 中已按 JSON 静态值上传，
         // 此处用 ecaOpacity 替换其 alpha 分量，使所有 ECA 着色器实例一致响应 setOpacity()。
@@ -196,6 +237,29 @@ public class EcaShaderInstance extends ShaderInstance {
                 }
             } catch (Throwable ignored) {
             }
+        }
+    }
+
+    private void applyShaderMask() {
+        ShaderMaskSource source = shaderMaskSource;
+        if (maskColorUniform != null) {
+            if (source == ShaderMaskSource.NONE) {
+                maskColorUniform.set(0.0f, 0.0f, 0.0f, 0.0f);
+            } else {
+                float red = (shaderMaskColor >> 16 & 0xFF) / 255.0f;
+                float green = (shaderMaskColor >> 8 & 0xFF) / 255.0f;
+                float blue = (shaderMaskColor & 0xFF) / 255.0f;
+                maskColorUniform.set(red, green, blue, 1.0f);
+            }
+        }
+        if (maskToleranceUniform != null) {
+            maskToleranceUniform.set(shaderMaskTolerance);
+        }
+        if (source == ShaderMaskSource.TEXTURE && shaderMaskTexture != null) {
+            AbstractTexture maskTexture = Minecraft.getInstance().getTextureManager().getTexture(shaderMaskTexture);
+            setSampler("MaskSampler", maskTexture);
+        } else if (source == ShaderMaskSource.BASE_TEXTURE) {
+            setSampler("MaskSampler", RenderSystem.getShaderTexture(0));
         }
     }
 }

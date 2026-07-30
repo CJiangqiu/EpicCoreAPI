@@ -16,6 +16,7 @@ public class EcaCommand {
                 .then(LockMaxHealthCommand.registerSubCommand())
                 .then(LockHealthCommand.registerSubCommand())
                 .then(BanHealingCommand.registerSubCommand())
+                .then(HurtCommand.registerSubCommand())
                 .then(KillCommand.registerSubCommand())
                 .then(RemoveCommand.registerSubCommand())
                 .then(MemoryRemoveCommand.registerSubCommand())

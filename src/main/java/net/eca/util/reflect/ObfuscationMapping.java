@@ -41,6 +41,9 @@ public final class ObfuscationMapping {
         fields.put("ServerLevel.entityManager", "f_143244_");
         fields.put("ServerLevel.navigatingMobs", "f_143246_");
 
+        // DimensionDataStorage
+        fields.put("DimensionDataStorage.cache", "f_78144_");
+
         // EntityTickList
         fields.put("EntityTickList.active", "f_156903_");
         fields.put("EntityTickList.passive", "f_156904_");

@@ -3,14 +3,18 @@ package net.eca.coremod;
 import com.sun.jna.Callback;
 import com.sun.jna.CallbackReference;
 import com.sun.jna.Function;
+import com.sun.jna.Memory;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
-import org.objectweb.asm.ClassReader;
 import com.sun.jna.ptr.IntByReference;
 import net.eca.agent.AgentLogWriter;
+import org.objectweb.asm.ClassReader;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiFunction;
 
@@ -19,11 +23,11 @@ import java.util.function.BiFunction;
  * 回调运行在 Java Instrumentation API 之下的原生层，Java 代码无法拦截/篡改。
  *
  * 生命周期：
- *   prepare() → 获取 jvmtiEnv*（CoreMod 阶段，最早执行）
- *   activate() → 注册 ClassFileLoadHook（激进防御开启时调用）
- *   deactivate() → 注销回调
+ *   prepare(boolean) → 获取 jvmtiEnv*，并按需注册 ClassPrepare 引用收集器（CoreMod 阶段，最早执行）
+ *   activate() → 保留收集器并注册 ClassFileLoadHook（激进防御开启时调用）
+ *   deactivate() → 注销字节码变换回调，保留类引用收集器
  *
- * 配置关闭时：prepare() 仍执行但仅保存指针（零开销），activate() 不调用（零回调）。
+ * 配置关闭时：prepare() 仅保存环境指针，不注册回调。
  * 配置开启时：ECA 的核心 transform 同时走 JVM TI 原生层 + Instrumentation Java 层，双通道互补。
  */
 public final class JvmTiChannel {
@@ -36,6 +40,7 @@ public final class JvmTiChannel {
     /* JVM TI 常量 */
     private static final int JVMTI_VERSION_1_2 = 0x30010200;
     private static final int JVMTI_EVENT_CLASS_FILE_LOAD_HOOK = 54;
+    private static final int JVMTI_EVENT_CLASS_PREPARE = 56;
     private static final int JVMTI_ENABLE = 1;
     private static final int JVMTI_DISABLE = 0;
 
@@ -52,7 +57,6 @@ public final class JvmTiChannel {
     private static final int JVMTI_DEALLOCATE = 46;          // 规范函数 47 Deallocate
     private static final int JVMTI_GET_CLASS_SIGNATURE = 47; // 规范函数 48 GetClassSignature
     private static final int JVMTI_IS_MODIFIABLE_CLASS = 44; // 规范函数 45 IsModifiableClass
-    private static final int JVMTI_GET_LOADED_CLASSES = 77;  // 规范函数 78 GetLoadedClasses
     private static final int JVMTI_ADD_CAPABILITIES = 141;   // 规范函数 142 AddCapabilities
     private static final int JVMTI_GET_CAPABILITIES = 88;    // 规范函数 89 GetCapabilities（注意：并非紧邻 AddCapabilities）
     private static final int JVMTI_RETRANSFORM_CLASSES = 151;
@@ -65,16 +69,51 @@ public final class JvmTiChannel {
     private static final int CAPABILITIES_STRUCT_SIZE = 16;
 
     /* JNI 函数表索引（0-based） */
-    private static final int JNI_FIND_CLASS = 6;
     private static final int JNI_IS_ASSIGNABLE_FROM = 11;
+    private static final int JNI_NEW_GLOBAL_REF = 21;
+    private static final int JNI_DELETE_GLOBAL_REF = 22;
 
     /* ClassFileLoadHook 在 jvmtiEventCallbacks 结构体中的字段偏移（字段数） */
     private static final int CLASS_FILE_LOAD_HOOK_FIELD_INDEX = 4;
+    private static final int CLASS_PREPARE_FIELD_INDEX = 6;
+
+    private static final String PREPARED_CLASSES_KEY = "net.eca.coremod.JvmTiChannel.preparedClasses";
+    private static volatile ConcurrentMap<String, Long> preparedClasses;
 
     private static volatile Pointer javaVM;
     private static volatile ClassFileLoadHookCallback activeCallback;
+    private static volatile ClassPrepareCallback classPrepareCallback;
 
     private JvmTiChannel() {}
+
+    @SuppressWarnings("unchecked")
+    private static ConcurrentMap<String, Long> preparedClasses() {
+        ConcurrentMap<String, Long> local = preparedClasses;
+        if (local != null) return local;
+        synchronized (System.getProperties()) {
+            Object existing = System.getProperties().get(PREPARED_CLASSES_KEY);
+            if (existing instanceof ConcurrentMap<?, ?> map) {
+                preparedClasses = (ConcurrentMap<String, Long>) map;
+                return preparedClasses;
+            }
+            ConcurrentMap<String, Long> created = new ConcurrentHashMap<>();
+            System.getProperties().put(PREPARED_CLASSES_KEY, created);
+            preparedClasses = created;
+            return preparedClasses;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ConcurrentMap<String, Long> existingPreparedClasses() {
+        ConcurrentMap<String, Long> local = preparedClasses;
+        if (local != null) return local;
+        Object existing = System.getProperties().get(PREPARED_CLASSES_KEY);
+        if (existing instanceof ConcurrentMap<?, ?> map) {
+            preparedClasses = (ConcurrentMap<String, Long>) map;
+            return preparedClasses;
+        }
+        return null;
+    }
 
     public record LoadedClassInfo(String internalName, boolean modifiable,
                                   boolean livingEntity, boolean entityOnly) {}
@@ -91,10 +130,16 @@ public final class JvmTiChannel {
 
     // ==================== 公共 API ====================
 
-    /* 获取 JVM TI 环境指针。仅在 CoreMod 静态初始化阶段调用一次。
-       不注册回调，不产生任何运行时开销。 */
+    /* 获取 JVM TI 环境指针，不启用类引用收集。 */
     public static void prepare() {
-        if (jvmtiEnv != null) return;   // 本 classloader 的 env 已就绪（CoreMod 层与 GAME 层各有一份静态）
+        prepare(false);
+    }
+
+    public static void prepare(boolean collectPreparedClasses) {
+        if (jvmtiEnv != null) {
+            if (collectPreparedClasses) activateClassCollector();
+            return;
+        }
         try {
             Function getCreatedVMs = Function.getFunction("jvm", "JNI_GetCreatedJavaVMs");
             Pointer[] vmBuf = new Pointer[1];
@@ -123,6 +168,7 @@ public final class JvmTiChannel {
 
             // 申请 retransform/redefine/all-class-hook 能力，并回读确认 live phase 是否授予
             addAndLogCapabilities();
+            if (collectPreparedClasses) activateClassCollector();
         } catch (Throwable t) {
             AgentLogWriter.info("[JvmTiChannel] prepare failed: " + t.getMessage());
         }
@@ -136,13 +182,42 @@ public final class JvmTiChannel {
         return Function.getFunction(fn, Function.C_CONVENTION);
     }
 
+    /* ClassPrepare 回调在 CoreMod 阶段启用，使每个 jclass 都能在其 JNI 局部引用有效时提升为全局引用。 */
+    private static void activateClassCollector() {
+        if (jvmtiEnv == null || classPrepareCallback != null) return;
+        try {
+            ClassPrepareCallback prepareCallback = new ClassPrepareCallback();
+            Pointer callbacksStruct = buildCallbacksStruct(null, prepareCallback);
+            Function setCallbacks = jvmtiFunction(JVMTI_SET_EVENT_CALLBACKS);
+            int callbackCode = setCallbacks.invokeInt(new Object[]{
+                    jvmtiEnv, callbacksStruct, Integer.valueOf(callbacksStructSize())
+            });
+            if (callbackCode != 0) {
+                AgentLogWriter.info("[JvmTiChannel] ClassPrepare SetEventCallbacks failed, code=" + callbackCode);
+                return;
+            }
+            Function setNotify = jvmtiFunction(JVMTI_SET_EVENT_NOTIFICATION_MODE);
+            int notifyCode = setNotify.invokeInt(new Object[]{
+                    jvmtiEnv, JVMTI_ENABLE, JVMTI_EVENT_CLASS_PREPARE, Pointer.NULL
+            });
+            if (notifyCode != 0) {
+                AgentLogWriter.info("[JvmTiChannel] ClassPrepare notification failed, code=" + notifyCode);
+                return;
+            }
+            classPrepareCallback = prepareCallback;
+            AgentLogWriter.info("[JvmTiChannel] ClassPrepare global-reference collector activated");
+        } catch (Throwable t) {
+            AgentLogWriter.info("[JvmTiChannel] ClassPrepare collector failed: " + t.getMessage());
+        }
+    }
+
     /* 申请 can_retransform_classes / can_redefine_classes / can_generate_all_class_hook_events，
        记录 AddCapabilities 返回码，并用 GetCapabilities 回读三个关键 bit 自校验。
        诊断用途：判定当前 JVM 的 live phase 是否允许这些能力（规范允许实现仅在 OnLoad phase 授予）。 */
     private static void addAndLogCapabilities() {
         if (jvmtiEnv == null) return;
         try {
-            Pointer request = new com.sun.jna.Memory(CAPABILITIES_STRUCT_SIZE);
+            Pointer request = new Memory(CAPABILITIES_STRUCT_SIZE);
             request.clear(CAPABILITIES_STRUCT_SIZE);
             setCapabilityBit(request, CAP_CAN_RETRANSFORM_CLASSES);
             setCapabilityBit(request, CAP_CAN_REDEFINE_CLASSES);
@@ -152,7 +227,7 @@ public final class JvmTiChannel {
             int addCode = add.invokeInt(new Object[]{jvmtiEnv, request});
             AgentLogWriter.info("[JvmTiChannel] AddCapabilities code=" + addCode);
 
-            Pointer current = new com.sun.jna.Memory(CAPABILITIES_STRUCT_SIZE);
+            Pointer current = new Memory(CAPABILITIES_STRUCT_SIZE);
             current.clear(CAPABILITIES_STRUCT_SIZE);
             Function get = jvmtiFunction(JVMTI_GET_CAPABILITIES);
             int getCode = get.invokeInt(new Object[]{jvmtiEnv, current});
@@ -183,76 +258,25 @@ public final class JvmTiChannel {
         return (struct.getByte(byteIndex) & (1 << bitInByte)) != 0;
     }
 
-    /* 用 JVMTI GetLoadedClasses 拿到所有已加载类的 jclass（绕开 JNI FindClass 无法解析 Forge module-layer 类的限制），
-       按类签名匹配目标后 RetransformClasses，记录已加载类总数、匹配数与返回码。
-       诊断/step2 基础：验证 JVMTI 能否 retransform mod-layer 的真实类。targetSignature 形如 "Lnet/eca/EcaMod;"。 */
+    /* 用 ClassPrepare 阶段保存的全局引用验证重转换，避免跨 JNA 调用复用 JVMTI 返回的局部引用。 */
     public static void verifyRetransformViaLoadedClasses(String targetSignature) {
-        if (jvmtiEnv == null) {
-            AgentLogWriter.info("[JvmTiChannel] verifyViaLoadedClasses skipped: no JVM TI env");
+        if (jvmtiEnv == null || targetSignature == null) {
+            AgentLogWriter.info("[JvmTiChannel] verify prepared class skipped: unavailable target");
             return;
         }
-        int ptrSize = Native.POINTER_SIZE;
-        Pointer classesArray = null;
-        try {
-            com.sun.jna.Memory countPtr = new com.sun.jna.Memory(4);
-            com.sun.jna.Memory arrPtrPtr = new com.sun.jna.Memory(ptrSize);
-            Function getLoaded = jvmtiFunction(JVMTI_GET_LOADED_CLASSES);
-            int lc = getLoaded.invokeInt(new Object[]{jvmtiEnv, countPtr, arrPtrPtr});
-            if (lc != 0) {
-                AgentLogWriter.info("[JvmTiChannel] GetLoadedClasses failed, code=" + lc);
-                return;
-            }
-            int count = countPtr.getInt(0);
-            classesArray = arrPtrPtr.getPointer(0);
-            AgentLogWriter.info("[JvmTiChannel] GetLoadedClasses: " + count + " loaded classes, target=" + targetSignature);
-            if (classesArray == null || count <= 0) return;
-
-            Function getSig = jvmtiFunction(JVMTI_GET_CLASS_SIGNATURE);
-            List<Pointer> matched = new ArrayList<>();
-            int sigOk = 0, sigErr = 0, sigCrash = 0;
-            String firstSig = null;
-            for (int i = 0; i < count; i++) {
-                // 逐类隔离：单个 jclass 失效/异常不中断整轮扫描；崩溃过多则早停（几乎可判定为 jclass 跨 JNA 调用失效）
-                try {
-                    Pointer jclass = classesArray.getPointer((long) i * ptrSize);
-                    if (jclass == null) continue;
-                    com.sun.jna.Memory sigPtrPtr = new com.sun.jna.Memory(ptrSize);
-                    int sc = getSig.invokeInt(new Object[]{jvmtiEnv, jclass, sigPtrPtr, Pointer.NULL});
-                    if (sc != 0) { sigErr++; continue; }
-                    Pointer sigStr = sigPtrPtr.getPointer(0);
-                    if (sigStr == null) { sigErr++; continue; }
-                    String sig = sigStr.getString(0);
-                    deallocate(sigStr);
-                    sigOk++;
-                    if (firstSig == null) firstSig = sig;
-                    if (targetSignature.equals(sig)) matched.add(jclass);
-                } catch (Throwable t) {
-                    if (++sigCrash > 50) {
-                        AgentLogWriter.info("[JvmTiChannel] scan aborted after " + sigCrash + " crashes at i=" + i);
-                        break;
-                    }
-                }
-            }
-            AgentLogWriter.info("[JvmTiChannel] scan: sigOk=" + sigOk + " sigErr=" + sigErr + " sigCrash=" + sigCrash
-                    + " first=" + firstSig);
-            AgentLogWriter.info("[JvmTiChannel] matched " + matched.size() + " class(es) for " + targetSignature);
-
-            if (!matched.isEmpty()) {
-                com.sun.jna.Memory arr = new com.sun.jna.Memory((long) matched.size() * ptrSize);
-                for (int i = 0; i < matched.size(); i++) arr.setPointer((long) i * ptrSize, matched.get(i));
-                Function retransform = jvmtiFunction(JVMTI_RETRANSFORM_CLASSES);
-                int rc = retransform.invokeInt(new Object[]{jvmtiEnv, matched.size(), arr});
-                AgentLogWriter.info("[JvmTiChannel] verifyViaLoadedClasses: RetransformClasses code=" + rc
-                        + " (0=OK) target=" + targetSignature);
-            }
-        } catch (Throwable t) {
-            AgentLogWriter.info("[JvmTiChannel] verifyViaLoadedClasses error: " + t.getMessage());
-        } finally {
-            if (classesArray != null) deallocate(classesArray);
+        String internalName = targetSignature.startsWith("L") && targetSignature.endsWith(";")
+                ? targetSignature.substring(1, targetSignature.length() - 1) : targetSignature;
+        ConcurrentMap<String, Long> classes = existingPreparedClasses();
+        Long pointerValue = classes == null ? null : classes.get(internalName);
+        if (pointerValue == null || pointerValue == 0L) {
+            AgentLogWriter.info("[JvmTiChannel] prepared class not found: " + targetSignature);
+            return;
         }
+        boolean result = retransformOne(new Pointer(pointerValue), "prepared verification");
+        AgentLogWriter.info("[JvmTiChannel] prepared verification result=" + result + " target=" + targetSignature);
     }
 
-    /* JVMTI Deallocate：释放 GetLoadedClasses/GetClassSignature 等分配的原生内存 */
+    /* JVMTI Deallocate：释放 GetClassSignature 等函数分配的原生内存 */
     private static void deallocate(Pointer mem) {
         if (mem == null) return;
         try {
@@ -278,8 +302,13 @@ public final class JvmTiChannel {
         if (active) return;
 
         try {
+            activateClassCollector();
             ClassFileLoadHookCallback callback = new ClassFileLoadHookCallback();
-            Pointer callbacksStruct = buildCallbacksStruct(callback);
+            ClassPrepareCallback prepareCallback = classPrepareCallback;
+            if (prepareCallback == null) {
+                prepareCallback = new ClassPrepareCallback();
+            }
+            Pointer callbacksStruct = buildCallbacksStruct(callback, prepareCallback);
 
             Function setCallbacks = jvmtiFunction(JVMTI_SET_EVENT_CALLBACKS);
             int result = setCallbacks.invokeInt(new Object[]{
@@ -301,14 +330,17 @@ public final class JvmTiChannel {
             }
 
             activeCallback = callback;
+            classPrepareCallback = prepareCallback;
             active = true;
+            ConcurrentMap<String, Long> classes = preparedClasses();
+            System.getProperties().remove(PREPARED_CLASSES_KEY, classes);
             AgentLogWriter.info("[JvmTiChannel] ClassFileLoadHook activated");
         } catch (Throwable t) {
             AgentLogWriter.info("[JvmTiChannel] activate failed: " + t.getMessage());
         }
     }
 
-    /* 注销 ClassFileLoadHook 回调。 */
+    /* 仅注销 ClassFileLoadHook；ClassPrepare 收集器继续服务于晚加载类。 */
     public static void deactivate() {
         if (jvmtiEnv == null || !active) return;
 
@@ -336,21 +368,17 @@ public final class JvmTiChannel {
 
     public static boolean retransformLoadedClasses(LoadedClassMatcher matcher) {
         if (!isAvailable() || matcher == null) return false;
-        ScanResult scan = scanLoadedClasses();
-        if (scan == null || scan.entries.isEmpty()) return false;
-        try {
-            List<Pointer> matched = new ArrayList<>();
-            for (LoadedEntry entry : scan.entries) {
-                LoadedClassInfo info = new LoadedClassInfo(entry.internalName, entry.modifiable,
-                        entry.livingEntity, entry.entityOnly);
-                if (entry.modifiable && matcher.test(info)) {
-                    matched.add(entry.jclass);
-                }
+        List<LoadedEntry> entries = preparedClassesSnapshot();
+        if (entries.isEmpty()) return false;
+        List<Pointer> matched = new ArrayList<>();
+        for (LoadedEntry entry : entries) {
+            LoadedClassInfo info = new LoadedClassInfo(entry.internalName, entry.modifiable,
+                    entry.livingEntity, entry.entityOnly);
+            if (entry.modifiable && matcher.test(info)) {
+                matched.add(entry.jclass);
             }
-            return retransformJclasses(matched, "matched loaded classes");
-        } finally {
-            scan.release();
         }
+        return retransformJclasses(matched, "matched prepared classes");
     }
 
     public static boolean retransformInternalName(String internalName) {
@@ -360,51 +388,29 @@ public final class JvmTiChannel {
 
     public static boolean forEachLoadedClass(LoadedClassConsumer consumer) {
         if (!isAvailable() || consumer == null) return false;
-        ScanResult scan = scanLoadedClasses();
-        if (scan == null) return false;
-        try {
-            for (LoadedEntry entry : scan.entries) {
-                consumer.accept(new LoadedClassInfo(entry.internalName, entry.modifiable,
-                        entry.livingEntity, entry.entityOnly));
-            }
-            return true;
-        } finally {
-            scan.release();
+        List<LoadedEntry> entries = preparedClassesSnapshot();
+        if (entries.isEmpty()) return false;
+        for (LoadedEntry entry : entries) {
+            consumer.accept(new LoadedClassInfo(entry.internalName, entry.modifiable,
+                    entry.livingEntity, entry.entityOnly));
         }
+        return true;
     }
 
-    /* 通过 JVM TI 原生 RetransformClasses 重转换类。
-       全部参数为 Java Class 对象，内部通过 JNI FindClass 转为 jclass 指针，
-       完全绕过 InstrumentationImpl。失败时静默跳过（记日志）。 */
+    /* 通过 ClassPrepare 保存的全局引用重转换显式 Java Class 目标。 */
     public static void retransformClasses(Class<?>... classes) {
         if (!active || jvmtiEnv == null || classes == null || classes.length == 0) return;
-
-        int ptrSize = Native.POINTER_SIZE;
-        com.sun.jna.Memory jclassArray = new com.sun.jna.Memory((long) classes.length * ptrSize);
-        int validCount = 0;
-
-        for (int i = 0; i < classes.length; i++) {
-            String internalName = classes[i].getName().replace('.', '/');
-            Pointer jclass = findClass(internalName);
-            if (jclass != null) {
-                jclassArray.setPointer((long) validCount * ptrSize, jclass);
-                validCount++;
+        ConcurrentMap<String, Long> prepared = existingPreparedClasses();
+        if (prepared == null) return;
+        List<Pointer> matched = new ArrayList<>();
+        for (Class<?> clazz : classes) {
+            if (clazz == null) continue;
+            Long pointer = prepared.get(clazz.getName().replace('.', '/'));
+            if (pointer != null && pointer != 0L) {
+                matched.add(new Pointer(pointer));
             }
         }
-
-        if (validCount == 0) return;
-
-        try {
-            Function retransform = jvmtiFunction(JVMTI_RETRANSFORM_CLASSES);
-            int result = retransform.invokeInt(new Object[]{jvmtiEnv, validCount, jclassArray});
-            if (result == 0) {
-                AgentLogWriter.info("[JvmTiChannel] Retransformed " + validCount + " classes via JVM TI");
-            } else {
-                AgentLogWriter.info("[JvmTiChannel] RetransformClasses failed, code=" + result);
-            }
-        } catch (Throwable t) {
-            AgentLogWriter.info("[JvmTiChannel] retransformClasses error: " + t.getMessage());
-        }
+        retransformJclasses(matched, "explicit prepared classes");
     }
 
     // ==================== JNI 工具 ====================
@@ -418,7 +424,7 @@ public final class JvmTiChannel {
         int successCount = 0;
         for (int start = 0; start < classes.size(); start += batchSize) {
             int end = Math.min(start + batchSize, classes.size());
-            com.sun.jna.Memory arr = new com.sun.jna.Memory((long) (end - start) * ptrSize);
+            Memory arr = new Memory((long) (end - start) * ptrSize);
             for (int i = start; i < end; i++) {
                 arr.setPointer((long) (i - start) * ptrSize, classes.get(i));
             }
@@ -458,7 +464,7 @@ public final class JvmTiChannel {
     private static boolean retransformOne(Pointer jclass, String reason) {
         if (jclass == null) return false;
         try {
-            com.sun.jna.Memory arr = new com.sun.jna.Memory(Native.POINTER_SIZE);
+            Memory arr = new Memory(Native.POINTER_SIZE);
             arr.setPointer(0, jclass);
             Function retransform = jvmtiFunction(JVMTI_RETRANSFORM_CLASSES);
             int result = retransform.invokeInt(new Object[]{jvmtiEnv, 1, arr});
@@ -487,77 +493,34 @@ public final class JvmTiChannel {
         }
     }
 
-    private static final class ScanResult {
-        final Pointer classesArray;
-        final List<LoadedEntry> entries;
-
-        ScanResult(Pointer classesArray, List<LoadedEntry> entries) {
-            this.classesArray = classesArray;
-            this.entries = entries;
+    private static List<LoadedEntry> preparedClassesSnapshot() {
+        ConcurrentMap<String, Long> classes = existingPreparedClasses();
+        if (classes == null || classes.isEmpty()) return List.of();
+        Long livingPointer = classes.get("net/minecraft/world/entity/LivingEntity");
+        Long entityPointer = classes.get("net/minecraft/world/entity/Entity");
+        Pointer livingClass = livingPointer == null ? null : new Pointer(livingPointer);
+        Pointer entityClass = entityPointer == null ? null : new Pointer(entityPointer);
+        List<LoadedEntry> entries = new ArrayList<>(classes.size());
+        for (Map.Entry<String, Long> prepared : classes.entrySet()) {
+            Long pointerValue = prepared.getValue();
+            if (pointerValue == null || pointerValue == 0L) continue;
+            Pointer jclass = new Pointer(pointerValue);
+            LoadedEntry entry = new LoadedEntry(jclass, prepared.getKey(), isModifiable(jclass));
+            if (livingClass != null && isAssignableFrom(jclass, livingClass)) {
+                entry.livingEntity = true;
+            } else if (entityClass != null && isAssignableFrom(jclass, entityClass)) {
+                entry.entityOnly = true;
+            }
+            entries.add(entry);
         }
-
-        void release() {
-            deallocate(classesArray);
-        }
-    }
-
-    private static ScanResult scanLoadedClasses() {
-        if (jvmtiEnv == null) return null;
-        int ptrSize = Native.POINTER_SIZE;
-        Pointer classesArray = null;
-        try {
-            com.sun.jna.Memory countPtr = new com.sun.jna.Memory(4);
-            com.sun.jna.Memory arrPtrPtr = new com.sun.jna.Memory(ptrSize);
-            Function getLoaded = jvmtiFunction(JVMTI_GET_LOADED_CLASSES);
-            int code = getLoaded.invokeInt(new Object[]{jvmtiEnv, countPtr, arrPtrPtr});
-            if (code != 0) {
-                AgentLogWriter.info("[JvmTiChannel] GetLoadedClasses failed, code=" + code);
-                return null;
-            }
-            int count = countPtr.getInt(0);
-            classesArray = arrPtrPtr.getPointer(0);
-            if (classesArray == null || count <= 0) {
-                return new ScanResult(classesArray, List.of());
-            }
-
-            List<LoadedEntry> entries = new ArrayList<>();
-            Pointer livingClass = null;
-            Pointer entityClass = null;
-            for (int i = 0; i < count; i++) {
-                Pointer jclass = classesArray.getPointer((long) i * ptrSize);
-                if (jclass == null) continue;
-                String internalName = getInternalName(jclass);
-                if (internalName == null) continue;
-                boolean modifiable = isModifiable(jclass);
-                LoadedEntry entry = new LoadedEntry(jclass, internalName, modifiable);
-                entries.add(entry);
-                if ("net/minecraft/world/entity/LivingEntity".equals(internalName)) {
-                    livingClass = jclass;
-                } else if ("net/minecraft/world/entity/Entity".equals(internalName)) {
-                    entityClass = jclass;
-                }
-            }
-
-            for (LoadedEntry entry : entries) {
-                if (livingClass != null && isAssignableFrom(entry.jclass, livingClass)) {
-                    entry.livingEntity = true;
-                } else if (entityClass != null && isAssignableFrom(entry.jclass, entityClass)) {
-                    entry.entityOnly = true;
-                }
-            }
-
-            return new ScanResult(classesArray, entries);
-        } catch (Throwable t) {
-            if (classesArray != null) deallocate(classesArray);
-            AgentLogWriter.info("[JvmTiChannel] scanLoadedClasses error: " + t.getMessage());
-            return null;
-        }
+        AgentLogWriter.info("[JvmTiChannel] Prepared-class snapshot: " + entries.size() + " global references");
+        return entries;
     }
 
     private static String getInternalName(Pointer jclass) {
         try {
-            com.sun.jna.Memory sigPtrPtr = new com.sun.jna.Memory(Native.POINTER_SIZE);
-            com.sun.jna.Memory genericPtrPtr = new com.sun.jna.Memory(Native.POINTER_SIZE);
+            Memory sigPtrPtr = new Memory(Native.POINTER_SIZE);
+            Memory genericPtrPtr = new Memory(Native.POINTER_SIZE);
             Function getSig = jvmtiFunction(JVMTI_GET_CLASS_SIGNATURE);
             int code = getSig.invokeInt(new Object[]{jvmtiEnv, jclass, sigPtrPtr, genericPtrPtr});
             if (code != 0) return null;
@@ -581,7 +544,7 @@ public final class JvmTiChannel {
 
     private static boolean isModifiable(Pointer jclass) {
         try {
-            com.sun.jna.Memory out = new com.sun.jna.Memory(1);
+            Memory out = new Memory(1);
             out.clear(1);
             Function fn = jvmtiFunction(JVMTI_IS_MODIFIABLE_CLASS);
             int code = fn.invokeInt(new Object[]{jvmtiEnv, jclass, out});
@@ -624,33 +587,50 @@ public final class JvmTiChannel {
         }
     }
 
-    /* 通过 JNI FindClass 按内部名查找 jclass 句柄 */
-    private static Pointer findClass(String internalName) {
-        Pointer jniEnv = getJniEnv();
-        if (jniEnv == null) return null;
+    private static Pointer newGlobalRef(Pointer jniEnv, Pointer localRef) {
+        if (jniEnv == null || localRef == null) return null;
         try {
             int ptrSize = Native.POINTER_SIZE;
             Pointer functions = jniEnv.getPointer(0);
-            Pointer findClassPtr = functions.getPointer(JNI_FIND_CLASS * ptrSize);
-            Function findClass = Function.getFunction(findClassPtr, Function.C_CONVENTION);
-            Object result = findClass.invoke(Pointer.class, new Object[]{jniEnv, internalName});
+            Pointer functionPointer = functions.getPointer((long) JNI_NEW_GLOBAL_REF * ptrSize);
+            Function function = Function.getFunction(functionPointer, Function.C_CONVENTION);
+            Object result = function.invoke(Pointer.class, new Object[]{jniEnv, localRef});
             return (Pointer) result;
         } catch (Throwable t) {
             return null;
         }
     }
 
+    private static void deleteGlobalRef(Pointer jniEnv, Pointer globalRef) {
+        if (jniEnv == null || globalRef == null) return;
+        try {
+            int ptrSize = Native.POINTER_SIZE;
+            Pointer functions = jniEnv.getPointer(0);
+            Pointer functionPointer = functions.getPointer((long) JNI_DELETE_GLOBAL_REF * ptrSize);
+            Function function = Function.getFunction(functionPointer, Function.C_CONVENTION);
+            function.invokeVoid(new Object[]{jniEnv, globalRef});
+        } catch (Throwable ignored) {
+        }
+    }
+
     // ==================== 内部实现 ====================
 
-    /* 构建 jvmtiEventCallbacks 结构体：除 ClassFileLoadHook 外全部填 NULL。
+    /* 构建 jvmtiEventCallbacks 结构体，仅设置当前需要的回调。
        使用堆外内存手动布局，避免定义 JNA Structure（字段太多且跨 JDK 版本差异大）。 */
-    private static Pointer buildCallbacksStruct(ClassFileLoadHookCallback callback) {
+    private static Pointer buildCallbacksStruct(ClassFileLoadHookCallback loadHook,
+                                                ClassPrepareCallback prepareCallback) {
         int structSize = callbacksStructSize();
-        Pointer struct = new com.sun.jna.Memory(structSize);
-        struct.clear(structSize);                         // 全部清零
+        Pointer struct = new Memory(structSize);
+        struct.clear(structSize);
 
-        int cbOffset = CLASS_FILE_LOAD_HOOK_FIELD_INDEX * Native.POINTER_SIZE;
-        struct.setPointer(cbOffset, CallbackReference.getFunctionPointer(callback));
+        if (loadHook != null) {
+            int loadHookOffset = CLASS_FILE_LOAD_HOOK_FIELD_INDEX * Native.POINTER_SIZE;
+            struct.setPointer(loadHookOffset, CallbackReference.getFunctionPointer(loadHook));
+        }
+        if (prepareCallback != null) {
+            int prepareOffset = CLASS_PREPARE_FIELD_INDEX * Native.POINTER_SIZE;
+            struct.setPointer(prepareOffset, CallbackReference.getFunctionPointer(prepareCallback));
+        }
 
         return struct;
     }
@@ -676,6 +656,27 @@ public final class JvmTiChannel {
     }
 
     // ==================== JNA 回调实现 ====================
+
+    private static class ClassPrepareCallback implements Callback {
+
+        @SuppressWarnings("unused")
+        public void callback(Pointer jvmtiEnv, Pointer jniEnv, Pointer thread, Pointer klass) {
+            if (jniEnv == null || klass == null) return;
+            try {
+                String internalName = getInternalName(klass);
+                if (internalName == null || internalName.isEmpty()) return;
+                Pointer globalRef = newGlobalRef(jniEnv, klass);
+                if (globalRef == null) return;
+                long pointerValue = Pointer.nativeValue(globalRef);
+                Long existing = preparedClasses().putIfAbsent(internalName, pointerValue);
+                if (existing != null) {
+                    deleteGlobalRef(jniEnv, globalRef);
+                }
+            } catch (Throwable ignored) {
+                // 回调边界不能传播异常；失败的类由后续惰性路径处理。
+            }
+        }
+    }
 
     /* JVM TI ClassFileLoadHook 回调。
        签名须与 jvmtiEventClassFileLoadHook typedef 完全一致。

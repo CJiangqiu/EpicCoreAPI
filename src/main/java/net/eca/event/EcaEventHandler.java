@@ -1,11 +1,13 @@
 package net.eca.event;
 
 import net.eca.api.EcaAPI;
+import net.eca.compat.FriendModCheck;
 import net.eca.config.EcaConfiguration;
 import net.eca.network.FactionGlowSyncPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
+import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
@@ -16,6 +18,7 @@ import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.eca.util.faction.FactionManager;
 import net.eca.util.faction.FactionRelation;
 import net.eca.util.raid.RaidManager;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -31,6 +34,7 @@ import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -83,6 +87,12 @@ public class EcaEventHandler {
         if (event.getEntity() instanceof ServerPlayer player) {
             EntityExtensionManager.syncActiveType(player);
             GlobalEffectOverrideManager.syncToPlayer(player);
+            if (!EcaConfiguration.getForceCompatibilityModeSafely()) {
+                for (String modId : FriendModCheck.getLoadedRadicalCompatModIds()) {
+                    player.sendSystemMessage(Component.translatable(
+                            FriendModCheck.getForcedMessageTranslationKey(modId)));
+                }
+            }
         }
     }
 
@@ -142,6 +152,8 @@ public class EcaEventHandler {
     public void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
         BossShowPlaybackTracker.onServerTick(event.getServer());
+        //END 相位在实体 tick 之后，此处复查才能看到防护逻辑的回滚
+        DelayedHealthVerifier.onServerTick(event.getServer());
     }
 
     // ==================== 阵营发光扫描 ====================
@@ -180,7 +192,7 @@ public class EcaEventHandler {
 
         int range = EcaConfiguration.getFactionGlowRangeSafely();
         AABB area = player.getBoundingBox().inflate(range);
-        java.util.List<LivingEntity> nearby = player.level().getEntitiesOfClass(
+        List<LivingEntity> nearby = player.level().getEntitiesOfClass(
                 LivingEntity.class, area, e -> e != player && e.isAlive());
 
         Map<Integer, Integer> glowMap = new HashMap<>();
@@ -229,6 +241,7 @@ public class EcaEventHandler {
     public void onServerStopped(ServerStoppedEvent event) {
         ResurrectionManager.stop();
         ResurrectionManager.clearAll();
+        DelayedHealthVerifier.clear();
         InvulnerableEntityManager.clearAll();
         GlobalEffectOverrideManager.clearAllDimensions();
         EntityExtensionManager.clearAll();

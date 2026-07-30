@@ -2,12 +2,17 @@
 
 uniform vec4 ColorModulator;
 uniform sampler2D Sampler0;
+uniform sampler2D MaskSampler;
+uniform vec4 MaskColor;
+uniform float MaskTolerance;
 uniform sampler2D Sampler2;
 uniform float GameTime;
 uniform float CameraYaw;
 uniform float CameraPitch;
 uniform vec4 ColorKeyColor;
 uniform float ColorKeyTolerance;
+uniform vec2 LocalUvMin;
+uniform vec2 LocalUvScale;
 
 in vec4 vertexColor;
 in vec2 texCoord0;
@@ -24,6 +29,14 @@ float hash2(vec2 p) {
 }
 
 void main() {
+    if (MaskColor.a > 0.5) {
+        vec2 eca_maskUv = (texCoord0 - LocalUvMin) * LocalUvScale;
+        vec4 eca_maskSample = texture(MaskSampler, eca_maskUv);
+        if (eca_maskSample.a < 0.1 || distance(eca_maskSample.rgb, MaskColor.rgb) > MaskTolerance) {
+            discard;
+        }
+    }
+
     if (ColorKeyColor.a > 0.5) {
         vec4 eca_baseColor = texture(Sampler0, texCoord0);
         if (eca_baseColor.a < 0.1 || distance(eca_baseColor.rgb, ColorKeyColor.rgb) > ColorKeyTolerance) {

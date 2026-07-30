@@ -7,13 +7,16 @@ import cpw.mods.modlauncher.api.ITransformationService;
 import cpw.mods.modlauncher.api.ITransformer;
 import net.eca.agent.AgentLoader;
 import net.eca.agent.AgentLogWriter;
+import net.eca.agent.EcaAgent;
 import org.jetbrains.annotations.NotNull;
 import sun.misc.Unsafe;
 
+import java.lang.instrument.Instrumentation;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.lang.module.Configuration;
 import java.lang.reflect.Field;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -38,7 +41,9 @@ public class EcaTransformationService implements ITransformationService {
         AgentLoader.loadAgent();
         // prepare() 必须在 dual loading 移除 ECA 模块之前：否则 JvmTiChannel 及其 JNA 依赖在模块移除后无法再加载（NoClassDefFoundError）
         try {
-            JvmTiChannel.prepare();
+            boolean collectPreparedClasses = EcaAgent.getInstrumentation() == null
+                    && isRadicalDefenceRequestedEarly();
+            JvmTiChannel.prepare(collectPreparedClasses);
         } catch (Throwable t) {
             log("[CoreMod] JvmTiChannel prepare skipped: " + t.getMessage());
         }
@@ -59,6 +64,32 @@ public class EcaTransformationService implements ITransformationService {
         return result;
     }
 
+    // CoreMod 阶段不加载 ForgeConfig；直接读取现有配置，避免默认关闭时保留全局类引用。
+    private static boolean isRadicalDefenceRequestedEarly() {
+        Path configPath = Path.of("config", "eca.toml");
+        if (!Files.isRegularFile(configPath)) return false;
+        try {
+            boolean defenceSection = false;
+            for (String rawLine : Files.readAllLines(configPath)) {
+                String line = rawLine.trim();
+                if (line.startsWith("[") && line.endsWith("]")) {
+                    defenceSection = "[Defence]".equals(line);
+                    continue;
+                }
+                if (!defenceSection || !line.startsWith("\"Enable Radical Logic\"")) continue;
+                int separator = line.indexOf('=');
+                if (separator < 0) return false;
+                String value = line.substring(separator + 1).trim();
+                int comment = value.indexOf('#');
+                if (comment >= 0) value = value.substring(0, comment).trim();
+                return Boolean.parseBoolean(value);
+            }
+        } catch (Throwable t) {
+            log("[CoreMod] Failed to read early defence config: " + t.getMessage());
+        }
+        return false;
+    }
+
     private static void initLoadingScreenTransformer() {
         try {
             if (PRELOADED[0] == null || !LoadingScreenTransformer.ENABLED) {
@@ -66,7 +97,7 @@ public class EcaTransformationService implements ITransformationService {
                 return;
             }
 
-            java.lang.instrument.Instrumentation inst = net.eca.agent.EcaAgent.getInstrumentation();
+            Instrumentation inst = EcaAgent.getInstrumentation();
             if (inst == null) {
                 log("[CoreMod] No Instrumentation, skipping loading screen transformer");
                 return;

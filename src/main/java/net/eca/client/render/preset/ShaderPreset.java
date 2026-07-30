@@ -6,9 +6,9 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
-/* 一个自定义预设的 4 种 RenderType 集合，由双 profile 五文件组成。
-   BLOCK profile（<name>_block.vsh/.json）→ skybox / boss bar。
-   NEW_ENTITY profile（<name>_entity.vsh/.json）→ boss layer / item。
+/* 一个自定义预设的多目标 RenderType 集合，由双 profile 五文件组成。
+   BLOCK profile（<name>_block.vsh/.json）→ skybox / boss bar / block。
+   NEW_ENTITY profile（<name>_entity.vsh/.json）→ boss layer / item / Geo block。
    共享 <name>.fsh。实体纹理叠加通过 EntityLayerExtension.getTexture() 支持。 */
 @OnlyIn(Dist.CLIENT)
 public final class ShaderPreset {
@@ -20,6 +20,7 @@ public final class ShaderPreset {
     private final RenderType bossLayer;
     private final RenderType skybox;
     private final RenderType item;
+    private final RenderType block;
 
     ShaderPreset(ResourceLocation id, GenericPresetShader shader) {
         this.id = id;
@@ -30,6 +31,7 @@ public final class ShaderPreset {
         this.skybox = PresetRenderTypes.skybox(name, blockShaderState);
         this.bossLayer = PresetRenderTypes.bossLayer(name, entityShaderState);
         this.item = PresetRenderTypes.item(name, entityShaderState);
+        this.block = PresetRenderTypes.block(name, blockShaderState);
     }
 
     //用一个 profile 的当前 ShaderInstance 构造 ShaderState，并在渲染前喂入该 profile 的标准 uniform
@@ -61,6 +63,14 @@ public final class ShaderPreset {
 
     public RenderType item() {
         return item;
+    }
+
+    public RenderType block() {
+        return block;
+    }
+
+    public RenderType geoBlock(ResourceLocation texture) {
+        return PresetRenderTypes.entityEffect(name + "_geo_block", entityShaderState, texture);
     }
 
     // 预览系统用：带纹理绑定的实体 RenderType
