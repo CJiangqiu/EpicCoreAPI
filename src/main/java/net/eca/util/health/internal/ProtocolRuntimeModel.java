@@ -20,7 +20,6 @@ public final class ProtocolRuntimeModel {
     private volatile Observation observation;
     private volatile ObservationOrigin observationOrigin;
     private volatile boolean effectiveObservationConfirmed;
-    private volatile boolean delayedRollbackObserved;
 
     private ProtocolRuntimeModel() {}
 
@@ -54,13 +53,6 @@ public final class ProtocolRuntimeModel {
         effectiveObservationConfirmed = confirmed;
     }
 
-    public boolean delayedRollbackObserved() {
-        return delayedRollbackObserved;
-    }
-
-    public void markDelayedRollbackObserved() {
-        delayedRollbackObserved = true;
-    }
 
     @FunctionalInterface
     public interface Observation {

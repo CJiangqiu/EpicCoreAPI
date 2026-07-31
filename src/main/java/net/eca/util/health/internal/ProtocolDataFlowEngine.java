@@ -4,6 +4,7 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.coremod.JvmTiChannel;
 import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.util.EcaLogger;
+import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.internal.ProtocolDataflowAnalyzer.AnalysisResult;
 import net.eca.util.health.internal.ProtocolDataflowAnalyzer.ArrayElementSource;
 import net.eca.util.health.internal.ProtocolDataflowAnalyzer.CapabilityDataSource;
@@ -76,23 +77,22 @@ public final class ProtocolDataFlowEngine {
             ProtocolMethodProbe.setClassBytesProvider(ProtocolDataFlowEngine::classBytesViaRuntime);
             // 锁血/最大血量锁的密文、密钥、校验位三者都参与 hook 取值，必须整组登记才能剥净
             ProtocolDataflowAnalyzer.setStripConfig(
-                    Set.of("net/eca/coremod/LivingEntityHook", "net/eca/util/health/HealthLockManager"),
-                    Set.of("SF:net.eca.util.EntityUtil.HEALTH_LOCK_VALUE",
-                           "SF:net.eca.util.EntityUtil.HEALTH_LOCK_KEY",
-                           "SF:net.eca.util.EntityUtil.HEALTH_LOCK_CHECK",
-                           "SF:net.eca.util.EntityUtil.HEAL_BAN_VALUE",
-                           "SF:net.eca.util.EntityUtil.MAX_HEALTH_LOCK_VALUE",
-                           "SF:net.eca.util.EntityUtil.MAX_HEALTH_LOCK_KEY",
-                           "SF:net.eca.util.EntityUtil.MAX_HEALTH_LOCK_CHECK"),
-                    Set.of("ecaHealthLockEnc", "ecaHealthLockKey", "ecaHealthLockCheck",
-                           "ecaMaxHealthLockEnc", "ecaMaxHealthLockKey", "ecaMaxHealthLockCheck",
-                           "ecaHealBanValue"));
+                    EcaOwnedState.hookOwners(),
+                    EcaOwnedState.staticFieldLabels(),
+                    EcaOwnedState.nbtKeys());
+            ProtocolDataflowAnalyzer.setOwnedSynchedDataIds(EcaOwnedState.ownedSynchedDataIds());
             initialized = true;
         }
     }
 
     /* 诊断去重：每类只报一次字节码来源 */
     private static final Set<String> BYTES_SOURCE_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 事务明细每类只报一次 */
+    private static final Set<String> TRANSACTION_DETAIL_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 兜底闸门命中每个 sink 只报一次 */
+    private static final Set<String> ECA_OWNED_WRITE_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* RuntimeBytecodeProvider 优先(含 mixin/coremod 转换后)，缺失回退分析器内置默认实现 */
     private static byte[] classBytesViaRuntime(Class<?> clazz) {
@@ -148,6 +148,13 @@ public final class ProtocolDataFlowEngine {
         if (graph == null || entity == null || graph.authoritySources().isEmpty()) return false;
         List<String> diagnostics = new ArrayList<>();
         for (ProtocolDataflowAnalyzer.AuthorityBranch branch : graph.authorityBranches()) {
+            /* 其他模组注入共享 getHealth 的分支会出现在每个实体的分析里，但其接收者在本实体上并不存在。
+               这类分支不是本实体权威，放进事务只会让整笔写入卡在一个永远写不进的位置上。 */
+            if (!isAddressable(branch.authority(), entity)) {
+                diagnostics.add("    [" + branch.authority().label
+                        + "] skipped=NOT_ADDRESSABLE (branch does not exist on this entity)");
+                continue;
+            }
             EvalContext context = ProtocolDataflowAnalyzer.newContext(entity);
             List<PreparedSourceWrite> writes = new ArrayList<>();
             Set<Source> selected = new HashSet<>();
@@ -155,6 +162,11 @@ public final class ProtocolDataFlowEngine {
 
             for (Source dependency : branch.transactionSources()) {
                 if (dependency.equals(branch.authority()) || selected.contains(dependency)) continue;
+                if (!isAddressable(dependency, entity)) {
+                    diagnostics.add("    [" + branch.authority().label + "] dependency="
+                            + dependency.label + " skipped=NOT_ADDRESSABLE");
+                    continue;
+                }
                 Object requiredValue = null;
                 boolean constrained = false;
                 for (ProtocolDataflowAnalyzer.StoreWrite maintenance : branch.maintenanceWrites()) {
@@ -191,8 +203,12 @@ public final class ProtocolDataFlowEngine {
 
             float anchorBefore = LifeProtocolManager.readHealthAnchor(entity);
             boolean wroteAll = true;
+            // 事务是全有或全无，任一位置写不进就整体作废；失败位置必须记名，否则无从判断是哪一环断的
             for (PreparedSourceWrite write : writes) {
                 if (!dispatchWrite(write.sink(), entity, write.value())) {
+                    diagnostics.add("    [" + authority.label + "] transaction write=FAIL at sink="
+                            + write.sink().label + " value="
+                            + limitedText(write.value(), MAX_DIAGNOSTIC_LOG_CHARS));
                     wroteAll = false;
                     break;
                 }
@@ -200,9 +216,21 @@ public final class ProtocolDataFlowEngine {
             if (wroteAll) LifeProtocolManager.noteAnchorResponse(entity, anchorBefore, target);
             if (wroteAll && LifeProtocolManager.verify(entity, target)) {
                 LifeProtocolManager.recordObservedWrite(entity.getClass());
-                registerDelayedRollback(entity, writes);
                 EcaLogger.info("[LifeProtocolGraph] transaction accepted entity={} authority={} states={} target={}",
                         entity.getClass().getName(), authority.label, writes.size(), target);
+                /* 事务被接受不代表值落到了目标逻辑实际读取的对象上：伴随状态的写入值由维护表达式
+                   反解得来，且其访问路径可能指向分析期捕获的陈旧实例。逐个回读以区分这两种情况。 */
+                if (TRANSACTION_DETAIL_DUMPED.add(entity.getClass().getName())) {
+                    for (PreparedSourceWrite write : writes) {
+                        EcaLogger.info("[LifeProtocolGraph]   sink={} before={} wrote={} readback={}",
+                                write.sink().label,
+                                limitedText(write.snapshot(), MAX_DIAGNOSTIC_LOG_CHARS),
+                                limitedText(write.value(), MAX_DIAGNOSTIC_LOG_CHARS),
+                                limitedText(write.sink().read(entity), MAX_DIAGNOSTIC_LOG_CHARS));
+                        dumpSinkReceiver(write.sink(), entity);
+                    }
+                    dumpVanillaHealthSync(entity);
+                }
                 return true;
             }
 
@@ -282,8 +310,6 @@ public final class ProtocolDataFlowEngine {
            模型是否可信改由 applyEffectiveHealth 的结构判据在建模阶段裁决。 */
         if (LifeProtocolManager.verify(entity, target)) {
             LifeProtocolManager.recordObservedWrite(cls);
-            registerDelayedRollback(entity,
-                    List.of(new PreparedSourceWrite(model.storage(), snapshot, solved.value())));
             if (EFFECTIVE_SUCCESS_DUMPED.add(cls.getName())) {
                 EcaLogger.info("[EffectiveHealth] success entity={} storage={} solved={} target={}",
                         cls.getName(), model.storage().label, solved.value(), target);
@@ -380,7 +406,6 @@ public final class ProtocolDataFlowEngine {
         }
         if (verified) {
             LifeProtocolManager.recordObservedWrite(entity.getClass());
-            registerDelayedRollback(entity, writes);
             return new AssociatedAttempt(true, true, true, states);
         }
         // 关联写入全部成功但校验失败时，记录观测锚点与存储可能解耦
@@ -465,21 +490,40 @@ public final class ProtocolDataFlowEngine {
         EvalContext ctx = ProtocolDataflowAnalyzer.newContext(entity);
         List<String> diag = new ArrayList<>();
         List<PreparedSourceWrite> solvedWrites = new ArrayList<>();
-        for (Source sink : ar.sources) {
+        /* 先全部求解再写入：所有分支都基于同一份写前状态求值，快照也在任何写入之前捕获。 */
+        for (Source sink : ProtocolDataflowAnalyzer.withoutEcaOwnedSources(ar.sources)) {
+            if (!isAddressable(sink, entity)) {
+                diag.add("    [" + sink.label + "] skipped=NOT_ADDRESSABLE"
+                        + " (branch does not exist on this entity)");
+                continue;
+            }
             ProtocolSolveResult solved = ProtocolDataflowAnalyzer.buildWritePath(ar.returnExpr, sink, Float.valueOf(expected), ctx);
             if (!solved.solved() || solved.value() == null) {
                 diag.add("    [" + sink.label + "] solve=FAIL " + solved.failure() + " ("
                         + limitedText(solved.detail(), MAX_DIAGNOSTIC_LOG_CHARS) + ")");
                 continue;
             }
+            solvedWrites.add(new PreparedSourceWrite(sink, sink.read(entity), solved.value()));
+        }
 
-            Object snapshot = sink.read(entity);
-            solvedWrites.add(new PreparedSourceWrite(sink, snapshot, solved.value()));
+        /* 权威由多个分支共同决定时，单支写入通过即时回读也留不住——下一 tick 换一支重算就被覆盖。
+           结构上识别出多分支，或跨 tick 复查已经证明单写留不住，都直接走合并事务。
+           但只剩一个可寻址分支时组不成合并事务，此时再拒绝单支成功就把唯一可用路径也堵死了。 */
+        boolean preferCombined = solvedWrites.size() >= 2
+                && ProtocolDataflowAnalyzer.hasMultiBranchAuthority(ar.returnExpr);
+        if (preferCombined && writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) {
+            return true;
+        }
+
+        for (PreparedSourceWrite prepared : solvedWrites) {
+            Source sink = prepared.sink();
+            Object snapshot = prepared.snapshot();
+            Object value = prepared.value();
             float anchorBefore = LifeProtocolManager.readHealthAnchor(entity);
-            if (!dispatchWrite(sink, entity, solved.value())) {
+            if (!dispatchWrite(sink, entity, value)) {
                 boolean restored = dispatchWrite(sink, entity, snapshot);
                 diag.add("    [" + sink.label + "] solved="
-                        + limitedText(solved.value(), MAX_DIAGNOSTIC_LOG_CHARS)
+                        + limitedText(value, MAX_DIAGNOSTIC_LOG_CHARS)
                         + " write=FAIL restore=" + (restored ? "OK" : "FAIL"));
                 continue;
             }
@@ -487,12 +531,10 @@ public final class ProtocolDataFlowEngine {
             LifeProtocolManager.noteAnchorResponse(entity, anchorBefore, expected);
             if (verifier.verify(entity, expected, sink)) {
                 LifeProtocolManager.recordObservedWrite(cls);
-                registerDelayedRollback(entity,
-                        List.of(new PreparedSourceWrite(sink, snapshot, solved.value())));
                 if (logSuccess) {
                     EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}",
                             cls.getName(), sink.label,
-                            limitedText(solved.value(), MAX_DIAGNOSTIC_LOG_CHARS), expected);
+                            limitedText(value, MAX_DIAGNOSTIC_LOG_CHARS), expected);
                 }
                 return true;
             }
@@ -501,11 +543,12 @@ public final class ProtocolDataFlowEngine {
             // 写入成功但校验失败时，单独记录观测锚点与存储可能解耦
             LifeProtocolManager.recordUnobservedWrite(cls, sink, sink.label);
             diag.add("    [" + sink.label + "] solved="
-                    + limitedText(solved.value(), MAX_DIAGNOSTIC_LOG_CHARS)
+                    + limitedText(value, MAX_DIAGNOSTIC_LOG_CHARS)
                     + " verify=FAIL restore=" + (restored ? "OK" : "FAIL"));
         }
 
-        if (writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) return true;
+        if (!preferCombined
+                && writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) return true;
 
         if (FAIL_DUMPED.add(cls.getName() + "|" + diagnosticChannel)) {
             EcaLogger.info("[{}] setHealth failed entity={} expected={} sink results:",
@@ -542,7 +585,6 @@ public final class ProtocolDataFlowEngine {
         if (wroteAll) LifeProtocolManager.noteAnchorResponse(entity, anchorBefore, expected);
         if (wroteAll && verifier.verify(entity, expected, null)) {
             LifeProtocolManager.recordObservedWrite(entity.getClass());
-            registerDelayedRollback(entity, writes);
             if (logSuccess) {
                 EcaLogger.info("[HealthDataflow] setHealth success entity={} sink=all-sources expected={}",
                         entity.getClass().getName(), expected);
@@ -562,22 +604,18 @@ public final class ProtocolDataFlowEngine {
         return false;
     }
 
-    private static void registerDelayedRollback(LivingEntity entity, List<PreparedSourceWrite> writes) {
-        if (entity == null || writes == null || writes.isEmpty()) return;
-        List<ProtocolVerificationManager.SourceSnapshot> snapshots = new ArrayList<>(writes.size());
-        Set<Source> captured = new HashSet<>();
-        for (PreparedSourceWrite write : writes) {
-            if (!captured.add(write.sink())) continue;
-            snapshots.add(new ProtocolVerificationManager.SourceSnapshot(
-                    write.sink(), write.snapshot()));
-        }
-        ProtocolVerificationManager.registerRollback(entity, snapshots);
-    }
 
     /* ==================== Source 写入分发(按子类形态) ==================== */
 
     /* 按 Source 子类形态选择写入实现。新增 Source 子类时必须在此扩充分发，否则写入将默默失败。 */
     public static boolean dispatchWrite(Source sink, LivingEntity entity, Object value) {
+        // 兜底闸门：任何通道都不得写入 ECA 自身注入的状态，否则会破坏血量锁与无敌标记
+        if (ProtocolDataflowAnalyzer.isEcaOwnedSource(sink)) {
+            if (ECA_OWNED_WRITE_DUMPED.add(sink.label)) {
+                EcaLogger.info("[LifeProtocol] refused write to ECA-owned state sink={}", sink.label);
+            }
+            return false;
+        }
         boolean wrote;
         if (sink instanceof FieldChainSource s) wrote = writeFieldChain(s, entity, value);
         else if (sink instanceof StaticFieldSource s) wrote = writeStaticField(s, value);
@@ -675,16 +713,66 @@ public final class ProtocolDataFlowEngine {
         }
     }
 
+    /* 多态 getHealth 的分支可能来自其他模组对 LivingEntity 的注入，对当前实体运行期根本不会走到，
+       其接收者也不存在。此类分支不属于本实体的权威，必须在组织事务前排除，
+       否则会让整个合并事务卡在一个永远写不进的位置上。 */
+    public static boolean isAddressable(Source sink, LivingEntity entity) {
+        try {
+            EvalContext context = ProtocolDataflowAnalyzer.newContext(entity);
+            if (sink instanceof ChainedFieldSource s) {
+                Object cur = ProtocolDataflowAnalyzer.evaluate(s.root, context);
+                if (cur == null) return false;
+                for (int i = 0; i < s.chain.size() - 1; i++) {
+                    cur = readField(cur, s.chain.get(i));
+                    if (cur == null) return false;
+                }
+                return true;
+            }
+            /* 容器型状态的容器可能是存档回调的形参：那是保存时才存在的投影，
+               不是实体的活状态，运行期求值必然为空，写入也无意义。 */
+            if (sink instanceof NbtValueSource s) {
+                return ProtocolDataflowAnalyzer.evaluate(s.containerExpr, context) instanceof CompoundTag;
+            }
+            if (sink instanceof MapEntrySource s) {
+                return ProtocolDataflowAnalyzer.evaluate(s.containerExpr, context) != null;
+            }
+            if (sink instanceof CapabilityDataSource s) {
+                return ProtocolDataflowAnalyzer.evaluate(s.containerExpr, context) != null;
+            }
+            if (sink instanceof ArrayElementSource s) {
+                return ProtocolDataflowAnalyzer.evaluate(s.arrayExpr, context) != null;
+            }
+            return true;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
+    }
+
     private static boolean writeChainedField(ChainedFieldSource s, LivingEntity entity, Object value) {
         try {
             Object cur = ProtocolDataflowAnalyzer.evaluate(s.root, ProtocolDataflowAnalyzer.newContext(entity));
-            if (cur == null) return false;
+            if (cur == null) return chainWriteFailed(s, "root evaluated to null", -1, value);
             for (int i = 0; i < s.chain.size() - 1; i++) {
                 cur = readField(cur, s.chain.get(i));
-                if (cur == null) return false;
+                if (cur == null) return chainWriteFailed(s, "chain step read null", i, value);
             }
-            return writeFieldStep(cur, s.chain.get(s.chain.size() - 1), value);
+            if (writeFieldStep(cur, s.chain.get(s.chain.size() - 1), value)) return true;
+            return chainWriteFailed(s, "final field step rejected the value", s.chain.size() - 1, value);
         } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; ProtocolDiagnostics.reflectionFailure("write", t); return false; }
+    }
+
+    /* 链式字段写入失败每个源只报一次：失败位置决定后续是补访问路径还是补数值域处理。 */
+    private static final Set<String> CHAIN_WRITE_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
+
+    private static boolean chainWriteFailed(ChainedFieldSource s, String reason, int stepIndex, Object value) {
+        if (CHAIN_WRITE_FAILURE_DUMPED.add(s.label + "|" + reason)) {
+            EcaLogger.info("[LifeProtocol] chained field write failed sink={} reason={} step={}/{} value={} chain={}",
+                    s.label, reason, stepIndex, s.chain.size(),
+                    limitedText(value, MAX_DIAGNOSTIC_LOG_CHARS),
+                    limitedText(s.chain, MAX_DIAGNOSTIC_LOG_CHARS));
+        }
+        return false;
     }
 
     private static boolean writeCapability(CapabilityDataSource s, LivingEntity entity, Object value) {
@@ -756,6 +844,38 @@ public final class ProtocolDataFlowEngine {
             if (ownerClass != null && writeSiblingMaps(ownerClass, entity, s, value, writtenMaps)) any = true;
         }
         return any;
+    }
+
+    /* 事务只覆盖了分析可见的状态。目标逻辑若还从原版血量重新推导，未被写入的原版值会把结果顶回去。
+       原版血量是 net/minecraft/ 的调用，不在可内联归属内，其值在依赖图里是不透明节点，故建不出边。 */
+    private static void dumpVanillaHealthSync(LivingEntity entity) {
+        Object vanilla = null;
+        try {
+            SynchedEntityData.DataItem<?> item = (SynchedEntityData.DataItem<?>) ((Int2ObjectMap<?>)
+                    entity.getEntityData().itemsById).get(LivingEntity.DATA_HEALTH_ID.getId());
+            if (item != null) vanilla = item.getValue();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+        EcaLogger.info("[LifeProtocolGraph]   vanillaHealth id={} value={} getHealth={}",
+                LivingEntity.DATA_HEALTH_ID.getId(), vanilla, entity.getHealth());
+    }
+
+    /* 写入与回读走同一条访问路径，两者一致证明不了它就是目标逻辑读取的那个对象。
+       根表达式若是 Reference，说明访问器在分析期被常量折叠成了捕获实例，写入落在陈旧对象上。 */
+    private static void dumpSinkReceiver(Source sink, LivingEntity entity) {
+        if (!(sink instanceof ChainedFieldSource chained)) return;
+        Object receiver = null;
+        try {
+            receiver = ProtocolDataflowAnalyzer.evaluate(chained.root, ProtocolDataflowAnalyzer.newContext(entity));
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+        EcaLogger.info("[LifeProtocolGraph]     receiver rootKind={} root={} resolved={}@{}",
+                chained.root == null ? "null" : chained.root.getClass().getSimpleName(),
+                limitedText(chained.root, MAX_DIAGNOSTIC_LOG_CHARS),
+                receiver == null ? "null" : receiver.getClass().getName(),
+                receiver == null ? 0 : System.identityHashCode(receiver));
     }
 
     private static boolean writeNbtValue(NbtValueSource source, LivingEntity entity, Object value) {

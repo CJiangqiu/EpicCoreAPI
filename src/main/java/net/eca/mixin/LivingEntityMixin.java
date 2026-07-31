@@ -8,6 +8,7 @@ import net.eca.util.ResurrectionManager;
 import net.eca.util.faction.FactionManager;
 import net.eca.util.faction.FactionRelation;
 import net.eca.util.faction.FactionUtil;
+import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.HealthLockManager;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.effect.MobEffectCategory;
@@ -33,15 +34,16 @@ import java.util.ArrayList;
 @Mixin(LivingEntity.class)
 public abstract class
 LivingEntityMixin {
-    private static final String NBT_INVULNERABLE = "ecaInvulnerable";
-    private static final String NBT_HEALTH_LOCK_ENC   = "ecaHealthLockEnc";
-    private static final String NBT_HEALTH_LOCK_KEY   = "ecaHealthLockKey";
-    private static final String NBT_HEALTH_LOCK_CHECK = "ecaHealthLockCheck";
-    private static final String NBT_HEAL_BAN_VALUE = "ecaHealBanValue";
-    private static final String NBT_MAX_HEALTH_LOCK_ENC   = "ecaMaxHealthLockEnc";
-    private static final String NBT_MAX_HEALTH_LOCK_KEY   = "ecaMaxHealthLockKey";
-    private static final String NBT_MAX_HEALTH_LOCK_CHECK = "ecaMaxHealthLockCheck";
-    private static final String NBT_RESURRECTION_TRACKED = "ecaResurrectionTracked";
+    // 键在 EcaOwnedState 集中登记，改血分析据同一份清单排除 ECA 自身注入
+    private static final String NBT_INVULNERABLE = EcaOwnedState.NBT_INVULNERABLE;
+    private static final String NBT_HEALTH_LOCK_ENC   = EcaOwnedState.NBT_HEALTH_LOCK_ENC;
+    private static final String NBT_HEALTH_LOCK_KEY   = EcaOwnedState.NBT_HEALTH_LOCK_KEY;
+    private static final String NBT_HEALTH_LOCK_CHECK = EcaOwnedState.NBT_HEALTH_LOCK_CHECK;
+    private static final String NBT_HEAL_BAN_VALUE = EcaOwnedState.NBT_HEAL_BAN_VALUE;
+    private static final String NBT_MAX_HEALTH_LOCK_ENC   = EcaOwnedState.NBT_MAX_HEALTH_LOCK_ENC;
+    private static final String NBT_MAX_HEALTH_LOCK_KEY   = EcaOwnedState.NBT_MAX_HEALTH_LOCK_KEY;
+    private static final String NBT_MAX_HEALTH_LOCK_CHECK = EcaOwnedState.NBT_MAX_HEALTH_LOCK_CHECK;
+    private static final String NBT_RESURRECTION_TRACKED = EcaOwnedState.NBT_RESURRECTION_TRACKED;
 
     // 防止本钩子与其他 mod 的 setHealth 注入互相递归导致 StackOverflowError
     private static final ThreadLocal<Boolean> ECA_IN_SET_HEALTH = ThreadLocal.withInitial(() -> false);

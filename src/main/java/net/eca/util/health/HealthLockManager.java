@@ -67,15 +67,16 @@ public class HealthLockManager {
     // ==================== NBT Key ====================
 
     // 锁血（新加密，int）
-    private static final String NBT_HEALTH_LOCK_ENC   = "ecaHealthLockEnc";
-    private static final String NBT_HEALTH_LOCK_KEY   = "ecaHealthLockKey";
-    private static final String NBT_HEALTH_LOCK_CHECK = "ecaHealthLockCheck";
+    // 键在 EcaOwnedState 集中登记，改血分析据同一份清单排除 ECA 自身注入
+    private static final String NBT_HEALTH_LOCK_ENC   = EcaOwnedState.NBT_HEALTH_LOCK_ENC;
+    private static final String NBT_HEALTH_LOCK_KEY   = EcaOwnedState.NBT_HEALTH_LOCK_KEY;
+    private static final String NBT_HEALTH_LOCK_CHECK = EcaOwnedState.NBT_HEALTH_LOCK_CHECK;
     // 最大血量锁定（新加密，int）
-    private static final String NBT_MAX_HEALTH_LOCK_ENC   = "ecaMaxHealthLockEnc";
-    private static final String NBT_MAX_HEALTH_LOCK_KEY   = "ecaMaxHealthLockKey";
-    private static final String NBT_MAX_HEALTH_LOCK_CHECK = "ecaMaxHealthLockCheck";
+    private static final String NBT_MAX_HEALTH_LOCK_ENC   = EcaOwnedState.NBT_MAX_HEALTH_LOCK_ENC;
+    private static final String NBT_MAX_HEALTH_LOCK_KEY   = EcaOwnedState.NBT_MAX_HEALTH_LOCK_KEY;
+    private static final String NBT_MAX_HEALTH_LOCK_CHECK = EcaOwnedState.NBT_MAX_HEALTH_LOCK_CHECK;
     // 禁疗（旧加密，不变）
-    private static final String NBT_HEAL_BAN_VALUE = "ecaHealBanValue";
+    private static final String NBT_HEAL_BAN_VALUE = EcaOwnedState.NBT_HEAL_BAN_VALUE;
 
     // ==================== 快速路径 ====================
 

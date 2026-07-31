@@ -53,8 +53,8 @@ public final class LifeProtocolManager {
             new ConcurrentHashMap<>();
     private static final Map<Class<?>, ResolvedProtocol> VERIFIED_PROTOCOLS = new ConcurrentHashMap<>();
     private static final Map<Class<?>, BytecodeStamp> BYTECODE_STAMPS = new ConcurrentHashMap<>();
-    private static final Map<Class<?>, Map<RejectionKey, String>> REJECTED_PROTOCOLS = new ConcurrentHashMap<>();
     private static final Set<String> PROTOCOL_RESOLUTION_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> UNPROVEN_ANCHOR_MATCH_DUMPED = ConcurrentHashMap.newKeySet();
 
     public static boolean setHealth(LivingEntity entity, float targetHealth) {
         if (entity == null || !Float.isFinite(targetHealth)) return false;
@@ -62,19 +62,23 @@ public final class LifeProtocolManager {
         ProtocolDataFlowEngine.init();
 
         float before = readHealthAnchor(entity);
-        if (ProtocolValueSemantics.matchesWithDeathSemantics(before, targetHealth)) return true;
+        if (ProtocolValueSemantics.matchesWithDeathSemantics(before, targetHealth)) {
+            if (isAnchorProven(entity.getClass())) return true;
+            if (UNPROVEN_ANCHOR_MATCH_DUMPED.add(entity.getClass().getName())) {
+                EcaLogger.info("[LifeProtocol] anchor already matches but is unproven entity={} anchor={} target={}"
+                                + " (running discovery instead of reporting success)",
+                        entity.getClass().getName(), before, targetHealth);
+            }
+        }
 
         ResolvedProtocol cached = VERIFIED_PROTOCOLS.get(entity.getClass());
         if (cached != null
                 && !cached.protocol().fingerprint().classStructure().equals(classFingerprint(entity.getClass()))) {
-            REJECTED_PROTOCOLS.remove(entity.getClass());
             invalidateProtocol(entity.getClass(), "class structure fingerprint changed");
             cached = null;
         }
         if (cached != null) {
             if (executeCapability(cached.capability(), entity, targetHealth)) {
-                ProtocolVerificationManager.schedule(entity, before, targetHealth);
-                schedulePersistenceValidation(cached.protocol(), entity, targetHealth);
                 return true;
             }
             invalidateProtocol(entity.getClass(), "cached transaction failed immediate validation");
@@ -85,8 +89,6 @@ public final class LifeProtocolManager {
 
         LifeProtocol protocol = describeProtocol(entity.getClass(), capability);
         VERIFIED_PROTOCOLS.put(entity.getClass(), new ResolvedProtocol(protocol, capability));
-        ProtocolVerificationManager.schedule(entity, before, targetHealth);
-        schedulePersistenceValidation(protocol, entity, targetHealth);
         if (PROTOCOL_RESOLUTION_DUMPED.add(entity.getClass().getName())) {
             EcaLogger.info("[LifeProtocol] resolved entity={} capability={} fingerprint={}",
                     entity.getClass().getName(), capability, protocol.fingerprint().protocolStructure());
@@ -111,14 +113,6 @@ public final class LifeProtocolManager {
         }
     }
 
-    static void invalidateResolvedProtocol(Class<?> entityClass, String reason) {
-        if (entityClass == null) return;
-        ResolvedProtocol removed = VERIFIED_PROTOCOLS.remove(entityClass);
-        if (removed != null) {
-            EcaLogger.info("[LifeProtocol] rejected entity={} capability={} reason={}",
-                    entityClass.getName(), removed.capability(), reason);
-        }
-    }
 
     public static void clear() {
         VERIFIED_PROTOCOLS.clear();
@@ -126,12 +120,12 @@ public final class LifeProtocolManager {
         DATAFLOW_TABLE.clear();
         STATIC_ANALYSES.clear();
         PROTOCOL_ANALYZER.clear();
-        REJECTED_PROTOCOLS.clear();
         ANCHOR_REFLECTS_WRITES.clear();
+        UNPROVEN_ANCHOR_MATCH_DUMPED.clear();
         ANCHOR_OBSERVED.clear();
         UNOBSERVED_WRITES.clear();
-        ProtocolVerificationManager.clear();
     }
+
 
     private static Capability discoverCapability(LivingEntity entity, float targetHealth) {
         warmAnchorTrust(entity);
@@ -159,19 +153,9 @@ public final class LifeProtocolManager {
             candidates.add(Capability.NUMERIC_INVERSION);
         }
         for (Capability capability : candidates) {
-            if (isProtocolRejected(entity.getClass(), capability, targetHealth)) continue;
             if (executeCapability(capability, entity, targetHealth)) return capability;
         }
         return null;
-    }
-
-    private static void schedulePersistenceValidation(LifeProtocol protocol, LivingEntity entity,
-                                                      float targetHealth) {
-        boolean requested = protocol.validationPlan().checks().stream()
-                .anyMatch(check -> check.stage() == ValidationPlan.Stage.PERSISTENCE_RELOAD);
-        if (requested && targetHealth > 0.0f) {
-            ProtocolVerificationManager.expectPersistence(entity, targetHealth);
-        }
     }
 
     private static boolean executeCapability(Capability capability, LivingEntity entity, float targetHealth) {
@@ -185,33 +169,6 @@ public final class LifeProtocolManager {
         };
     }
 
-    static List<Float> predictDelayedHealthStates(LivingEntity entity, float targetHealth) {
-        if (entity == null || targetHealth <= 0.0f) return List.of();
-        ProtocolDataflowAnalyzer.ProtocolGraphResult graph =
-                PROTOCOL_ANALYZER.protocolGraph(entity.getClass());
-        ProtocolDataflowAnalyzer.EvalContext context = ProtocolDataflowAnalyzer.newContext(entity);
-        List<Float> predictions = new ArrayList<>();
-        for (ProtocolDataflowAnalyzer.AuthorityBranch branch : graph.authorityBranches()) {
-            for (ProtocolDataflowAnalyzer.StoreWrite maintenance : branch.maintenanceWrites()) {
-                if (!maintenance.sink().equals(branch.authority())) continue;
-                try {
-                    Object nextState = ProtocolDataflowAnalyzer.evaluate(maintenance.valueExpr(), context);
-                    if (nextState == null) continue;
-                    Object nextHealth = ProtocolDataflowAnalyzer.evaluateWithSourceOverride(
-                            graph.observation().returnExpr, context, branch.authority(), nextState);
-                    if (nextHealth instanceof Number number) {
-                        float prediction = number.floatValue();
-                        if (Float.isFinite(prediction) && !predictions.contains(prediction)) {
-                            predictions.add(prediction);
-                        }
-                    }
-                } catch (Throwable throwable) {
-                    if (throwable instanceof VirtualMachineError error) throw error;
-                }
-            }
-        }
-        return List.copyOf(predictions);
-    }
 
     private static boolean applyCausalGraphTransaction(LivingEntity entity, float targetHealth) {
         ProtocolDataflowAnalyzer.ProtocolGraphResult graph =
@@ -242,8 +199,6 @@ public final class LifeProtocolManager {
             noteAnchorResponse(entity, anchorBefore, targetHealth);
             if (verify(entity, targetHealth)) {
                 Source source = new SynchedDataSource(LivingEntity.DATA_HEALTH_ID, float.class);
-                ProtocolVerificationManager.registerRollback(entity,
-                        List.of(new ProtocolVerificationManager.SourceSnapshot(source, snapshot)));
                 return true;
             }
             EntityUtil.setBasicHealth(entity, snapshot);
@@ -479,6 +434,9 @@ public final class LifeProtocolManager {
     private static void prewarmJoinedEntityClass(Class<?> cls) {
         try {
             ProtocolDataflowAnalyzer.AnalysisResult tree = resolveTree(cls);
+            /* 维护写入扫描的预算只在后台线程放宽，必须在此处完成并进缓存；
+               留给首次改血在服务器线程上惰性触发，就只能拿到小预算的残缺结果。 */
+            PROTOCOL_ANALYZER.protocolGraph(cls);
             if (tree != ProtocolDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
                     && tree.classify() != ProtocolDataflowAnalyzer.AnalysisResult.Kind.CONST_OVERRIDE) return;
             EcaLogger.info("[SemanticSlice] join prewarm started entity={}", cls.getName());
@@ -657,7 +615,6 @@ public final class LifeProtocolManager {
             if (wrote) noteAnchorResponse(target, anchorBefore, targetHealth);
             actual = readHealthAnchor(target);
             if (wrote && ProtocolValueSemantics.matchesWithDeathSemantics(actual, targetHealth)) {
-                ProtocolVerificationManager.registerStateRollback(target, snapshot);
                 return true;
             }
         }
@@ -870,6 +827,14 @@ public final class LifeProtocolManager {
         if (target != null) isAnchorTrustworthy(target);
     }
 
+    /* 锚点是否已被证据证明反映真实存储。仅接受注册锚点与观测到的写入联动两种证据，
+       不接受 isAnchorTrustworthy 的原版字段弱探测——诱饵 getHealth 恰好能通过弱探测，
+       据此把"读数已等于目标"当作改血成功会得到静默假成功。 */
+    private static boolean isAnchorProven(Class<?> cls) {
+        if (cls == null) return false;
+        return hasHealthAnchor(cls) || Boolean.TRUE.equals(ANCHOR_REFLECTS_WRITES.get(cls));
+    }
+
     /* 观测到锚点随两个不同写入分别读回对应值时提升为可信。这比原版字段探测强：
        写入经由目标自身的 writer 驱动，直接证明了锚点反映真实存储。 */
     public static void promoteAnchorTrust(Class<?> cls) {
@@ -1003,33 +968,10 @@ public final class LifeProtocolManager {
     /* 延迟复查发现写入被实体自身逻辑改回：解除该类"已验证可写"的两处闭锁，
        使后续改血重新收集解耦证据、并允许重新裁决有效血量模型。
        不撤销模型与桥接本身——值没留住说明防护把它改回去了，不说明存储定位错了。 */
-    static void onDelayedRollback(Class<?> cls, float targetHealth) {
-        if (cls == null) return;
-        ResolvedProtocol resolved = VERIFIED_PROTOCOLS.get(cls);
-        if (resolved != null) {
-            REJECTED_PROTOCOLS.computeIfAbsent(cls, ignored -> new ConcurrentHashMap<>())
-                    .put(new RejectionKey(resolved.capability(), TargetDomain.of(targetHealth)),
-                            resolved.protocol().fingerprint().classStructure());
-        }
-        ANCHOR_OBSERVED.remove(cls);
-        ProtocolRuntimeModel model = ProtocolRuntimeModel.forClass(cls);
-        model.setEffectiveObservationConfirmed(false);
-        // 下次改血时放行第三阶段，去实体之外找持有真实血量的镜像
-        model.markDelayedRollbackObserved();
-    }
 
-    private static boolean isProtocolRejected(Class<?> entityClass, Capability capability, float targetHealth) {
-        Map<RejectionKey, String> rejected = REJECTED_PROTOCOLS.get(entityClass);
-        if (rejected == null) return false;
-        RejectionKey key = new RejectionKey(capability, TargetDomain.of(targetHealth));
-        String rejectedFingerprint = rejected.get(key);
-        if (rejectedFingerprint == null) return false;
-        String currentFingerprint = classFingerprint(entityClass);
-        if (rejectedFingerprint.equals(currentFingerprint)) return true;
-        rejected.remove(key, rejectedFingerprint);
-        if (rejected.isEmpty()) REJECTED_PROTOCOLS.remove(entityClass, rejected);
-        return false;
-    }
+
+
+
 
     /* 存在写入成功但观测不到的源，且该类从未通过校验时判定为解耦，供后续通道决定是否改用替代锚点。 */
     public static boolean isHealthReadDecoupled(Class<?> cls) {
@@ -1097,14 +1039,8 @@ public final class LifeProtocolManager {
                         List.of(new ValueExpression.Parameter(0,
                                 "Lnet/minecraft/world/entity/LivingEntity;"), target), states)));
         List<ValidationPlan.Check> checks = new ArrayList<>();
+        // 改血是一次性事务：写入当场回读即为判据，不做跨 tick 的持续观察
         checks.add(new ValidationPlan.Check(ValidationPlan.Stage.IMMEDIATE_READBACK, 0, true));
-        checks.add(new ValidationPlan.Check(ValidationPlan.Stage.AFTER_TICK, 1, true));
-        boolean persistentSource = sources.stream()
-                .anyMatch(source -> source instanceof ProtocolDataflowAnalyzer.MapEntrySource);
-        if (capability == Capability.SEMANTIC_INTERSECTION
-                || capability == Capability.CAUSAL_GRAPH_TRANSACTION || persistentSource) {
-            checks.add(new ValidationPlan.Check(ValidationPlan.Stage.PERSISTENCE_RELOAD, 0, false));
-        }
 
         ValueExpression authoritativeRead = new ValueExpression.Invocation(reader,
                 new ValueExpression.Parameter(0, "Lnet/minecraft/world/entity/LivingEntity;"), List.of(), "F");
@@ -1204,17 +1140,7 @@ public final class LifeProtocolManager {
     private record BytecodeStamp(byte[] bytes, String fingerprint) {
     }
 
-    private record RejectionKey(Capability capability, TargetDomain targetDomain) {
-    }
 
-    private enum TargetDomain {
-        LETHAL,
-        POSITIVE;
-
-        private static TargetDomain of(float targetHealth) {
-            return targetHealth <= 0.0f ? LETHAL : POSITIVE;
-        }
-    }
 
     private enum Capability {
         VANILLA_STATE,

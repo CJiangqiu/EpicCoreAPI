@@ -124,8 +124,6 @@ public final class ProtocolNumericInverter {
                 diag(entity, "descent did not reach target (cells=" + cells.size() + " relevant=" + relevant.size() + ")");
                 rollback(cells, snapshot);
             } else {
-                ProtocolVerificationManager.registerNumericRollback(
-                        entity, new NumericRollback(cells, snapshot));
                 EcaLogger.info("[ProtocolNumericInverter] hit entity={} target={} cells={} relevant={}",
                         entity.getClass().getName(), target, cells.size(), relevant.size());
             }

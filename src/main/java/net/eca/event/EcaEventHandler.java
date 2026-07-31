@@ -14,7 +14,6 @@ import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.eca.util.faction.FactionManager;
 import net.eca.util.health.internal.LifeProtocolManager;
-import net.eca.util.health.internal.ProtocolVerificationManager;
 import net.eca.util.faction.FactionRelation;
 import net.eca.util.raid.RaidManager;
 import net.minecraft.network.chat.Component;
@@ -58,7 +57,6 @@ public class EcaEventHandler {
             event.getEntity() instanceof LivingEntity living) {
             EntityExtensionManager.onEntityJoin(living, serverLevel);
             ForceLoadingManager.onEntityJoin(living, serverLevel);
-            ProtocolVerificationManager.onEntityJoin(living);
             LifeProtocolManager.onEntityJoinLevel(living);
         }
     }
@@ -150,7 +148,6 @@ public class EcaEventHandler {
     @SubscribeEvent
     public void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
-        ProtocolVerificationManager.onServerTick(event.getServer());
         BossShowPlaybackTracker.onServerTick(event.getServer());
     }
 

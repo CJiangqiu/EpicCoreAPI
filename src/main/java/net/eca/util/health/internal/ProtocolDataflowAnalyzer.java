@@ -2,13 +2,17 @@ package net.eca.util.health.internal;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.config.EcaConfiguration;
+import net.eca.coremod.EcaTransformerManager;
 import net.eca.util.EcaLogger;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.Handle;
+import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.*;
@@ -32,6 +36,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.IntPredicate;
 import java.util.function.Supplier;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -72,6 +77,11 @@ public final class ProtocolDataflowAnalyzer {
     public static final McMethod HURT             = new McMethod("m_6469_", "hurt", "(" + DAMAGE_SOURCE_DESC + "F)Z");
     public static final McMethod ACTUALLY_HURT    = new McMethod("m_6475_", "actuallyHurt", "(" + DAMAGE_SOURCE_DESC + "F)V");
     public static final McMethod SET_HEALTH       = new McMethod("m_21153_", "setHealth", "(F)V");
+    /* 每 tick 复跑的语义出口：维护写入(含实体外的影子记录)几乎都挂在这三个上，
+       故按名字显式登记，不再只靠"无参 void 覆写"的签名形态命中。 */
+    public static final McMethod TICK             = new McMethod("m_8119_", "tick", "()V");
+    public static final McMethod BASE_TICK        = new McMethod("m_6075_", "baseTick", "()V");
+    public static final McMethod AI_STEP          = new McMethod("m_8107_", "aiStep", "()V");
 
     /* ==================== 语义交集：isAlive/isDeadOrDying 数据流逆向 ==================== */
 
@@ -105,6 +115,13 @@ public final class ProtocolDataflowAnalyzer {
     private static final Set<String> WRAPPER_CALL_OWNERS = ConcurrentHashMap.newKeySet();
     private static final Set<String> WRAPPER_SOURCE_LABEL_PREFIXES = ConcurrentHashMap.newKeySet();
     private static final Set<String> WRAPPER_REFERENCE_VALUES = ConcurrentHashMap.newKeySet();
+    /* accessor ID 在注册后才确定，故由调用者以谓词注入而非静态登记。 */
+    private static volatile IntPredicate ownedSynchedDataIds = id -> false;
+
+    public static void setOwnedSynchedDataIds(IntPredicate predicate) {
+        if (predicate != null) ownedSynchedDataIds = predicate;
+    }
+
     public static void setStripConfig(Set<String> wrapperCallOwners, Set<String> wrapperSourceLabelPrefixes) {
         setStripConfig(wrapperCallOwners, wrapperSourceLabelPrefixes, Set.of());
     }
@@ -1184,6 +1201,34 @@ public final class ProtocolDataflowAnalyzer {
         }
         if (e instanceof OptionalContentExpr optional) return dependsOnDamageInput(optional.optionalExpr());
         if (e instanceof StoreWrite write) return dependsOnDamageInput(write.valueExpr());
+        return false;
+    }
+
+    /* getHealth 在多个存储之间按运行期条件取值时，权威不是单一状态：写入其中一支能通过即时回读，
+       但下一 tick 取到另一支就会把读数算回去。此类实体的事务必须覆盖同一 Choice 的全部分支。 */
+    public static boolean hasMultiBranchAuthority(Expr e) {
+        if (e == null) return false;
+        if (e instanceof Choice c) {
+            Set<Source> distinct = new LinkedHashSet<>();
+            for (Expr a : c.alternatives()) distinct.addAll(collectSources(a));
+            if (distinct.size() > 1) return true;
+            for (Expr a : c.alternatives()) if (hasMultiBranchAuthority(a)) return true;
+            return false;
+        }
+        if (e instanceof Call call) {
+            for (Expr a : call.args()) if (hasMultiBranchAuthority(a)) return true;
+            return false;
+        }
+        if (e instanceof Op op) {
+            for (Expr a : op.args()) if (hasMultiBranchAuthority(a)) return true;
+            return false;
+        }
+        if (e instanceof Closure closure) {
+            for (Expr a : closure.captured()) if (hasMultiBranchAuthority(a)) return true;
+            return false;
+        }
+        if (e instanceof OptionalContentExpr optional) return hasMultiBranchAuthority(optional.optionalExpr());
+        if (e instanceof StoreWrite write) return hasMultiBranchAuthority(write.valueExpr());
         return false;
     }
 
@@ -2321,6 +2366,16 @@ public final class ProtocolDataflowAnalyzer {
         return String.join("|", labels);
     }
 
+    /* 调用者自身的注入不是宿主的血量存储，进入建模只会污染签名并浪费扫描预算。 */
+    public static List<Source> withoutEcaOwnedSources(List<Source> sources) {
+        if (sources == null || sources.isEmpty()) return List.of();
+        List<Source> kept = new ArrayList<>(sources.size());
+        for (Source source : sources) {
+            if (!isEcaOwnedSource(source)) kept.add(source);
+        }
+        return kept;
+    }
+
     /* 从候选存储源推导有效血量模型；无法确定时返回 null。
        该分析需要扫描类指令，必须在后台线程调用。 */
     public static EffectiveProtocolRuntimeModel resolveEffectiveProtocolRuntimeModel(Class<?> entityClass, List<Source> candidates) {
@@ -2341,6 +2396,8 @@ public final class ProtocolDataflowAnalyzer {
         EffectiveProtocolRuntimeModel cached = EFFECTIVE_MODEL_CACHE.get(entityClass);
         if (cached != null) return cached;
         if (candidates == null) return null;
+        candidates = withoutEcaOwnedSources(candidates);
+        if (candidates.isEmpty()) return null;
         String signature = candidateSignature(candidates);
         if (signature.equals(EFFECTIVE_MODEL_MISSES.get(entityClass))) return null;
         EffectiveProtocolRuntimeModel model = null;
@@ -2863,6 +2920,13 @@ public final class ProtocolDataflowAnalyzer {
         int expectedArgs = argTypes.length + (isStatic ? 0 : 1);
         if (args.size() != expectedArgs) return null;
 
+        // 到不了权威存储的调用直接跳过，额度留给真正通往它的路径
+        if (!mayWriteAuthority(owner, call.name, call.desc, ctx.authorityFingerprint, 0)) {
+            ctx.inlineSkipped++;
+            return null;
+        }
+        ctx.inlineAllowed++;
+
         int localCount = isStatic ? 0 : 1;
         for (Type argType : argTypes) localCount += argType.getSize();
         TaintValue[] seedLocals = new TaintValue[localCount + 8];
@@ -2878,6 +2942,258 @@ public final class ProtocolDataflowAnalyzer {
         }
         ctx.consumeInline();
         return analyzeMethodWrites(owner, call.name, call.desc, seedLocals, ctx, depth + 1);
+    }
+
+    /* 内联准入预扫：只读指令表判断被调方法是否可能写到权威存储，不做数据流分析。
+       判据必须针对具体权威——大型实体回调转发出去的过程大多确实在写状态，只是写的是别的字段，
+       按"是否写任何状态"筛等于不筛。看不见字节码时保守放行，宁可多展开也不漏真正的写入。 */
+    /* 记忆化后总工作量与可达方法数同阶而非路径数，故深度可放宽；环由缓存占位 TRUE 兜住。 */
+    private static final int MAY_WRITE_SCAN_DEPTH = 24;
+    private static final int MAY_WRITE_CACHE_LIMIT = 20_000;
+    private static final Map<String, Boolean> MAY_WRITE_STATE_CACHE = new ConcurrentHashMap<>();
+
+    /* 权威存储的语法指纹：字段按 owner#name#desc，同步单元按持有 accessor 的静态字段，
+       NBT 按键名。任一权威刻画不出来就整体不可用，退回不加限制的旧行为。 */
+    private record AuthorityFingerprint(Set<String> fieldKeys, Set<String> accessorKeys,
+                                        Set<String> nbtKeys, boolean usable) {
+        /* 判定结果依赖于"要找哪个权威"，缓存键必须带上它，否则不同实体之间会串用结论。 */
+        String cacheScope() {
+            return new TreeSet<>(fieldKeys) + "|" + new TreeSet<>(accessorKeys) + "|" + new TreeSet<>(nbtKeys);
+        }
+
+        boolean matchesField(FieldInsnNode field) {
+            return fieldKeys.contains(field.owner + "#" + field.name + "#" + field.desc);
+        }
+
+        boolean matchesAccessor(FieldInsnNode field) {
+            return accessorKeys.contains(field.owner + "#" + field.name);
+        }
+    }
+
+    private static AuthorityFingerprint fingerprintAuthorities(Class<?> entityClass, Collection<Source> authorities) {
+        Set<String> fieldKeys = new HashSet<>();
+        Set<String> accessorKeys = new HashSet<>();
+        Set<String> nbtKeys = new HashSet<>();
+        boolean usable = !authorities.isEmpty();
+        for (Source authority : authorities) {
+            if (authority instanceof SynchedDataSource synched) {
+                String accessorField = findAccessorFieldKey(entityClass, synched.accessor);
+                if (accessorField == null) usable = false;
+                else accessorKeys.add(accessorField);
+            } else if (authority instanceof FieldChainSource chain && !chain.chain.isEmpty()) {
+                fieldKeys.add(fieldKey(chain.chain.get(chain.chain.size() - 1)));
+            } else if (authority instanceof ChainedFieldSource chain && !chain.chain.isEmpty()) {
+                fieldKeys.add(fieldKey(chain.chain.get(chain.chain.size() - 1)));
+            } else if (authority instanceof NbtValueSource nbt
+                    && nbt.keyExpr instanceof Reference reference && reference.value() instanceof String key) {
+                nbtKeys.add(key);
+            } else {
+                usable = false;
+            }
+        }
+        return new AuthorityFingerprint(fieldKeys, accessorKeys, nbtKeys, usable);
+    }
+
+    private static String fieldKey(FieldStep step) {
+        return step.ownerInternal() + "#" + step.name() + "#" + step.desc();
+    }
+
+    /* accessor 对象本身不带来源信息，只能在实体继承链的静态字段里反查持有它的那个。 */
+    private static String findAccessorFieldKey(Class<?> entityClass, EntityDataAccessor<?> accessor) {
+        for (Class<?> owner = entityClass; owner != null && owner != Object.class; owner = owner.getSuperclass()) {
+            for (Field field : owner.getDeclaredFields()) {
+                if (!Modifier.isStatic(field.getModifiers())
+                        || !EntityDataAccessor.class.isAssignableFrom(field.getType())) continue;
+                try {
+                    field.setAccessible(true);
+                    if (field.get(null) == accessor) return internalName(owner) + "#" + field.getName();
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                }
+            }
+        }
+        return null;
+    }
+
+    /* 正向定位写入者：已知权威的 accessor/字段之后，直接在实体所属 jar 里找引用它的方法，
+       不再指望从 tick 逐层内联撞上去。此处只读指令表、不做数据流、不加载类，
+       故与被写入方法在过程图里离 tick 多远无关。 */
+    private record WriterSite(String ownerInternal, String methodName, String methodDesc) {}
+
+    private static final Map<String, List<WriterSite>> AUTHORITY_WRITER_SITES = new ConcurrentHashMap<>();
+    private static final int WRITER_SCAN_CLASS_LIMIT = 30_000;
+
+    private static List<WriterSite> findAuthorityWriterSites(Class<?> entityClass, AuthorityFingerprint fingerprint) {
+        if (fingerprint == null || !fingerprint.usable()) return List.of();
+        if (fingerprint.accessorKeys().isEmpty() && fingerprint.fieldKeys().isEmpty()) return List.of();
+        String scope = modScopePrefix(entityClass);
+        if (scope == null) return List.of();
+        return AUTHORITY_WRITER_SITES.computeIfAbsent(scope + "|" + fingerprint.cacheScope(),
+                ignored -> scanLoadedClassesForWriterSites(scope, fingerprint));
+    }
+
+    /* 写入权威的过程与声明该 accessor 的实体同属一个模组，按包前缀限定扫描范围；
+       CodeSource 在 Forge 下常是虚拟路径，不能用 jar 文件定位。 */
+    private static String modScopePrefix(Class<?> entityClass) {
+        String name = entityClass.getName();
+        int cut = 0;
+        for (int segment = 0; segment < 3; segment++) {
+            int dot = name.indexOf('.', cut);
+            if (dot < 0) break;
+            cut = dot + 1;
+        }
+        return cut <= 1 ? null : name.substring(0, cut - 1);
+    }
+
+    private static List<WriterSite> scanLoadedClassesForWriterSites(String scope, AuthorityFingerprint fingerprint) {
+        List<WriterSite> sites = new ArrayList<>();
+        long startNanos = System.nanoTime();
+        int[] scanned = {0};
+        boolean enumerated = EcaTransformerManager.forEachLoadedClass(clazz -> {
+            if (clazz == null || scanned[0] >= WRITER_SCAN_CLASS_LIMIT) return;
+            if (!clazz.getName().startsWith(scope)) return;
+            byte[] bytes = classBytes(clazz);
+            if (bytes == null) return;
+            scanned[0]++;
+            try {
+                collectWriterSites(new ClassReader(bytes), fingerprint, sites);
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+            }
+        });
+        EcaLogger.info("[ProtocolGraph] writer-site scan scope={} enumerated={} classes={} sites={} elapsedMs={}",
+                scope, enumerated, scanned[0], sites.size(), (System.nanoTime() - startNanos) / 1_000_000L);
+        return List.copyOf(sites);
+    }
+
+    private static void collectWriterSites(ClassReader reader, AuthorityFingerprint fingerprint,
+                                           List<WriterSite> sites) {
+        String[] ownerInternal = {reader.getClassName()};
+        reader.accept(new ClassVisitor(Opcodes.ASM9) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                             String signature, String[] exceptions) {
+                return new MethodVisitor(Opcodes.ASM9) {
+                    private boolean recorded;
+
+                    @Override
+                    public void visitFieldInsn(int opcode, String owner, String fieldName, String fieldDesc) {
+                        if (recorded) return;
+                        boolean hit = opcode == Opcodes.GETSTATIC
+                                && fingerprint.accessorKeys().contains(owner + "#" + fieldName);
+                        hit |= opcode == Opcodes.PUTFIELD
+                                && fingerprint.fieldKeys().contains(owner + "#" + fieldName + "#" + fieldDesc);
+                        if (!hit) return;
+                        recorded = true;
+                        sites.add(new WriterSite(ownerInternal[0], name, descriptor));
+                    }
+                };
+            }
+        }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+    }
+
+    /* 命中的方法单独分析：它们自身通常很小，预算充裕，不受大型 tick 过程图的牵连。 */
+    private static List<StoreWrite> collectAuthorityWriterWrites(Class<?> entityClass,
+                                                                AuthorityFingerprint fingerprint) {
+        List<StoreWrite> writes = new ArrayList<>();
+        for (WriterSite site : findAuthorityWriterSites(entityClass, fingerprint)) {
+            Class<?> owner = loadClass(site.ownerInternal());
+            if (owner == null) continue;
+            MethodNode method;
+            try {
+                method = findMethodNode(classNode(owner), site.methodName(), site.methodDesc());
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                continue;
+            }
+            if (method == null || method.instructions.size() == 0) continue;
+            boolean isStatic = (method.access & Opcodes.ACC_STATIC) != 0;
+            AnalysisCtx context = newOverrideScanContext();
+            Expr expression = analyzeMethodWrites(owner, site.methodName(), site.methodDesc(),
+                    seedWriterSiteInputs(site.methodDesc(), isStatic), context, 0);
+            collectStoreWrites(expression, writes);
+        }
+        return writes;
+    }
+
+    /* 静态过程以实体为形参接收目标，须把该形参标成实体本体，否则字段源无法归位到实体。 */
+    private static TaintValue[] seedWriterSiteInputs(String desc, boolean isStatic) {
+        TaintValue[] locals = seedMethodInputs(desc, isStatic);
+        if (!isStatic) return locals;
+        Type[] argumentTypes = Type.getArgumentTypes(desc);
+        int local = 0;
+        for (Type argumentType : argumentTypes) {
+            if (argumentType.getSort() == Type.OBJECT && isEntityInternalName(argumentType.getInternalName())) {
+                locals[local] = new TaintValue(argumentType.getSize(), EntityParamMarker.I);
+                break;
+            }
+            local += argumentType.getSize();
+        }
+        return locals;
+    }
+
+    private static boolean isEntityInternalName(String internal) {
+        Class<?> type = loadClass(internal);
+        return type != null && Entity.class.isAssignableFrom(type);
+    }
+
+    private static boolean mayWriteAuthority(Class<?> owner, String name, String desc,
+                                             AuthorityFingerprint fingerprint, int depth) {
+        if (owner == null || fingerprint == null || !fingerprint.usable()) return true;
+        String key = fingerprint.cacheScope() + "@" + internalName(owner) + "#" + name + desc;
+        Boolean cached = MAY_WRITE_STATE_CACHE.get(key);
+        if (cached != null) return cached;
+        if (depth >= MAY_WRITE_SCAN_DEPTH) return true;
+        if (MAY_WRITE_STATE_CACHE.size() > MAY_WRITE_CACHE_LIMIT) MAY_WRITE_STATE_CACHE.clear();
+        // 互递归期间先占位为"可能写"，环上的方法因此保守放行而不会缓存出错误的 false
+        MAY_WRITE_STATE_CACHE.put(key, Boolean.TRUE);
+        boolean result = scanMayWriteAuthority(owner, name, desc, fingerprint, depth);
+        MAY_WRITE_STATE_CACHE.put(key, result);
+        return result;
+    }
+
+    private static boolean scanMayWriteAuthority(Class<?> owner, String name, String desc,
+                                                 AuthorityFingerprint fingerprint, int depth) {
+        MethodNode method;
+        try {
+            method = findMethodNode(classNode(owner), name, desc);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return true;
+        }
+        if (method == null) return true;
+        if (method.instructions.size() == 0) return false;
+        for (AbstractInsnNode insn : method.instructions) {
+            if (insn instanceof FieldInsnNode field) {
+                if (insn.getOpcode() == Opcodes.PUTFIELD && fingerprint.matchesField(field)) return true;
+                // 读取 accessor 静态字段是使用该同步单元的必经指令，读写在此不作区分
+                if (insn.getOpcode() == Opcodes.GETSTATIC && fingerprint.matchesAccessor(field)) return true;
+                continue;
+            }
+            if (!(insn instanceof MethodInsnNode call)) continue;
+            if (!fingerprint.nbtKeys().isEmpty() && isNbtPut(call)) return true;
+            // 不会被内联的归属不必递归：调用方自身的写入指令已在本轮扫描中判过
+            if (!isInlinableOwner(call)) continue;
+            Class<?> callee = loadClass(call.owner);
+            if (callee == null) return true;
+            Class<?> resolved = resolveInvocationOwner(callee, call.name, call.desc);
+            if (mayWriteAuthority(resolved == null ? callee : resolved, call.name, call.desc,
+                    fingerprint, depth + 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /* 与 tryInlineWriteCall 的归属过滤保持一致，否则预扫会对实际不展开的调用做无谓递归。 */
+    private static boolean isInlinableOwner(MethodInsnNode call) {
+        if (call.name.startsWith("<")) return false;
+        if (call.owner.startsWith("java/") || call.owner.startsWith("javax/")
+                || call.owner.startsWith("jdk/") || call.owner.startsWith("com/google/")) return false;
+        if (call.owner.startsWith("net/minecraftforge/") || call.owner.startsWith("org/spongepowered/")) {
+            return false;
+        }
+        return !call.owner.startsWith("net/minecraft/") || isHealthLifecycleCall(call);
     }
 
     private static boolean isHealthLifecycleCall(MethodInsnNode call) {
@@ -3247,7 +3563,13 @@ public final class ProtocolDataflowAnalyzer {
             return new ProtocolGraphResult(AnalysisResult.EMPTY, List.of(), List.of(), List.of());
         }
 
-        List<StoreWrite> recurringWrites = collectRecurringWrites(entityClass);
+        AuthorityFingerprint fingerprint = fingerprintAuthorities(entityClass, observation.sources);
+        List<StoreWrite> recurringWrites = new ArrayList<>(collectRecurringWrites(entityClass, fingerprint));
+        /* tick 遍历只能覆盖过程图里够得着的部分；正向定位补上直接引用权威的写入者，
+           两者合并后再建依赖图。 */
+        for (StoreWrite write : collectAuthorityWriterWrites(entityClass, fingerprint)) {
+            if (!recurringWrites.contains(write)) recurringWrites.add(write);
+        }
         Map<Source, Set<Source>> dependencies = new HashMap<>();
         for (StoreWrite write : recurringWrites) {
             Source sink = canonicalSource(dependencies.keySet(), write.sink());
@@ -3278,6 +3600,7 @@ public final class ProtocolDataflowAnalyzer {
                 }
             }
             branches.add(new AuthorityBranch(authority, maintenance, dependencySources, transactionSources));
+            dumpAuthorityBranch(entityClass, authority, dependencies, reachable, transactionSources);
         }
 
         List<StoreWrite> persistenceWrites = collectPersistenceWrites(entityClass);
@@ -3323,15 +3646,18 @@ public final class ProtocolDataflowAnalyzer {
         return false;
     }
 
-    private static List<StoreWrite> collectRecurringWrites(Class<?> entityClass) {
-        return collectOverrideWrites(entityClass, false);
+    private static List<StoreWrite> collectRecurringWrites(Class<?> entityClass,
+                                                          AuthorityFingerprint fingerprint) {
+        return collectOverrideWrites(entityClass, false, fingerprint);
     }
 
+    /* 持久化回调本身很小，实测不触预算，无需按权威裁剪。 */
     private static List<StoreWrite> collectPersistenceWrites(Class<?> entityClass) {
-        return collectOverrideWrites(entityClass, true);
+        return collectOverrideWrites(entityClass, true, null);
     }
 
-    private static List<StoreWrite> collectOverrideWrites(Class<?> entityClass, boolean persistence) {
+    private static List<StoreWrite> collectOverrideWrites(Class<?> entityClass, boolean persistence,
+                                                         AuthorityFingerprint fingerprint) {
         List<StoreWrite> writes = new ArrayList<>();
         if (entityClass == null || entityClass.getClassLoader() == null) return writes;
         for (Class<?> owner = entityClass; owner != null && owner != LivingEntity.class;
@@ -3347,18 +3673,99 @@ public final class ProtocolDataflowAnalyzer {
             for (MethodNode method : node.methods) {
                 if (persistence != isPersistenceOverride(owner, method)) continue;
                 if (!persistence && !isRecurringOverride(owner, method)) continue;
-                AnalysisCtx context = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+                AnalysisCtx context = newOverrideScanContext();
+                context.authorityFingerprint = fingerprint;
                 TaintValue[] inputs = seedMethodInputs(method.desc, false);
+                long startNanos = System.nanoTime();
+                int before = writes.size();
                 Expr expression = analyzeMethodWrites(
                         owner, method.name, method.desc, inputs, context, 0);
                 collectStoreWrites(expression, writes);
+                dumpOverrideWriteScan(owner, method, persistence, writes.size() - before,
+                        context, System.nanoTime() - startNanos);
             }
         }
         return List.copyOf(writes);
     }
 
+    /* 维护写入常藏在实体回调转发出去的大型静态过程末尾，按 getHealth 的预算(2s/500 内联)
+       会在走到之前就熔断。此扫描只在后台预热线程放宽预算；服务器线程上遇到缓存未命中时
+       沿用原预算，宁可这次收集不全，也不能让主线程停顿。 */
+    /* 实测瓶颈单一：6000 次内联耗尽时节点只用掉三成、时间只用掉两成，
+       故内联额度按实测比例上调，另外两项同步放大以免换成新的瓶颈。 */
+    private static final int OVERRIDE_SCAN_INLINE_BUDGET = 40_000;
+    private static final int OVERRIDE_SCAN_NODE_BUDGET = 12_000_000;
+    private static final long OVERRIDE_SCAN_BUDGET_NANOS = 45_000_000_000L;
+
+    private static AnalysisCtx newOverrideScanContext() {
+        if ("Server thread".equals(Thread.currentThread().getName())) {
+            return new AnalysisCtx(DEFAULT_MAX_DEPTH);
+        }
+        AnalysisCtx context = new AnalysisCtx(DEFAULT_MAX_DEPTH,
+                System.nanoTime() + OVERRIDE_SCAN_BUDGET_NANOS);
+        context.inlineBudget = OVERRIDE_SCAN_INLINE_BUDGET;
+        context.nodeBudget = OVERRIDE_SCAN_NODE_BUDGET;
+        return context;
+    }
+
+    /* 维护/持久化写入的收集失败此前被 analyzeMethodWrites 的兜底 catch 静默吞掉，
+       无法区分"该方法确实不写状态"与"预算耗尽提前退出"。每个方法只报一次。 */
+    private static final Set<String> OVERRIDE_SCAN_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 事务只覆盖权威本身时，需要区分"伴随状态没被收集"与"收集到了但没连上依赖边"，
+       故把收集到的维护写入 sink 与最终入选的事务状态一并打出。每个权威只报一次。 */
+    private static final Set<String> AUTHORITY_BRANCH_DUMPED = ConcurrentHashMap.newKeySet();
+
+    private static void dumpAuthorityBranch(Class<?> entityClass, Source authority,
+                                            Map<Source, Set<Source>> dependencies, Set<Source> reachable,
+                                            List<Source> transactionSources) {
+        String key = entityClass.getName() + "|" + authority.label;
+        if (!AUTHORITY_BRANCH_DUMPED.add(key)) return;
+        /* 直接依赖为空说明权威的维护写入没被收集到；非空却选不出事务状态，
+           则是互相可达这条判据把伴随状态筛掉了。两者改法不同，必须分开看。 */
+        EcaLogger.info("[ProtocolGraph] authority={} entity={} directDeps={}",
+                authority.label, entityClass.getName(),
+                labelsOf(dependencies.getOrDefault(canonicalSource(dependencies.keySet(), authority), Set.of())));
+        EcaLogger.info("[ProtocolGraph]   reachable={}", labelsOf(reachable));
+        EcaLogger.info("[ProtocolGraph]   transactionStates={}", labelsOf(transactionSources));
+    }
+
+    private static List<String> labelsOf(Collection<Source> sources) {
+        List<String> labels = new ArrayList<>();
+        for (Source source : sources) if (!labels.contains(source.label)) labels.add(source.label);
+        return labels;
+    }
+
+    private static void dumpOverrideWriteScan(Class<?> owner, MethodNode method, boolean persistence,
+                                              int collected, AnalysisCtx context, long elapsedNanos) {
+        String key = owner.getName() + "#" + method.name + method.desc;
+        if (!OVERRIDE_SCAN_DUMPED.add(key)) return;
+        boolean exhausted = context.nodeBudget <= 0 || context.inlineBudget <= 0
+                || System.nanoTime() > context.deadlineNanos;
+        EcaLogger.info("[ProtocolGraph] {} scan {}#{}{} collected={} exhausted={} inlineLeft={} nodeLeft={}"
+                        + " gate={}/{}allowed fingerprint={} elapsedMs={}",
+                persistence ? "persistence" : "recurring", owner.getName(), method.name, method.desc,
+                collected, exhausted, context.inlineBudget, context.nodeBudget,
+                context.inlineSkipped, context.inlineAllowed,
+                context.authorityFingerprint == null ? "none"
+                        : context.authorityFingerprint.usable() ? context.authorityFingerprint.cacheScope() : "UNUSABLE",
+                elapsedNanos / 1_000_000L);
+    }
+
+    /* 显式登记的 tick 出口即便没有覆写父类也要收集；其余无参 void 覆写仍按形态命中，
+       以覆盖各模组自定义的周期性回调。 */
     private static boolean isRecurringOverride(Class<?> owner, MethodNode method) {
+        if (isRecurringSemanticEntry(method)) return true;
         return isVoidOverride(owner, method) && Type.getArgumentTypes(method.desc).length == 0;
+    }
+
+    private static boolean isRecurringSemanticEntry(MethodNode method) {
+        if (method == null || (method.access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT)) != 0) return false;
+        for (McMethod entry : new McMethod[]{TICK, BASE_TICK, AI_STEP}) {
+            if (entry.desc().equals(method.desc)
+                    && (entry.srg().equals(method.name) || entry.mcp().equals(method.name))) return true;
+        }
+        return false;
     }
 
     private static boolean isPersistenceOverride(Class<?> owner, MethodNode method) {
@@ -3709,11 +4116,27 @@ public final class ProtocolDataflowAnalyzer {
         return isWrapperOwner(call.owner());
     }
 
+    /* 候选存储是否属于调用者自身的注入。NBT 键与同步单元不带 owner 信息，
+       只能按登记的键名与运行期 accessor ID 判定，否则调用者会解算并覆写自己的状态。 */
+    public static boolean isEcaOwnedSource(Source source) {
+        return source != null && isEcaHealthWrapperSource(source);
+    }
+
     private static boolean isEcaHealthWrapperSource(Source source) {
         for (String prefix : WRAPPER_SOURCE_LABEL_PREFIXES) {
             if (source.label.startsWith(prefix)) return true;
         }
+        if (source instanceof SynchedDataSource synched
+                && ownedSynchedDataIds.test(synched.accessor.getId())) return true;
+        if (source instanceof NbtValueSource nbt && isWrapperOwnedNbtKey(nbt.keyExpr)) return true;
         return hasWrapperOwnedFieldStep(source);
+    }
+
+    /* 键在字节码里是常量池字符串，折叠后以 Reference 承载。 */
+    private static boolean isWrapperOwnedNbtKey(Expr keyExpr) {
+        return keyExpr instanceof Reference reference
+                && reference.value() instanceof String key
+                && WRAPPER_REFERENCE_VALUES.contains(key);
     }
 
     /* 调用者 hook 的中转存储会被建模成字段链源，字段名与实体自身的血量字段无法区分，
@@ -3918,6 +4341,11 @@ public final class ProtocolDataflowAnalyzer {
         /* 方法在当前类找不到时是否沿继承链上溯查找。默认关闭，保持既有各通道的分析结果不变；
            有效血量模型扫描需要展开继承自基类的访问器，单独开启。 */
         boolean inheritedInline = false;
+        /* 维护写入扫描时携带；为空表示不限制内联准入(其余通道沿用旧行为)。 */
+        AuthorityFingerprint authorityFingerprint = null;
+        //准入闸门的放行/拦截计数，用于判断定向过滤是否真的生效
+        int inlineAllowed = 0;
+        int inlineSkipped = 0;
         AnalysisCtx(int maxDepth) {
             this(maxDepth, System.nanoTime() + DEFAULT_ANALYSIS_BUDGET_NANOS);
         }

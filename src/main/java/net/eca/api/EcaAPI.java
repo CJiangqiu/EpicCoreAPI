@@ -9,6 +9,7 @@ import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
+import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.UnsafeUtil;
 
@@ -315,7 +316,7 @@ public final class EcaAPI {
         if (EntityUtil.INVULNERABLE != null) {
             dataInvulnerable = livingEntity.getEntityData().get(EntityUtil.INVULNERABLE);
         } else {
-            dataInvulnerable = livingEntity.getPersistentData().getBoolean("ecaInvulnerable");
+            dataInvulnerable = livingEntity.getPersistentData().getBoolean(EcaOwnedState.NBT_INVULNERABLE);
         }
         if (dataInvulnerable || !EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
             return dataInvulnerable;
@@ -325,7 +326,7 @@ public final class EcaAPI {
             if (EntityUtil.INVULNERABLE != null) {
                 livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, true);
             } else {
-                livingEntity.getPersistentData().putBoolean("ecaInvulnerable", true);
+                livingEntity.getPersistentData().putBoolean(EcaOwnedState.NBT_INVULNERABLE, true);
             }
         }
         return managerInvulnerable;
@@ -368,7 +369,7 @@ public final class EcaAPI {
             if (EntityUtil.INVULNERABLE != null) {
                 livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, true);
             } else {
-                livingEntity.getPersistentData().putBoolean("ecaInvulnerable", true);
+                livingEntity.getPersistentData().putBoolean(EcaOwnedState.NBT_INVULNERABLE, true);
             }
             InvulnerableEntityManager.addInvulnerable(entity);
         } else {
@@ -377,7 +378,7 @@ public final class EcaAPI {
             if (EntityUtil.INVULNERABLE != null) {
                 livingEntity.getEntityData().set(EntityUtil.INVULNERABLE, false);
             } else {
-                livingEntity.getPersistentData().putBoolean("ecaInvulnerable", false);
+                livingEntity.getPersistentData().putBoolean(EcaOwnedState.NBT_INVULNERABLE, false);
             }
             unlockHealth(livingEntity);
             InvulnerableEntityManager.removeInvulnerable(entity);

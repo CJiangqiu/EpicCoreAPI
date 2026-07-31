@@ -7,6 +7,7 @@ import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.network.SetHealthClientSyncPacket;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.health.internal.LifeProtocolManager;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -639,15 +640,22 @@ public class EntityUtil {
     private static void ensureEcaDataIds() {
         if (ecaDataIdsInitialized) return;
         ecaDataIdsInitialized = true;
-        if (HEALTH_LOCK_VALUE != null) ECA_DATA_IDS.add(HEALTH_LOCK_VALUE.getId());
-        if (HEALTH_LOCK_KEY != null) ECA_DATA_IDS.add(HEALTH_LOCK_KEY.getId());
-        if (HEALTH_LOCK_CHECK != null) ECA_DATA_IDS.add(HEALTH_LOCK_CHECK.getId());
-        if (HEAL_BAN_VALUE != null) ECA_DATA_IDS.add(HEAL_BAN_VALUE.getId());
-        if (INVULNERABLE != null) ECA_DATA_IDS.add(INVULNERABLE.getId());
-        if (RESURRECTION_TRACKED != null) ECA_DATA_IDS.add(RESURRECTION_TRACKED.getId());
-        if (MAX_HEALTH_LOCK_VALUE != null) ECA_DATA_IDS.add(MAX_HEALTH_LOCK_VALUE.getId());
-        if (MAX_HEALTH_LOCK_KEY != null) ECA_DATA_IDS.add(MAX_HEALTH_LOCK_KEY.getId());
-        if (MAX_HEALTH_LOCK_CHECK != null) ECA_DATA_IDS.add(MAX_HEALTH_LOCK_CHECK.getId());
+        registerEcaDataId(HEALTH_LOCK_VALUE);
+        registerEcaDataId(HEALTH_LOCK_KEY);
+        registerEcaDataId(HEALTH_LOCK_CHECK);
+        registerEcaDataId(HEAL_BAN_VALUE);
+        registerEcaDataId(INVULNERABLE);
+        registerEcaDataId(RESURRECTION_TRACKED);
+        registerEcaDataId(MAX_HEALTH_LOCK_VALUE);
+        registerEcaDataId(MAX_HEALTH_LOCK_KEY);
+        registerEcaDataId(MAX_HEALTH_LOCK_CHECK);
+    }
+
+    // 同时登记到 EcaOwnedState，使改血分析把这些单元排除在候选存储之外
+    private static void registerEcaDataId(EntityDataAccessor<?> accessor) {
+        if (accessor == null) return;
+        ECA_DATA_IDS.add(accessor.getId());
+        EcaOwnedState.registerSynchedDataId(accessor.getId());
     }
 
     // 清除外部 mod 注入的 Float 类型实体数据（ID > vanillaMaxId ）
@@ -962,7 +970,7 @@ public class EntityUtil {
         if (INVULNERABLE != null) {
             livingEntity.getEntityData().set(INVULNERABLE, false);
         } else {
-            livingEntity.getPersistentData().putBoolean("ecaInvulnerable", false);
+            livingEntity.getPersistentData().putBoolean(EcaOwnedState.NBT_INVULNERABLE, false);
         }
         InvulnerableEntityManager.removeInvulnerable(livingEntity);
         EcaAPI.clearInvulnerableFastPath(entity.getId());
