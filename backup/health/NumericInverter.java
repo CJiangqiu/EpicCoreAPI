@@ -14,9 +14,11 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -130,8 +132,7 @@ public final class NumericInverter {
 
     private static boolean hit(float actual, float target) {
         if (!Float.isFinite(actual)) return false;
-        float tol = Math.max(0.5f, Math.abs(target) * 0.02f);
-        return Math.abs(actual - target) <= tol;
+        return HealthValueSemantics.matches(actual, target);
     }
 
     private static float step(LivingEntity entity, float target, Cell cell, double current, double delta, float before) {
@@ -166,6 +167,34 @@ public final class NumericInverter {
         if (!visited.add(obj)) return;
         Class<?> cls = obj.getClass();
         if (isSkippable(cls)) return;
+
+        /* 容器必须按公开元素语义遍历。反射进入哈希表的 size、mask、桶数组会把结构元数据
+           误当成业务数值；即使回滚成功，写入期间也足以破坏容器不变量。 */
+        if (obj instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (System.nanoTime() > deadline || cells.size() >= cellCap) return;
+                Object value = entry.getValue();
+                if (value instanceof Number) cells.add(new MapValueCell(map, entry.getKey()));
+                else walk(value, cells, visited, deadline, depth + 1, cellCap);
+            }
+            return;
+        }
+        if (obj instanceof List<?> list) {
+            for (int i = 0; i < list.size(); i++) {
+                if (System.nanoTime() > deadline || cells.size() >= cellCap) return;
+                Object value = list.get(i);
+                if (value instanceof Number) cells.add(new ListValueCell(list, i));
+                else walk(value, cells, visited, deadline, depth + 1, cellCap);
+            }
+            return;
+        }
+        if (obj instanceof Collection<?> collection) {
+            for (Object value : collection) {
+                if (System.nanoTime() > deadline || cells.size() >= cellCap) return;
+                if (!(value instanceof Number)) walk(value, cells, visited, deadline, depth + 1, cellCap);
+            }
+            return;
+        }
 
         if (cls.isArray()) {
             Class<?> comp = cls.getComponentType();
@@ -232,6 +261,7 @@ public final class NumericInverter {
         Object snapshot();
         void restore(Object snap);
         String label();
+        default int associationScore(LivingEntity entity) { return 0; }
     }
 
     /* 从给定根收集可写数值 cell，不做斜率筛选。
@@ -316,6 +346,93 @@ public final class NumericInverter {
 
         @Override public String label() {
             return array.getClass().getComponentType().getSimpleName() + "[" + index + "]";
+        }
+    }
+
+    private static final class MapValueCell implements Cell {
+        private final Map map;
+        private final Object key;
+
+        private MapValueCell(Map<?, ?> map, Object key) {
+            this.map = map;
+            this.key = key;
+        }
+
+        @Override public double read() {
+            try { return map.get(key) instanceof Number number ? number.doubleValue() : Double.NaN; }
+            catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return Double.NaN; }
+        }
+
+        @Override public boolean write(double value) {
+            try {
+                Object current = map.get(key);
+                Object boxed = coerceLike(current, current == null ? Object.class : current.getClass(), value);
+                if (boxed == null) return false;
+                map.put(key, boxed);
+                return true;
+            } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
+        }
+
+        @Override public Object snapshot() {
+            try { return map.get(key); }
+            catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return null; }
+        }
+
+        @Override public void restore(Object snapshot) {
+            try { map.put(key, snapshot); }
+            catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
+        }
+
+        @Override public String label() {
+            return map.getClass().getSimpleName() + "[" + String.valueOf(key) + "]";
+        }
+
+        @Override public int associationScore(LivingEntity entity) {
+            if (entity == null || key == null) return 0;
+            if (key == entity || key.equals(entity.getUUID())) return 100;
+            if (key instanceof Number number && number.intValue() == entity.getId()) return 80;
+            String text = String.valueOf(key);
+            if (text.equals(entity.getUUID().toString())) return 90;
+            return 0;
+        }
+    }
+
+    private static final class ListValueCell implements Cell {
+        private final List list;
+        private final int index;
+
+        private ListValueCell(List<?> list, int index) {
+            this.list = list;
+            this.index = index;
+        }
+
+        @Override public double read() {
+            try { return list.get(index) instanceof Number number ? number.doubleValue() : Double.NaN; }
+            catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return Double.NaN; }
+        }
+
+        @Override public boolean write(double value) {
+            try {
+                Object current = list.get(index);
+                Object boxed = coerceLike(current, current == null ? Object.class : current.getClass(), value);
+                if (boxed == null) return false;
+                list.set(index, boxed);
+                return true;
+            } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
+        }
+
+        @Override public Object snapshot() {
+            try { return list.get(index); }
+            catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return null; }
+        }
+
+        @Override public void restore(Object snapshot) {
+            try { list.set(index, snapshot); }
+            catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
+        }
+
+        @Override public String label() {
+            return list.getClass().getSimpleName() + "[" + index + "]";
         }
     }
 

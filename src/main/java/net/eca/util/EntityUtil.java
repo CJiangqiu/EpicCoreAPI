@@ -7,13 +7,9 @@ import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.network.SetHealthClientSyncPacket;
 import net.eca.util.entity_extension.EntityExtensionManager;
-import net.eca.util.health.DelayedHealthVerifier;
-import net.eca.util.health.EcaSetHealthManager;
-import net.eca.util.health.HealthDataflowAnalyzer;
 import net.eca.util.health.HealthLockManager;
-import net.minecraft.network.syncher.EntityDataSerializer;
+import net.eca.util.health.internal.LifeProtocolManager;
 import net.minecraft.network.syncher.EntityDataAccessor;
-import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -44,8 +40,6 @@ import net.minecraft.world.level.entity.EntityTickList;
 import net.minecraftforge.entity.PartEntity;
 import net.eca.util.selector.EcaEntitySelector;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.*;
@@ -625,6 +619,8 @@ public class EntityUtil {
     //获取实体真实生命值
     public static float getHealth(LivingEntity entity) {
         if (entity == null) return 0.0f;
+        float protocolValue = LifeProtocolManager.readHealthAnchor(entity);
+        if (Float.isFinite(protocolValue)) return protocolValue;
         try {
             SynchedEntityData.DataItem dataItem = getDataItem(entity.getEntityData(), LivingEntity.DATA_HEALTH_ID.getId());
             if (dataItem == null) {
@@ -704,37 +700,20 @@ public class EntityUtil {
             boolean client = entity.level() != null && entity.level().isClientSide;
             //客户端仅允许被同步包驱动改血(否则客户端会与服务端各自为政)
             if (client && !IS_FROM_SYNC.get()) return false;
-            //锚点可信度探测自身要写原版血量，必须先于所有通道完成，否则会污染通道的回滚快照
-            EcaSetHealthManager.warmAnchorTrust(entity);
-            float beforeHealth = EcaSetHealthManager.safeGetHealth(entity);
-
-            //第一步：写原版 DATA_HEALTH_ID。若目标 getHealth 就是读这里(原版实体多数如此)，验证已通过则直接成功，
-            //  避免每次都触发数据流逆向分析。Player 跳过(原版自带保护)，非 Player 走完整链。
-            setBasicHealth(entity, expectedHealth);
+            float beforeHealth = getHealth(entity);
             boolean ok;
-            if (entity instanceof Player) {
-                ok = EcaSetHealthManager.verify(entity, expectedHealth);
-            } else if (EcaSetHealthManager.verify(entity, expectedHealth)) {
-                ok = true;                                                         //原版同步即生效
-            } else if (EcaSetHealthManager.applyDataflow(entity, expectedHealth)) {
-                ok = true;                                                         //数据流逆向定位真实存储
-            } else if (EcaSetHealthManager.applyExternalScan(entity, expectedHealth)) {
-                ok = true;                                                         //外部扫描(isAlive/hurt 旁证，含有效血量换算)
-            } else if (EcaSetHealthManager.applyMethodProbe(entity, expectedHealth)) {
-                ok = true;                                                         //方法探针(借实体自身 writer)
+            if (client) {
+                setBasicHealth(entity, expectedHealth);
+                SynchedEntityData.DataItem dataItem = getDataItem(
+                        entity.getEntityData(), LivingEntity.DATA_HEALTH_ID.getId());
+                ok = dataItem != null && dataItem.value instanceof Float value
+                        && Math.abs(value - expectedHealth) <= 0.001f;
             } else {
-                ok = EcaSetHealthManager.applyNumericInversion(entity, expectedHealth); //数值反演(死角对象图扰动)
+                ok = LifeProtocolManager.setHealth(entity, expectedHealth);
             }
 
-            //服务端改血成功 → 广播给追踪客户端，令自定义存储型实体客户端显示同步(客户端重跑同一条链)
             if (ok && !client) {
                 syncHealthToClients(entity, expectedHealth, beforeHealth);
-                /* 当场校验只能证明这一刻写进去了，tick 内的防护会把值改回去，故登记延迟复查。
-                   已知会被改回的类再追加联写实体之外的血量镜像(外部扫描第三阶段)——
-                   须登记成功才写，那批世界数据的提交与撤销全靠这次复查裁定。 */
-                if (DelayedHealthVerifier.schedule(entity, expectedHealth)) {
-                    EcaSetHealthManager.applyExternalMirror(entity, beforeHealth, expectedHealth);
-                }
             }
             return ok;
         } catch (Exception e) {
@@ -779,49 +758,24 @@ public class EntityUtil {
 
     // ==================== 实体受伤模块 ====================
 
-    //强制实体受伤（原版 hurt + 校验不符时兜底强制）
-    /* 原版 hurt 的实际扣血只有 actuallyHurt 末尾的 setHealth(getHealth() - f1) 一处，走的是实体自己的
-       getHealth/setHealth：两者被重写或与真实存储解耦时，整套流程照常跑完、事件照常发出，血却没掉。
-       故先让原版跑完减免、击退、仇恨与受击表现，再按锚点读数复核，不符时补齐伤害源记账并强制落血量。 */
+    //强制实体受伤（清无敌帧走原版 hurt，再校验不符时兜底强制改血）
     public static boolean hurt(LivingEntity entity, DamageSource damageSource, float amount) {
-        if (entity == null || damageSource == null) return false;
-        if (!Float.isFinite(amount) || amount <= 0.0f) return false;
+        if (entity == null || damageSource == null || amount <= 0.0f) return false;
         if (entity.level() == null || entity.level().isClientSide) return false;
         try {
-            /* ECA 自家的锁血与无敌都以"血量不该掉"为语义，强制写入会与之互相打架。
-               原版 hurt 仍照常调用，由这两套防护自行拦截。 */
             if (EcaAPI.isInvulnerable(entity) || HealthLockManager.getLock(entity) != null) {
                 return entity.hurt(damageSource, amount);
             }
-
-            //锚点读数：诱饵型 getHealth 恒返回满血，只有它能算出可信的预期值
-            float before = EcaSetHealthManager.safeGetHealth(entity);
-            if (!Float.isFinite(before)) before = entity.getHealth();
-            //基准读不出来就只跑原版，避免拿错误基准把血量写坏
-            if (!Float.isFinite(before)) return entity.hurt(damageSource, amount);
-
-            /* 清无敌帧让原版走非冷却分支真正进 actuallyHurt：冷却期内 amount <= lastHurt 会直接返回 false，
-               逐 tick 调用时第一步将全程空转。lastHurt 与 invulnerableTime 由该分支自行重设。 */
+            float before = getHealth(entity);
             entity.invulnerableTime = 0;
             entity.hurt(damageSource, amount);
-
             float expected = before - amount;
-            //原版已把实体打死：死亡流程连掉落一并跑过了，无须介入
-            if (expected <= 0.0f && (entity.isRemoved() || entity.dead)) return true;
-
-            /* 容差随伤害收紧：固定 1.0 会让所有小于 1 的伤害恒判"扣对了"，一点血没掉也放过。 */
-            float actual = EcaSetHealthManager.safeGetHealth(entity);
+            float actual = getHealth(entity);
             float tolerance = Math.min(1.0f, amount * 0.5f);
             if (Float.isFinite(actual) && Math.abs(actual - expected) <= tolerance) return true;
-
-            if (expected > 0.0f) {
-                //补齐原版本该留下的伤害源记账，使这次受伤在仇恨、死亡消息和后续掉落上都算数
-                applyDamageSourceRecord(entity, damageSource, amount);
-                return setHealth(entity, expected);
-            }
-            //预期已致死：kill 内部补记伤害源，并承担死亡门控、die、掉落与移除
-            kill(entity, damageSource);
-            return true;
+            //伤害源记录相关处理避免不掉掉落物
+            applyDamageSourceRecord(entity, damageSource, amount);
+            return setHealth(entity, Math.max(0.0f, expected));
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] hurt failed entity={} amount={} msg={}",
                     entity.getClass().getName(), amount, e.getMessage());
@@ -872,10 +826,10 @@ public class EntityUtil {
         if (entity == null || damageSource == null) return;
 
         try {
-            //门控实体的 die/remove 在开关翻正前空转，必须先于原版死亡处理和掉落解锁
-            unlockDeathGate(entity);
+            //门控实体会让自身的 die/remove 空转，必须先切换其生命周期状态
+            DeathGateAnalyzer.unlock(entity);
             //致死伤害量取归零前的血量，供战斗记录与死亡消息使用；须先于归零读取
-            float lethalDamage = EcaSetHealthManager.safeGetHealth(entity);
+            float lethalDamage = getHealth(entity);
             if (!Float.isFinite(lethalDamage) || lethalDamage <= 0.0f) lethalDamage = 1.0f;
             //设置血量为0
             setHealth(entity, 0.0f);
@@ -897,33 +851,6 @@ public class EntityUtil {
 
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Failed to set entity dead: {}", e.getMessage());
-        }
-    }
-
-    //翻正编码布尔死亡门控，使实体自身的 die/remove 不再空转
-    /* 生死由编码布尔字段而非血量决定的实体，血量路径全部无效。
-       借实体自身编码器写入死亡值，再用解码器回读校验，不符则回滚。 */
-    private static boolean unlockDeathGate(LivingEntity target) {
-        if (target == null) return false;
-        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) return false;
-        Class<?> cls = target.getClass();
-        HealthDataflowAnalyzer.DeathGate gate = HealthDataflowAnalyzer.analyzeDeathGate(cls);
-        if (gate == null) return false;
-        try {
-            Object snapshot = gate.field().get(target);
-            Object encoded = gate.encoder().invoke(null, gate.deathValue());
-            gate.field().set(target, encoded);
-            boolean dead = Boolean.TRUE.equals(gate.decoder().invoke(null, gate.field().get(target)));
-            if (dead == gate.deathValue()) {
-                EcaLogger.info("[DeathGate] unlocked entity={} field={} deathValue={}",
-                        cls.getName(), gate.field().getName(), gate.deathValue());
-                return true;
-            }
-            gate.field().set(target, snapshot);   // 回读不符，回滚
-            return false;
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            return false;
         }
     }
 

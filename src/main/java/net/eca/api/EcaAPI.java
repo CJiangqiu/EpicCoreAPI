@@ -9,7 +9,6 @@ import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
-import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.UnsafeUtil;
 
@@ -61,7 +60,6 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -212,8 +210,8 @@ public final class EcaAPI {
 
     // 获取实体真实血量
     /**
-     * Get entity real health using VarHandle direct access.
-     * This bypasses any custom getHealth() implementations and reads directly from DATA_HEALTH_ID.
+     * Get the health observed through the entity's active life protocol.
+     * The protocol bypasses ECA's own health-lock presentation while preserving custom entity storage semantics.
      * @param entity the living entity
      * @return the real health value, or 0.0f if entity is null
      */
@@ -221,37 +219,26 @@ public final class EcaAPI {
         return EntityUtil.getHealth(entity);
     }
 
-    //读取实体真实血量(旁路禁疗/血锁 hook，走实体自身 getHealth 读其真实存储)
+    // 读取生命协议确认的权威血量
     /**
-     * Get the entity's real health by invoking its own getHealth() with the raw-read bypass enabled,
-     * so ECA heal-ban / health-lock hooks are skipped and the value reflects the entity's actual
-     * health storage. Unlike {@link #getHealth(LivingEntity)} (which reads the vanilla DATA_HEALTH_ID
-     * synched value and may be out of sync for custom-storage entities), this returns the true health
-     * even for entities that store health outside DATA_HEALTH_ID. Use this whenever the real current
-     * health is needed (e.g. computing an expected post-damage health), not the synced vanilla value.
+     * Get the authoritative health observation selected by the life protocol analyzer.
+     * If no custom protocol is needed, this naturally resolves to the vanilla synchronized health state.
      * @param entity the living entity
-     * @return the real health value, or NaN if it cannot be read / is not finite
+     * @return the authoritative observed health value, or NaN if the entity is null
      */
     public static float getRealHealth(LivingEntity entity) {
         if (entity == null) return Float.NaN;
-        return EcaSetHealthManager.safeGetHealth(entity);
+        return EntityUtil.getHealth(entity);
     }
 
-    // 设置实体血量（分阶段升级：Vanilla→Symbolic→Probe→Dynamic）
+    // 设置实体血量
     /**
-     * Set entity health using a staged pipeline that escalates only when a verify step fails.
-     * Vanilla: directly write vanilla DATA_HEALTH_ID (bypasses any setHealth override).
-     * Symbolic: bytecode dataflow analysis of getHealth() to locate the real storage and invert the
-     *           formula; when a located storage cannot be inverted, fall back to numeric solving on it.
-     * Probe: behavioral probing — feed test values to candidate numeric setters and keep the one whose
-     *        effect getHealth() faithfully follows (name-agnostic, finds private/obfuscated setters).
-     * Dynamic: runtime bytecode instrumentation to trace the storage getHealth() actually reads
-     *          (heaviest; requires "Enable Radical Logic" in the Attack config).
-     * Players only undergo the Vanilla stage. Each stage is verified against entity.getHealth() with a
-     * tolerance of max(0.5, abs(target) * 2%); the first stage to pass wins and is cached per entity class.
+     * Set entity health through a verified life-protocol transaction.
+     * The transaction snapshots every affected state, applies the selected writer, performs immediate
+     * readback, and schedules cross-tick validation. Failed immediate writes are rolled back.
      * @param entity the living entity
      * @param health the target health value
-     * @return true if the post-modification verify passed
+     * @return true if the active implementation verifies the target value
      */
     public static boolean setHealth(LivingEntity entity, float health) {
         return EntityUtil.setHealth(entity, health);
@@ -270,8 +257,9 @@ public final class EcaAPI {
      *    {@code min(1.0, amount * 50%)}.
      * 3. On mismatch, restores the damage-source bookkeeping vanilla would have left behind
      *    (lastHurtByMob, lastHurtByPlayer/Time, lastDamageSource/Stamp, combat tracker, hurt animation)
-     *    and forces the health through {@link #setHealth}; if the expected health is at or below zero it
-     *    routes to {@link #kill} instead, so the death path, loot table and experience drops all run.
+     *    and forces the health through {@link #setHealth}, clamped at zero. A lethal result is never
+     *    forced into the death path here: the entity is left at zero health so vanilla {@code tickDeath}
+     *    plays the death animation and removes it. Use {@link #kill} when an immediate kill is wanted.
      * Entities protected by ECA's own health lock or invulnerability are left to those systems: vanilla
      * {@code hurt} is still called, but no forced write is attempted.
      * Server side only; clients receive the result through the existing health sync packet.

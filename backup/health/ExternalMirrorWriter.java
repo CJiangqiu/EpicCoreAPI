@@ -47,10 +47,10 @@ public final class ExternalMirrorWriter {
        序列化时直接抛 Invalid null NBT value。 */
     private record Candidate(NumericInverter.Cell cell, SavedData owner) {}
 
-    /* 本次联写的单元与快照，按实体 id 记账，等延迟复查裁定后提交或撤销。 */
+    /* 本次联写的单元与快照，按验证票据记账，等对应代次的延迟复查裁定后提交或撤销。 */
     private record Written(List<NumericInverter.Cell> cells, Object[] snapshot) {}
 
-    private static final Map<Integer, Written> PENDING = new ConcurrentHashMap<>();
+    private static final Map<DelayedHealthVerifier.Ticket, Written> PENDING = new ConcurrentHashMap<>();
     private static final Set<String> DIAG_DUMPED = ConcurrentHashMap.newKeySet();
 
     private static void diag(Class<?> cls, String reason) {
@@ -60,14 +60,16 @@ public final class ExternalMirrorWriter {
     }
 
     /* 联写外部镜像。before 取本次写入之前的锚点读数——镜像此刻仍持有该值，正是匹配依据。 */
-    static boolean write(LivingEntity entity, float before, float target) {
+    static boolean write(LivingEntity entity, float before, float target, DelayedHealthVerifier.Ticket ticket) {
         if (entity == null || !Float.isFinite(before) || !Float.isFinite(target)) return false;
+        if (ticket == null || entity.getId() != ticket.entityId()
+                || !entity.getUUID().equals(ticket.entityUuid())) return false;
         if (!(entity.level() instanceof ServerLevel level)) return false;
         Class<?> cls = entity.getClass();
         long deadline = System.nanoTime() + TIME_BUDGET_NANOS;
 
         List<Candidate> candidates = collectCandidates(entity, level, deadline);
-        List<Candidate> matched = matchByValue(candidates, before, cls);
+        List<Candidate> matched = matchByValue(candidates, before, cls, entity);
         if (matched.isEmpty()) return false;
 
         List<NumericInverter.Cell> cells = new ArrayList<>(matched.size());
@@ -96,32 +98,41 @@ public final class ExternalMirrorWriter {
 
         /* 同一实体在一个 tick 内被改血多次时必须追加而非覆盖：后一次的快照拍摄于前一次写入之后，
            单独持有它只能还原到中间态。合并后按逆序撤销，同一单元最终落回最早的原值。 */
-        PENDING.merge(entity.getId(), new Written(cells, snapshot), ExternalMirrorWriter::append);
+        PENDING.merge(ticket, new Written(cells, snapshot), ExternalMirrorWriter::append);
         EcaLogger.info("[ExternalMirror] co-wrote entity={} before={} target={} cells={}",
                 cls.getName(), before, target, labels);
         return true;
     }
 
     //延迟复查确认写入留住了：丢弃快照，不再撤销
-    static void commit(int entityId) {
-        PENDING.remove(entityId);
+    static void commit(DelayedHealthVerifier.Ticket ticket) {
+        if (ticket != null) PENDING.remove(ticket);
     }
 
     /* 延迟复查仍报回滚：撤销本次联写。打不穿是可以接受的，留下一批被改坏的世界数据不行。 */
-    static void revert(int entityId) {
-        Written written = PENDING.remove(entityId);
+    static void revert(DelayedHealthVerifier.Ticket ticket) {
+        if (ticket == null) return;
+        Written written = PENDING.remove(ticket);
         if (written == null) return;
         restore(written.cells(), written.snapshot());
         EcaLogger.info("[ExternalMirror] reverted {} external cell(s): rollback persisted", written.cells().size());
     }
 
+    static void supersede(DelayedHealthVerifier.Ticket previous, DelayedHealthVerifier.Ticket next) {
+        if (previous == null || next == null || previous.equals(next)) return;
+        Written written = PENDING.remove(previous);
+        if (written != null) PENDING.merge(next, written, ExternalMirrorWriter::append);
+    }
+
     static void clear() {
+        for (Written written : PENDING.values()) restore(written.cells(), written.snapshot());
         PENDING.clear();
     }
 
     /* 逐层放宽容差取匹配集：命中且不超过写入上限即采用。
        所有层都过宽说明该血量值在世界数据里太常见，判据无法定位镜像，放弃优于乱写。 */
-    private static List<Candidate> matchByValue(List<Candidate> candidates, float before, Class<?> cls) {
+    private static List<Candidate> matchByValue(List<Candidate> candidates, float before, Class<?> cls,
+                                                LivingEntity entity) {
         for (float tolerance : MATCH_TOLERANCES) {
             List<Candidate> matched = new ArrayList<>();
             for (Candidate candidate : candidates) {
@@ -130,6 +141,15 @@ public final class ExternalMirrorWriter {
             }
             // 空集说明这一层太严，放宽再试
             if (matched.isEmpty()) continue;
+            int strongestAssociation = 0;
+            for (Candidate candidate : matched) {
+                strongestAssociation = Math.max(strongestAssociation,
+                        candidate.cell().associationScore(entity));
+            }
+            if (strongestAssociation > 0) {
+                int requiredScore = strongestAssociation;
+                matched.removeIf(candidate -> candidate.cell().associationScore(entity) < requiredScore);
+            }
             if (matched.size() <= MAX_WRITE_CELLS) return matched;
             // 更宽的容差只会命中更多，无需再试
             diag(cls, "value " + before + " too common in world data ("

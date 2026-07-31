@@ -67,7 +67,7 @@ public final class MethodProbe {
         if (provider != null) bytesProvider = provider;
     }
 
-    private static final String RUNTIME = "net/eca/util/health/MethodProbe";
+    private static final String RUNTIME = "backup/health/MethodProbe";
     private static final String ENTITY_INTERNAL = Type.getInternalName(Entity.class);
 
     // ==================== 模型 ====================
@@ -1218,8 +1218,7 @@ public final class MethodProbe {
 
     private static boolean matches(float actual, float expected) {
         if (!Float.isFinite(actual)) return false;
-        float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
-        return Math.abs(actual - expected) <= tolerance;
+        return HealthValueSemantics.matches(actual, expected);
     }
 
     /* 目标步专用校验(带死亡语义)：target≤0 是斩杀意图，writer 会把血量 clamp 到≥0(实际写成 0)，

@@ -97,9 +97,29 @@ public final class ObfuscationMapping {
         methods.put("LivingEntity.getRecordMaxHp", "m_21233_");
         methods.put("LivingEntity.actuallyHurt", "m_6475_");
         methods.put("LivingEntity.setHealth", "m_21153_");
+        methods.put("LivingEntity.isDeadOrDying", "m_21224_");
+        methods.put("LivingEntity.isAlive", "m_6084_");
 
         // Entity
         methods.put("Entity.setRemoved", "m_142467_");
+
+        // CompoundTag
+        methods.put("CompoundTag.getBoolean", "m_128471_");
+        methods.put("CompoundTag.getByte", "m_128445_");
+        methods.put("CompoundTag.getShort", "m_128448_");
+        methods.put("CompoundTag.getInt", "m_128451_");
+        methods.put("CompoundTag.getLong", "m_128454_");
+        methods.put("CompoundTag.getFloat", "m_128457_");
+        methods.put("CompoundTag.getDouble", "m_128459_");
+        methods.put("CompoundTag.getString", "m_128461_");
+        methods.put("CompoundTag.putBoolean", "m_128379_");
+        methods.put("CompoundTag.putByte", "m_128344_");
+        methods.put("CompoundTag.putShort", "m_128376_");
+        methods.put("CompoundTag.putInt", "m_128405_");
+        methods.put("CompoundTag.putLong", "m_128356_");
+        methods.put("CompoundTag.putFloat", "m_128350_");
+        methods.put("CompoundTag.putDouble", "m_128347_");
+        methods.put("CompoundTag.putString", "m_128359_");
 
         METHOD_MAPPINGS.put(CURRENT_VERSION, methods);
     }

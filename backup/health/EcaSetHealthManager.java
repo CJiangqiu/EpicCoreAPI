@@ -137,16 +137,15 @@ public final class EcaSetHealthManager {
        说明真实血量另有一份实体之外的镜像。仅对延迟复查检出过回滚的类启用：
        普通实体既不承担扫描开销，也不会无故去改世界存档。门控与一二阶段共用。
        beforeHealth 取写入之前的锚点读数，镜像此刻仍持有该值，是唯一可用的匹配依据。 */
-    public static boolean applyExternalMirror(LivingEntity target, float beforeHealth, float targetHealth) {
+    public static boolean applyExternalMirror(LivingEntity target, float beforeHealth, float targetHealth,
+                                              DelayedHealthVerifier.Ticket ticket) {
         if (target == null) return false;
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
                 || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return false;
-        if (!ROLLBACK_OBSERVED.contains(target.getClass())) return false;
-        return ExternalMirrorWriter.write(target, beforeHealth, targetHealth);
+        HealthModel model = HealthModel.forClass(target.getClass());
+        if (model == null || !model.delayedRollbackObserved()) return false;
+        return ExternalMirrorWriter.write(target, beforeHealth, targetHealth, ticket);
     }
-
-    /* 延迟复查检出过回滚的实体类，即第三阶段的准入名单。 */
-    private static final Set<Class<?>> ROLLBACK_OBSERVED = ConcurrentHashMap.newKeySet();
 
     /* getHealth 与实际存储解耦时，使用实体生死判定所读取的有效血量表达式作为观测锚点，
        并通过表达式反演计算存储值。仅对已有解耦记录的类启用。
@@ -177,8 +176,9 @@ public final class EcaSetHealthManager {
                 EcaLogger.info("[EffectiveHealth] model rejected entity={} storage={} reason=depends on damage input",
                         cls.getName(), resolved.storage().label);
             }
-            EFFECTIVE_ANCHOR_CONFIRMED.remove(cls);
-            if (EFFECTIVE_ANCHOR_OWNED.remove(cls)) registerHealthAnchor(cls, null);
+            HealthModel healthModel = HealthModel.forClass(cls);
+            healthModel.setEffectiveObservationConfirmed(false);
+            healthModel.clearEffectiveObservation();
             HealthDataflowAnalyzer.rejectEffectiveModel(cls, resolved);
             EFFECTIVE_MODEL_SUBMITTED.remove(cls);
             return false;
@@ -202,27 +202,25 @@ public final class EcaSetHealthManager {
 
         // 使用有效血量表达式校验，避免 getHealth 与存储解耦时错误接受或拒绝写入
         boolean anchorWasPresent = hasHealthAnchor(cls);
-        registerHealthAnchor(cls, entity -> {
+        registerEffectiveHealthAnchor(cls, entity -> {
             Object value = HealthDataflowAnalyzer.evaluate(
                     oriented.readExpr(), HealthDataflowAnalyzer.newContext(entity));
             return value instanceof Number number ? number.floatValue() : Float.NaN;
         });
-        EFFECTIVE_ANCHOR_OWNED.add(cls);
-
         List<Object> rollbackRoots = collectRollbackRoots(target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
         boolean success = HealthDataFlow.writeEffective(oriented, target, targetHealth);
         if (success) {
-            EFFECTIVE_ANCHOR_CONFIRMED.add(cls);
+            HealthModel.forClass(cls).setEffectiveObservationConfirmed(true);
             return true;
         }
         snapshot.restore();
         /* 未经成功写入确认的模型失败后立即失效，以便候选集合变化时重新分析。
            写入失败由快照回滚；已经确认的锚点不因单次失败而移除。 */
-        if (!EFFECTIVE_ANCHOR_CONFIRMED.contains(cls)) {
+        HealthModel healthModel = HealthModel.forClass(cls);
+        if (!healthModel.effectiveObservationConfirmed()) {
             if (!anchorWasPresent) {
-                EFFECTIVE_ANCHOR_OWNED.remove(cls);
-                registerHealthAnchor(cls, null);
+                healthModel.clearEffectiveObservation();
             }
             HealthDataflowAnalyzer.rejectEffectiveModel(cls, oriented);
             EFFECTIVE_MODEL_SUBMITTED.remove(cls);
@@ -235,12 +233,6 @@ public final class EcaSetHealthManager {
 
     /* 极性校正的诊断去重，按类与存储标识。 */
     private static final Set<String> EFFECTIVE_POLARITY_DUMPED = ConcurrentHashMap.newKeySet();
-
-    /* 有效血量锚点已被一次成功写入证实的类 */
-    private static final Set<Class<?>> EFFECTIVE_ANCHOR_CONFIRMED = ConcurrentHashMap.newKeySet();
-
-    /* 由本通道安装的锚点。外部经 registerHealthAnchor 注册的锚点不在其列，不可被本通道撤销。 */
-    private static final Set<Class<?>> EFFECTIVE_ANCHOR_OWNED = ConcurrentHashMap.newKeySet();
 
     /* 已提交模型分析的候选签名：同一批候选只分析一次；候选随各通道失败逐步补齐，签名一变即允许重试。 */
     private static final Map<Class<?>, String> EFFECTIVE_MODEL_SUBMITTED = new ConcurrentHashMap<>();
@@ -453,9 +445,7 @@ public final class EcaSetHealthManager {
         for (int attempt = 0; attempt < 3; attempt++) {
             wrote = writer.write(target, targetHealth);
             actual = readHealthAnchor(target);
-            if (wrote && Float.isFinite(actual)
-                    && (targetHealth <= 0.0f ? actual <= 0.0f
-                            : Math.abs(actual - targetHealth) <= Math.max(0.5f, Math.abs(targetHealth) * 0.02f))) {
+            if (wrote && HealthValueSemantics.matchesWithDeathSemantics(actual, targetHealth)) {
                 return true;
             }
         }
@@ -665,8 +655,7 @@ public final class EcaSetHealthManager {
     public static boolean verify(LivingEntity target, float targetHealth) {
         float actual = readHealthAnchor(target);
         if (!Float.isFinite(actual)) return false;
-        float tolerance = Math.max(0.5f, Math.abs(targetHealth) * 0.02f);
-        if (Math.abs(actual - targetHealth) > tolerance) return false;
+        if (!HealthValueSemantics.matches(actual, targetHealth)) return false;
         return isAnchorTrustworthy(target);
     }
 
@@ -675,7 +664,10 @@ public final class EcaSetHealthManager {
     public static boolean verifyExternalRaw(LivingEntity target, float targetHealth) {
         float actual = readHealthAnchor(target);
         if (!Float.isFinite(actual)) return false;
-        if (targetHealth <= 0.0f) return actual <= 0.0f && isAnchorTrustworthy(target);
+        if (targetHealth <= 0.0f) {
+            return HealthValueSemantics.matchesWithDeathSemantics(actual, targetHealth)
+                    && isAnchorTrustworthy(target);
+        }
         return verify(target, targetHealth);
     }
 
@@ -703,10 +695,9 @@ public final class EcaSetHealthManager {
        两者本就相近时取不到位移，不作判定——没有证据不等于反证。 */
     public static void noteAnchorResponse(LivingEntity target, float before, float expected) {
         if (target == null || !Float.isFinite(before) || !Float.isFinite(expected)) return;
-        float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
-        if (Math.abs(before - expected) <= tolerance) return;
+        if (HealthValueSemantics.matches(before, expected)) return;
         float actual = readHealthAnchor(target);
-        if (Float.isFinite(actual) && Math.abs(actual - expected) <= tolerance) {
+        if (HealthValueSemantics.matches(actual, expected)) {
             promoteAnchorTrust(target.getClass());
         }
     }
@@ -758,27 +749,28 @@ public final class EcaSetHealthManager {
 
     /* 校验默认读取 getHealth。若 getHealth 与血量存储解耦，则使用分析器注册的替代锚点，
        防止有效写入因观测值不变而被回滚。 */
-    public interface HealthAnchor {
-        float read(LivingEntity entity);
+    /* 注册实体类的替代观测锚点；anchor 为 null 表示恢复默认的 getHealth 锚点。 */
+    public static void registerHealthAnchor(Class<?> cls, HealthModel.Observation anchor) {
+        if (cls == null) return;
+        HealthModel model = HealthModel.forClass(cls);
+        model.setObservation(anchor, HealthModel.ObservationOrigin.EXTERNAL);
     }
 
-    private static final Map<Class<?>, HealthAnchor> HEALTH_ANCHORS = new ConcurrentHashMap<>();
-
-    /* 注册实体类的替代观测锚点；anchor 为 null 表示恢复默认的 getHealth 锚点。 */
-    public static void registerHealthAnchor(Class<?> cls, HealthAnchor anchor) {
-        if (cls == null) return;
-        if (anchor == null) HEALTH_ANCHORS.remove(cls);
-        else HEALTH_ANCHORS.put(cls, anchor);
+    private static void registerEffectiveHealthAnchor(Class<?> cls, HealthModel.Observation anchor) {
+        HealthModel model = HealthModel.forClass(cls);
+        if (model != null) model.setObservation(anchor, HealthModel.ObservationOrigin.EFFECTIVE_HEALTH);
     }
 
     public static boolean hasHealthAnchor(Class<?> cls) {
-        return cls != null && HEALTH_ANCHORS.containsKey(cls);
+        HealthModel model = HealthModel.forClass(cls);
+        return model != null && model.observation() != null;
     }
 
     /* 读锚点当前值：已注册替代锚点的类走替代量，其余回落 getHealth 原始读。异常/非有限值返回 NaN。 */
     public static float readHealthAnchor(LivingEntity target) {
         if (target == null) return Float.NaN;
-        HealthAnchor anchor = HEALTH_ANCHORS.get(target.getClass());
+        HealthModel model = HealthModel.forClass(target.getClass());
+        HealthModel.Observation anchor = model == null ? null : model.observation();
         if (anchor == null) return safeGetHealth(target);
         try {
             float value = anchor.read(target);
@@ -829,9 +821,10 @@ public final class EcaSetHealthManager {
     static void onDelayedRollback(Class<?> cls) {
         if (cls == null) return;
         ANCHOR_OBSERVED.remove(cls);
-        EFFECTIVE_ANCHOR_CONFIRMED.remove(cls);
+        HealthModel model = HealthModel.forClass(cls);
+        model.setEffectiveObservationConfirmed(false);
         // 下次改血时放行第三阶段，去实体之外找持有真实血量的镜像
-        ROLLBACK_OBSERVED.add(cls);
+        model.markDelayedRollbackObserved();
     }
 
     /* 存在写入成功但观测不到的源，且该类从未通过校验时判定为解耦，供后续通道决定是否改用替代锚点。 */

@@ -1,10 +1,9 @@
 package net.eca.coremod;
 
 import net.eca.agent.AgentLogWriter;
-import net.eca.agent.EcaAgent;
 import net.eca.config.EcaConfiguration;
-import net.eca.util.health.ConstOverride;
-import net.eca.util.health.MethodProbe;
+import net.eca.util.health.internal.ProtocolConstantOverride;
+import net.eca.util.health.internal.ProtocolMethodProbe;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -76,6 +75,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
        但内部逻辑仅依赖 className 和字节码。强制兼容模式下跳过全部转换。 */
     public static byte[] transformStatic(String className, byte[] classfileBuffer) {
         if (className == null) return null;
+        RuntimeBytecodeProvider.captureAnalysisInput(className, classfileBuffer);
         if (FORCE_COMPATIBILITY_MODE) return null;
         // 实体健康 hook 目标（LivingEntity/Entity 及已知子类）绕过 net.minecraft 系统保护，只施加 HEAD hook
         if (isHealthHookTarget(className) && TransformerWhitelist.isSystemProtectedInternal(className)) {
@@ -88,7 +88,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         }
         if (TransformerWhitelist.isSystemProtectedInternal(className)) return null;
         try {
-            // 通过静态实例调用（ConstOverrideClassVisitor 等方法是非 static inner class，需实例）
+            // 通过静态实例调用，转换器内部包含非 static visitor
             return SINGLETON.doTransform(className, classfileBuffer);
         } catch (Throwable t) {
             AgentLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
@@ -171,8 +171,8 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             TransformerWhitelist.class,
             AllReturnToggle.class,
             AllReturnTransformer.class,
-            ConstOverride.class,
-            MethodProbe.class
+            ProtocolConstantOverride.class,
+            ProtocolMethodProbe.class
         };
         for (Class<?> root : roots) {
             initializeClassTree(root);
@@ -329,6 +329,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                             ProtectionDomain protectionDomain, byte[] classfileBuffer) {
         if (className == null) return null;
+        RuntimeBytecodeProvider.captureAnalysisInput(className, classfileBuffer);
 
         // 强制兼容模式：跳过全部字节码转换
         if (FORCE_COMPATIBILITY_MODE) return null;
@@ -420,17 +421,15 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             anyTransformed = true;
         }
 
-        // 常数覆写 patch 排在链尾：insnIndex 按 hook 注入后的最终字节码算出，须在 hook 之后施加
-        byte[] constOverrideResult = ConstOverride.transform(className, result);
-        if (constOverrideResult != null) {
-            result = constOverrideResult;
+        byte[] bridgeResult = ProtocolMethodProbe.transform(className, result);
+        if (bridgeResult != null) {
+            result = bridgeResult;
             anyTransformed = true;
         }
 
-        // 方法探针 HeadBridge：在目标 void(float) 方法 HEAD 注入 token+writer 桥，惰性(未激活时 fall through)
-        byte[] bridgeResult = MethodProbe.transform(className, result);
-        if (bridgeResult != null) {
-            result = bridgeResult;
+        byte[] constantResult = ProtocolConstantOverride.transform(className, result);
+        if (constantResult != null) {
+            result = constantResult;
             anyTransformed = true;
         }
 

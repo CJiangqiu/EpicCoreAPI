@@ -6,9 +6,6 @@ import net.eca.config.EcaConfiguration;
 import net.eca.network.FactionGlowSyncPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EntityLocationManager;
-import net.eca.util.EntityUtil;
-import net.eca.util.health.DelayedHealthVerifier;
-import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
 import net.eca.util.bossshow.BossShowPlaybackTracker;
@@ -16,6 +13,8 @@ import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.eca.util.faction.FactionManager;
+import net.eca.util.health.internal.LifeProtocolManager;
+import net.eca.util.health.internal.ProtocolVerificationManager;
 import net.eca.util.faction.FactionRelation;
 import net.eca.util.raid.RaidManager;
 import net.minecraft.network.chat.Component;
@@ -59,8 +58,8 @@ public class EcaEventHandler {
             event.getEntity() instanceof LivingEntity living) {
             EntityExtensionManager.onEntityJoin(living, serverLevel);
             ForceLoadingManager.onEntityJoin(living, serverLevel);
-            // 按实体实际出现来预热改血分析，比按已加载类顺序盲扫命中率高得多
-            EcaSetHealthManager.onEntityJoinLevel(living);
+            ProtocolVerificationManager.onEntityJoin(living);
+            LifeProtocolManager.onEntityJoinLevel(living);
         }
     }
 
@@ -151,9 +150,8 @@ public class EcaEventHandler {
     @SubscribeEvent
     public void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
+        ProtocolVerificationManager.onServerTick(event.getServer());
         BossShowPlaybackTracker.onServerTick(event.getServer());
-        //END 相位在实体 tick 之后，此处复查才能看到防护逻辑的回滚
-        DelayedHealthVerifier.onServerTick(event.getServer());
     }
 
     // ==================== 阵营发光扫描 ====================
@@ -241,13 +239,13 @@ public class EcaEventHandler {
     public void onServerStopped(ServerStoppedEvent event) {
         ResurrectionManager.stop();
         ResurrectionManager.clearAll();
-        DelayedHealthVerifier.clear();
         InvulnerableEntityManager.clearAll();
         GlobalEffectOverrideManager.clearAllDimensions();
         EntityExtensionManager.clearAll();
         FactionManager.clearAll();
         // 传入全部维度以便释放袭击期间强制加载的区块
         RaidManager.clearAll(event.getServer().getAllLevels());
+        LifeProtocolManager.clear();
         NEXT_GLOW_SCAN.clear();
     }
 }

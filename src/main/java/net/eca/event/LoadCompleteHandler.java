@@ -7,11 +7,11 @@ import net.eca.coremod.EcaClassTransformer;
 
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
-import net.eca.util.health.EcaSetHealthManager;
-import net.eca.util.health.HealthDataFlow;
 import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.faction.FactionManager;
+import net.eca.util.health.internal.LifeProtocolManager;
+import net.eca.util.health.internal.ProtocolDataFlowEngine;
 import net.eca.util.raid.RaidManager;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
 import org.objectweb.asm.ClassReader;
@@ -33,7 +33,6 @@ import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Method;
 import java.security.ProtectionDomain;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -66,13 +65,12 @@ public final class LoadCompleteHandler {
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
         event.enqueueWork(BossShowManager::scanAndRegisterAll);
 
-        // 实体健康 hook 收尾：普通与激进模式都在所有 mod 构造完成后施加，确保 ECA 排在其他 mod 的字节码处理之后
-        event.enqueueWork(LoadCompleteHandler::applyLoadCompleteTransformers);
-
-        // 数据流分析器注入 ECA 运行期字节码源与 hook 剥离配置，必须排在 warmup 之前
-        event.enqueueWork(HealthDataFlow::init);
-        // 数据流改血预热：排在所有 ECA 字节码处理之后，确保读到的是含 ECA hook 的最终字节码
-        event.enqueueWork(EcaSetHealthManager::startWarmup);
+        // 最终字节码必须先完成转换，协议分析才能避开尚未稳定的中间结果
+        event.enqueueWork(() -> {
+            applyLoadCompleteTransformers();
+            ProtocolDataFlowEngine.init();
+            LifeProtocolManager.startWarmup();
+        });
     }
 
     // ── 激进模式：延迟 retransform ──

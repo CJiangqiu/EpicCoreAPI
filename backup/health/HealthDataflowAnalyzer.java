@@ -195,8 +195,7 @@ public final class HealthDataflowAnalyzer {
             return false;
         }
         float actual = number.floatValue();
-        float tolerance = Math.max(0.5f, Math.abs(expected) * 0.02f);
-        boolean matches = Float.isFinite(actual) && Math.abs(actual - expected) <= tolerance;
+        boolean matches = HealthValueSemantics.matches(actual, expected);
         if (!matches && sink != null && EXTERNAL_EVAL_DIAG.add(sink.label + "|actual=" + actual))
             EcaLogger.info("[ExternalScan] eval mismatch sink={} actual={} expected={}", sink.label, actual, expected);
         return matches;
