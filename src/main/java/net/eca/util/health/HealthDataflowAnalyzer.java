@@ -2,12 +2,16 @@ package net.eca.util.health;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.config.EcaConfiguration;
+import net.eca.coremod.EcaTransformerManager;
 import net.eca.util.EcaLogger;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.Handle;
+import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.*;
@@ -64,6 +68,9 @@ public final class HealthDataflowAnalyzer {
     public static final McMethod HURT             = new McMethod("m_6469_", "hurt", "(" + DAMAGE_SOURCE_DESC + "F)Z");
     public static final McMethod ACTUALLY_HURT    = new McMethod("m_6475_", "actuallyHurt", "(" + DAMAGE_SOURCE_DESC + "F)V");
     public static final McMethod SET_HEALTH       = new McMethod("m_21153_", "setHealth", "(F)V");
+    public static final McMethod TICK             = new McMethod("m_8119_", "tick", "()V");
+    public static final McMethod BASE_TICK        = new McMethod("m_6075_", "baseTick", "()V");
+    public static final McMethod AI_STEP          = new McMethod("m_8107_", "aiStep", "()V");
 
     /* ==================== 外部扫描：isAlive/isDeadOrDying 数据流逆向 ==================== */
 
@@ -1007,27 +1014,6 @@ public final class HealthDataflowAnalyzer {
         return false;
     }
 
-    /* 判断表达式树中是否存在至少一条纯字面常数分支。
-       对 Choice：只要任一条 alternative 是常数即返回 true（分支级判定）。
-       对 Op：所有 args 必须都是常数才算常数（保持语义正确性）。
-       其余节点类型不再放宽——Source/Call/Closure/Unknown 一律不是常数。 */
-    static boolean hasConstantBranch(Expr e) {
-        if (e instanceof Primitive) return true;
-        if (e instanceof Op op) {
-            for (Expr a : op.args()) if (!hasConstantBranch(a)) return false;
-            return true;
-        }
-        if (e instanceof Choice c) {
-            for (Expr a : c.alternatives()) if (hasConstantBranch(a)) return true;
-            return false;
-        }
-        if (e instanceof Call call) {
-            for (Expr a : call.args()) if (hasConstantBranch(a)) return true;
-            return false;
-        }
-        return false;
-    }
-
     private static int findArgWithSink(List<Expr> args, Source sink) {
         int detailed = findArgWithSinkDetailed(args, sink);
         return detailed < 0 ? -1 : detailed;
@@ -1884,6 +1870,7 @@ public final class HealthDataflowAnalyzer {
             Object recv = null;
             if (hasRecv) {
                 recv = evaluate(call.args().get(0), ctx);
+                if (recv == null) recv = inferUnknownReceiver(call.owner(), ctx);
                 if (recv == null) return null;
             }
             Class<?>[] pts = new Class<?>[argTypes.length];
@@ -1892,6 +1879,10 @@ public final class HealthDataflowAnalyzer {
                 pts[i] = asmTypeToClass(argTypes[i]);
                 if (pts[i] == null) return null;
                 Object v = evaluate(call.args().get(start + i), ctx);
+                // 静态方法参数不可符号化时兜底：WorldVariables.get(world) 的 world 是 LevelAccessor，
+                // 分析期 entity.level() 常被拦成 UnknownExpr→null，求值 null 会让 get(null) 返回
+                // 客户端静态替身，写入与模组读取出口不同对象。参数类型能被实体当前 level 满足时用它兜底。
+                if (v == null) v = inferUnknownArg(pts[i], ctx);
                 pvs[i] = v;
             }
             Class<?> dispatchOwner = recv == null ? owner : recv.getClass();
@@ -1903,6 +1894,41 @@ public final class HealthDataflowAnalyzer {
             for (int i = 0; i < pvs.length; i++) pvs[i] = coerceArg(pvs[i], actualTypes[i]);
             return m.invoke(recv, pvs);
         } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
+    }
+
+    /* 接收者符号化失败(UnknownExpr→null)时，若方法归属类型能被实体当前 level 满足，用 entity.level() 兜底。
+       按维度 SavedData 经 level.getDataStorage().computeIfAbsent(...) 访问，分析期 level 常不可符号化；
+       不退路会落到客户端静态替身实例，写入与模组读取出口不同对象。 */
+    private static Object inferUnknownReceiver(String ownerInternal, EvalContext ctx) {
+        LivingEntity entity = ctx.entity();
+        if (entity == null) return null;
+        Class<?> owner = loadClass(ownerInternal);
+        if (owner == null) return null;
+        Object level = entity.level();
+        return level != null && owner.isInstance(level) ? level : null;
+    }
+
+    /* 静态方法参数符号化失败(如 WorldVariables.get(world) 的 LevelAccessor 参数)时，
+       若参数类型能被实体当前 level 满足，用 entity.level() 兜底，避免 get(null) 落回客户端静态替身。 */
+    private static Object inferUnknownArg(Class<?> paramType, EvalContext ctx) {
+        if (paramType == null) return null;
+        LivingEntity entity = ctx.entity();
+        if (entity == null) return null;
+        Object level = entity.level();
+        return level != null && paramType.isInstance(level) ? level : null;
+    }
+
+    /* 写源是否位于实体之外：tick 过程收集的 SavedData/静态状态等真实权威不在实体对象上。
+       FieldChainSource/SynchedDataSource 是实体本体存储(EntityParamMarker receiver)，不算。 */
+    public static boolean isExternalStorageSource(Source sink) {
+        if (sink instanceof StaticFieldSource) return true;
+        if (sink instanceof MapEntrySource) return true;
+        if (sink instanceof CapabilityDataSource) return true;
+        if (sink instanceof ArrayElementSource) return true;
+        if (sink instanceof ChainedFieldSource chained) {
+            return chained.root != EntityParamMarker.I;
+        }
+        return false;
     }
 
     public enum InvokeFailed { INSTANCE }
@@ -2009,7 +2035,50 @@ public final class HealthDataflowAnalyzer {
             entryCosts.add(entryCost(target.name(), entryStart, fetchStart));
             if (result != null && !result.isEmpty() && !result.sources.isEmpty()) candidates.add(result);
         }
+        // tick 过程收集：从 baseTick/tick/aiStep 及静态过程链反推实体外的真实血量写源(SavedData 等)
+        long tickStart = System.nanoTime();
+        List<StoreWrite> tickWrites = collectTickWrites(entityClass);
+        if (!tickWrites.isEmpty()) {
+            scannedMethods.add("tickWrites");
+            List<Expr> alternatives = new ArrayList<>();
+            for (StoreWrite write : tickWrites) {
+                if (write != null && !alternatives.contains(write)) alternatives.add(write);
+            }
+            if (!alternatives.isEmpty()) {
+                AnalysisResult tickResult = AnalysisResult.of(
+                        alternatives.size() == 1 ? alternatives.get(0) : new Choice(List.copyOf(alternatives)),
+                        entityClass);
+                if (tickResult != null && !tickResult.isEmpty() && !tickResult.sources.isEmpty()) {
+                    candidates.add(tickResult);
+                }
+            }
+            entryCosts.add(entryCost("tickWrites", tickStart, 0));
+        }
         AnalysisResult combined = combineExternalScanCandidates(entityClass, candidates);
+        // 正向定位写入者：tick 链在大型转发过程里预算被无关调用吃光，够不着尾部的真实写入方法；
+        // 从已确认的权威源构建指纹，扫描模组内引用它的方法单独分析，补进候选写源。
+        // 指纹源取 combined(含 tick 收集的 SD 镜像)：观察入口(isAlive/hurt)不读镜像，反查不到 accessor。
+        long writerStart = System.nanoTime();
+        AuthorityFingerprint fingerprint = fingerprintAuthorities(entityClass,
+                combined == null ? List.of() : combined.sources);
+        List<StoreWrite> authorityWrites = collectAuthorityWriterWrites(entityClass, fingerprint);
+        if (!authorityWrites.isEmpty()) {
+            scannedMethods.add("authorityWriters");
+            List<Expr> alternatives = new ArrayList<>();
+            for (StoreWrite write : authorityWrites) {
+                if (write != null && !alternatives.contains(write)) alternatives.add(write);
+            }
+            if (!alternatives.isEmpty()) {
+                AnalysisResult writerResult = AnalysisResult.of(
+                        alternatives.size() == 1 ? alternatives.get(0) : new Choice(List.copyOf(alternatives)),
+                        entityClass);
+                if (writerResult != null && !writerResult.isEmpty() && !writerResult.sources.isEmpty()) {
+                    candidates.add(writerResult);
+                }
+            }
+            entryCosts.add(entryCost("authorityWriters", writerStart, 0));
+            combined = combineExternalScanCandidates(entityClass, candidates);
+        }
         if (EXTERNAL_SCAN_DIAG_DUMPED.add(entityClass)) {
             EcaLogger.info("[ExternalScan] entity={} methods={} candidates={} sources={}",
                     entityClass.getName(), scannedMethods, candidates.size(),
@@ -2052,6 +2121,285 @@ public final class HealthDataflowAnalyzer {
         Expr stripped = stripEcaHealthWrappers(expression);
         if (stripped == null || stripped instanceof UnknownExpr) return null;
         return AnalysisResult.of(stripped, owner);
+    }
+
+    /* ==================== 外部扫描：tick 过程写源收集 ====================
+       实体真实血量常由 tick 过程(baseTick/tick/aiStep)经静态过程链维护(LuciferDefenseProcedure 等)，
+       权威存储可能是实体外的 SavedData/静态状态。从这些周期性回调提取 StoreWrite 的 sink，
+       使真实存储成为可写 Source。旧架构经 collectRecurringWrites 完成同样收集，此处对齐移植。 */
+
+    /* 从表达式树递归收集 StoreWrite 的 sink。Choice/Op/Call/Closure 等复合节点逐子遍历。 */
+    private static void collectStoreWrites(Expr expression, List<StoreWrite> writes) {
+        if (expression == null || expression instanceof UnknownExpr) return;
+        if (expression instanceof StoreWrite write) {
+            if (!writes.contains(write)) writes.add(write);
+            collectStoreWrites(write.valueExpr(), writes);
+            return;
+        }
+        if (expression instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) collectStoreWrites(alternative, writes);
+            return;
+        }
+        if (expression instanceof Op operation) {
+            for (Expr argument : operation.args()) collectStoreWrites(argument, writes);
+            return;
+        }
+        if (expression instanceof Call call) {
+            for (Expr argument : call.args()) collectStoreWrites(argument, writes);
+            return;
+        }
+        if (expression instanceof Closure closure) {
+            for (Expr argument : closure.captured()) collectStoreWrites(argument, writes);
+            return;
+        }
+        if (expression instanceof OptionalContentExpr optional) {
+            collectStoreWrites(optional.optionalExpr(), writes);
+        }
+    }
+
+    /* tick 语义入口(显式登记名)或父类覆写的无参 void 方法，判定为周期性回调。
+       与旧版 ProtocolDataflowAnalyzer.isRecurringOverride 语义一致：语义名命中即 true，
+       否则要求父类覆写且无参。 */
+    private static boolean isRecurringOverride(Class<?> owner, MethodNode method) {
+        if (method == null || (method.access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT)) != 0) return false;
+        for (McMethod entry : new McMethod[]{TICK, BASE_TICK, AI_STEP}) {
+            if (entry.desc().equals(method.desc)
+                    && (entry.srg().equals(method.name) || entry.mcp().equals(method.name))) return true;
+        }
+        return isVoidOverride(owner, method) && Type.getArgumentTypes(method.desc).length == 0;
+    }
+
+    /* 父类覆写的 void 方法：模组自定义的周期性回调形态。无参约束由调用方按需施加。 */
+    private static boolean isVoidOverride(Class<?> owner, MethodNode method) {
+        if (owner == null || method == null || method.name.startsWith("<")) return false;
+        if ((method.access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT)) != 0) return false;
+        if (Type.getReturnType(method.desc).getSort() != Type.VOID) return false;
+        for (Class<?> parent = owner.getSuperclass(); parent != null && parent != Object.class;
+             parent = parent.getSuperclass()) {
+            if (classDefinesMethod(parent, method.name, method.desc)) return true;
+        }
+        return false;
+    }
+
+    /* 从实体类层次沿 superclass 收集所有 tick 覆写方法分析出的写源，返回 StoreWrite 列表。
+       tick 过程常把血量维护转发给大型静态过程(LuciferETProcedure 等)，默认 500 内联额度不够穿透，
+       故放宽内联预算(仍保留 maxDepth 防环)，使实体外真实存储能暴露为写源。 */
+    private static List<StoreWrite> collectTickWrites(Class<?> entityClass) {
+        List<StoreWrite> writes = new ArrayList<>();
+        if (entityClass == null || entityClass.getClassLoader() == null) return writes;
+        for (Class<?> owner = entityClass; owner != null && owner != LivingEntity.class;
+             owner = owner.getSuperclass()) {
+            ClassNode node;
+            try {
+                node = classNode(owner);
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                continue;
+            }
+            if (node == null) continue;
+            for (MethodNode method : node.methods) {
+                if (!isRecurringOverride(owner, method)) continue;
+                AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+                ctx.inlineBudget = TICK_WRITE_INLINE_BUDGET;
+                ctx.nodeBudget = TICK_WRITE_NODE_BUDGET;
+                TaintValue[] seed = seedMethodInputs(method.desc, false);
+                Expr expression = analyzeMethodWrites(owner, method.name, method.desc, seed, ctx, 0);
+                if (expression == null || expression instanceof UnknownExpr) continue;
+                collectStoreWrites(expression, writes);
+            }
+        }
+        return List.copyOf(writes);
+    }
+
+    /* tick 过程写源收集的预算：按实测放宽的 override 扫描额度。
+       巨型静态过程转发链在默认 50 万节点预算内 merge 必然耗尽，receiver 链坍缩成
+       Unknown 后写源全部 NOT_ADDRESSABLE；节点与内联额度须同步放大，缺一不可。 */
+    private static final int TICK_WRITE_INLINE_BUDGET = 40_000;
+    private static final int TICK_WRITE_NODE_BUDGET = 12_000_000;
+
+    /* ==================== 正向定位权威写入者 ====================
+       tick 链内联在大型转发过程里预算会被海量无关调用吃光，够不着尾部的真实写入方法；
+       权威(accessor/字段)已知后直接在实体所属模组内扫描引用它的方法，单独分析即可
+       暴露实体外的真实存储写入，与被写入方法在过程图里离 tick 多远无关。 */
+
+    /* 权威指纹：真实存储的字段/accessor/NBT 键集合。任一权威无法落键则该指纹整体不可用。 */
+    private record AuthorityFingerprint(Set<String> fieldKeys, Set<String> accessorKeys,
+                                        Set<String> nbtKeys, boolean usable) {
+        String cacheScope() {
+            return fieldKeys.size() + "/" + accessorKeys.size() + "/" + nbtKeys.size();
+        }
+    }
+
+    private static final AuthorityFingerprint NO_AUTHORITY_FINGERPRINT =
+            new AuthorityFingerprint(Set.of(), Set.of(), Set.of(), false);
+
+    /* 从已分析出的权威源构建指纹：SynchedDataSource→反查其 accessor 静态字段键，
+       字段链源→末段字段键。非实体权威的源类型(静态字段/容器等)跳过不置不可用——
+       它们只是实体外维护状态，不是"权威"本身，且 tick 收集常混入无关静态字段，
+       把它们当权威会把指纹整体拖成不可用。 */
+    private static AuthorityFingerprint fingerprintAuthorities(Class<?> entityClass,
+                                                               Collection<Source> authorities) {
+        if (authorities == null || authorities.isEmpty()) return NO_AUTHORITY_FINGERPRINT;
+        Set<String> fieldKeys = new HashSet<>();
+        Set<String> accessorKeys = new HashSet<>();
+        Set<String> nbtKeys = new HashSet<>();
+        boolean usable = true;
+        for (Source authority : authorities) {
+            if (authority instanceof SynchedDataSource synched) {
+                String accessorField = findAccessorFieldKey(entityClass, synched.accessor);
+                if (accessorField == null) usable = false;
+                else accessorKeys.add(accessorField);
+            } else if (authority instanceof FieldChainSource chain && !chain.chain.isEmpty()) {
+                fieldKeys.add(fieldKey(chain.chain.get(chain.chain.size() - 1)));
+            } else if (authority instanceof ChainedFieldSource chain && !chain.chain.isEmpty()) {
+                fieldKeys.add(fieldKey(chain.chain.get(chain.chain.size() - 1)));
+            } else {
+                // StaticFieldSource/MapEntrySource/CapabilityDataSource/ArrayElementSource 等
+                // 实体外维护状态，非权威本体，忽略即可
+            }
+        }
+        if (fieldKeys.isEmpty() && accessorKeys.isEmpty() && nbtKeys.isEmpty()) {
+            return NO_AUTHORITY_FINGERPRINT;
+        }
+        return new AuthorityFingerprint(fieldKeys, accessorKeys, nbtKeys, usable);
+    }
+
+    private static String fieldKey(FieldStep step) {
+        return step.ownerInternal() + "#" + step.name() + "#" + step.desc();
+    }
+
+    /* accessor 对象本身不带来源信息，只能在实体继承链的静态字段里反查持有它的那个。 */
+    private static String findAccessorFieldKey(Class<?> entityClass, EntityDataAccessor<?> accessor) {
+        for (Class<?> owner = entityClass; owner != null && owner != Object.class; owner = owner.getSuperclass()) {
+            for (Field field : owner.getDeclaredFields()) {
+                if (!Modifier.isStatic(field.getModifiers())
+                        || !EntityDataAccessor.class.isAssignableFrom(field.getType())) continue;
+                try {
+                    field.setAccessible(true);
+                    if (field.get(null) == accessor) return internalName(owner) + "#" + field.getName();
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                }
+            }
+        }
+        return null;
+    }
+
+    /* 写入权威的过程与声明 accessor 的实体同属一个模组，按实体类名前三段包前缀限定扫描范围；
+       CodeSource 在 Forge 下常是虚拟路径，不能用 jar 文件定位。 */
+    private static String modScopePrefix(Class<?> entityClass) {
+        String name = entityClass.getName();
+        int cut = 0;
+        for (int segment = 0; segment < 3; segment++) {
+            int dot = name.indexOf('.', cut);
+            if (dot < 0) break;
+            cut = dot + 1;
+        }
+        return cut <= 1 ? null : name.substring(0, cut - 1);
+    }
+
+    private record WriterSite(String ownerInternal, String methodName, String methodDesc) {}
+
+    private static final Map<String, List<WriterSite>> AUTHORITY_WRITER_SITES = new ConcurrentHashMap<>();
+    private static final int WRITER_SCAN_CLASS_LIMIT = 30_000;
+
+    private static List<WriterSite> findAuthorityWriterSites(Class<?> entityClass,
+                                                             AuthorityFingerprint fingerprint) {
+        if (fingerprint == null || !fingerprint.usable()) return List.of();
+        if (fingerprint.accessorKeys().isEmpty() && fingerprint.fieldKeys().isEmpty()) return List.of();
+        String scope = modScopePrefix(entityClass);
+        if (scope == null) return List.of();
+        return AUTHORITY_WRITER_SITES.computeIfAbsent(scope + "|" + fingerprint.cacheScope(),
+                ignored -> scanLoadedClassesForWriterSites(scope, fingerprint));
+    }
+
+    private static List<WriterSite> scanLoadedClassesForWriterSites(String scope,
+                                                                    AuthorityFingerprint fingerprint) {
+        List<WriterSite> sites = new ArrayList<>();
+        int[] scanned = {0};
+        EcaTransformerManager.forEachLoadedClass(clazz -> {
+            if (clazz == null || scanned[0] >= WRITER_SCAN_CLASS_LIMIT) return;
+            if (!clazz.getName().startsWith(scope)) return;
+            byte[] bytes = classBytes(clazz);
+            if (bytes == null) return;
+            scanned[0]++;
+            try {
+                collectWriterSites(new ClassReader(bytes), fingerprint, sites);
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+            }
+        });
+        return List.copyOf(sites);
+    }
+
+    /* 只读指令表找引用指纹的方法：GETSTATIC 命中 accessor 键或 PUTFIELD 命中字段键即记录。 */
+    private static void collectWriterSites(ClassReader reader, AuthorityFingerprint fingerprint,
+                                           List<WriterSite> sites) {
+        String[] ownerInternal = {reader.getClassName()};
+        reader.accept(new ClassVisitor(Opcodes.ASM9) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                             String signature, String[] exceptions) {
+                return new MethodVisitor(Opcodes.ASM9) {
+                    private boolean recorded;
+
+                    @Override
+                    public void visitFieldInsn(int opcode, String owner, String fieldName, String fieldDesc) {
+                        if (recorded) return;
+                        boolean hit = opcode == Opcodes.GETSTATIC
+                                && fingerprint.accessorKeys().contains(owner + "#" + fieldName);
+                        hit |= opcode == Opcodes.PUTFIELD
+                                && fingerprint.fieldKeys().contains(owner + "#" + fieldName + "#" + fieldDesc);
+                        if (!hit) return;
+                        recorded = true;
+                        sites.add(new WriterSite(ownerInternal[0], name, descriptor));
+                    }
+                };
+            }
+        }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+    }
+
+    /* 命中的方法单独分析：它们自身通常很小，预算充裕，不受大型 tick 过程图的牵连。 */
+    private static List<StoreWrite> collectAuthorityWriterWrites(Class<?> entityClass,
+                                                                 AuthorityFingerprint fingerprint) {
+        List<StoreWrite> writes = new ArrayList<>();
+        for (WriterSite site : findAuthorityWriterSites(entityClass, fingerprint)) {
+            Class<?> owner = loadClass(site.ownerInternal());
+            if (owner == null) continue;
+            MethodNode method;
+            try {
+                method = findMethodNode(classNode(owner), site.methodName(), site.methodDesc());
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                continue;
+            }
+            if (method == null || method.instructions.size() == 0) continue;
+            boolean isStatic = (method.access & Opcodes.ACC_STATIC) != 0;
+            AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+            ctx.inlineBudget = TICK_WRITE_INLINE_BUDGET;
+            ctx.nodeBudget = TICK_WRITE_NODE_BUDGET;
+            Expr expression = analyzeMethodWrites(owner, site.methodName(), site.methodDesc(),
+                    seedWriterSiteInputs(site.methodDesc(), isStatic), ctx, 0);
+            collectStoreWrites(expression, writes);
+        }
+        return List.copyOf(writes);
+    }
+
+    /* 静态过程以实体为形参接收目标，须把该形参标成实体本体，否则字段源无法归位到实体。 */
+    private static TaintValue[] seedWriterSiteInputs(String desc, boolean isStatic) {
+        TaintValue[] locals = seedMethodInputs(desc, isStatic);
+        if (!isStatic) return locals;
+        Type[] argumentTypes = Type.getArgumentTypes(desc);
+        int local = 0;
+        for (Type argumentType : argumentTypes) {
+            Class<?> argumentClass = asmTypeToClass(argumentType);
+            if (argumentClass != null && Entity.class.isAssignableFrom(argumentClass)) {
+                locals[local] = new TaintValue(argumentType.getSize(), EntityParamMarker.I);
+                break;
+            }
+            local += argumentType.getSize();
+        }
+        return locals;
     }
 
     /* ==================== 外部扫描：布尔死亡门控识别 ====================
@@ -2795,7 +3143,10 @@ public final class HealthDataflowAnalyzer {
             return analyzeMethodWrites(target.owner(), target.name(), target.desc(), seedLocals, ctx, depth + 1);
         }
         if (depth + 1 >= ctx.maxDepth || ctx.inlineBudget <= 0 || call.name.startsWith("<")) return null;
-        if (call.getOpcode() == Opcodes.INVOKESTATIC && !isHealthLifecycleCall(call)) return null;
+        // 实体控制类静态过程(LuciferETProcedure.execute 等)带实体参数，是实体周期行为的转发链，须放行内联才能
+        // 从 tick 链反推到真实血量写入点；其余无关静态调用仍拦掉，避免把无关工具方法拖进分析。
+        if (call.getOpcode() == Opcodes.INVOKESTATIC && !isHealthLifecycleCall(call)
+                && !isEntityControlCall(call, args)) return null;
         if (call.owner.startsWith("java/") || call.owner.startsWith("javax/") || call.owner.startsWith("jdk/")) {
             return null;
         }
@@ -3092,25 +3443,77 @@ public final class HealthDataflowAnalyzer {
         }
 
         // getHealth 返回值的分类语义，决定改血手段的分流
-        // CONST_OVERRIDE：树中存在常数语义（纯常数或 Choice 含常数分支），走常数覆写 patch
-        // DATAFLOW：包含可写 Source，使用数据流结果写入存储
+        // REAL_HEALTH：getHealth 经数据流分析后确认能沿着它到达真实血量存储位置（高可信），直接写存储
+        // NOT_REAL_HEALTH：getHealth 返回值与真实血量存储位置无关（常数/诱饵/镜像），内部按形态细分
         // UNRESOLVED：含 Unknown 或无法符号化的非常数计算，留给后续模块
-        public enum Kind { DATAFLOW, CONST_OVERRIDE, UNRESOLVED }
+        public enum Kind { REAL_HEALTH, NOT_REAL_HEALTH, UNRESOLVED }
 
-        /* CONST_OVERRIDE 优先级高于 DATAFLOW：只要有常数语义就优先走常数覆写 patch，
-           即使树中也存在 Source（如加密保护的存储），常数覆写仍能生效。
-           DATAFLOW 仅用于纯数据流可写、无常数语义的实体。 */
+        /* NOT_REAL_HEALTH 优先于 REAL_HEALTH：存在可 patch 的常数覆写源时走覆写通道（改观测出口而非存储）。
+           REAL_HEALTH 仅用于无常数覆写源、getHealth 直接到达真实存储的实体。
+           常数判定只认可 patch 的 ConstOverrideSource：树中任一处出现常数（如算术常数、NaN 分支）
+           不代表 getHealth 就是常数——它可能实际读的是 SynchedEntityData 镜像，那应归 REAL_HEALTH。 */
         public Kind classify() {
-            if (hasConstantBranch(returnExpr)) return Kind.CONST_OVERRIDE;
-            if (sources.stream().anyMatch(ConstOverrideSource.class::isInstance)) return Kind.CONST_OVERRIDE;
+            if (sources.stream().anyMatch(ConstOverrideSource.class::isInstance)) return Kind.NOT_REAL_HEALTH;
             if (returnExpr == null || containsUnknown(returnExpr)) return Kind.UNRESOLVED;
-            if (!sources.isEmpty()) return Kind.DATAFLOW;
-            return Kind.UNRESOLVED;
+            if (!sources.isEmpty()) return Kind.REAL_HEALTH;
+            // getHealth 恒返回纯常数（无 Source 可写）→ 与真实存储无关，归 NOT_REAL_HEALTH
+            return Kind.NOT_REAL_HEALTH;
         }
 
         public static AnalysisResult of(Expr e, Class<?> definingClass) {
             Expr rewritten = rewriteConstOverrides(e);
             return new AnalysisResult(rewritten, List.copyOf(collectSources(rewritten)), definingClass);
+        }
+
+        /* external 写入只处理与权威有依赖关系的源：真实血量的联动存储，其写入值引用其他存储；
+           纯常量写入源(阶段标记等)写入后回读必匹配目标值，会抢先假成功。实体本体源保留——
+           dataflow 之外的补充写入对它们无害，且 external-only 实体仍依赖它们落地。 */
+        public static AnalysisResult withoutConstantOnlySources(AnalysisResult tree) {
+            if (tree == null || tree.sources.isEmpty()) return tree;
+            List<Source> filtered = new ArrayList<>(tree.sources.size());
+            for (Source sink : tree.sources) {
+                if (!isExternalStorageSource(sink) || sinkHasSourceDependency(tree.returnExpr, sink)) {
+                    filtered.add(sink);
+                }
+            }
+            if (filtered.size() == tree.sources.size()) return tree;
+            return new AnalysisResult(tree.returnExpr, List.copyOf(filtered), tree.definingClass);
+        }
+
+        /* 递归遍历表达式树：该 sink 存在写入且写入值引用了其他存储源 → 有依赖。 */
+        private static boolean sinkHasSourceDependency(Expr e, Source sink) {
+            if (e instanceof StoreWrite write) {
+                if (write.sink().equals(sink) && !collectSources(write.valueExpr()).isEmpty()) return true;
+                return sinkHasSourceDependency(write.valueExpr(), sink);
+            }
+            if (e instanceof Choice choice) {
+                for (Expr alt : choice.alternatives()) {
+                    if (sinkHasSourceDependency(alt, sink)) return true;
+                }
+                return false;
+            }
+            if (e instanceof Op op) {
+                for (Expr arg : op.args()) {
+                    if (sinkHasSourceDependency(arg, sink)) return true;
+                }
+                return false;
+            }
+            if (e instanceof Call call) {
+                for (Expr arg : call.args()) {
+                    if (sinkHasSourceDependency(arg, sink)) return true;
+                }
+                return false;
+            }
+            if (e instanceof Closure closure) {
+                for (Expr arg : closure.captured()) {
+                    if (sinkHasSourceDependency(arg, sink)) return true;
+                }
+                return false;
+            }
+            if (e instanceof OptionalContentExpr optional) {
+                return sinkHasSourceDependency(optional.optionalExpr(), sink);
+            }
+            return false;
         }
     }
 

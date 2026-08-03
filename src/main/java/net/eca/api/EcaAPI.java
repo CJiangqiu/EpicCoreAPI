@@ -931,7 +931,9 @@ public final class EcaAPI {
      * Add a keyword to the health whitelist.
      * Fields containing this keyword will be modified during health modification.
      * @param keyword the keyword to add (case-insensitive)
+     * @deprecated Leftover of the legacy name-based heuristic; the protocol analyzer is structure-based and never reads these lists. Retained for API compatibility only.
      */
+    @Deprecated
     public static void addHealthWhitelistKeyword(String keyword) {
         EntityUtil.addHealthWhitelistKeyword(keyword);
     }
@@ -940,7 +942,9 @@ public final class EcaAPI {
     /**
      * Remove a keyword from the health whitelist.
      * @param keyword the keyword to remove (case-insensitive)
+     * @deprecated Leftover of the legacy name-based heuristic; the protocol analyzer is structure-based and never reads these lists. Retained for API compatibility only.
      */
+    @Deprecated
     public static void removeHealthWhitelistKeyword(String keyword) {
         EntityUtil.removeHealthWhitelistKeyword(keyword);
     }
@@ -949,7 +953,9 @@ public final class EcaAPI {
     /**
      * Get all health whitelist keywords.
      * @return a read-only copy of the health whitelist keywords
+     * @deprecated Leftover of the legacy name-based heuristic; the protocol analyzer is structure-based and never reads these lists. Retained for API compatibility only.
      */
+    @Deprecated
     public static Set<String> getHealthWhitelistKeywords() {
         return EntityUtil.getHealthWhitelistKeywords();
     }
@@ -959,7 +965,9 @@ public final class EcaAPI {
      * Add a keyword to the health blacklist.
      * Fields containing this keyword will NOT be modified during health modification.
      * @param keyword the keyword to add (case-insensitive)
+     * @deprecated Leftover of the legacy name-based heuristic; the protocol analyzer is structure-based and never reads these lists. Retained for API compatibility only.
      */
+    @Deprecated
     public static void addHealthBlacklistKeyword(String keyword) {
         EntityUtil.addHealthBlacklistKeyword(keyword);
     }
@@ -968,7 +976,9 @@ public final class EcaAPI {
     /**
      * Remove a keyword from the health blacklist.
      * @param keyword the keyword to remove (case-insensitive)
+     * @deprecated Leftover of the legacy name-based heuristic; the protocol analyzer is structure-based and never reads these lists. Retained for API compatibility only.
      */
+    @Deprecated
     public static void removeHealthBlacklistKeyword(String keyword) {
         EntityUtil.removeHealthBlacklistKeyword(keyword);
     }
@@ -977,7 +987,9 @@ public final class EcaAPI {
     /**
      * Get all health blacklist keywords.
      * @return a read-only copy of the health blacklist keywords
+     * @deprecated Leftover of the legacy name-based heuristic; the protocol analyzer is structure-based and never reads these lists. Retained for API compatibility only.
      */
+    @Deprecated
     public static Set<String> getHealthBlacklistKeywords() {
         return EntityUtil.getHealthBlacklistKeywords();
     }

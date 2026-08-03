@@ -9,6 +9,10 @@ public class EcaConfiguration {
 
     public static ForgeConfigSpec.ConfigValue<Boolean> FORCE_COMPATIBILITY_MODE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_ENABLE_RADICAL_LOGIC;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_CONST_OVERRIDE;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_EXTERNAL_SCAN;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_METHOD_PROBE;
+    public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_ENABLE_RADICAL_LOGIC;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_INVULNERABLE_UNTARGETABLE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
@@ -50,7 +54,36 @@ public class EcaConfiguration {
                      "启用激进攻击逻辑：memoryRemove、AllReturn 等。警告：可能导致游戏不稳定！")
             .define("Enable Radical Logic", false);
 
-        BUILDER.pop();
+        // setHealth 子配置：改血模块各自开关。数据流逆向与玩家/原版直写一样是基础能力（常开，仅受强制兼容模式控制，
+        // 见 getAttackSetHealthEnableDataflowSafely），不在此列；本子段只容纳以激进逻辑为共同前提的模块。
+        BUILDER.push("setHealth");
+
+        ATTACK_SETHEALTH_ENABLE_CONST_OVERRIDE = BUILDER
+            .comment("Enable constant-override channel: patch getHealth bytecode to return the target value directly."
+                    + " Used when getHealth returns a compile-time constant (decoy pattern).",
+                     "启用常数覆写通道：直接修改 getHealth 字节码使其返回目标值。用于 getHealth 返回编译期常量（诱饵模式）的情况。")
+            .define("Enable Const Override", false);
+
+        ATTACK_SETHEALTH_ENABLE_EXTERNAL_SCAN = BUILDER
+            .comment("Enable external-scan channel: when getHealth is decoupled from storage, reverse isAlive/isDeadOrDying/hurt"
+                    + " to locate the real health store. Also enables effective-health expression inversion and external-mirror writing.",
+                     "启用外部扫描通道：当 getHealth 与存储解耦时，逆向 isAlive/isDeadOrDying/hurt 定位真实血量存储。同时启用有效血量表达式反演与外部镜像联写。")
+            .define("Enable External Scan", false);
+
+        ATTACK_SETHEALTH_ENABLE_METHOD_PROBE = BUILDER
+            .comment("Enable method-probe channel: when structural analysis cannot locate storage, attempt to call the entity's"
+                    + " own health writer via reflection, functional fields, HeadBridge, MethodHandle fields, or field-commit.",
+                     "启用方法探针通道：当结构分析无法定位存储时，尝试通过反射、函数式字段、HeadBridge、MethodHandle 字段或字段提交调用实体自身的血量 writer。")
+            .define("Enable Method Probe", false);
+
+        ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION = BUILDER
+            .comment("Enable numeric-inversion channel: when all structural channels fail, descend into non-invertible"
+                    + " dead-end objects and search for writable numeric cells by value perturbation.",
+                     "启用数值反演通道：所有结构通道失败后，降入不可反演的末端对象，通过数值扰动搜索可写单元。")
+            .define("Enable Numeric Inversion", false);
+
+        BUILDER.pop();  // setHealth
+        BUILDER.pop();  // Attack
 
         // Defence Configuration | 防御系统配置
         BUILDER.push("Defence");
@@ -200,6 +233,32 @@ public class EcaConfiguration {
         if (FriendModCheck.hasRadicalCompatModLoaded()) return true;
         // 优先级链第 3 级：按配置
         return safeGet(ATTACK_ENABLE_RADICAL_LOGIC, false);
+    }
+
+    public static boolean getAttackSetHealthEnableConstOverrideSafely() {
+        if (!getAttackEnableRadicalLogicSafely()) return false;
+        return safeGet(ATTACK_SETHEALTH_ENABLE_CONST_OVERRIDE, false);
+    }
+
+    public static boolean getAttackSetHealthEnableDataflowSafely() {
+        // 数据流逆向是基础能力，常开：与玩家/原版直写一样不配开关，仅受强制兼容模式关闭。
+        // 激进逻辑仅解锁其扩展能力（运行期发现编解码对偶等），不影响数据流定位存储本身。
+        return !getForceCompatibilityModeSafely();
+    }
+
+    public static boolean getAttackSetHealthEnableExternalScanSafely() {
+        if (!getAttackEnableRadicalLogicSafely()) return false;
+        return safeGet(ATTACK_SETHEALTH_ENABLE_EXTERNAL_SCAN, false);
+    }
+
+    public static boolean getAttackSetHealthEnableMethodProbeSafely() {
+        if (!getAttackEnableRadicalLogicSafely()) return false;
+        return safeGet(ATTACK_SETHEALTH_ENABLE_METHOD_PROBE, false);
+    }
+
+    public static boolean getAttackSetHealthEnableNumericInversionSafely() {
+        if (!getAttackEnableRadicalLogicSafely()) return false;
+        return safeGet(ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION, false);
     }
 
     public static boolean getDefenceEnableRadicalLogicSafely() {

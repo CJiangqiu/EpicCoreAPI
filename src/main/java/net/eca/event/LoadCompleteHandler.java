@@ -10,8 +10,8 @@ import net.eca.util.EcaLogger;
 import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.faction.FactionManager;
-import net.eca.util.health.internal.LifeProtocolManager;
-import net.eca.util.health.internal.ProtocolDataFlowEngine;
+import net.eca.util.health.EcaSetHealthManager;
+import net.eca.util.health.HealthDataFlow;
 import net.eca.util.raid.RaidManager;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
 import org.objectweb.asm.ClassReader;
@@ -68,8 +68,8 @@ public final class LoadCompleteHandler {
         // 最终字节码必须先完成转换，协议分析才能避开尚未稳定的中间结果
         event.enqueueWork(() -> {
             applyLoadCompleteTransformers();
-            ProtocolDataFlowEngine.init();
-            LifeProtocolManager.startWarmup();
+            HealthDataFlow.init();
+            EcaSetHealthManager.startWarmup();
         });
     }
 

@@ -2,8 +2,8 @@ package net.eca.coremod;
 
 import net.eca.agent.AgentLogWriter;
 import net.eca.config.EcaConfiguration;
-import net.eca.util.health.internal.ProtocolConstantOverride;
-import net.eca.util.health.internal.ProtocolMethodProbe;
+import net.eca.util.health.ConstOverride;
+import net.eca.util.health.MethodProbe;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -171,8 +171,8 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             TransformerWhitelist.class,
             AllReturnToggle.class,
             AllReturnTransformer.class,
-            ProtocolConstantOverride.class,
-            ProtocolMethodProbe.class
+            ConstOverride.class,
+            MethodProbe.class
         };
         for (Class<?> root : roots) {
             initializeClassTree(root);
@@ -421,13 +421,13 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             anyTransformed = true;
         }
 
-        byte[] bridgeResult = ProtocolMethodProbe.transform(className, result);
+        byte[] bridgeResult = MethodProbe.transform(className, result);
         if (bridgeResult != null) {
             result = bridgeResult;
             anyTransformed = true;
         }
 
-        byte[] constantResult = ProtocolConstantOverride.transform(className, result);
+        byte[] constantResult = ConstOverride.transform(className, result);
         if (constantResult != null) {
             result = constantResult;
             anyTransformed = true;

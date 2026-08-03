@@ -7,9 +7,10 @@ import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.network.SetHealthClientSyncPacket;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
+import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.health.HealthLockManager;
-import net.eca.util.health.internal.LifeProtocolManager;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.Entity;
@@ -620,7 +621,7 @@ public class EntityUtil {
     //获取实体真实生命值
     public static float getHealth(LivingEntity entity) {
         if (entity == null) return 0.0f;
-        float protocolValue = LifeProtocolManager.readHealthAnchor(entity);
+        float protocolValue = EcaSetHealthManager.readHealthAnchor(entity);
         if (Float.isFinite(protocolValue)) return protocolValue;
         try {
             SynchedEntityData.DataItem dataItem = getDataItem(entity.getEntityData(), LivingEntity.DATA_HEALTH_ID.getId());
@@ -708,20 +709,38 @@ public class EntityUtil {
             boolean client = entity.level() != null && entity.level().isClientSide;
             //客户端仅允许被同步包驱动改血(否则客户端会与服务端各自为政)
             if (client && !IS_FROM_SYNC.get()) return false;
-            float beforeHealth = getHealth(entity);
+            //锚点可信度探测自身要写原版血量，必须先于所有通道完成，否则会污染通道的回滚快照
+            EcaSetHealthManager.warmAnchorTrust(entity);
+            float beforeHealth = EcaSetHealthManager.safeGetHealth(entity);
+
+            //第一步：写原版 DATA_HEALTH_ID。若目标 getHealth 就是读这里(原版实体多数如此)，验证已通过则直接成功，
+            //  避免每次都触发数据流逆向分析。Player 跳过(原版自带保护)，非 Player 走完整链。
+            setBasicHealth(entity, expectedHealth);
             boolean ok;
-            if (client) {
-                setBasicHealth(entity, expectedHealth);
-                SynchedEntityData.DataItem dataItem = getDataItem(
-                        entity.getEntityData(), LivingEntity.DATA_HEALTH_ID.getId());
-                ok = dataItem != null && dataItem.value instanceof Float value
-                        && Math.abs(value - expectedHealth) <= 0.001f;
+            if (entity instanceof Player) {
+                ok = EcaSetHealthManager.verify(entity, expectedHealth);
+            } else if (EcaSetHealthManager.verify(entity, expectedHealth)) {
+                ok = true;                                                         //原版同步即生效
+            } else if (EcaSetHealthManager.applyDataflow(entity, expectedHealth)) {
+                ok = true;                                                         //数据流逆向定位真实存储
+            } else if (EcaSetHealthManager.applyExternalScan(entity, expectedHealth)) {
+                ok = true;                                                         //外部扫描(isAlive/hurt 旁证，含有效血量换算)
+            } else if (EcaSetHealthManager.applyMethodProbe(entity, expectedHealth)) {
+                ok = true;                                                         //方法探针(借实体自身 writer)
             } else {
-                ok = LifeProtocolManager.setHealth(entity, expectedHealth);
+                ok = EcaSetHealthManager.applyNumericInversion(entity, expectedHealth); //数值反演(死角对象图扰动)
             }
 
+            //服务端改血成功 → 广播给追踪客户端，令自定义存储型实体客户端显示同步(客户端重跑同一条链)
             if (ok && !client) {
                 syncHealthToClients(entity, expectedHealth, beforeHealth);
+                /* 当场校验只能证明这一刻写进去了，tick 内的防护会把值改回去，故登记延迟复查。
+                   已知会被改回的类再追加联写实体之外的血量镜像(外部扫描第三阶段)——
+                   须登记成功才写，那批世界数据的提交与撤销全靠这次复查裁定。 */
+                DelayedHealthVerifier.Ticket ticket = DelayedHealthVerifier.schedule(entity, expectedHealth);
+                if (ticket != null) {
+                    EcaSetHealthManager.applyExternalMirror(entity, beforeHealth, expectedHealth, ticket);
+                }
             }
             return ok;
         } catch (Exception e) {
@@ -1265,40 +1284,46 @@ public class EntityUtil {
 
     // ==================== 关键词名单管理 API ====================
 
-    //添加生命值白名单关键词
+    //添加生命值白名单关键词（已弃用：旧按名启发式残留，协议分析按结构判据从不读取这些名单）
+    @Deprecated
     public static void addHealthWhitelistKeyword(String keyword) {
         if (keyword != null && !keyword.isEmpty()) {
             HEALTH_WHITELIST_KEYWORDS.add(keyword.toLowerCase());
         }
     }
 
-    //移除生命值白名单关键词
+    //移除生命值白名单关键词（已弃用）
+    @Deprecated
     public static void removeHealthWhitelistKeyword(String keyword) {
         if (keyword != null) {
             HEALTH_WHITELIST_KEYWORDS.remove(keyword.toLowerCase());
         }
     }
 
-    //获取生命值白名单关键词（只读副本）
+    //获取生命值白名单关键词（只读副本，已弃用）
+    @Deprecated
     public static Set<String> getHealthWhitelistKeywords() {
         return new HashSet<>(HEALTH_WHITELIST_KEYWORDS);
     }
 
-    //添加生命值黑名单关键词
+    //添加生命值黑名单关键词（已弃用）
+    @Deprecated
     public static void addHealthBlacklistKeyword(String keyword) {
         if (keyword != null && !keyword.isEmpty()) {
             HEALTH_BLACKLIST_KEYWORDS.add(keyword.toLowerCase());
         }
     }
 
-    //移除生命值黑名单关键词
+    //移除生命值黑名单关键词（已弃用）
+    @Deprecated
     public static void removeHealthBlacklistKeyword(String keyword) {
         if (keyword != null) {
             HEALTH_BLACKLIST_KEYWORDS.remove(keyword.toLowerCase());
         }
     }
 
-    //获取生命值黑名单关键词（只读副本）
+    //获取生命值黑名单关键词（只读副本，已弃用）
+    @Deprecated
     public static Set<String> getHealthBlacklistKeywords() {
         return new HashSet<>(HEALTH_BLACKLIST_KEYWORDS);
     }

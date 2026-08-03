@@ -89,7 +89,7 @@ public final class ConstOverride {
     private record PatchTarget(MethodNode method, AbstractInsnNode insn, boolean fallback) {}
 
     private static final Map<String, List<Site>> SPECS = new ConcurrentHashMap<>();
-    private static final String SELF_INTERNAL = "backup/health/ConstOverride";
+    private static final String SELF_INTERNAL = "net/eca/util/health/ConstOverride";
     private static final Set<String> INSTALL_DUMPED = ConcurrentHashMap.newKeySet();
     private static final Set<String> PATCH_DUMPED = ConcurrentHashMap.newKeySet();
     private static final Set<String> MISS_DUMPED = ConcurrentHashMap.newKeySet();

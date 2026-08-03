@@ -67,7 +67,7 @@ public final class MethodProbe {
         if (provider != null) bytesProvider = provider;
     }
 
-    private static final String RUNTIME = "backup/health/MethodProbe";
+    private static final String RUNTIME = "net/eca/util/health/MethodProbe";
     private static final String ENTITY_INTERNAL = Type.getInternalName(Entity.class);
 
     // ==================== 模型 ====================

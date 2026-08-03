@@ -244,6 +244,10 @@ public final class NumericInverter {
                 || n.startsWith("java.lang.Thread") || n.startsWith("java.lang.reflect.")
                 || n.startsWith("java.lang.invoke.") || n.startsWith("java.security.")
                 || n.startsWith("com.mojang.")) return true;
+        /* SynchedEntityData 的注册/网络元数据(EntityDataAccessor.id、序列化器等)绝不能被当数值扰动：
+           改 accessor 的 id 会让多个数据项撞同一 field id，下一 tick 类型冲突直接崩服。
+           真实 DataItem 血量由 SynchedDataSource 正规通道写入，不经本遍历。 */
+        if (n.startsWith("net.minecraft.network.syncher.")) return true;
         return Level.class.isAssignableFrom(cls)
                 || MinecraftServer.class.isAssignableFrom(cls)
                 || RegistryAccess.class.isAssignableFrom(cls)

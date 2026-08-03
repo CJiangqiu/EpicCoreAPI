@@ -97,13 +97,53 @@ public final class EcaSetHealthManager {
     /* 查询 DATAFLOW_TABLE：失败结果直接返回，可写结果交由 HealthDataFlow；缓存缺失时执行分析并写入表。 */
     public static boolean applyDataflow(LivingEntity target, float targetHealth) {
         if (target == null) return false;
+        if (!EcaConfiguration.getAttackSetHealthEnableDataflowSafely()) return false;
         HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(target.getClass());
         if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) return false;
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
         boolean success = HealthDataFlow.write(tree, target, targetHealth);
         if (!success) snapshot.restore();
+        /* dataflow 写实体存储成功后，追加写实体外的 SavedData 真实权威。
+           路西法这类实体：dataflow 只覆盖实体镜像 SD:48，当场 verify 通过，但真实血量
+           (SavedData) 未写，下一 tick 被钳制回。ExternalScan(tick 收集)能定位 SavedData 写源，
+           追加写入使真实权威与实体镜像一致。外部扫描关闭或未就绪时不阻塞 dataflow 的成功结果。 */
+        tryExternalScanCoWrite(target, targetHealth);
         return success;
+    }
+
+    /* 仅当 ExternalScan 结果已缓存且含实体外写源时追加写实体外权威；未就绪则触发后台分析并放弃本次追加。
+       只对 dataflow 覆盖实体镜像、真实血量在实体外(SavedData 等)的类追加，普通实体(ExternalScan 结果全是
+       实体内源)跳过，避免每个改血都拖进外部扫描/有效血量建模。
+       不改变 dataflow 的返回值——它是主通道，SavedData 追加是补写，失败不影响已成功的实体写入。
+       applyExternalScan 内部已自带快照/回滚，此处不再嵌套捕获。 */
+    private static void tryExternalScanCoWrite(LivingEntity target, float targetHealth) {
+        if (target == null) return;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return;
+        Class<?> cls = target.getClass();
+        HealthDataflowAnalyzer.AnalysisResult external = HealthDataflowAnalyzer.peekExternalScanResult(cls);
+        if (external == null) {
+            submitExternalScanAnalysis(cls);
+            submitComparisonPrescan(cls);
+            return;
+        }
+        boolean hasExternalSource = external.sources.stream()
+                .anyMatch(HealthDataflowAnalyzer::isExternalStorageSource);
+        if (!hasExternalSource) return;
+        try {
+            /* 只补写实体外权威(SavedData 等)：dataflow 已把实体内存储写成目标值，此处必须让
+               tick 权威同 tick 也等于目标值，否则路西法的钳制会拿高水位把实体存储改回。
+               逐个全写并回读自证，不能借用 applyExternalScan——它首个校验通过的 sink(常是实体内
+               镜像)就返回，永远碰不到 lucifer_health2 这类真正的 tick 权威。 */
+            if (HealthDataFlow.coWriteExternalAuthorities(external, target, targetHealth)) {
+                markExternalAuthorityWritten(cls);
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            EcaLogger.info("[ExternalScan] co-write threw entity={} type={} msg={}",
+                    cls.getName(), t.getClass().getName(), t.getMessage());
+        }
     }
 
     /* getHealth 数据流无法定位存储时，逆向 isAlive/isDeadOrDying/hurt/actuallyHurt 定位血量存储。
@@ -144,7 +184,26 @@ public final class EcaSetHealthManager {
                 || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return false;
         HealthModel model = HealthModel.forClass(target.getClass());
         if (model == null || !model.delayedRollbackObserved()) return false;
+        /* co-write 已成功写入实体外权威后仍未留住，是模组地板/钳制(路西打的 max(_,10) 等)所致，
+           不是未知镜像回滚。此时再按"值吻合"破坏性扫描世界存档既定位不到真镜像，又有改坏其他
+           模组世界数据的风险，直接抑制。 */
+        if (EXTERNAL_AUTHORITY_WRITTEN.contains(target.getClass())) {
+            if (EXTERNAL_MIRROR_SUPPRESSED_DUMPED.add(target.getClass().getName())) {
+                EcaLogger.info("[ExternalMirror] suppressed entity={} reason=external authority already co-written (mod floor/clamp, not a hidden mirror)",
+                        target.getClass().getName());
+            }
+            return false;
+        }
         return ExternalMirrorWriter.write(target, beforeHealth, targetHealth, ticket);
+    }
+
+    /* co-write 成功写入实体外权威的类：其外部权威已被 ECA 直接写入，镜像阶段无需再介入。 */
+    private static final Set<Class<?>> EXTERNAL_AUTHORITY_WRITTEN = ConcurrentHashMap.newKeySet();
+    private static final Set<String> EXTERNAL_MIRROR_SUPPRESSED_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 由 tryExternalScanCoWrite 在 co-write 至少写成功一个外部权威时登记。 */
+    static void markExternalAuthorityWritten(Class<?> cls) {
+        if (cls != null) EXTERNAL_AUTHORITY_WRITTEN.add(cls);
     }
 
     /* getHealth 与实际存储解耦时，使用实体生死判定所读取的有效血量表达式作为观测锚点，
@@ -264,13 +323,16 @@ public final class EcaSetHealthManager {
     }
 
     /* 数据流未分析过的类先补分析，再据其形态决定是否需要外部扫描。
-       写入打不穿的形态有两种：分析失败，以及 getHealth 返回常数语义——
-       后者数据流分析本身是成功的，只按失败筛会把这类实体漏掉。 */
+       写入打不穿的形态有两种：分析失败，以及 getHealth 与真实存储无关(NOT_REAL_HEALTH，
+       常数/诱饵/镜像)——后者数据流分析本身是成功的，只按失败筛会把这类实体漏掉。 */
     private static void prewarmJoinedEntityClass(Class<?> cls) {
         try {
             HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(cls);
+            /* getHealth 定义在原版(未被模组重写)→真血就在原版存储，原版直写即可，跳过外部扫描。
+               分析失败时定义类不可知，仍需外部扫描兜底；模组重写了 getHealth 的类(无论其 getHealth
+               读实体内还是实体外)都要扫描，否则路西法这类"读得对但权威在实体外"的实体会被漏掉。 */
             if (tree != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
-                    && tree.classify() != HealthDataflowAnalyzer.AnalysisResult.Kind.CONST_OVERRIDE) return;
+                    && isVanillaGetHealthOwner(tree)) return;
             EcaLogger.info("[ExternalScan] join prewarm started entity={}", cls.getName());
             /* 预热跑完之前，同一执行器上的运行期请求只能排队等待，因此预热时长直接决定
                "生成后第一次改血能否命中缓存"。分两段计时以便定位是哪一段变慢。 */
@@ -288,6 +350,13 @@ public final class EcaSetHealthManager {
             EcaLogger.info("[ExternalScan] join prewarm threw entity={} type={} msg={}",
                     cls.getName(), t.getClass().getName(), t.getMessage());
         }
+    }
+
+    /* getHealth 的定义类是否在原版包：definingClass 由分析器沿层次解析到真正定义 getHealth 字节码的类，
+       落在 net.minecraft.* 即表示当前实体未重写 getHealth，其真血在原版存储，无需外部扫描。 */
+    private static boolean isVanillaGetHealthOwner(HealthDataflowAnalyzer.AnalysisResult tree) {
+        Class<?> owner = tree.definingClass;
+        return owner != null && owner.getName().startsWith("net.minecraft.");
     }
 
     /* 在外部扫描进行的同时预扫比较表达式，使两段耗时重叠而非相加。 */
@@ -530,8 +599,8 @@ public final class EcaSetHealthManager {
         return DATAFLOW_TABLE.computeIfAbsent(cls, EcaSetHealthManager::analyzeForTable);
     }
 
-    /* 分析并归一化为 2 态：可写结构(DATAFLOW 或 CONST_OVERRIDE 带可写源) / DATA_FLOW_ANALYZER_FAILED。
-       异常、空结果、无可写源形态(无源 CONST_OVERRIDE/UNRESOLVED)统一记失败，避免后续重复分析。 */
+    /* 分析并归一化为 2 态：可写结构(REAL_HEALTH 或 NOT_REAL_HEALTH 带可写源) / DATA_FLOW_ANALYZER_FAILED。
+       异常、空结果、无可写源形态(无源 NOT_REAL_HEALTH/UNRESOLVED)统一记失败，避免后续重复分析。 */
     private static HealthDataflowAnalyzer.AnalysisResult analyzeForTable(Class<?> cls) {
         HealthDataflowAnalyzer.AnalysisResult ar;
         try {
@@ -548,8 +617,8 @@ public final class EcaSetHealthManager {
             return HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED;
         }
         HealthDataflowAnalyzer.AnalysisResult.Kind kind = ar.classify();
-        boolean eligible = kind == HealthDataflowAnalyzer.AnalysisResult.Kind.DATAFLOW
-                || (kind == HealthDataflowAnalyzer.AnalysisResult.Kind.CONST_OVERRIDE && !ar.sources.isEmpty());
+        boolean eligible = kind == HealthDataflowAnalyzer.AnalysisResult.Kind.REAL_HEALTH
+                || (kind == HealthDataflowAnalyzer.AnalysisResult.Kind.NOT_REAL_HEALTH && !ar.sources.isEmpty());
         if (!isWarmupDiagnosticsSuppressed()) {
             EcaLogger.info("[HealthDataflow] analyze {} => kind={} definingClass={} sources={} eligible={}",
                     cls.getName(), kind,
@@ -832,5 +901,35 @@ public final class EcaSetHealthManager {
         if (cls == null || ANCHOR_OBSERVED.contains(cls)) return false;
         Map<String, HealthDataflowAnalyzer.Source> unobserved = UNOBSERVED_WRITES.get(cls);
         return unobserved != null && !unobserved.isEmpty();
+    }
+
+    /* 服务器停止时清除所有缓存与状态，确保热重载后从干净状态开始。 */
+    public static void clear() {
+        DATAFLOW_TABLE.clear();
+        EXTERNAL_INSTALLED.clear();
+        EXTERNAL_SCAN_PENDING.clear();
+        EXTERNAL_SCAN_SUBMIT_DUMPED.clear();
+        EXTERNAL_SCAN_START_DUMPED.clear();
+        EXTERNAL_SCAN_FAILURE_DUMPED.clear();
+        UNRESOLVED_DUMPED.clear();
+        METHOD_BRIDGE_INSTALLED.clear();
+        DIRECT_PROBE_RETRY_LEGACY.clear();
+        DIRECT_WRITER_LEGACY.clear();
+        DIRECT_PROBE_RETRY_EXTENDED.clear();
+        DIRECT_WRITER_EXTENDED.clear();
+        NUMERIC_INVERSION_SKIP_DUMPED.clear();
+        ANCHOR_REFLECTS_WRITES.clear();
+        ANCHOR_TRUST_DUMPED.clear();
+        ANCHOR_OBSERVED.clear();
+        UNOBSERVED_WRITES.clear();
+        UNOBSERVED_DUMPED.clear();
+        JOIN_PREWARM_SUBMITTED.clear();
+        COMPARISON_PRESCAN_SUBMITTED.clear();
+        EFFECTIVE_MODEL_SUBMITTED.clear();
+        EFFECTIVE_MODEL_REJECT_DUMPED.clear();
+        EFFECTIVE_POLARITY_DUMPED.clear();
+        EXTERNAL_AUTHORITY_WRITTEN.clear();
+        EXTERNAL_MIRROR_SUPPRESSED_DUMPED.clear();
+        ExternalMirrorWriter.clear();
     }
 }
