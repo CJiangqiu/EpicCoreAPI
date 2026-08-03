@@ -943,9 +943,13 @@ public class EntityUtil {
         if (entity == null || entity.level() == null) return;
         if (entity.level().isClientSide) return;
         ServerLevel serverLevel = (ServerLevel) entity.level();
+        if (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity) && !isChangingDimension(entity)) {
+            return;
+        }
 
         try {
             List<UUID> bossEventUUIDs = collectAllBossEventUUIDsForRemoval(entity);
+            EntityRemovalQuarantine.begin(serverLevel, entity);
             cleanupAI(entity);
             cleanupBossBar(entity);
             entity.removalReason = reason;
@@ -958,6 +962,8 @@ public class EntityUtil {
 
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] Entity removal failed: {}", e.getMessage());
+        } finally {
+            EntityRemovalQuarantine.reconcile(serverLevel, entity);
         }
     }
 

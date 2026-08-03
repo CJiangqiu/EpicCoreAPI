@@ -1,6 +1,6 @@
 package net.eca.client;
 
-import net.eca.api.EcaAPI;
+import net.eca.coremod.EcaContainers;
 import net.eca.network.EntityContainerCheckResponsePacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
@@ -23,9 +23,11 @@ import net.minecraftforge.entity.PartEntity;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -41,7 +43,7 @@ public final class ClientEntityUtil {
         if (!(level instanceof ClientLevel clientLevel)) {
             return null;
         }
-        Entity entity = clientLevel.entityStorage.entityStorage.getEntity(entityId);
+        Entity entity = EcaContainers.rawGet(clientLevel.entityStorage.entityStorage.byId, entityId);
         if (entity != null) {
             return entity;
         }
@@ -49,7 +51,18 @@ public final class ClientEntityUtil {
         if (entity != null) {
             return entity;
         }
-        return clientLevel.tickingEntities.active.get(entityId);
+        entity = EcaContainers.rawGet(clientLevel.tickingEntities.active, entityId);
+        if (entity != null) {
+            return entity;
+        }
+        entity = EcaContainers.rawGet(clientLevel.partEntities, entityId);
+        if (entity != null) {
+            return entity;
+        }
+        for (Entity player : EcaContainers.rawValues(clientLevel.players)) {
+            if (player != null && player.getId() == entityId) return player;
+        }
+        return null;
     }
 
     // 客户端按 UUID 查找实体
@@ -57,11 +70,23 @@ public final class ClientEntityUtil {
         if (uuid == null || !(level instanceof ClientLevel clientLevel)) {
             return null;
         }
-        Entity entity = clientLevel.entityStorage.entityStorage.getEntity(uuid);
+        Entity entity = EcaContainers.rawGet(clientLevel.entityStorage.entityStorage.byUuid, uuid);
         if (entity != null) {
             return entity;
         }
-        return findEntityInClientSectionsByUuid(clientLevel, uuid);
+        entity = findEntityInClientSectionsByUuid(clientLevel, uuid);
+        if (entity != null) {
+            return entity;
+        }
+        entity = findByUuid(EcaContainers.rawValues(clientLevel.tickingEntities.active), uuid);
+        if (entity != null) {
+            return entity;
+        }
+        entity = findByUuid(EcaContainers.rawValues(clientLevel.players), uuid);
+        if (entity != null) {
+            return entity;
+        }
+        return findByUuid(EcaContainers.rawValues(clientLevel.partEntities), uuid);
     }
 
     // 客户端按条件收集实体
@@ -70,50 +95,62 @@ public final class ClientEntityUtil {
             return Collections.emptyList();
         }
 
-        Map<UUID, Entity> unique = new LinkedHashMap<>();
-        for (Entity entity : clientLevel.entityStorage.entityStorage.getAllEntities()) {
-            if (entity != null && (!entity.isRemoved() || EcaAPI.isInvulnerable(entity)) && filter.test(entity)) {
-                unique.put(entity.getUUID(), entity);
+        List<Entity> result = new ArrayList<>();
+        Set<Entity> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        addAll(result, seen, EcaContainers.rawValues(clientLevel.entityStorage.entityStorage.byId), filter);
+        for (EntitySection<Entity> section : EcaContainers.rawValues(clientLevel.entityStorage.sectionStorage.sections)) {
+            if (section != null) {
+                addAll(result, seen, EcaContainers.rawValues(section.storage.allInstances), filter);
             }
         }
-
-        for (EntitySection<Entity> section : clientLevel.entityStorage.sectionStorage.sections.values()) {
-            if (section == null) {
-                continue;
-            }
-            section.getEntities().forEach(entity -> {
-                if (entity != null && (!entity.isRemoved() || EcaAPI.isInvulnerable(entity)) && filter.test(entity)) {
-                    unique.putIfAbsent(entity.getUUID(), entity);
-                }
-            });
-        }
-        return new ArrayList<>(unique.values());
+        addAll(result, seen, EcaContainers.rawValues(clientLevel.tickingEntities.active), filter);
+        addAll(result, seen, EcaContainers.rawValues(clientLevel.players), filter);
+        addAll(result, seen, EcaContainers.rawValues(clientLevel.partEntities), filter);
+        return result;
     }
 
     private static Entity findEntityInClientSectionsById(ClientLevel level, int entityId) {
-        for (EntitySection<Entity> section : level.entityStorage.sectionStorage.sections.values()) {
+        for (EntitySection<Entity> section : EcaContainers.rawValues(level.entityStorage.sectionStorage.sections)) {
             if (section == null) {
                 continue;
             }
-            Entity entity = section.getEntities().filter(e -> e.getId() == entityId).findFirst().orElse(null);
-            if (entity != null) {
-                return entity;
+            for (Entity entity : EcaContainers.rawValues(section.storage.allInstances)) {
+                if (entity != null && entity.getId() == entityId) {
+                    return entity;
+                }
             }
         }
         return null;
     }
 
     private static Entity findEntityInClientSectionsByUuid(ClientLevel level, UUID uuid) {
-        for (EntitySection<Entity> section : level.entityStorage.sectionStorage.sections.values()) {
+        for (EntitySection<Entity> section : EcaContainers.rawValues(level.entityStorage.sectionStorage.sections)) {
             if (section == null) {
                 continue;
             }
-            Entity entity = section.getEntities().filter(e -> uuid.equals(e.getUUID())).findFirst().orElse(null);
-            if (entity != null) {
-                return entity;
+            for (Entity entity : EcaContainers.rawValues(section.storage.allInstances)) {
+                if (entity != null && uuid.equals(entity.getUUID())) {
+                    return entity;
+                }
             }
         }
         return null;
+    }
+
+    private static Entity findByUuid(Iterable<? extends Entity> entities, UUID uuid) {
+        for (Entity entity : entities) {
+            if (entity != null && uuid.equals(entity.getUUID())) return entity;
+        }
+        return null;
+    }
+
+    private static void addAll(List<Entity> result, Set<Entity> seen,
+                               Iterable<? extends Entity> entities, Predicate<Entity> filter) {
+        for (Entity entity : entities) {
+            if (entity != null && seen.add(entity) && filter.test(entity)) {
+                result.add(entity);
+            }
+        }
     }
 
     // 检查实体在客户端关键容器中的存在情况

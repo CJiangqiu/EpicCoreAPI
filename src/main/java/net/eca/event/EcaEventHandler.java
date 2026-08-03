@@ -14,6 +14,7 @@ import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.eca.util.faction.FactionManager;
 import net.eca.util.health.DelayedHealthVerifier;
+import net.eca.util.EntityRemovalQuarantine;
 import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.faction.FactionRelation;
 import net.eca.util.raid.RaidManager;
@@ -152,6 +153,7 @@ public class EcaEventHandler {
         BossShowPlaybackTracker.onServerTick(event.getServer());
         //END 相位在实体 tick 之后，此处复查才能看到防护逻辑对改血的回滚
         DelayedHealthVerifier.onServerTick(event.getServer());
+        EntityRemovalQuarantine.onServerTick(event.getServer());
     }
 
     // ==================== 阵营发光扫描 ====================
@@ -248,6 +250,7 @@ public class EcaEventHandler {
         EcaSetHealthManager.clear();
         //实体 id 重启后重排，残留复查条目会拿旧目标值比对新实体，必须清空
         DelayedHealthVerifier.clear();
+        EntityRemovalQuarantine.clear();
         NEXT_GLOW_SCAN.clear();
     }
 }

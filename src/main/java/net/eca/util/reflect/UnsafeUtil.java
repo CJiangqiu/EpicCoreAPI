@@ -10,6 +10,7 @@ import net.eca.network.ClientRemovePacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
+import net.eca.util.EntityRemovalQuarantine;
 import net.minecraft.core.SectionPos;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.server.level.*;
@@ -378,6 +379,7 @@ public class UnsafeUtil {
 
         try {
             List<UUID> bossEventUUIDs = EntityUtil.collectAllBossEventUUIDsForRemoval(entity);
+            EntityRemovalQuarantine.begin(serverLevel, entity);
             EntityUtil.cleanupAI(entity);
             EntityUtil.cleanupBossBar(entity);
             entity.removalReason = reason;
@@ -407,6 +409,8 @@ public class UnsafeUtil {
         } catch (Exception e) {
             EcaLogger.info("[UnsafeUtil] Failed to remove entity: {}", e.getMessage());
             return false;
+        } finally {
+            EntityRemovalQuarantine.reconcile(serverLevel, entity);
         }
     }
 

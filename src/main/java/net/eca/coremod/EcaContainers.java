@@ -1,11 +1,14 @@
 package net.eca.coremod;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongAVLTreeSet;
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
+import net.eca.util.EntityRemovalQuarantine;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.entity.ChunkEntities;
@@ -24,7 +27,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.Spliterator;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -43,6 +45,54 @@ import java.util.function.Predicate;
 public final class EcaContainers {
 
     private EcaContainers() {}
+
+    // ==================== 原始读取 ====================
+
+    // 绕过容器虚方法过滤，供 ECA 底层选择器和物理状态验证使用。
+    public static <V> V rawGet(Int2ObjectMap<V> map, int key) {
+        if (map instanceof EcaInt2ObjectOpenHashMap<?> ecaMap) {
+            return (V) ecaMap.rawGet(key);
+        }
+        if (map instanceof EcaInt2ObjectLinkedOpenHashMap<?> ecaMap) {
+            return (V) ecaMap.rawGet(key);
+        }
+        return map.get(key);
+    }
+
+    // 绕过容器虚方法过滤，读取映射中的原始值。
+    public static <K, V> V rawGet(Map<K, V> map, K key) {
+        if (map instanceof EcaHashMap<?, ?> ecaMap) {
+            return (V) ecaMap.rawGet(key);
+        }
+        return map.get(key);
+    }
+
+    // 返回独立快照，避免底层容器在选择期间重入修改。
+    public static <V> List<V> rawValues(Int2ObjectMap<V> map) {
+        if (map instanceof EcaInt2ObjectOpenHashMap<?> ecaMap) {
+            return (List<V>) ecaMap.rawValues();
+        }
+        if (map instanceof EcaInt2ObjectLinkedOpenHashMap<?> ecaMap) {
+            return (List<V>) ecaMap.rawValues();
+        }
+        return new ArrayList<>(map.values());
+    }
+
+    // 返回长键映射的原始值快照。
+    public static <V> List<V> rawValues(Long2ObjectMap<V> map) {
+        if (map instanceof EcaLong2ObjectOpenHashMap<?> ecaMap) {
+            return (List<V>) ecaMap.rawValues();
+        }
+        return new ArrayList<>(map.values());
+    }
+
+    // 返回列表底层内容的独立快照。
+    public static <E> List<E> rawValues(List<E> list) {
+        if (list instanceof EcaArrayList<?> ecaList) {
+            return (List<E>) ecaList.rawValues();
+        }
+        return new ArrayList<>(list);
+    }
 
     // ==================== 保护逻辑 ====================
 
@@ -74,6 +124,18 @@ public final class EcaContainers {
     private static boolean shouldProtectTarget(Object value) {
         Entity entity = resolveEntityFromContainerValue(value);
         return entity != null && shouldProtectEntity(entity);
+    }
+
+    private static boolean shouldHideTarget(Object value) {
+        if (!EntityRemovalQuarantine.hasActiveRemovals()) return false;
+        Entity entity = resolveEntityFromContainerValue(value);
+        return entity != null && EntityRemovalQuarantine.isQueryHidden(entity);
+    }
+
+    private static boolean shouldBlockAddition(Object value) {
+        if (!EntityRemovalQuarantine.hasBlockedAdditions()) return false;
+        Entity entity = resolveEntityFromContainerValue(value);
+        return entity != null && EntityRemovalQuarantine.shouldBlockAdd(entity);
     }
 
     private static boolean hasProtectedEntity(Collection<?> values) {
@@ -165,7 +227,71 @@ public final class EcaContainers {
         }
 
         public EcaArrayList(Collection<? extends E> c) {
-            super(c);
+            super(c.size());
+            for (E element : c) {
+                if (!shouldBlockAddition(element)) {
+                    super.add(element);
+                }
+            }
+        }
+
+        private List<E> rawValues() {
+            ArrayList<E> snapshot = new ArrayList<>(super.size());
+            Iterator<E> iterator = super.iterator();
+            while (iterator.hasNext()) {
+                snapshot.add(iterator.next());
+            }
+            return snapshot;
+        }
+
+        private List<E> readableValues() {
+            List<E> snapshot = rawValues();
+            if (EntityRemovalQuarantine.hasActiveRemovals()) {
+                snapshot.removeIf(EcaContainers::shouldHideTarget);
+            }
+            return snapshot;
+        }
+
+        @Override
+        public boolean add(E element) {
+            return !shouldBlockAddition(element) && super.add(element);
+        }
+
+        @Override
+        public void add(int index, E element) {
+            if (!shouldBlockAddition(element)) {
+                super.add(index, element);
+            }
+        }
+
+        @Override
+        public boolean addAll(Collection<? extends E> values) {
+            boolean modified = false;
+            for (E value : values) {
+                modified |= add(value);
+            }
+            return modified;
+        }
+
+        @Override
+        public boolean addAll(int index, Collection<? extends E> values) {
+            int insertionIndex = index;
+            boolean modified = false;
+            for (E value : values) {
+                if (!shouldBlockAddition(value)) {
+                    super.add(insertionIndex++, value);
+                    modified = true;
+                }
+            }
+            return modified;
+        }
+
+        @Override
+        public E set(int index, E element) {
+            if (shouldBlockAddition(element)) {
+                return super.get(index);
+            }
+            return super.set(index, element);
         }
 
         private boolean isProtectedElement(Object element) {
@@ -219,12 +345,28 @@ public final class EcaContainers {
 
         @Override
         public Iterator<E> iterator() {
-            return new ArrayList<>(this).iterator();
+            return readableValues().iterator();
         }
 
         @Override
         public Spliterator<E> spliterator() {
-            return new ArrayList<>(this).spliterator();
+            return readableValues().spliterator();
+        }
+
+        @Override
+        public Object[] toArray() {
+            if (!EntityRemovalQuarantine.hasActiveRemovals()) {
+                return super.toArray();
+            }
+            return readableValues().toArray();
+        }
+
+        @Override
+        public <T> T[] toArray(T[] array) {
+            if (!EntityRemovalQuarantine.hasActiveRemovals()) {
+                return super.toArray(array);
+            }
+            return readableValues().toArray(array);
         }
     }
 
@@ -253,13 +395,40 @@ public final class EcaContainers {
             super(m);
         }
 
+        private V rawGet(Object key) {
+            return super.get(key);
+        }
+
+        @Override
+        public V get(Object key) {
+            V value = super.get(key);
+            return shouldHideTarget(value) ? null : value;
+        }
+
+        @Override
+        public V getOrDefault(Object key, V defaultValue) {
+            V value = super.get(key);
+            if (shouldHideTarget(value)) return defaultValue;
+            return value != null || super.containsKey(key) ? value : defaultValue;
+        }
+
         private transient Set<K> keySetView;
         private transient Collection<V> valuesView;
         private transient Set<Map.Entry<K, V>> entrySetView;
 
         @Override
         public V put(K key, V value) {
+            if (shouldBlockAddition(value)) {
+                return super.get(key);
+            }
             return super.put(key, wrapListIfNeeded(value));
+        }
+
+        @Override
+        public void putAll(Map<? extends K, ? extends V> values) {
+            for (Map.Entry<? extends K, ? extends V> entry : values.entrySet()) {
+                put(entry.getKey(), entry.getValue());
+            }
         }
 
         @Override
@@ -545,7 +714,22 @@ public final class EcaContainers {
         }
 
         public EcaHashSet(Collection<? extends E> c) {
-            super(c);
+            super();
+            addAll(c);
+        }
+
+        @Override
+        public boolean add(E element) {
+            return !shouldBlockAddition(element) && super.add(element);
+        }
+
+        @Override
+        public boolean addAll(Collection<? extends E> values) {
+            boolean modified = false;
+            for (E value : values) {
+                modified |= add(value);
+            }
+            return modified;
         }
 
         @Override
@@ -615,6 +799,19 @@ public final class EcaContainers {
             super(expected, f);
         }
 
+        private List<V> rawValues() {
+            ArrayList<V> snapshot = new ArrayList<>(size);
+            if (containsNullKey) {
+                snapshot.add(value[n]);
+            }
+            for (int index = n; index-- != 0;) {
+                if (key[index] != 0L) {
+                    snapshot.add(value[index]);
+                }
+            }
+            return snapshot;
+        }
+
         @Override
         public V remove(long key) {
             V value = super.get(key);
@@ -646,16 +843,7 @@ public final class EcaContainers {
         // EntitySectionStorage 遍历期间可能因实体复活重入修改分区表，使用快照避免 fastutil 迭代器状态损坏。
         @Override
         public ObjectCollection<V> values() {
-            ObjectArrayList<V> snapshot = new ObjectArrayList<>(size);
-            if (containsNullKey) {
-                snapshot.add(value[n]);
-            }
-            for (int index = n; index-- != 0;) {
-                if (key[index] != 0L) {
-                    snapshot.add(value[index]);
-                }
-            }
-            return snapshot;
+            return new ObjectArrayList<>(rawValues());
         }
     }
 
@@ -778,6 +966,22 @@ public final class EcaContainers {
             super(expected, f);
         }
 
+        private V rawGet(int key) {
+            return super.get(key);
+        }
+
+        private List<V> rawValues() {
+            return new ArrayList<>(super.values());
+        }
+
+        @Override
+        public V put(int key, V value) {
+            if (shouldBlockAddition(value)) {
+                return super.get(key);
+            }
+            return super.put(key, value);
+        }
+
         @Override
         public V remove(int key) {
             if (shouldProtectRemoval(key)) {
@@ -849,6 +1053,28 @@ public final class EcaContainers {
             super(expected, f);
         }
 
+        private V rawGet(int key) {
+            return super.get(key);
+        }
+
+        private List<V> rawValues() {
+            return new ArrayList<>(super.values());
+        }
+
+        @Override
+        public V get(int key) {
+            V value = super.get(key);
+            return shouldHideTarget(value) ? null : value;
+        }
+
+        @Override
+        public V put(int key, V value) {
+            if (shouldBlockAddition(value)) {
+                return super.get(key);
+            }
+            return super.put(key, value);
+        }
+
         @Override
         public V remove(int key) {
             if (shouldProtectRemoval(key)) {
@@ -887,7 +1113,11 @@ public final class EcaContainers {
         // 导致 live view 返回 null。返回快照副本保证迭代安全。
         @Override
         public ObjectCollection<V> values() {
-            return new ObjectArrayList<>(super.values());
+            ObjectArrayList<V> snapshot = new ObjectArrayList<>(super.values());
+            if (EntityRemovalQuarantine.hasActiveRemovals()) {
+                snapshot.removeIf(EcaContainers::shouldHideTarget);
+            }
+            return snapshot;
         }
 
         private boolean shouldProtectRemoval(int entityId) {

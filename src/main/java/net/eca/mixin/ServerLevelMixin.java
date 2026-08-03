@@ -95,7 +95,12 @@ public class ServerLevelMixin {
             // 针对无敌玩家被第三方模组强制 respawn 的场景：
             // 在新实例加入前，先移除旧实例，避免 knownUuids/lookup 里出现同 UUID 冲突
             if (eca$duplicateWasInvulnerable) {
-                EntityUtil.remove(sp, Entity.RemovalReason.CHANGED_DIMENSION);
+                EntityUtil.markDimensionChanging(sp);
+                try {
+                    EntityUtil.remove(sp, Entity.RemovalReason.CHANGED_DIMENSION);
+                } finally {
+                    EntityUtil.unmarkDimensionChanging(sp);
+                }
             }
         } else {
             eca$oldDuplicate = null;
@@ -122,7 +127,12 @@ public class ServerLevelMixin {
         ServerLevel self = (ServerLevel)(Object)this;
         Entity current = self.getEntities().get(eca$oldDuplicate.getUUID());
         if (current == eca$oldDuplicate) {
-            EntityUtil.remove(eca$oldDuplicate, Entity.RemovalReason.CHANGED_DIMENSION);
+            EntityUtil.markDimensionChanging(eca$oldDuplicate);
+            try {
+                EntityUtil.remove(eca$oldDuplicate, Entity.RemovalReason.CHANGED_DIMENSION);
+            } finally {
+                EntityUtil.unmarkDimensionChanging(eca$oldDuplicate);
+            }
         }
 
         // 旧实例为无敌时，将无敌状态显式补回新玩家实例，避免 respawn 过程状态丢失

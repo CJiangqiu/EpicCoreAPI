@@ -2035,9 +2035,15 @@ public final class HealthDataflowAnalyzer {
             entryCosts.add(entryCost(target.name(), entryStart, fetchStart));
             if (result != null && !result.isEmpty() && !result.sources.isEmpty()) candidates.add(result);
         }
+        /* 权威指纹必须在 tick 收集之前定出来：tick 没有语义锚点，不带指纹进去就会把过程图里
+           每一条写指令都收成候选。指纹取 getHealth 数据流的源与上面四个语义出口的源之并——
+           getHealth 读的正是实体内镜像(路西法的 SD:48 即由此而来)，语义出口补上它不读的那部分。 */
+        AuthorityFingerprint fingerprint = fingerprintAuthorities(entityClass,
+                observedAuthoritySources(entityClass, candidates));
         // tick 过程收集：从 baseTick/tick/aiStep 及静态过程链反推实体外的真实血量写源(SavedData 等)
         long tickStart = System.nanoTime();
-        List<StoreWrite> tickWrites = collectTickWrites(entityClass);
+        BudgetedWrites tick = collectTickWrites(entityClass, fingerprint);
+        List<StoreWrite> tickWrites = tick.writes();
         if (!tickWrites.isEmpty()) {
             scannedMethods.add("tickWrites");
             List<Expr> alternatives = new ArrayList<>();
@@ -2052,16 +2058,17 @@ public final class HealthDataflowAnalyzer {
                     candidates.add(tickResult);
                 }
             }
-            entryCosts.add(entryCost("tickWrites", tickStart, 0));
+        }
+        // 超时即使一个写源都没收集到也要记账，否则这次降级在日志里完全不可见
+        if (!tickWrites.isEmpty() || tick.timedOut()) {
+            entryCosts.add(entryCost("tickWrites", tickStart, 0) + (tick.timedOut() ? " TIMEOUT" : ""));
         }
         AnalysisResult combined = combineExternalScanCandidates(entityClass, candidates);
         // 正向定位写入者：tick 链在大型转发过程里预算被无关调用吃光，够不着尾部的真实写入方法；
-        // 从已确认的权威源构建指纹，扫描模组内引用它的方法单独分析，补进候选写源。
-        // 指纹源取 combined(含 tick 收集的 SD 镜像)：观察入口(isAlive/hurt)不读镜像，反查不到 accessor。
+        // 按同一份指纹扫描模组内引用权威的方法单独分析，补进候选写源。
         long writerStart = System.nanoTime();
-        AuthorityFingerprint fingerprint = fingerprintAuthorities(entityClass,
-                combined == null ? List.of() : combined.sources);
-        List<StoreWrite> authorityWrites = collectAuthorityWriterWrites(entityClass, fingerprint);
+        BudgetedWrites authority = collectAuthorityWriterWrites(entityClass, fingerprint);
+        List<StoreWrite> authorityWrites = authority.writes();
         if (!authorityWrites.isEmpty()) {
             scannedMethods.add("authorityWriters");
             List<Expr> alternatives = new ArrayList<>();
@@ -2076,8 +2083,11 @@ public final class HealthDataflowAnalyzer {
                     candidates.add(writerResult);
                 }
             }
-            entryCosts.add(entryCost("authorityWriters", writerStart, 0));
             combined = combineExternalScanCandidates(entityClass, candidates);
+        }
+        if (!authorityWrites.isEmpty() || authority.timedOut()) {
+            entryCosts.add(entryCost("authorityWriters", writerStart, 0)
+                    + (authority.timedOut() ? " TIMEOUT" : ""));
         }
         if (EXTERNAL_SCAN_DIAG_DUMPED.add(entityClass)) {
             EcaLogger.info("[ExternalScan] entity={} methods={} candidates={} sources={}",
@@ -2085,6 +2095,10 @@ public final class HealthDataflowAnalyzer {
                     combined != null ? combined.sources.size() : 0);
             EcaLogger.info("[ExternalScan]   cost entity={} total={}ms perEntry={}",
                     entityClass.getName(), millisSince(scanStart), entryCosts);
+            /* 指纹不可用时剪枝是空操作，tick 会退回全量收集。这两种结局的源数差一个数量级，
+               但日志里长得一样，必须把指纹状态单独打出来才分得清。 */
+            EcaLogger.info("[ExternalScan]   fingerprint entity={} usable={} scope={} tickWrites={}",
+                    entityClass.getName(), fingerprint.usable(), fingerprint.cacheScope(), tickWrites.size());
         }
         return combined;
     }
@@ -2184,10 +2198,14 @@ public final class HealthDataflowAnalyzer {
     /* 从实体类层次沿 superclass 收集所有 tick 覆写方法分析出的写源，返回 StoreWrite 列表。
        tick 过程常把血量维护转发给大型静态过程(LuciferETProcedure 等)，默认 500 内联额度不够穿透，
        故放宽内联预算(仍保留 maxDepth 防环)，使实体外真实存储能暴露为写源。 */
-    private static List<StoreWrite> collectTickWrites(Class<?> entityClass) {
+    private static BudgetedWrites collectTickWrites(Class<?> entityClass, AuthorityFingerprint fingerprint) {
         List<StoreWrite> writes = new ArrayList<>();
-        if (entityClass == null || entityClass.getClassLoader() == null) return writes;
-        for (Class<?> owner = entityClass; owner != null && owner != LivingEntity.class;
+        if (entityClass == null || entityClass.getClassLoader() == null) {
+            return new BudgetedWrites(List.copyOf(writes), false);
+        }
+        long deadline = System.nanoTime() + TICK_WRITE_SCAN_BUDGET_NANOS;
+        boolean timedOut = false;
+        for (Class<?> owner = entityClass; owner != null && owner != LivingEntity.class && !timedOut;
              owner = owner.getSuperclass()) {
             ClassNode node;
             try {
@@ -2199,16 +2217,41 @@ public final class HealthDataflowAnalyzer {
             if (node == null) continue;
             for (MethodNode method : node.methods) {
                 if (!isRecurringOverride(owner, method)) continue;
+                if (System.nanoTime() > deadline) { timedOut = true; break; }
                 AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
                 ctx.inlineBudget = TICK_WRITE_INLINE_BUDGET;
                 ctx.nodeBudget = TICK_WRITE_NODE_BUDGET;
+                ctx.authorityFingerprint = fingerprint;
                 TaintValue[] seed = seedMethodInputs(method.desc, false);
                 Expr expression = analyzeMethodWrites(owner, method.name, method.desc, seed, ctx, 0);
                 if (expression == null || expression instanceof UnknownExpr) continue;
                 collectStoreWrites(expression, writes);
             }
         }
-        return List.copyOf(writes);
+        return new BudgetedWrites(List.copyOf(writes), timedOut);
+    }
+
+    /* 受时间预算约束的收集结果：timedOut 表示本项被截断，收集到的写源可能不完整。 */
+    private record BudgetedWrites(List<StoreWrite> writes, boolean timedOut) {}
+
+    /* 剪枝指纹的种子源：getHealth 数据流的源 + 语义出口已定位的源。
+       两者都由带语义锚点的入口得出，不含 tick 的无关写入，可以安全地反过来约束 tick。 */
+    private static List<Source> observedAuthoritySources(Class<?> entityClass,
+                                                         List<AnalysisResult> semanticCandidates) {
+        List<Source> sources = new ArrayList<>();
+        try {
+            AnalysisResult observation = analyze(entityClass);
+            if (observation != null && !observation.isEmpty()) sources.addAll(observation.sources);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+        for (AnalysisResult candidate : semanticCandidates) {
+            if (candidate == null || candidate.isEmpty()) continue;
+            for (Source source : candidate.sources) {
+                if (!sources.contains(source)) sources.add(source);
+            }
+        }
+        return sources;
     }
 
     /* tick 过程写源收集的预算：按实测放宽的 override 扫描额度。
@@ -2216,6 +2259,13 @@ public final class HealthDataflowAnalyzer {
        Unknown 后写源全部 NOT_ADDRESSABLE；节点与内联额度须同步放大，缺一不可。 */
     private static final int TICK_WRITE_INLINE_BUDGET = 40_000;
     private static final int TICK_WRITE_NODE_BUDGET = 12_000_000;
+
+    /* tick 收集与权威写入者扫描各自的时间预算。这两项与语义出口(isAlive/hurt 等，实测合计
+       约 150ms)串行跑在同一条单线程分析队列上，放开跑单个实体实测可达 14s 与 21s，
+       排在后面的实体会被饿死到永远拿不到外部扫描结果，有效血量通道随之整条进不去。
+       超时即放弃本项，语义出口已收集的结果照常返回。 */
+    private static final long TICK_WRITE_SCAN_BUDGET_NANOS = 2_000_000_000L;
+    private static final long AUTHORITY_WRITER_SCAN_BUDGET_NANOS = 2_000_000_000L;
 
     /* ==================== 正向定位权威写入者 ====================
        tick 链内联在大型转发过程里预算会被海量无关调用吃光，够不着尾部的真实写入方法；
@@ -2227,6 +2277,15 @@ public final class HealthDataflowAnalyzer {
                                         Set<String> nbtKeys, boolean usable) {
         String cacheScope() {
             return fieldKeys.size() + "/" + accessorKeys.size() + "/" + nbtKeys.size();
+        }
+
+        boolean matchesField(FieldInsnNode field) {
+            return fieldKeys.contains(field.owner + "#" + field.name + "#" + field.desc);
+        }
+
+        // accessor 静态字段无描述符参与，键格式与 findAccessorFieldKey 一致
+        boolean matchesAccessor(FieldInsnNode field) {
+            return accessorKeys.contains(field.owner + "#" + field.name);
         }
     }
 
@@ -2303,23 +2362,38 @@ public final class HealthDataflowAnalyzer {
     private static final Map<String, List<WriterSite>> AUTHORITY_WRITER_SITES = new ConcurrentHashMap<>();
     private static final int WRITER_SCAN_CLASS_LIMIT = 30_000;
 
-    private static List<WriterSite> findAuthorityWriterSites(Class<?> entityClass,
-                                                             AuthorityFingerprint fingerprint) {
-        if (fingerprint == null || !fingerprint.usable()) return List.of();
-        if (fingerprint.accessorKeys().isEmpty() && fingerprint.fieldKeys().isEmpty()) return List.of();
+    private static WriterSiteScan findAuthorityWriterSites(Class<?> entityClass,
+                                                           AuthorityFingerprint fingerprint,
+                                                           long deadline) {
+        if (fingerprint == null || !fingerprint.usable()) return WriterSiteScan.EMPTY;
+        if (fingerprint.accessorKeys().isEmpty() && fingerprint.fieldKeys().isEmpty()) return WriterSiteScan.EMPTY;
         String scope = modScopePrefix(entityClass);
-        if (scope == null) return List.of();
-        return AUTHORITY_WRITER_SITES.computeIfAbsent(scope + "|" + fingerprint.cacheScope(),
-                ignored -> scanLoadedClassesForWriterSites(scope, fingerprint));
+        if (scope == null) return WriterSiteScan.EMPTY;
+        String key = scope + "|" + fingerprint.cacheScope();
+        List<WriterSite> cached = AUTHORITY_WRITER_SITES.get(key);
+        if (cached != null) return new WriterSiteScan(cached, false);
+        WriterSiteScan scan = scanLoadedClassesForWriterSites(scope, fingerprint, deadline);
+        /* 被时间预算截断的结果绝不入缓存：一旦缓存，残缺的写源集会被当作完整结论长期复用，
+           该模组此后再也扫不出真实权威写入者。不缓存则下次请求可以重新扫。 */
+        if (!scan.timedOut()) AUTHORITY_WRITER_SITES.put(key, scan.sites());
+        return scan;
     }
 
-    private static List<WriterSite> scanLoadedClassesForWriterSites(String scope,
-                                                                    AuthorityFingerprint fingerprint) {
+    /* 受时间预算约束的写入者站点扫描结果；timedOut 表示扫描被截断，站点集不完整。 */
+    private record WriterSiteScan(List<WriterSite> sites, boolean timedOut) {
+        private static final WriterSiteScan EMPTY = new WriterSiteScan(List.of(), false);
+    }
+
+    private static WriterSiteScan scanLoadedClassesForWriterSites(String scope,
+                                                                  AuthorityFingerprint fingerprint,
+                                                                  long deadline) {
         List<WriterSite> sites = new ArrayList<>();
         int[] scanned = {0};
+        boolean[] timedOut = {false};
         EcaTransformerManager.forEachLoadedClass(clazz -> {
-            if (clazz == null || scanned[0] >= WRITER_SCAN_CLASS_LIMIT) return;
+            if (clazz == null || timedOut[0] || scanned[0] >= WRITER_SCAN_CLASS_LIMIT) return;
             if (!clazz.getName().startsWith(scope)) return;
+            if (System.nanoTime() > deadline) { timedOut[0] = true; return; }
             byte[] bytes = classBytes(clazz);
             if (bytes == null) return;
             scanned[0]++;
@@ -2329,7 +2403,7 @@ public final class HealthDataflowAnalyzer {
                 if (t instanceof VirtualMachineError e) throw e;
             }
         });
-        return List.copyOf(sites);
+        return new WriterSiteScan(List.copyOf(sites), timedOut[0]);
     }
 
     /* 只读指令表找引用指纹的方法：GETSTATIC 命中 accessor 键或 PUTFIELD 命中字段键即记录。 */
@@ -2360,10 +2434,15 @@ public final class HealthDataflowAnalyzer {
     }
 
     /* 命中的方法单独分析：它们自身通常很小，预算充裕，不受大型 tick 过程图的牵连。 */
-    private static List<StoreWrite> collectAuthorityWriterWrites(Class<?> entityClass,
-                                                                 AuthorityFingerprint fingerprint) {
+    private static BudgetedWrites collectAuthorityWriterWrites(Class<?> entityClass,
+                                                               AuthorityFingerprint fingerprint) {
         List<StoreWrite> writes = new ArrayList<>();
-        for (WriterSite site : findAuthorityWriterSites(entityClass, fingerprint)) {
+        // 站点扫描与逐站点分析共用同一份预算：两段都在同一条队列上，分开计会让总耗时翻倍
+        long deadline = System.nanoTime() + AUTHORITY_WRITER_SCAN_BUDGET_NANOS;
+        WriterSiteScan scan = findAuthorityWriterSites(entityClass, fingerprint, deadline);
+        boolean timedOut = scan.timedOut();
+        for (WriterSite site : scan.sites()) {
+            if (System.nanoTime() > deadline) { timedOut = true; break; }
             Class<?> owner = loadClass(site.ownerInternal());
             if (owner == null) continue;
             MethodNode method;
@@ -2382,7 +2461,7 @@ public final class HealthDataflowAnalyzer {
                     seedWriterSiteInputs(site.methodDesc(), isStatic), ctx, 0);
             collectStoreWrites(expression, writes);
         }
-        return List.copyOf(writes);
+        return new BudgetedWrites(List.copyOf(writes), timedOut);
     }
 
     /* 静态过程以实体为形参接收目标，须把该形参标成实体本体，否则字段源无法归位到实体。 */
@@ -3123,6 +3202,85 @@ public final class HealthDataflowAnalyzer {
         return null;
     }
 
+    /* ==================== 权威可达性剪枝 ====================
+       tick/aiStep 这类周期入口没有语义锚点，不剪枝就会把过程图里每一条写指令都收进来
+       (实测塞纳非亚 428 个源，绝大多数是朝向、目标、冷却等无关字段)。内联前先限深预扫
+       被调方能否触及权威存储，到不了的整条不展开：既是相关性判据，也是预算的天然上界。 */
+    private static final int MAY_WRITE_SCAN_DEPTH = 24;
+    private static final int MAY_WRITE_CACHE_LIMIT = 20_000;
+    private static final Map<String, Boolean> MAY_WRITE_STATE_CACHE = new ConcurrentHashMap<>();
+
+    private static boolean mayWriteAuthority(Class<?> owner, String name, String desc,
+                                             AuthorityFingerprint fingerprint, int depth) {
+        if (owner == null || fingerprint == null || !fingerprint.usable()) return true;
+        String key = fingerprint.cacheScope() + "@" + internalName(owner) + "#" + name + desc;
+        Boolean cached = MAY_WRITE_STATE_CACHE.get(key);
+        if (cached != null) return cached;
+        if (depth >= MAY_WRITE_SCAN_DEPTH) return true;
+        if (MAY_WRITE_STATE_CACHE.size() > MAY_WRITE_CACHE_LIMIT) MAY_WRITE_STATE_CACHE.clear();
+        // 互递归期间先占位为"可能写"，环上的方法因此保守放行而不会缓存出错误的 false
+        MAY_WRITE_STATE_CACHE.put(key, Boolean.TRUE);
+        boolean result = scanMayWriteAuthority(owner, name, desc, fingerprint, depth);
+        MAY_WRITE_STATE_CACHE.put(key, result);
+        return result;
+    }
+
+    /* 判不出来一律放行：剪枝只用来省额度，绝不能把真实写入路径剪掉。 */
+    private static boolean scanMayWriteAuthority(Class<?> owner, String name, String desc,
+                                                 AuthorityFingerprint fingerprint, int depth) {
+        MethodNode method;
+        try {
+            method = findMethodNode(classNode(owner), name, desc);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return true;
+        }
+        if (method == null) return true;
+        if (method.instructions.size() == 0) return false;
+        for (AbstractInsnNode insn : method.instructions) {
+            if (insn instanceof FieldInsnNode field) {
+                if (insn.getOpcode() == Opcodes.PUTFIELD && fingerprint.matchesField(field)) return true;
+                // 读取 accessor 静态字段是使用该同步单元的必经指令，读写在此不作区分
+                if (insn.getOpcode() == Opcodes.GETSTATIC && fingerprint.matchesAccessor(field)) return true;
+                continue;
+            }
+            if (!(insn instanceof MethodInsnNode call)) continue;
+            if (!fingerprint.nbtKeys().isEmpty() && isNbtPut(call)) return true;
+            // 不会被内联的归属不必递归：调用方自身的写入指令已在本轮扫描中判过
+            if (!isInlinableOwner(call)) continue;
+            Class<?> callee = loadClass(call.owner);
+            if (callee == null) return true;
+            Class<?> resolved = resolveInvocationOwner(callee, call.name, call.desc);
+            if (mayWriteAuthority(resolved == null ? callee : resolved, call.name, call.desc,
+                    fingerprint, depth + 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /* 与 tryInlineWriteCall 的归属过滤保持一致，否则预扫会对实际不展开的调用做无谓递归。 */
+    private static boolean isInlinableOwner(MethodInsnNode call) {
+        if (call.name.startsWith("<")) return false;
+        if (call.owner.startsWith("java/") || call.owner.startsWith("javax/")
+                || call.owner.startsWith("jdk/") || call.owner.startsWith("com/google/")) return false;
+        if (call.owner.startsWith("net/minecraftforge/") || call.owner.startsWith("org/spongepowered/")) {
+            return false;
+        }
+        return !call.owner.startsWith("net/minecraft/") || isHealthLifecycleCall(call);
+    }
+
+    private static boolean isNbtPut(MethodInsnNode call) {
+        if (!call.owner.equals("net/minecraft/nbt/CompoundTag")) return false;
+        return switch (call.name) {
+            case "putBoolean", "m_128379_", "putByte", "m_128344_",
+                    "putShort", "m_128376_", "putInt", "m_128405_",
+                    "putLong", "m_128356_", "putFloat", "m_128350_",
+                    "putDouble", "m_128347_", "putString", "m_128359_" -> true;
+            default -> false;
+        };
+    }
+
     private static Expr tryInlineWriteCall(MethodInsnNode call, List<Expr> args, AnalysisCtx ctx, int depth) {
         if (isMethodHandleInvoke(call) && !args.isEmpty()) {
             if (depth + 1 >= ctx.maxDepth || ctx.inlineBudget <= 0) return null;
@@ -3161,6 +3319,13 @@ public final class HealthDataflowAnalyzer {
         Type[] argTypes = Type.getArgumentTypes(call.desc);
         int expectedArgs = argTypes.length + (isStatic ? 0 : 1);
         if (args.size() != expectedArgs) return null;
+
+        // 到不了权威存储的调用直接跳过，额度留给真正通往它的路径
+        if (!mayWriteAuthority(owner, call.name, call.desc, ctx.authorityFingerprint, 0)) {
+            ctx.inlineSkipped++;
+            return null;
+        }
+        ctx.inlineAllowed++;
 
         int localCount = isStatic ? 0 : 1;
         for (Type argType : argTypes) localCount += argType.getSize();
@@ -4073,6 +4238,11 @@ public final class HealthDataflowAnalyzer {
         /* 方法在当前类找不到时是否沿继承链上溯查找。默认关闭，保持既有各通道的分析结果不变；
            有效血量模型扫描需要展开继承自基类的访问器，单独开启。 */
         boolean inheritedInline = false;
+        /* 权威指纹：非空时内联前先判被调方能否到达权威存储，到不了的整条跳过。
+           tick 这类没有语义锚点的入口靠它把额度约束在通往真实血量的路径上。 */
+        AuthorityFingerprint authorityFingerprint = null;
+        int inlineSkipped = 0;
+        int inlineAllowed = 0;
         AnalysisCtx(int maxDepth) { this.maxDepth = maxDepth; }
     }
 
