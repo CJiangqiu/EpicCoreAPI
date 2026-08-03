@@ -6,18 +6,25 @@ import net.eca.util.EcaLogger;
 import net.eca.util.health.HealthDataflowAnalyzer.AnalysisResult;
 import net.eca.util.health.HealthDataflowAnalyzer.ArrayElementSource;
 import net.eca.util.health.HealthDataflowAnalyzer.CapabilityDataSource;
+import net.eca.util.health.HealthDataflowAnalyzer.Call;
 import net.eca.util.health.HealthDataflowAnalyzer.ChainedFieldSource;
 import net.eca.util.health.HealthDataflowAnalyzer.Choice;
+import net.eca.util.health.HealthDataflowAnalyzer.Closure;
 import net.eca.util.health.HealthDataflowAnalyzer.ConstOverrideSource;
 import net.eca.util.health.HealthDataflowAnalyzer.EvalContext;
 import net.eca.util.health.HealthDataflowAnalyzer.Expr;
 import net.eca.util.health.HealthDataflowAnalyzer.FieldChainSource;
 import net.eca.util.health.HealthDataflowAnalyzer.FieldStep;
 import net.eca.util.health.HealthDataflowAnalyzer.MapEntrySource;
+import net.eca.util.health.HealthDataflowAnalyzer.MaintenanceBranch;
+import net.eca.util.health.HealthDataflowAnalyzer.MaintenancePlan;
 import net.eca.util.health.HealthDataflowAnalyzer.MethodCallSource;
+import net.eca.util.health.HealthDataflowAnalyzer.Op;
+import net.eca.util.health.HealthDataflowAnalyzer.OptionalContentExpr;
 import net.eca.util.health.HealthDataflowAnalyzer.Primitive;
 import net.eca.util.health.HealthDataflowAnalyzer.Source;
 import net.eca.util.health.HealthDataflowAnalyzer.StaticFieldSource;
+import net.eca.util.health.HealthDataflowAnalyzer.StoreWrite;
 import net.eca.util.health.HealthDataflowAnalyzer.SynchedDataSource;
 import net.eca.util.reflect.UnsafeUtil;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -32,11 +39,14 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.RecordComponent;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -97,10 +107,15 @@ public final class HealthDataFlow {
     //每个实体类首次走数据流改血时打印一次分析结构诊断
     private static final Set<String> FIRST_WRITE_DUMPED = ConcurrentHashMap.newKeySet();
     private static final Set<String> FIRST_EXTERNAL_WRITE_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> RUNTIME_BUDGET_DUMPED = ConcurrentHashMap.newKeySet();
     private static final Set<String> ASSOCIATED_SUCCESS_DUMPED = ConcurrentHashMap.newKeySet();
     private static final Set<String> ASSOCIATED_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
     private static final int MAX_ASSOCIATED_CANDIDATES_PER_SOURCE = 8;
     private static final int MAX_ASSOCIATED_COMBINATIONS = 64;
+    private static final int MAX_RUNTIME_SOURCES = 32;
+    private static final int MAX_DIAGNOSTIC_SOURCES = 32;
+    private static final int MAX_RUNTIME_EXPRESSION_NODES = 50_000;
+    private static final long RUNTIME_WRITE_BUDGET_NANOS = 100_000_000L;
 
     /* 数据流改血主入口：拿已分析的可写树把目标血量写进目标真实存储，verify 通过返回 true。
        REAL_HEALTH 与 NOT_REAL_HEALTH(带可写源)由本入口处理；无源 NOT_REAL_HEALTH/UNRESOLVED 在表层就被拦掉。 */
@@ -126,8 +141,8 @@ public final class HealthDataFlow {
         return writeViaSources(cls, filtered, entity, target, firstWrite,
                 (verifiedEntity, verifiedTarget, sink) ->
                     // 外部扫描的 Choice 可能使无效候选通过符号校验，因此还需验证 getHealth 的实际读数。
-                    // tick 过程收集的实体外写源(SavedData 等)不在 isAlive/hurt 表达式树里，root 匹配恒失败；
-                    // 对这类写源改为写入后回读该存储本身确认，这是 tick 权威的真实判据。
+                    // 语义出口直接读取实体外存储时，getHealth 可能与它解耦，改为回读该存储本身确认；
+                    // tick 维护源已进入独立因果计划，不会出现在本候选树中。
                     HealthDataflowAnalyzer.isExternalStorageSource(sink)
                         ? readSinkMatches(sink, verifiedEntity, verifiedTarget)
                         : (HealthDataflowAnalyzer.verifyExternalDataflow(tree.returnExpr, verifiedEntity, verifiedTarget, sink)
@@ -137,38 +152,114 @@ public final class HealthDataFlow {
 
     private static final Set<String> CO_WRITE_DUMPED = ConcurrentHashMap.newKeySet();
 
-    /* 联写实体外权威：dataflow 已把实体内存储写成目标值，此处补写 tick 权威(SavedData/静态状态等)。
-       与 writeExternal 的关键区别是不首个成功即停——路西法的 lucifer_health2 与实体内 SD:48 必须
-       同 tick 都等于目标值，钳制的落差判定才不触发。故只遍历 isExternalStorageSource 的源逐个全写，
-       每个写后回读该存储本身自证(tick 权威不在 getHealth 表达式树里，root 匹配恒失败)，
-       成功的保留、失败的单独回滚，绝不把 solve 错的值留在会落盘的世界数据里。
-       返回是否至少写成功一个外部权威；不改变 dataflow 已成功的实体写入。 */
-    public static boolean coWriteExternalAuthorities(AnalysisResult tree, LivingEntity entity, float target) {
-        if (tree == null || entity == null) return false;
+    /* 联写实体外状态：只使用由权威因果闭包裁出的维护分支。上游状态从写回权威的表达式反解，
+       下游镜像则在 dataflow 已写好实体权威后求值，避免遍历整个 tick 的所有写入。 */
+    public static boolean coWriteExternalAuthorities(MaintenancePlan plan, LivingEntity entity, float target) {
+        if (plan == null || entity == null || plan.branches().isEmpty()) return false;
         EvalContext ctx = HealthDataflowAnalyzer.newContext(entity);
         boolean anyWritten = false;
-        for (Source sink : tree.sources) {
-            if (!HealthDataflowAnalyzer.isExternalStorageSource(sink)) continue;
-            if (!isAddressable(sink, entity)) continue;
-            HealthSolveResult solved = HealthDataflowAnalyzer.buildWritePath(
-                    tree.returnExpr, sink, Float.valueOf(target), ctx);
-            if (!solved.solved() || solved.value() == null) continue;
-            Object snapshot = sink.read(entity);
-            if (!dispatchWrite(sink, entity, solved.value())) {
-                dispatchWrite(sink, entity, snapshot);
-                continue;
-            }
-            if (readSinkMatches(sink, entity, target)) {
-                anyWritten = true;
-                if (CO_WRITE_DUMPED.add(entity.getClass().getName() + "|" + sink.label)) {
-                    EcaLogger.info("[ExternalScan] co-write authority entity={} sink={} solved={} target={}",
-                            entity.getClass().getName(), sink.label, solved.value(), target);
+        int attempted = 0;
+        for (MaintenanceBranch branch : plan.branches()) {
+            for (Source dependency : branch.transactionSources()) {
+                if (dependency.equals(branch.authority())
+                        || !HealthDataflowAnalyzer.isExternalStorageSource(dependency)) continue;
+                if (++attempted > MAX_CAUSAL_EXTERNAL_WRITES) return anyWritten;
+                Constraint downstream = downstreamConstraint(branch, dependency, ctx);
+                Constraint constraint = downstream.constrained()
+                        ? downstream
+                        : upstreamConstraint(branch, dependency, target, ctx);
+                if (!constraint.constrained() || constraint.conflict()
+                        || !isAddressable(dependency, entity)) continue;
+                Object requiredValue = constraint.value();
+                Object snapshot = dependency.read(entity);
+                if (!dispatchWrite(dependency, entity, requiredValue)) {
+                    dispatchWrite(dependency, entity, snapshot);
+                    continue;
                 }
-            } else {
-                dispatchWrite(sink, entity, snapshot);
+                if (readSinkMatchesValue(dependency, entity, requiredValue)) {
+                    anyWritten = true;
+                    if (CO_WRITE_DUMPED.add(entity.getClass().getName() + "|" + dependency.label)) {
+                        EcaLogger.info("[ExternalScan] co-write authority entity={} sink={} solved={} target={}",
+                                entity.getClass().getName(), dependency.label, requiredValue, target);
+                    }
+                } else {
+                    dispatchWrite(dependency, entity, snapshot);
+                }
             }
         }
         return anyWritten;
+    }
+
+    /* dataflow 已先写好实体权威，直接由权威派生的镜像代表当前事务；路径不敏感分析同时看到的
+       反向高水位分支属于旧状态恢复，不得与镜像约束合并成假冲突。 */
+    private static Constraint downstreamConstraint(MaintenanceBranch branch, Source dependency,
+                                                   EvalContext context) {
+        Constraint result = Constraint.NONE;
+        for (StoreWrite maintenance : branch.maintenanceWrites()) {
+            if (!maintenance.sink().equals(dependency)
+                    || !HealthDataflowAnalyzer.containsSink(maintenance.valueExpr(), branch.authority())) continue;
+            Object candidate = evaluateMaintenanceValue(maintenance.valueExpr(), context);
+            result = result.merge(candidate);
+            if (result.conflict()) return result;
+        }
+        return result;
+    }
+
+    private static Constraint upstreamConstraint(MaintenanceBranch branch, Source dependency, float target,
+                                                 EvalContext context) {
+        Constraint result = Constraint.NONE;
+        for (StoreWrite maintenance : branch.maintenanceWrites()) {
+            if (!maintenance.sink().equals(branch.authority())
+                    || !HealthDataflowAnalyzer.containsSink(maintenance.valueExpr(), dependency)) continue;
+            HealthSolveResult solved = HealthDataflowAnalyzer.buildWritePath(
+                    maintenance.valueExpr(), dependency, Float.valueOf(target), context);
+            if (!solved.solved()) continue;
+            result = result.merge(solved.value());
+            if (result.conflict()) return result;
+        }
+        return result;
+    }
+
+    private static Object evaluateMaintenanceValue(Expr expression, EvalContext context) {
+        try {
+            return HealthDataflowAnalyzer.evaluate(expression, context);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
+    private static final int MAX_CAUSAL_EXTERNAL_WRITES = 16;
+
+    private record Constraint(Object value, boolean constrained, boolean conflict) {
+        private static final Constraint NONE = new Constraint(null, false, false);
+
+        private Constraint merge(Object candidate) {
+            if (candidate == null || conflict) return this;
+            if (!constrained) return new Constraint(candidate, true, false);
+            return equivalentValue(value, candidate)
+                    ? this
+                    : new Constraint(value, true, true);
+        }
+    }
+
+    private static boolean equivalentValue(Object left, Object right) {
+        if (left instanceof Number leftNumber && right instanceof Number rightNumber) {
+            double scale = Math.max(1.0d,
+                    Math.max(Math.abs(leftNumber.doubleValue()), Math.abs(rightNumber.doubleValue())));
+            return Math.abs(leftNumber.doubleValue() - rightNumber.doubleValue()) <= scale * 1.0e-6d;
+        }
+        return Objects.equals(left, right);
+    }
+
+    private static boolean readSinkMatchesValue(Source sink, LivingEntity entity, Object expected) {
+        try {
+            Object actual = HealthDataflowAnalyzer.evaluate(sink, HealthDataflowAnalyzer.newContext(entity));
+            return equivalentValue(actual, expected);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
     }
 
     /* 写入后回读写源本身并匹配目标值：tick 权威的判据是"存储确实写入目标值"，
@@ -340,11 +431,15 @@ public final class HealthDataFlow {
                 target, tree.classify(),
                 tree.definingClass != null ? tree.definingClass.getName() : "null",
                 tree.sources.size());
-        EcaLogger.info("[HealthDataflow]   returnExpr={}", tree.returnExpr);
+        EcaLogger.info("[HealthDataflow]   returnExpr={}", expressionSummary(tree.returnExpr));
         int i = 0;
-        for (Source s : tree.sources) {
+        for (Source s : tree.sources.subList(0, Math.min(tree.sources.size(), MAX_DIAGNOSTIC_SOURCES))) {
             EcaLogger.info("[HealthDataflow]   sink#{} {} type={} class={}",
                     i++, s.label, s.valueType.getName(), s.getClass().getSimpleName());
+        }
+        if (tree.sources.size() > MAX_DIAGNOSTIC_SOURCES) {
+            EcaLogger.info("[HealthDataflow]   ... {} additional sinks omitted",
+                    tree.sources.size() - MAX_DIAGNOSTIC_SOURCES);
         }
     }
 
@@ -352,11 +447,15 @@ public final class HealthDataFlow {
         EcaLogger.info("[ExternalScan] ===== first external write: {} =====", cls.getName());
         EcaLogger.info("[ExternalScan]   target={} definingClass={} sources={}", target,
                 tree.definingClass != null ? tree.definingClass.getName() : "null", tree.sources.size());
-        EcaLogger.info("[ExternalScan]   returnExpr={}", tree.returnExpr);
+        EcaLogger.info("[ExternalScan]   returnExpr={}", expressionSummary(tree.returnExpr));
         int index = 0;
-        for (Source source : tree.sources) {
+        for (Source source : tree.sources.subList(0, Math.min(tree.sources.size(), MAX_DIAGNOSTIC_SOURCES))) {
             EcaLogger.info("[ExternalScan]   sink#{} {} type={} class={}",
                     index++, source.label, source.valueType.getName(), source.getClass().getSimpleName());
+        }
+        if (tree.sources.size() > MAX_DIAGNOSTIC_SOURCES) {
+            EcaLogger.info("[ExternalScan]   ... {} additional sinks omitted",
+                    tree.sources.size() - MAX_DIAGNOSTIC_SOURCES);
         }
     }
 
@@ -388,10 +487,27 @@ public final class HealthDataFlow {
        仅在缓存失败树时打印一次诊断，避免每-tick 改血刷屏。 */
     public static boolean writeViaSources(Class<?> cls, AnalysisResult ar, LivingEntity entity, float expected,
                                           boolean logSuccess, HealthVerifier verifier, String diagnosticChannel) {
+        if (!isRuntimeSafeExpression(ar.returnExpr)) {
+            dumpRuntimeBudget(cls, diagnosticChannel, "expression node budget exceeded");
+            return false;
+        }
         EvalContext ctx = HealthDataflowAnalyzer.newContext(entity);
         List<String> diag = new ArrayList<>();
         List<PreparedSourceWrite> solvedWrites = new ArrayList<>();
+        long deadline = System.nanoTime() + RUNTIME_WRITE_BUDGET_NANOS;
+        int examined = 0;
+        boolean candidateScanComplete = true;
         for (Source sink : withoutEcaOwnedSources(ar.sources)) {
+            if (++examined > MAX_RUNTIME_SOURCES) {
+                dumpRuntimeBudget(cls, diagnosticChannel, "source cap exceeded");
+                candidateScanComplete = false;
+                break;
+            }
+            if (System.nanoTime() > deadline) {
+                dumpRuntimeBudget(cls, diagnosticChannel, "runtime write budget exceeded");
+                candidateScanComplete = false;
+                break;
+            }
             if (!isAddressable(sink, entity)) {
                 diag.add("    [" + sink.label + "] skipped=NOT_ADDRESSABLE"
                         + " (branch does not exist on this entity)");
@@ -430,7 +546,12 @@ public final class HealthDataFlow {
                     + " verify=FAIL restore=" + (restored ? "OK" : "FAIL"));
         }
 
-        if (writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) return true;
+        if (System.nanoTime() > deadline) {
+            dumpRuntimeBudget(cls, diagnosticChannel, "runtime write budget exceeded");
+            candidateScanComplete = false;
+        }
+        if (candidateScanComplete
+                && writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) return true;
 
         if (FAIL_DUMPED.add(cls.getName() + "|" + diagnosticChannel)) {
             EcaLogger.info("[{}] setHealth failed entity={} expected={} sink results:",
@@ -439,6 +560,63 @@ public final class HealthDataFlow {
         }
         return false;
     }
+
+    private static void dumpRuntimeBudget(Class<?> cls, String channel, String reason) {
+        String className = cls == null ? "null" : cls.getName();
+        if (RUNTIME_BUDGET_DUMPED.add(className + "|" + channel + "|" + reason)) {
+            EcaLogger.info("[HealthDataflow] runtime candidate scan stopped entity={} channel={} reason={}",
+                    className, channel, reason);
+        }
+    }
+
+    /* 诊断摘要直接遍历节点并受硬预算约束，不能先调用 Expr.toString() 再截断。 */
+    static String expressionSummary(Expr root) {
+        if (root == null) return "null";
+        ExpressionStats stats = inspectExpression(root, 2_048);
+        String type = root.getClass().getSimpleName();
+        return "type=" + type + " nodes=" + stats.nodes()
+                + (stats.truncated() ? "+" : "")
+                + " sources=" + stats.sourceLabels();
+    }
+
+    private static boolean isRuntimeSafeExpression(Expr root) {
+        return root != null && !inspectExpression(root, MAX_RUNTIME_EXPRESSION_NODES).truncated();
+    }
+
+    private static ExpressionStats inspectExpression(Expr root, int nodeLimit) {
+        Set<Expr> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<String> sourceLabels = new LinkedHashSet<>();
+        ArrayDeque<Expr> pending = new ArrayDeque<>();
+        pending.add(root);
+        boolean truncated = false;
+        while (!pending.isEmpty()) {
+            Expr current = pending.removeLast();
+            if (current == null || !visited.add(current)) continue;
+            if (visited.size() > nodeLimit) {
+                truncated = true;
+                break;
+            }
+            if (current instanceof Source source) {
+                if (sourceLabels.size() < 8) sourceLabels.add(source.label);
+            } else if (current instanceof Choice choice) {
+                pending.addAll(choice.alternatives());
+            } else if (current instanceof Op op) {
+                pending.addAll(op.args());
+            } else if (current instanceof Call call) {
+                pending.addAll(call.args());
+            } else if (current instanceof Closure closure) {
+                pending.addAll(closure.captured());
+            } else if (current instanceof StoreWrite write) {
+                pending.add(write.sink());
+                pending.add(write.valueExpr());
+            } else if (current instanceof OptionalContentExpr optional) {
+                pending.add(optional.optionalExpr());
+            }
+        }
+        return new ExpressionStats(Math.min(visited.size(), nodeLimit), List.copyOf(sourceLabels), truncated);
+    }
+
+    private record ExpressionStats(int nodes, List<String> sourceLabels, boolean truncated) {}
 
     /* ≥2 个可解 Source 时联合写入(应对需同时写多处的双源防御)，失败逆序回滚。
        writes 由单源循环收集，其 snapshot 均为原值(循环对每次尝试都已回滚)，故回滚即复原。 */
@@ -489,7 +667,7 @@ public final class HealthDataFlow {
                         EcaLogger.info("[HealthDataflow] isAddressable root=null entity={} sink={} level={} rootExpr={}",
                                 entity.getClass().getName(), s.label,
                                 entity.level() != null ? entity.level().getClass().getName() : "null",
-                                s.root);
+                                expressionSummary(s.root));
                     }
                     return false;
                 }

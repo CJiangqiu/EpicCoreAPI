@@ -50,6 +50,13 @@ public final class EcaSetHealthManager {
         return t;
     });
 
+    /* tick 与权威写入者扫描可能命中巨型方法或全模组类枚举，必须与四入口语义扫描隔离。 */
+    private static final ExecutorService MAINTENANCE_ANALYSIS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "ECA-Health-MaintenanceScan");
+        t.setDaemon(true);
+        return t;
+    });
+
     /* 有效血量模型分析不依赖外部扫描结果，使用独立线程避免两类任务相互阻塞。 */
     private static final ExecutorService MODEL_ANALYSIS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "ECA-Health-ModelAnalysis");
@@ -59,6 +66,8 @@ public final class EcaSetHealthManager {
 
     /* 外部扫描异步分析去重：同类并发首改只提交一次后台分析任务 */
     private static final Set<Class<?>> EXTERNAL_SCAN_PENDING = ConcurrentHashMap.newKeySet();
+    private static final Set<Class<?>> MAINTENANCE_SCAN_PENDING = ConcurrentHashMap.newKeySet();
+    private static final Set<String> MAINTENANCE_SCAN_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* 外部扫描诊断去重(每类一次)：提交、开始执行、失败三个节点各自记一次。
        提交后没有开始记录表示任务仍在队列中。 */
@@ -128,15 +137,19 @@ public final class EcaSetHealthManager {
             submitComparisonPrescan(cls);
             return;
         }
-        boolean hasExternalSource = external.sources.stream()
-                .anyMatch(HealthDataflowAnalyzer::isExternalStorageSource);
-        if (!hasExternalSource) return;
+        HealthDataflowAnalyzer.MaintenancePlan maintenance =
+                HealthDataflowAnalyzer.peekMaintenancePlan(cls);
+        if (!HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) {
+            submitMaintenanceAnalysis(cls);
+            return;
+        }
+        if (!maintenance.hasExternalTransactionSource()) return;
         try {
             /* 只补写实体外权威(SavedData 等)：dataflow 已把实体内存储写成目标值，此处必须让
                tick 权威同 tick 也等于目标值，否则路西法的钳制会拿高水位把实体存储改回。
                逐个全写并回读自证，不能借用 applyExternalScan——它首个校验通过的 sink(常是实体内
                镜像)就返回，永远碰不到 lucifer_health2 这类真正的 tick 权威。 */
-            if (HealthDataFlow.coWriteExternalAuthorities(external, target, targetHealth)) {
+            if (HealthDataFlow.coWriteExternalAuthorities(maintenance, target, targetHealth)) {
                 markExternalAuthorityWritten(cls);
             }
         } catch (Throwable t) {
@@ -256,7 +269,8 @@ public final class EcaSetHealthManager {
         }
         if (oriented != resolved && EFFECTIVE_POLARITY_DUMPED.add(cls.getName() + "|" + oriented.storage().label)) {
             EcaLogger.info("[EffectiveHealth] polarity inverted entity={} storage={} readExpr={}",
-                    cls.getName(), oriented.storage().label, oriented.readExpr());
+                    cls.getName(), oriented.storage().label,
+                    HealthDataFlow.expressionSummary(oriented.readExpr()));
         }
 
         // 使用有效血量表达式校验，避免 getHealth 与存储解耦时错误接受或拒绝写入
@@ -334,17 +348,14 @@ public final class EcaSetHealthManager {
             if (tree != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
                     && isVanillaGetHealthOwner(tree)) return;
             EcaLogger.info("[ExternalScan] join prewarm started entity={}", cls.getName());
-            /* 预热跑完之前，同一执行器上的运行期请求只能排队等待，因此预热时长直接决定
-               "生成后第一次改血能否命中缓存"。分两段计时以便定位是哪一段变慢。 */
+            /* 只在高优先级队列完成四个语义入口；比较扫描和周期维护各自进入独立队列。 */
             long scanStart = System.nanoTime();
             HealthDataflowAnalyzer.resolveExternalScanResult(cls);
             long scanMs = (System.nanoTime() - scanStart) / 1_000_000L;
-            long comparisonStart = System.nanoTime();
-            // 比较表达式一并预扫，证据到手后即可当场建模，无需再等一次改血
-            HealthDataflowAnalyzer.prewarmClassComparisons(cls);
-            long comparisonMs = (System.nanoTime() - comparisonStart) / 1_000_000L;
-            EcaLogger.info("[ExternalScan] join prewarm done entity={} externalScan={}ms comparisons={}ms total={}ms",
-                    cls.getName(), scanMs, comparisonMs, scanMs + comparisonMs);
+            EcaLogger.info("[ExternalScan] join semantic prewarm done entity={} elapsedMs={}",
+                    cls.getName(), scanMs);
+            submitComparisonPrescan(cls);
+            submitMaintenanceAnalysis(cls);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             EcaLogger.info("[ExternalScan] join prewarm threw entity={} type={} msg={}",
@@ -421,6 +432,7 @@ public final class EcaSetHealthManager {
                         EcaLogger.info("[ExternalScan] analysis started entity={}", cls.getName());
                     }
                     HealthDataflowAnalyzer.resolveExternalScanResult(cls);
+                    submitMaintenanceAnalysis(cls);
                 } catch (Throwable t) {
                     dumpExternalScanFailure(cls, t);
                     if (t instanceof VirtualMachineError e) throw e;
@@ -432,6 +444,30 @@ public final class EcaSetHealthManager {
             // 提交被拒时必须让出占位，否则该类此后永远跳过外部扫描
             EXTERNAL_SCAN_PENDING.remove(cls);
             EcaLogger.info("[ExternalScan] analysis submit rejected entity={} type={} msg={}",
+                    cls.getName(), t.getClass().getName(), t.getMessage());
+        }
+    }
+
+    private static void submitMaintenanceAnalysis(Class<?> cls) {
+        if (cls == null || HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) return;
+        if (!MAINTENANCE_SCAN_PENDING.add(cls)) return;
+        try {
+            MAINTENANCE_ANALYSIS_EXECUTOR.submit(() -> {
+                try {
+                    HealthDataflowAnalyzer.resolveMaintenancePlan(cls);
+                } catch (Throwable t) {
+                    if (MAINTENANCE_SCAN_FAILURE_DUMPED.add(cls.getName())) {
+                        EcaLogger.info("[ExternalScan] maintenance analysis threw entity={} type={} msg={}",
+                                cls.getName(), t.getClass().getName(), t.getMessage());
+                    }
+                    if (t instanceof VirtualMachineError e) throw e;
+                } finally {
+                    MAINTENANCE_SCAN_PENDING.remove(cls);
+                }
+            });
+        } catch (Throwable t) {
+            MAINTENANCE_SCAN_PENDING.remove(cls);
+            EcaLogger.info("[ExternalScan] maintenance submit rejected entity={} type={} msg={}",
                     cls.getName(), t.getClass().getName(), t.getMessage());
         }
     }
@@ -908,6 +944,8 @@ public final class EcaSetHealthManager {
         DATAFLOW_TABLE.clear();
         EXTERNAL_INSTALLED.clear();
         EXTERNAL_SCAN_PENDING.clear();
+        MAINTENANCE_SCAN_PENDING.clear();
+        MAINTENANCE_SCAN_FAILURE_DUMPED.clear();
         EXTERNAL_SCAN_SUBMIT_DUMPED.clear();
         EXTERNAL_SCAN_START_DUMPED.clear();
         EXTERNAL_SCAN_FAILURE_DUMPED.clear();

@@ -74,8 +74,12 @@ public final class HealthDataflowAnalyzer {
 
     /* ==================== 外部扫描：isAlive/isDeadOrDying 数据流逆向 ==================== */
 
-    private static final Map<Class<?>, AnalysisResult> EXTERNAL_SCAN_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, SemanticExternalScan> EXTERNAL_SCAN_CACHE = new ConcurrentHashMap<>();
+    /* 周期维护写入必须与语义观测树分开保存。把两者拼成 Choice 会让无关 tick 字段成为血量候选，
+       并使每次改血都重复遍历一棵可能指数膨胀的表达式树。 */
+    private static final Map<Class<?>, MaintenancePlan> MAINTENANCE_PLAN_CACHE = new ConcurrentHashMap<>();
     private static final Set<Class<?>> EXTERNAL_SCAN_DIAG_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Set<Class<?>> MAINTENANCE_SCAN_DIAG_DUMPED = ConcurrentHashMap.newKeySet();
     /* 单个扫描入口抛出的诊断去重(每类每入口一次) */
     private static final Set<String> EXTERNAL_ENTRY_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
 
@@ -145,12 +149,13 @@ public final class HealthDataflowAnalyzer {
 
     /* ==================== 对外：字节码分析入口 ==================== */
 
-    /* 外部扫描入口：对 isAlive/isDeadOrDying 跑完整数据流管线，返回可写结构；
-       无结果或无可写 Source 返回 null。写入由调用者落地。 */
+    /* 外部语义扫描入口：只分析 isAlive/isDeadOrDying/hurt/actuallyHurt。tick 维护扫描由独立
+       入口稍后执行，不能阻塞真实血量候选发布。 */
     public static AnalysisResult resolveExternalScanResult(Class<?> entityClass) {
         if (entityClass == null) return null;
-        AnalysisResult ar = EXTERNAL_SCAN_CACHE.computeIfAbsent(entityClass,
-                c -> analyzeUnifiedExternalScan(entityClass));
+        SemanticExternalScan scan = EXTERNAL_SCAN_CACHE.computeIfAbsent(entityClass,
+                HealthDataflowAnalyzer::analyzeSemanticExternalScan);
+        AnalysisResult ar = scan.result();
         if (ar == null || ar.isEmpty() || ar.sources.isEmpty()) return null;
         return ar;
     }
@@ -159,9 +164,30 @@ public final class HealthDataflowAnalyzer {
        resolveExternalScanResult 预填，从而不阻塞服务器线程。 */
     public static AnalysisResult peekExternalScanResult(Class<?> entityClass) {
         if (entityClass == null) return null;
-        AnalysisResult ar = EXTERNAL_SCAN_CACHE.get(entityClass);
+        SemanticExternalScan scan = EXTERNAL_SCAN_CACHE.get(entityClass);
+        AnalysisResult ar = scan == null ? null : scan.result();
         if (ar == null || ar.isEmpty() || ar.sources.isEmpty()) return null;
         return ar;
+    }
+
+    /* 在四个语义入口完成后构建周期维护计划。调用方必须放在维护专用后台线程，避免巨型 tick
+       或模组全类写入者扫描阻塞语义队列。 */
+    public static MaintenancePlan resolveMaintenancePlan(Class<?> entityClass) {
+        if (entityClass == null) return MaintenancePlan.EMPTY;
+        SemanticExternalScan semantic = EXTERNAL_SCAN_CACHE.computeIfAbsent(entityClass,
+                HealthDataflowAnalyzer::analyzeSemanticExternalScan);
+        return MAINTENANCE_PLAN_CACHE.computeIfAbsent(entityClass,
+                ignored -> analyzeMaintenancePlan(entityClass, semantic));
+    }
+
+    /* 只读查询已分析出的周期维护计划；计划未就绪时不触发同步分析。 */
+    public static MaintenancePlan peekMaintenancePlan(Class<?> entityClass) {
+        if (entityClass == null) return MaintenancePlan.EMPTY;
+        return MAINTENANCE_PLAN_CACHE.getOrDefault(entityClass, MaintenancePlan.EMPTY);
+    }
+
+    public static boolean isMaintenancePlanResolved(Class<?> entityClass) {
+        return entityClass != null && MAINTENANCE_PLAN_CACHE.containsKey(entityClass);
     }
 
     public static boolean verifyExternalDataflow(Expr root, LivingEntity entity, float expected, Source sink) {
@@ -198,7 +224,8 @@ public final class HealthDataflowAnalyzer {
         Object value = safeEvaluate(expression, context);
         if (!(value instanceof Number number)) {
             if (sink != null && EXTERNAL_EVAL_DIAG.add(sink.label + "|eval=" + value))
-                EcaLogger.info("[ExternalScan] eval non-numeric sink={} value={} expr={}", sink.label, value, expression);
+                EcaLogger.info("[ExternalScan] eval non-numeric sink={} value={} expr={}",
+                        sink.label, value, HealthDataFlow.expressionSummary(expression));
             return false;
         }
         float actual = number.floatValue();
@@ -2005,8 +2032,11 @@ public final class HealthDataflowAnalyzer {
         return null;
     }
 
+    private record SemanticExternalScan(AnalysisResult result, List<Source> observedAuthorities,
+                                        AuthorityFingerprint fingerprint) {}
+
     //按虚调用实际生效的定义方法分析，避免遗漏基类转换结果或混入被覆写的实现
-    private static AnalysisResult analyzeUnifiedExternalScan(Class<?> entityClass) {
+    private static SemanticExternalScan analyzeSemanticExternalScan(Class<?> entityClass) {
         List<AnalysisResult> candidates = new ArrayList<>();
         List<String> scannedMethods = new ArrayList<>();
         List<String> entryCosts = new ArrayList<>();
@@ -2038,32 +2068,38 @@ public final class HealthDataflowAnalyzer {
         /* 权威指纹必须在 tick 收集之前定出来：tick 没有语义锚点，不带指纹进去就会把过程图里
            每一条写指令都收成候选。指纹取 getHealth 数据流的源与上面四个语义出口的源之并——
            getHealth 读的正是实体内镜像(路西法的 SD:48 即由此而来)，语义出口补上它不读的那部分。 */
-        AuthorityFingerprint fingerprint = fingerprintAuthorities(entityClass,
-                observedAuthoritySources(entityClass, candidates));
+        List<Source> observedAuthorities = observedAuthoritySources(entityClass, candidates);
+        AuthorityFingerprint fingerprint = fingerprintAuthorities(entityClass, observedAuthorities);
+        /* 语义出口是运行期直接写入的唯一候选树。tick/authority writer 只描述跨 tick 维护关系，
+           后续进入独立因果计划，绝不能再合并进这里。 */
+        AnalysisResult combined = combineExternalScanCandidates(entityClass, candidates);
+        if (EXTERNAL_SCAN_DIAG_DUMPED.add(entityClass)) {
+            EcaLogger.info("[ExternalScan] semantic entity={} methods={} candidates={} sources={}",
+                    entityClass.getName(), scannedMethods, candidates.size(),
+                    combined != null ? combined.sources.size() : 0);
+            EcaLogger.info("[ExternalScan]   semantic cost entity={} total={}ms perEntry={}",
+                    entityClass.getName(), millisSince(scanStart), entryCosts);
+        }
+        return new SemanticExternalScan(combined, List.copyOf(observedAuthorities), fingerprint);
+    }
+
+    private static MaintenancePlan analyzeMaintenancePlan(Class<?> entityClass,
+                                                           SemanticExternalScan semantic) {
+        List<String> scannedMethods = new ArrayList<>();
+        List<String> entryCosts = new ArrayList<>();
+        long scanStart = System.nanoTime();
+        AuthorityFingerprint fingerprint = semantic.fingerprint();
         // tick 过程收集：从 baseTick/tick/aiStep 及静态过程链反推实体外的真实血量写源(SavedData 等)
         long tickStart = System.nanoTime();
         BudgetedWrites tick = collectTickWrites(entityClass, fingerprint);
         List<StoreWrite> tickWrites = tick.writes();
         if (!tickWrites.isEmpty()) {
             scannedMethods.add("tickWrites");
-            List<Expr> alternatives = new ArrayList<>();
-            for (StoreWrite write : tickWrites) {
-                if (write != null && !alternatives.contains(write)) alternatives.add(write);
-            }
-            if (!alternatives.isEmpty()) {
-                AnalysisResult tickResult = AnalysisResult.of(
-                        alternatives.size() == 1 ? alternatives.get(0) : new Choice(List.copyOf(alternatives)),
-                        entityClass);
-                if (tickResult != null && !tickResult.isEmpty() && !tickResult.sources.isEmpty()) {
-                    candidates.add(tickResult);
-                }
-            }
         }
         // 超时即使一个写源都没收集到也要记账，否则这次降级在日志里完全不可见
         if (!tickWrites.isEmpty() || tick.timedOut()) {
             entryCosts.add(entryCost("tickWrites", tickStart, 0) + (tick.timedOut() ? " TIMEOUT" : ""));
         }
-        AnalysisResult combined = combineExternalScanCandidates(entityClass, candidates);
         // 正向定位写入者：tick 链在大型转发过程里预算被无关调用吃光，够不着尾部的真实写入方法；
         // 按同一份指纹扫描模组内引用权威的方法单独分析，补进候选写源。
         long writerStart = System.nanoTime();
@@ -2071,36 +2107,31 @@ public final class HealthDataflowAnalyzer {
         List<StoreWrite> authorityWrites = authority.writes();
         if (!authorityWrites.isEmpty()) {
             scannedMethods.add("authorityWriters");
-            List<Expr> alternatives = new ArrayList<>();
-            for (StoreWrite write : authorityWrites) {
-                if (write != null && !alternatives.contains(write)) alternatives.add(write);
-            }
-            if (!alternatives.isEmpty()) {
-                AnalysisResult writerResult = AnalysisResult.of(
-                        alternatives.size() == 1 ? alternatives.get(0) : new Choice(List.copyOf(alternatives)),
-                        entityClass);
-                if (writerResult != null && !writerResult.isEmpty() && !writerResult.sources.isEmpty()) {
-                    candidates.add(writerResult);
-                }
-            }
-            combined = combineExternalScanCandidates(entityClass, candidates);
         }
         if (!authorityWrites.isEmpty() || authority.timedOut()) {
             entryCosts.add(entryCost("authorityWriters", writerStart, 0)
                     + (authority.timedOut() ? " TIMEOUT" : ""));
         }
-        if (EXTERNAL_SCAN_DIAG_DUMPED.add(entityClass)) {
-            EcaLogger.info("[ExternalScan] entity={} methods={} candidates={} sources={}",
-                    entityClass.getName(), scannedMethods, candidates.size(),
-                    combined != null ? combined.sources.size() : 0);
-            EcaLogger.info("[ExternalScan]   cost entity={} total={}ms perEntry={}",
+        List<StoreWrite> maintenanceWrites = new ArrayList<>(tickWrites.size() + authorityWrites.size());
+        for (StoreWrite write : tickWrites) {
+            if (write != null && !maintenanceWrites.contains(write)) maintenanceWrites.add(write);
+        }
+        for (StoreWrite write : authorityWrites) {
+            if (write != null && !maintenanceWrites.contains(write)) maintenanceWrites.add(write);
+        }
+        MaintenancePlan maintenancePlan = buildMaintenancePlan(semantic.observedAuthorities(), maintenanceWrites);
+        if (MAINTENANCE_SCAN_DIAG_DUMPED.add(entityClass)) {
+            EcaLogger.info("[ExternalScan] maintenance entity={} methods={} branches={}",
+                    entityClass.getName(), scannedMethods, maintenancePlan.branches().size());
+            EcaLogger.info("[ExternalScan]   maintenance cost entity={} total={}ms perEntry={}",
                     entityClass.getName(), millisSince(scanStart), entryCosts);
             /* 指纹不可用时剪枝是空操作，tick 会退回全量收集。这两种结局的源数差一个数量级，
                但日志里长得一样，必须把指纹状态单独打出来才分得清。 */
-            EcaLogger.info("[ExternalScan]   fingerprint entity={} usable={} scope={} tickWrites={}",
-                    entityClass.getName(), fingerprint.usable(), fingerprint.cacheScope(), tickWrites.size());
+            EcaLogger.info("[ExternalScan]   fingerprint entity={} usable={} scope={} tickWrites={} authorityWrites={} causalWrites={}",
+                    entityClass.getName(), fingerprint.usable(), fingerprint.cacheScope(), tickWrites.size(),
+                    authorityWrites.size(), maintenancePlan.maintenanceWriteCount());
         }
-        return combined;
+        return maintenancePlan;
     }
 
     private static String entryCost(String name, long startNanos, int fetchStart) {
@@ -2233,6 +2264,119 @@ public final class HealthDataflowAnalyzer {
 
     /* 受时间预算约束的收集结果：timedOut 表示本项被截断，收集到的写源可能不完整。 */
     private record BudgetedWrites(List<StoreWrite> writes, boolean timedOut) {}
+
+    /* 每个权威只携带与其形成因果闭包的周期写入和状态，避免把整个 tick 过程当作改血候选。 */
+    public record MaintenanceBranch(Source authority, List<StoreWrite> maintenanceWrites,
+                                    List<Source> transactionSources) {
+        public MaintenanceBranch {
+            maintenanceWrites = List.copyOf(maintenanceWrites);
+            transactionSources = List.copyOf(transactionSources);
+        }
+    }
+
+    public record MaintenancePlan(List<MaintenanceBranch> branches) {
+        public static final MaintenancePlan EMPTY = new MaintenancePlan(List.of());
+
+        public MaintenancePlan {
+            branches = List.copyOf(branches);
+        }
+
+        public int maintenanceWriteCount() {
+            int count = 0;
+            for (MaintenanceBranch branch : branches) count += branch.maintenanceWrites().size();
+            return count;
+        }
+
+        public boolean hasExternalTransactionSource() {
+            for (MaintenanceBranch branch : branches) {
+                for (Source source : branch.transactionSources()) {
+                    if (!source.equals(branch.authority()) && isExternalStorageSource(source)) return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    /* 周期写入先形成 sink→dependencies 图，再从语义权威求强连通闭包。实体外存储若由该
+       闭包直接赋值，则作为单向下游镜像附加；它无需回到权威，但也不应扩散到后续无关写入。 */
+    private static MaintenancePlan buildMaintenancePlan(Collection<Source> authorities,
+                                                        List<StoreWrite> writes) {
+        if (authorities == null || authorities.isEmpty() || writes == null || writes.isEmpty()) {
+            return MaintenancePlan.EMPTY;
+        }
+        Map<Source, Set<Source>> dependencies = new HashMap<>();
+        for (StoreWrite write : writes) {
+            if (write == null || write.sink() == null) continue;
+            Source sink = canonicalSource(dependencies.keySet(), write.sink());
+            Set<Source> outgoing = dependencies.computeIfAbsent(sink, ignored -> new LinkedHashSet<>());
+            for (Source dependency : collectSources(write.valueExpr())) {
+                outgoing.add(canonicalSource(dependencies.keySet(), dependency));
+            }
+        }
+
+        List<MaintenanceBranch> branches = new ArrayList<>();
+        for (Source authorityCandidate : authorities) {
+            if (authorityCandidate == null) continue;
+            Source authority = canonicalSource(dependencies.keySet(), authorityCandidate);
+            Set<Source> reachable = reachableSources(List.of(authority), dependencies);
+            List<Source> transactionSources = new ArrayList<>();
+            transactionSources.add(authority);
+            for (Source candidate : reachable) {
+                if (candidate.equals(authority)) continue;
+                if (reachableSources(List.of(candidate), dependencies).contains(authority)) {
+                    transactionSources.add(candidate);
+                }
+            }
+            List<StoreWrite> causalWrites = new ArrayList<>();
+            for (StoreWrite write : writes) {
+                if (write != null && transactionSources.contains(write.sink()) && !causalWrites.contains(write)) {
+                    causalWrites.add(write);
+                }
+            }
+            /* 路西法一类实体把实体内真实血量单向同步到 SavedData。该镜像不在强连通分量内，
+               但若不与权威同事务写入，下一 tick 的高水位仍会把实体值拉回。只接一跳且要求
+               写值直接依赖当前闭包，避免沿整个 tick 写图扩散。 */
+            List<Source> causalCore = List.copyOf(transactionSources);
+            for (StoreWrite write : writes) {
+                if (write == null || write.sink() == null
+                        || !isExternalStorageSource(write.sink())
+                        || !containsAnySink(write.valueExpr(), causalCore)) continue;
+                if (!transactionSources.contains(write.sink())) transactionSources.add(write.sink());
+                if (!causalWrites.contains(write)) causalWrites.add(write);
+            }
+            transactionSources.sort(Comparator.comparing(source -> source.label));
+            if (!causalWrites.isEmpty()) {
+                branches.add(new MaintenanceBranch(authority, causalWrites, transactionSources));
+            }
+        }
+        return branches.isEmpty() ? MaintenancePlan.EMPTY : new MaintenancePlan(branches);
+    }
+
+    private static boolean containsAnySink(Expr expression, Collection<Source> sinks) {
+        for (Source sink : sinks) {
+            if (containsSink(expression, sink)) return true;
+        }
+        return false;
+    }
+
+    private static Source canonicalSource(Collection<Source> known, Source candidate) {
+        for (Source source : known) {
+            if (source.equals(candidate)) return source;
+        }
+        return candidate;
+    }
+
+    private static Set<Source> reachableSources(Collection<Source> roots,
+                                                Map<Source, Set<Source>> dependencies) {
+        Set<Source> reached = new LinkedHashSet<>();
+        ArrayDeque<Source> pending = new ArrayDeque<>(roots);
+        while (!pending.isEmpty()) {
+            Source current = canonicalSource(dependencies.keySet(), pending.removeFirst());
+            if (!reached.add(current)) continue;
+            for (Source next : dependencies.getOrDefault(current, Set.of())) pending.addLast(next);
+        }
+        return reached;
+    }
 
     /* 剪枝指纹的种子源：getHealth 数据流的源 + 语义出口已定位的源。
        两者都由带语义锚点的入口得出，不含 tick 的无关写入，可以安全地反过来约束 tick。 */
@@ -2740,7 +2884,8 @@ public final class HealthDataflowAnalyzer {
             EFFECTIVE_MODEL_CACHE.put(entityClass, model);
             EFFECTIVE_MODEL_MISSES.remove(entityClass);
             EcaLogger.info("[EffectiveHealth] model entity={} storage={} readExpr={}",
-                    entityClass.getName(), model.storage().label, model.readExpr());
+                    entityClass.getName(), model.storage().label,
+                    HealthDataFlow.expressionSummary(model.readExpr()));
         } else if (!cachedOnly) {
             EFFECTIVE_MODEL_MISSES.put(entityClass, signature);
             EcaLogger.info("[EffectiveHealth] no model entity={} candidates={} signature={}",
@@ -3630,14 +3775,15 @@ public final class HealthDataflowAnalyzer {
             return new AnalysisResult(rewritten, List.copyOf(collectSources(rewritten)), definingClass);
         }
 
-        /* external 写入只处理与权威有依赖关系的源：真实血量的联动存储，其写入值引用其他存储；
-           纯常量写入源(阶段标记等)写入后回读必匹配目标值，会抢先假成功。实体本体源保留——
-           dataflow 之外的补充写入对它们无害，且 external-only 实体仍依赖它们落地。 */
+        /* external 写入只处理与权威有读取或依赖关系的源。纯常量 StoreWrite(阶段标记等)写入后
+           回读必匹配目标值，会抢先假成功；语义出口直接读取的实体外存储必须保留。 */
         public static AnalysisResult withoutConstantOnlySources(AnalysisResult tree) {
             if (tree == null || tree.sources.isEmpty()) return tree;
             List<Source> filtered = new ArrayList<>(tree.sources.size());
             for (Source sink : tree.sources) {
-                if (!isExternalStorageSource(sink) || sinkHasSourceDependency(tree.returnExpr, sink)) {
+                if (!isExternalStorageSource(sink)
+                        || containsSinkInReadPosition(tree.returnExpr, sink)
+                        || sinkHasSourceDependency(tree.returnExpr, sink)) {
                     filtered.add(sink);
                 }
             }
