@@ -47,9 +47,15 @@ public final class EcaSetHealthManager {
         return t;
     });
 
-    /* tick 与权威写入者扫描可能命中巨型方法或全模组类枚举，必须与四入口语义扫描隔离。 */
-    private static final ExecutorService MAINTENANCE_ANALYSIS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "ECA-Health-MaintenanceScan");
+    /* Tick 与 writer 都可能命中巨型方法；两条固定通道并行，避免互相吞掉时间片。 */
+    private static final ExecutorService TICK_ANALYSIS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "ECA-Health-TickScan");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private static final ExecutorService WRITER_ANALYSIS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "ECA-Health-WriterScan");
         t.setDaemon(true);
         return t;
     });
@@ -63,7 +69,8 @@ public final class EcaSetHealthManager {
 
     /* 外部扫描异步分析去重：同类并发首改只提交一次后台分析任务 */
     private static final Set<Class<?>> EXTERNAL_SCAN_PENDING = ConcurrentHashMap.newKeySet();
-    private static final Set<Class<?>> MAINTENANCE_SCAN_PENDING = ConcurrentHashMap.newKeySet();
+    private static final Set<Class<?>> TICK_SCAN_PENDING = ConcurrentHashMap.newKeySet();
+    private static final Set<Class<?>> WRITER_SCAN_PENDING = ConcurrentHashMap.newKeySet();
     private static final Set<String> MAINTENANCE_SCAN_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
 
     /* 外部扫描诊断去重(每类一次)：提交、开始执行、失败三个节点各自记一次。
@@ -136,7 +143,8 @@ public final class EcaSetHealthManager {
         }
         HealthDataflowAnalyzer.MaintenancePlan maintenance =
                 HealthDataflowAnalyzer.peekMaintenancePlan(cls);
-        if (!HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) {
+        if (!maintenance.hasExternalTransactionSource()
+                && !HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) {
             submitMaintenanceAnalysis(cls);
             return;
         }
@@ -446,24 +454,52 @@ public final class EcaSetHealthManager {
 
     private static void submitMaintenanceAnalysis(Class<?> cls) {
         if (cls == null || HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) return;
-        if (!MAINTENANCE_SCAN_PENDING.add(cls)) return;
+        submitTickAnalysis(cls);
+        submitWriterAnalysis(cls);
+    }
+
+    private static void submitTickAnalysis(Class<?> cls) {
+        if (HealthDataflowAnalyzer.isTickMaintenanceResolved(cls) || !TICK_SCAN_PENDING.add(cls)) return;
         try {
-            MAINTENANCE_ANALYSIS_EXECUTOR.submit(() -> {
+            TICK_ANALYSIS_EXECUTOR.submit(() -> {
                 try {
-                    HealthDataflowAnalyzer.resolveMaintenancePlan(cls);
+                    HealthDataflowAnalyzer.resolveTickMaintenancePlan(cls);
                 } catch (Throwable t) {
-                    if (MAINTENANCE_SCAN_FAILURE_DUMPED.add(cls.getName())) {
-                        EcaLogger.info("[ExternalScan] maintenance analysis threw entity={} type={} msg={}",
+                    if (MAINTENANCE_SCAN_FAILURE_DUMPED.add(cls.getName() + "|tick")) {
+                        EcaLogger.info("[ExternalScan] tick analysis threw entity={} type={} msg={}",
                                 cls.getName(), t.getClass().getName(), t.getMessage());
                     }
                     if (t instanceof VirtualMachineError e) throw e;
                 } finally {
-                    MAINTENANCE_SCAN_PENDING.remove(cls);
+                    TICK_SCAN_PENDING.remove(cls);
                 }
             });
         } catch (Throwable t) {
-            MAINTENANCE_SCAN_PENDING.remove(cls);
-            EcaLogger.info("[ExternalScan] maintenance submit rejected entity={} type={} msg={}",
+            TICK_SCAN_PENDING.remove(cls);
+            EcaLogger.info("[ExternalScan] tick submit rejected entity={} type={} msg={}",
+                    cls.getName(), t.getClass().getName(), t.getMessage());
+        }
+    }
+
+    private static void submitWriterAnalysis(Class<?> cls) {
+        if (HealthDataflowAnalyzer.isAuthorityMaintenanceResolved(cls) || !WRITER_SCAN_PENDING.add(cls)) return;
+        try {
+            WRITER_ANALYSIS_EXECUTOR.submit(() -> {
+                try {
+                    HealthDataflowAnalyzer.resolveAuthorityMaintenancePlan(cls);
+                } catch (Throwable t) {
+                    if (MAINTENANCE_SCAN_FAILURE_DUMPED.add(cls.getName() + "|writer")) {
+                        EcaLogger.info("[ExternalScan] writer analysis threw entity={} type={} msg={}",
+                                cls.getName(), t.getClass().getName(), t.getMessage());
+                    }
+                    if (t instanceof VirtualMachineError e) throw e;
+                } finally {
+                    WRITER_SCAN_PENDING.remove(cls);
+                }
+            });
+        } catch (Throwable t) {
+            WRITER_SCAN_PENDING.remove(cls);
+            EcaLogger.info("[ExternalScan] writer submit rejected entity={} type={} msg={}",
                     cls.getName(), t.getClass().getName(), t.getMessage());
         }
     }
@@ -939,8 +975,10 @@ public final class EcaSetHealthManager {
     public static void clear() {
         DATAFLOW_TABLE.clear();
         EXTERNAL_SCAN_PENDING.clear();
-        MAINTENANCE_SCAN_PENDING.clear();
+        TICK_SCAN_PENDING.clear();
+        WRITER_SCAN_PENDING.clear();
         MAINTENANCE_SCAN_FAILURE_DUMPED.clear();
+        HealthDataflowAnalyzer.clearMaintenancePlans();
         EXTERNAL_SCAN_SUBMIT_DUMPED.clear();
         EXTERNAL_SCAN_START_DUMPED.clear();
         EXTERNAL_SCAN_FAILURE_DUMPED.clear();

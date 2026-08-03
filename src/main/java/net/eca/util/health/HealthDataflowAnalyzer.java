@@ -78,6 +78,7 @@ public final class HealthDataflowAnalyzer {
     /* 周期维护写入必须与语义观测树分开保存。把两者拼成 Choice 会让无关 tick 字段成为血量候选，
        并使每次改血都重复遍历一棵可能指数膨胀的表达式树。 */
     private static final Map<Class<?>, MaintenancePlan> MAINTENANCE_PLAN_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, MaintenanceParts> MAINTENANCE_PARTS_CACHE = new ConcurrentHashMap<>();
     private static final Set<Class<?>> EXTERNAL_SCAN_DIAG_DUMPED = ConcurrentHashMap.newKeySet();
     private static final Set<Class<?>> MAINTENANCE_SCAN_DIAG_DUMPED = ConcurrentHashMap.newKeySet();
     /* 单个扫描入口抛出的诊断去重(每类每入口一次) */
@@ -170,14 +171,20 @@ public final class HealthDataflowAnalyzer {
         return ar;
     }
 
-    /* 在四个语义入口完成后构建周期维护计划。调用方必须放在维护专用后台线程，避免巨型 tick
-       或模组全类写入者扫描阻塞语义队列。 */
+    /* 兼容入口：依次补齐两个维护分支。运行期管理器使用下方两个独立入口并行执行。 */
     public static MaintenancePlan resolveMaintenancePlan(Class<?> entityClass) {
         if (entityClass == null) return MaintenancePlan.EMPTY;
-        SemanticExternalScan semantic = EXTERNAL_SCAN_CACHE.computeIfAbsent(entityClass,
-                HealthDataflowAnalyzer::analyzeSemanticExternalScan);
-        return MAINTENANCE_PLAN_CACHE.computeIfAbsent(entityClass,
-                ignored -> analyzeMaintenancePlan(entityClass, semantic));
+        resolveTickMaintenancePlan(entityClass);
+        resolveAuthorityMaintenancePlan(entityClass);
+        return peekMaintenancePlan(entityClass);
+    }
+
+    public static MaintenancePlan resolveTickMaintenancePlan(Class<?> entityClass) {
+        return resolveMaintenancePart(entityClass, true);
+    }
+
+    public static MaintenancePlan resolveAuthorityMaintenancePlan(Class<?> entityClass) {
+        return resolveMaintenancePart(entityClass, false);
     }
 
     /* 只读查询已分析出的周期维护计划；计划未就绪时不触发同步分析。 */
@@ -187,7 +194,24 @@ public final class HealthDataflowAnalyzer {
     }
 
     public static boolean isMaintenancePlanResolved(Class<?> entityClass) {
-        return entityClass != null && MAINTENANCE_PLAN_CACHE.containsKey(entityClass);
+        MaintenanceParts parts = entityClass == null ? null : MAINTENANCE_PARTS_CACHE.get(entityClass);
+        return parts != null && parts.tickResolved && parts.authorityResolved;
+    }
+
+    public static boolean isTickMaintenanceResolved(Class<?> entityClass) {
+        MaintenanceParts parts = entityClass == null ? null : MAINTENANCE_PARTS_CACHE.get(entityClass);
+        return parts != null && parts.tickResolved;
+    }
+
+    public static boolean isAuthorityMaintenanceResolved(Class<?> entityClass) {
+        MaintenanceParts parts = entityClass == null ? null : MAINTENANCE_PARTS_CACHE.get(entityClass);
+        return parts != null && parts.authorityResolved;
+    }
+
+    static void clearMaintenancePlans() {
+        MAINTENANCE_PLAN_CACHE.clear();
+        MAINTENANCE_PARTS_CACHE.clear();
+        MAINTENANCE_SCAN_DIAG_DUMPED.clear();
     }
 
     public static boolean verifyExternalDataflow(Expr root, LivingEntity entity, float expected, Source sink) {
@@ -2083,55 +2107,92 @@ public final class HealthDataflowAnalyzer {
         return new SemanticExternalScan(combined, List.copyOf(observedAuthorities), fingerprint);
     }
 
-    private static MaintenancePlan analyzeMaintenancePlan(Class<?> entityClass,
-                                                           SemanticExternalScan semantic) {
-        List<String> scannedMethods = new ArrayList<>();
-        List<String> entryCosts = new ArrayList<>();
-        long scanStart = System.nanoTime();
-        AuthorityFingerprint fingerprint = semantic.fingerprint();
-        // tick 过程收集：从 baseTick/tick/aiStep 及静态过程链反推实体外的真实血量写源(SavedData 等)
-        long tickStart = System.nanoTime();
-        BudgetedWrites tick = collectTickWrites(entityClass, fingerprint);
-        List<StoreWrite> tickWrites = tick.writes();
-        if (!tickWrites.isEmpty()) {
-            scannedMethods.add("tickWrites");
+    private static final class MaintenanceParts {
+        List<StoreWrite> tickWrites = List.of();
+        List<StoreWrite> authorityWrites = List.of();
+        volatile boolean tickResolved;
+        volatile boolean authorityResolved;
+        boolean tickRunning;
+        boolean authorityRunning;
+        String tickCost = "tickWrites pending";
+        String authorityCost = "authorityWriters pending";
+        long firstStartedNanos;
+    }
+
+    /* Tick 与 writer 分别发布结果。部分结果也会重建计划，使先找到外部权威的一侧无需等待另一侧。 */
+    private static MaintenancePlan resolveMaintenancePart(Class<?> entityClass, boolean tickPart) {
+        if (entityClass == null) return MaintenancePlan.EMPTY;
+        SemanticExternalScan semantic = EXTERNAL_SCAN_CACHE.computeIfAbsent(entityClass,
+                HealthDataflowAnalyzer::analyzeSemanticExternalScan);
+        MaintenanceParts parts = MAINTENANCE_PARTS_CACHE.computeIfAbsent(entityClass, ignored -> new MaintenanceParts());
+        synchronized (parts) {
+            if (tickPart ? parts.tickResolved || parts.tickRunning
+                    : parts.authorityResolved || parts.authorityRunning) {
+                return MAINTENANCE_PLAN_CACHE.getOrDefault(entityClass, MaintenancePlan.EMPTY);
+            }
+            if (parts.firstStartedNanos == 0L) parts.firstStartedNanos = System.nanoTime();
+            if (tickPart) parts.tickRunning = true;
+            else parts.authorityRunning = true;
         }
-        // 超时即使一个写源都没收集到也要记账，否则这次降级在日志里完全不可见
-        if (!tickWrites.isEmpty() || tick.timedOut()) {
-            entryCosts.add(entryCost("tickWrites", tickStart, 0) + (tick.timedOut() ? " TIMEOUT" : ""));
+
+        long partStart = System.nanoTime();
+        BudgetedWrites result;
+        try {
+            result = tickPart
+                    ? collectTickWrites(entityClass, semantic.fingerprint())
+                    : collectAuthorityWriterWrites(entityClass, semantic.fingerprint());
+        } catch (Throwable t) {
+            synchronized (parts) {
+                if (tickPart) parts.tickRunning = false;
+                else parts.authorityRunning = false;
+            }
+            throw t;
         }
-        // 正向定位写入者：tick 链在大型转发过程里预算被无关调用吃光，够不着尾部的真实写入方法；
-        // 按同一份指纹扫描模组内引用权威的方法单独分析，补进候选写源。
-        long writerStart = System.nanoTime();
-        BudgetedWrites authority = collectAuthorityWriterWrites(entityClass, fingerprint);
-        List<StoreWrite> authorityWrites = authority.writes();
-        if (!authorityWrites.isEmpty()) {
-            scannedMethods.add("authorityWriters");
+
+        synchronized (parts) {
+            String name = tickPart ? "tickWrites" : "authorityWriters";
+            String cost = entryCost(name, partStart, 0) + (result.timedOut() ? " TIMEOUT" : "");
+            if (tickPart) {
+                parts.tickWrites = result.writes();
+                parts.tickCost = cost;
+                parts.tickRunning = false;
+                parts.tickResolved = true;
+            } else {
+                parts.authorityWrites = result.writes();
+                parts.authorityCost = cost;
+                parts.authorityRunning = false;
+                parts.authorityResolved = true;
+            }
+            List<StoreWrite> combined = mergeMaintenanceWrites(parts.tickWrites, parts.authorityWrites);
+            MaintenancePlan plan = buildMaintenancePlan(semantic.observedAuthorities(), combined);
+            MAINTENANCE_PLAN_CACHE.put(entityClass, plan);
+            if (parts.tickResolved && parts.authorityResolved && MAINTENANCE_SCAN_DIAG_DUMPED.add(entityClass)) {
+                List<String> methods = new ArrayList<>();
+                if (!parts.tickWrites.isEmpty()) methods.add("tickWrites");
+                if (!parts.authorityWrites.isEmpty()) methods.add("authorityWriters");
+                EcaLogger.info("[ExternalScan] maintenance entity={} methods={} branches={}",
+                        entityClass.getName(), methods, plan.branches().size());
+                EcaLogger.info("[ExternalScan]   maintenance cost entity={} wall={}ms parallelParts=[{}, {}]",
+                        entityClass.getName(), millisSince(parts.firstStartedNanos), parts.tickCost, parts.authorityCost);
+                AuthorityFingerprint fingerprint = semantic.fingerprint();
+                EcaLogger.info("[ExternalScan]   fingerprint entity={} usable={} scope={} tickWrites={} authorityWrites={} causalWrites={}",
+                        entityClass.getName(), fingerprint.usable(), fingerprint.cacheScope(), parts.tickWrites.size(),
+                        parts.authorityWrites.size(), plan.maintenanceWriteCount());
+            }
+            return plan;
         }
-        if (!authorityWrites.isEmpty() || authority.timedOut()) {
-            entryCosts.add(entryCost("authorityWriters", writerStart, 0)
-                    + (authority.timedOut() ? " TIMEOUT" : ""));
-        }
-        List<StoreWrite> maintenanceWrites = new ArrayList<>(tickWrites.size() + authorityWrites.size());
+    }
+
+    private static List<StoreWrite> mergeMaintenanceWrites(List<StoreWrite> tickWrites,
+                                                            List<StoreWrite> authorityWrites) {
+        List<StoreWrite> combined = new ArrayList<>(tickWrites.size() + authorityWrites.size());
         for (StoreWrite write : tickWrites) {
-            if (write != null && !maintenanceWrites.contains(write)) maintenanceWrites.add(write);
+            if (write != null && !combined.contains(write)) combined.add(write);
         }
         for (StoreWrite write : authorityWrites) {
-            if (write != null && !maintenanceWrites.contains(write)) maintenanceWrites.add(write);
+            if (write != null && !combined.contains(write)) combined.add(write);
         }
-        MaintenancePlan maintenancePlan = buildMaintenancePlan(semantic.observedAuthorities(), maintenanceWrites);
-        if (MAINTENANCE_SCAN_DIAG_DUMPED.add(entityClass)) {
-            EcaLogger.info("[ExternalScan] maintenance entity={} methods={} branches={}",
-                    entityClass.getName(), scannedMethods, maintenancePlan.branches().size());
-            EcaLogger.info("[ExternalScan]   maintenance cost entity={} total={}ms perEntry={}",
-                    entityClass.getName(), millisSince(scanStart), entryCosts);
-            /* 指纹不可用时剪枝是空操作，tick 会退回全量收集。这两种结局的源数差一个数量级，
-               但日志里长得一样，必须把指纹状态单独打出来才分得清。 */
-            EcaLogger.info("[ExternalScan]   fingerprint entity={} usable={} scope={} tickWrites={} authorityWrites={} causalWrites={}",
-                    entityClass.getName(), fingerprint.usable(), fingerprint.cacheScope(), tickWrites.size(),
-                    authorityWrites.size(), maintenancePlan.maintenanceWriteCount());
-        }
-        return maintenancePlan;
+        return combined;
     }
 
     private static String entryCost(String name, long startNanos, int fetchStart) {
@@ -2234,7 +2295,7 @@ public final class HealthDataflowAnalyzer {
         if (entityClass == null || entityClass.getClassLoader() == null) {
             return new BudgetedWrites(List.copyOf(writes), false);
         }
-        long deadline = System.nanoTime() + TICK_WRITE_SCAN_BUDGET_NANOS;
+        long deadline = System.nanoTime() + MAINTENANCE_HARD_BUDGET_NANOS;
         boolean timedOut = false;
         for (Class<?> owner = entityClass; owner != null && owner != LivingEntity.class && !timedOut;
              owner = owner.getSuperclass()) {
@@ -2253,8 +2314,13 @@ public final class HealthDataflowAnalyzer {
                 ctx.inlineBudget = TICK_WRITE_INLINE_BUDGET;
                 ctx.nodeBudget = TICK_WRITE_NODE_BUDGET;
                 ctx.authorityFingerprint = fingerprint;
+                ctx.configureAdaptiveDeadline(deadline);
                 TaintValue[] seed = seedMethodInputs(method.desc, false);
                 Expr expression = analyzeMethodWrites(owner, method.name, method.desc, seed, ctx, 0);
+                if (ctx.deadlineExceeded || System.nanoTime() > deadline) {
+                    timedOut = true;
+                    break;
+                }
                 if (expression == null || expression instanceof UnknownExpr) continue;
                 collectStoreWrites(expression, writes);
             }
@@ -2404,12 +2470,11 @@ public final class HealthDataflowAnalyzer {
     private static final int TICK_WRITE_INLINE_BUDGET = 40_000;
     private static final int TICK_WRITE_NODE_BUDGET = 12_000_000;
 
-    /* tick 收集与权威写入者扫描各自的时间预算。这两项与语义出口(isAlive/hurt 等，实测合计
-       约 150ms)串行跑在同一条单线程分析队列上，放开跑单个实体实测可达 14s 与 21s，
-       排在后面的实体会被饿死到永远拿不到外部扫描结果，有效血量通道随之整条进不去。
-       超时即放弃本项，语义出口已收集的结果照常返回。 */
-    private static final long TICK_WRITE_SCAN_BUDGET_NANOS = 2_000_000_000L;
-    private static final long AUTHORITY_WRITER_SCAN_BUDGET_NANOS = 2_000_000_000L;
+    /* 软时间片只在分析仍有解释器进展时续期；绝对上限保证恶意或异常控制流最终退出。
+       Tick 与 writer 位于独立线程，因此两边的上限不会串行相加到等待时间上。 */
+    private static final long MAINTENANCE_SOFT_SLICE_NANOS = 2_000_000_000L;
+    private static final long MAINTENANCE_EXTENSION_SLICE_NANOS = 1_000_000_000L;
+    private static final long MAINTENANCE_HARD_BUDGET_NANOS = 8_000_000_000L;
 
     /* ==================== 正向定位权威写入者 ====================
        tick 链内联在大型转发过程里预算会被海量无关调用吃光，够不着尾部的真实写入方法；
@@ -2582,7 +2647,7 @@ public final class HealthDataflowAnalyzer {
                                                                AuthorityFingerprint fingerprint) {
         List<StoreWrite> writes = new ArrayList<>();
         // 站点扫描与逐站点分析共用同一份预算：两段都在同一条队列上，分开计会让总耗时翻倍
-        long deadline = System.nanoTime() + AUTHORITY_WRITER_SCAN_BUDGET_NANOS;
+        long deadline = System.nanoTime() + MAINTENANCE_HARD_BUDGET_NANOS;
         WriterSiteScan scan = findAuthorityWriterSites(entityClass, fingerprint, deadline);
         boolean timedOut = scan.timedOut();
         for (WriterSite site : scan.sites()) {
@@ -2601,8 +2666,14 @@ public final class HealthDataflowAnalyzer {
             AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
             ctx.inlineBudget = TICK_WRITE_INLINE_BUDGET;
             ctx.nodeBudget = TICK_WRITE_NODE_BUDGET;
+            ctx.authorityFingerprint = fingerprint;
+            ctx.configureAdaptiveDeadline(deadline);
             Expr expression = analyzeMethodWrites(owner, site.methodName(), site.methodDesc(),
                     seedWriterSiteInputs(site.methodDesc(), isStatic), ctx, 0);
+            if (ctx.deadlineExceeded || System.nanoTime() > deadline) {
+                timedOut = true;
+                break;
+            }
             collectStoreWrites(expression, writes);
         }
         return new BudgetedWrites(List.copyOf(writes), timedOut);
@@ -3275,6 +3346,7 @@ public final class HealthDataflowAnalyzer {
     private static Expr analyzeMethodWrites(Class<?> owner, String name, String desc,
                                             TaintValue[] seedLocals, AnalysisCtx ctx, int depth) {
         if (owner == null || owner.getClassLoader() == null || depth >= ctx.maxDepth) return null;
+        ctx.throwIfDeadlineExceeded();
         String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc + "#writes";
         if (!ctx.inflight.add(cacheKey)) return new UnknownExpr("recursive-cycle-writes");
         try {
@@ -3289,6 +3361,7 @@ public final class HealthDataflowAnalyzer {
             List<Expr> writes = new ArrayList<>();
             int idx = 0;
             for (AbstractInsnNode insn : mn.instructions) {
+                ctx.checkDeadline();
                 Expr write = extractWriteExpression(frames[idx], insn, ctx, depth);
                 if (write != null && !(write instanceof UnknownExpr)) addUniqueExpr(writes, write);
                 idx++;
@@ -3356,8 +3429,10 @@ public final class HealthDataflowAnalyzer {
     private static final Map<String, Boolean> MAY_WRITE_STATE_CACHE = new ConcurrentHashMap<>();
 
     private static boolean mayWriteAuthority(Class<?> owner, String name, String desc,
-                                             AuthorityFingerprint fingerprint, int depth) {
+                                             AnalysisCtx ctx, int depth) {
+        AuthorityFingerprint fingerprint = ctx.authorityFingerprint;
         if (owner == null || fingerprint == null || !fingerprint.usable()) return true;
+        ctx.throwIfDeadlineExceeded();
         String key = fingerprint.cacheScope() + "@" + internalName(owner) + "#" + name + desc;
         Boolean cached = MAY_WRITE_STATE_CACHE.get(key);
         if (cached != null) return cached;
@@ -3365,14 +3440,22 @@ public final class HealthDataflowAnalyzer {
         if (MAY_WRITE_STATE_CACHE.size() > MAY_WRITE_CACHE_LIMIT) MAY_WRITE_STATE_CACHE.clear();
         // 互递归期间先占位为"可能写"，环上的方法因此保守放行而不会缓存出错误的 false
         MAY_WRITE_STATE_CACHE.put(key, Boolean.TRUE);
-        boolean result = scanMayWriteAuthority(owner, name, desc, fingerprint, depth);
-        MAY_WRITE_STATE_CACHE.put(key, result);
-        return result;
+        try {
+            boolean result = scanMayWriteAuthority(owner, name, desc, ctx, depth);
+            MAY_WRITE_STATE_CACHE.put(key, result);
+            return result;
+        } catch (AnalysisDeadlineExceeded ignored) {
+            // 超时结论不完整，不能把递归占位当成长期可达性结果。
+            MAY_WRITE_STATE_CACHE.remove(key);
+            throw ignored;
+        }
     }
 
     /* 判不出来一律放行：剪枝只用来省额度，绝不能把真实写入路径剪掉。 */
     private static boolean scanMayWriteAuthority(Class<?> owner, String name, String desc,
-                                                 AuthorityFingerprint fingerprint, int depth) {
+                                                 AnalysisCtx ctx, int depth) {
+        AuthorityFingerprint fingerprint = ctx.authorityFingerprint;
+        ctx.throwIfDeadlineExceeded();
         MethodNode method;
         try {
             method = findMethodNode(classNode(owner), name, desc);
@@ -3383,6 +3466,7 @@ public final class HealthDataflowAnalyzer {
         if (method == null) return true;
         if (method.instructions.size() == 0) return false;
         for (AbstractInsnNode insn : method.instructions) {
+            ctx.checkDeadline();
             if (insn instanceof FieldInsnNode field) {
                 if (insn.getOpcode() == Opcodes.PUTFIELD && fingerprint.matchesField(field)) return true;
                 // 读取 accessor 静态字段是使用该同步单元的必经指令，读写在此不作区分
@@ -3397,7 +3481,7 @@ public final class HealthDataflowAnalyzer {
             if (callee == null) return true;
             Class<?> resolved = resolveInvocationOwner(callee, call.name, call.desc);
             if (mayWriteAuthority(resolved == null ? callee : resolved, call.name, call.desc,
-                    fingerprint, depth + 1)) {
+                    ctx, depth + 1)) {
                 return true;
             }
         }
@@ -3466,7 +3550,7 @@ public final class HealthDataflowAnalyzer {
         if (args.size() != expectedArgs) return null;
 
         // 到不了权威存储的调用直接跳过，额度留给真正通往它的路径
-        if (!mayWriteAuthority(owner, call.name, call.desc, ctx.authorityFingerprint, 0)) {
+        if (!mayWriteAuthority(owner, call.name, call.desc, ctx, 0)) {
             ctx.inlineSkipped++;
             return null;
         }
@@ -4388,9 +4472,50 @@ public final class HealthDataflowAnalyzer {
         /* 权威指纹：非空时内联前先判被调方能否到达权威存储，到不了的整条跳过。
            tick 这类没有语义锚点的入口靠它把额度约束在通往真实血量的路径上。 */
         AuthorityFingerprint authorityFingerprint = null;
+        /* 仅维护扫描设置截止时间。共享计数器把 nanoTime 检查摊薄到每 256 个解释器操作一次，
+           同时让递归内联与权威可达性预扫服从同一份总预算。 */
+        long deadlineNanos = Long.MAX_VALUE;
+        long hardDeadlineNanos = Long.MAX_VALUE;
+        int deadlineCheckCounter = 0;
+        int deadlineProgressMarker = 0;
+        boolean deadlineExceeded = false;
         int inlineSkipped = 0;
         int inlineAllowed = 0;
         AnalysisCtx(int maxDepth) { this.maxDepth = maxDepth; }
+
+        void configureAdaptiveDeadline(long hardDeadline) {
+            long now = System.nanoTime();
+            hardDeadlineNanos = hardDeadline;
+            deadlineNanos = Math.min(hardDeadline, now + MAINTENANCE_SOFT_SLICE_NANOS);
+            deadlineProgressMarker = deadlineCheckCounter;
+        }
+
+        void checkDeadline() {
+            if (deadlineNanos == Long.MAX_VALUE || (++deadlineCheckCounter & 0xff) != 0) return;
+            throwIfDeadlineExceeded();
+        }
+
+        void throwIfDeadlineExceeded() {
+            if (deadlineNanos == Long.MAX_VALUE) return;
+            long now = System.nanoTime();
+            if (now <= deadlineNanos) return;
+            if (now <= hardDeadlineNanos && deadlineCheckCounter > deadlineProgressMarker) {
+                deadlineProgressMarker = deadlineCheckCounter;
+                deadlineNanos = Math.min(hardDeadlineNanos, now + MAINTENANCE_EXTENSION_SLICE_NANOS);
+                return;
+            }
+            deadlineExceeded = true;
+            throw AnalysisDeadlineExceeded.INSTANCE;
+        }
+    }
+
+    /* 栈关闭的内部控制流异常：预算耗尽是预期降级，不应为它构造昂贵栈轨迹。 */
+    private static final class AnalysisDeadlineExceeded extends RuntimeException {
+        private static final AnalysisDeadlineExceeded INSTANCE = new AnalysisDeadlineExceeded();
+
+        private AnalysisDeadlineExceeded() {
+            super(null, null, false, false);
+        }
     }
 
     /* ==================== ASM analyzeMethod / Interpreter ==================== */
@@ -4648,18 +4773,21 @@ public final class HealthDataflowAnalyzer {
         }
 
         @Override public TaintValue newValue(Type type) {
+            ctx.checkDeadline();
             if (type == null) return new TaintValue(1, UnknownExpr.UNKNOWN);
             if (type == Type.VOID_TYPE) return null;
             return new TaintValue(type.getSize(), UnknownExpr.UNKNOWN);
         }
 
         @Override public TaintValue newParameterValue(boolean isInstanceMethod, int local, Type type) {
+            ctx.checkDeadline();
             if (seedLocals != null && local < seedLocals.length && seedLocals[local] != null) return seedLocals[local];
             if (isInstanceMethod && local == 0) return new TaintValue(1, EntityParamMarker.I);
             return new TaintValue(type.getSize(), UnknownExpr.UNKNOWN);
         }
 
         @Override public TaintValue newOperation(AbstractInsnNode insn) {
+            ctx.checkDeadline();
             ConstProvenance prov = provenanceOf(insn);
             return switch (insn.getOpcode()) {
                 case Opcodes.ACONST_NULL -> new TaintValue(1, UnknownExpr.UNKNOWN);
@@ -4690,9 +4818,13 @@ public final class HealthDataflowAnalyzer {
             };
         }
 
-        @Override public TaintValue copyOperation(AbstractInsnNode insn, TaintValue value) { return value; }
+        @Override public TaintValue copyOperation(AbstractInsnNode insn, TaintValue value) {
+            ctx.checkDeadline();
+            return value;
+        }
 
         @Override public TaintValue unaryOperation(AbstractInsnNode insn, TaintValue value) {
+            ctx.checkDeadline();
             int op = insn.getOpcode();
             return switch (op) {
                 case Opcodes.INEG, Opcodes.FNEG -> new TaintValue(1, new Op(op, List.of(value.expr)));
@@ -4723,6 +4855,7 @@ public final class HealthDataflowAnalyzer {
         }
 
         @Override public TaintValue binaryOperation(AbstractInsnNode insn, TaintValue v1, TaintValue v2) {
+            ctx.checkDeadline();
             int op = insn.getOpcode();
             return switch (op) {
                 case Opcodes.IADD, Opcodes.ISUB, Opcodes.IMUL, Opcodes.IDIV, Opcodes.IREM,
@@ -4745,10 +4878,12 @@ public final class HealthDataflowAnalyzer {
         }
 
         @Override public TaintValue ternaryOperation(AbstractInsnNode insn, TaintValue v1, TaintValue v2, TaintValue v3) {
+            ctx.checkDeadline();
             return null;
         }
 
         @Override public TaintValue naryOperation(AbstractInsnNode insn, List<? extends TaintValue> values) {
+            ctx.checkDeadline();
             if (insn.getOpcode() == Opcodes.MULTIANEWARRAY) return new TaintValue(1, UnknownExpr.UNKNOWN);
             if (insn.getOpcode() == Opcodes.INVOKEDYNAMIC) {
                 InvokeDynamicInsnNode dynamic = (InvokeDynamicInsnNode) insn;
@@ -5212,9 +5347,12 @@ public final class HealthDataflowAnalyzer {
             return analyzeMethod(owner, m.name, m.desc, seed, ctx, depth + 1);
         }
 
-        @Override public void returnOperation(AbstractInsnNode insn, TaintValue value, TaintValue expected) {}
+        @Override public void returnOperation(AbstractInsnNode insn, TaintValue value, TaintValue expected) {
+            ctx.checkDeadline();
+        }
 
         @Override public TaintValue merge(TaintValue v1, TaintValue v2) {
+            ctx.checkDeadline();
             if (v1.equals(v2)) return v1;
             int size = Math.max(v1.size, v2.size);
             if (--ctx.nodeBudget <= 0) return new TaintValue(size, new UnknownExpr("merge-nodeBudget-exhausted"));
