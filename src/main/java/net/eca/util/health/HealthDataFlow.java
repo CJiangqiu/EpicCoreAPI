@@ -140,13 +140,9 @@ public final class HealthDataFlow {
         AnalysisResult filtered = HealthDataflowAnalyzer.AnalysisResult.withoutConstantOnlySources(tree);
         return writeViaSources(cls, filtered, entity, target, firstWrite,
                 (verifiedEntity, verifiedTarget, sink) ->
-                    // 外部扫描的 Choice 可能使无效候选通过符号校验，因此还需验证 getHealth 的实际读数。
-                    // 语义出口直接读取实体外存储时，getHealth 可能与它解耦，改为回读该存储本身确认；
-                    // tick 维护源已进入独立因果计划，不会出现在本候选树中。
-                    HealthDataflowAnalyzer.isExternalStorageSource(sink)
-                        ? readSinkMatches(sink, verifiedEntity, verifiedTarget)
-                        : (HealthDataflowAnalyzer.verifyExternalDataflow(tree.returnExpr, verifiedEntity, verifiedTarget, sink)
-                            && EcaSetHealthManager.verifyExternalRaw(verifiedEntity, verifiedTarget)),
+                    // 自回读只能证明候选可写，不能证明它承载真实血量。
+                    HealthDataflowAnalyzer.verifyExternalDataflow(tree.returnExpr, verifiedEntity, verifiedTarget, sink)
+                        && EcaSetHealthManager.verifyExternalRaw(verifiedEntity, verifiedTarget),
                 "external");
     }
 
@@ -256,19 +252,6 @@ public final class HealthDataFlow {
         try {
             Object actual = HealthDataflowAnalyzer.evaluate(sink, HealthDataflowAnalyzer.newContext(entity));
             return equivalentValue(actual, expected);
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            return false;
-        }
-    }
-
-    /* 写入后回读写源本身并匹配目标值：tick 权威的判据是"存储确实写入目标值"，
-       不依赖 getHealth(root 表达式)。回读失败返回 false，由 writeViaSources 回滚。 */
-    private static boolean readSinkMatches(Source sink, LivingEntity entity, float expected) {
-        try {
-            Object value = HealthDataflowAnalyzer.evaluate(sink, HealthDataflowAnalyzer.newContext(entity));
-            if (!(value instanceof Number number)) return false;
-            return HealthValueSemantics.matches(number.floatValue(), expected);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             return false;

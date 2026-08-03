@@ -3775,12 +3775,13 @@ public final class HealthDataflowAnalyzer {
             return new AnalysisResult(rewritten, List.copyOf(collectSources(rewritten)), definingClass);
         }
 
-        /* external 写入只处理与权威有读取或依赖关系的源。纯常量 StoreWrite(阶段标记等)写入后
-           回读必匹配目标值，会抢先假成功；语义出口直接读取的实体外存储必须保留。 */
+        /* external 写入只处理与权威有读取或依赖关系的源。四个语义出口中的常量通常是控制流
+           回退值，不能据此覆写实体真实血量；纯常量 StoreWrite 回读也会抢先假成功。 */
         public static AnalysisResult withoutConstantOnlySources(AnalysisResult tree) {
             if (tree == null || tree.sources.isEmpty()) return tree;
             List<Source> filtered = new ArrayList<>(tree.sources.size());
             for (Source sink : tree.sources) {
+                if (sink instanceof ConstOverrideSource) continue;
                 if (!isExternalStorageSource(sink)
                         || containsSinkInReadPosition(tree.returnExpr, sink)
                         || sinkHasSourceDependency(tree.returnExpr, sink)) {

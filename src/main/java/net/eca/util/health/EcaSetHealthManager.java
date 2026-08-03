@@ -32,9 +32,6 @@ public final class EcaSetHealthManager {
        warmup 后台预填，setHealth 时查询；未命中现场分析并写回，失败标记后续不再重复分析。 */
     private static final Map<Class<?>, HealthDataflowAnalyzer.AnalysisResult> DATAFLOW_TABLE = new ConcurrentHashMap<>();
 
-    /* 记录已经安装外部扫描 patch 的类，安装去重由管理器维护。 */
-    private static final Set<Class<?>> EXTERNAL_INSTALLED = ConcurrentHashMap.newKeySet();
-
     /* 预热专用后台执行器：常驻单守护线程，承接 LoadComplete 的全量预热。
        纯分析只读，离开主线程安全。 */
     private static final ExecutorService ANALYSIS_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
@@ -175,7 +172,6 @@ public final class EcaSetHealthManager {
             submitComparisonPrescan(cls);
             return false;
         }
-        if (EXTERNAL_INSTALLED.add(cls)) ConstOverride.install(tree);
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
         boolean success = HealthDataFlow.writeExternal(tree, target, targetHealth);
@@ -942,7 +938,6 @@ public final class EcaSetHealthManager {
     /* 服务器停止时清除所有缓存与状态，确保热重载后从干净状态开始。 */
     public static void clear() {
         DATAFLOW_TABLE.clear();
-        EXTERNAL_INSTALLED.clear();
         EXTERNAL_SCAN_PENDING.clear();
         MAINTENANCE_SCAN_PENDING.clear();
         MAINTENANCE_SCAN_FAILURE_DUMPED.clear();
