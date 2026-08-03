@@ -78,7 +78,8 @@ final class ObjectGraphSnapshot {
 
     private void captureEntityFieldsShallow(LivingEntity entity) {
         if (entity == null || !visited.add(entity)) return;
-        for (Class<?> c = entity.getClass(); c != null && c != LivingEntity.class && c != Object.class; c = c.getSuperclass()) {
+        // 未证实的 writer 可能转调基类 setter；身份、位置等基类状态也必须纳入同一事务回滚。
+        for (Class<?> c = entity.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
             for (Field field : c.getDeclaredFields()) {
                 if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers())) continue;
                 try {

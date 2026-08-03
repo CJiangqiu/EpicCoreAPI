@@ -185,6 +185,7 @@ public final class MethodProbe {
                 if (Modifier.isStatic(method.getModifiers()) || method.getParameterCount() != 1) continue;
                 Class<?> input = method.getParameterTypes()[0];
                 if (!isMethodInput(input)) continue;
+                if (overridesUnsafeMinecraftMutation(method)) continue;
                 if (!seen.add("M:" + ownerInternal + ":" + method.getName() + ":" + input.getName())) continue;
                 out.add(new DirectCandidate(WriterKind.METHOD, ownerInternal, method.getName(), Type.getDescriptor(input), null, false));
             }
@@ -213,6 +214,26 @@ public final class MethodProbe {
             case FIELD_COMMIT -> 3;
         }));
         return out;
+    }
+
+    /* 基类数值 setter 操作的是实体身份、姿态或运行状态，不能用血量探针试写。
+       setHealth 是唯一允许的基类覆写；其余自定义 writer 仍由运行期两点回读裁决。 */
+    private static boolean overridesUnsafeMinecraftMutation(Method method) {
+        if (isSetHealthMethod(method)) return false;
+        Class<?>[] parameters = method.getParameterTypes();
+        for (Class<?> c = LivingEntity.class; c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                c.getDeclaredMethod(method.getName(), parameters);
+                return true;
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        return false;
+    }
+
+    private static boolean isSetHealthMethod(Method method) {
+        if (method.getReturnType() != void.class || method.getParameterTypes()[0] != float.class) return false;
+        return method.getName().equals("setHealth") || method.getName().equals("m_21153_");
     }
 
     /* 反射缓存可能被目标主动清空；字段元数据仍在 classfile 中，作为无反射后备。 */
@@ -566,14 +587,12 @@ public final class MethodProbe {
                         wroteA, a, actualA, stateA.diffFrom(beforeA), afterReadA.diffFrom(stateA));
             }
             if (!wroteA || !matches(actualA, a)) {
-                restore(entity, writer, baseline);
                 return false;
             }
             boolean wroteB = writer.write(entity, b);
             float actualB = EcaSetHealthManager.readHealthAnchor(entity);
             if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle probeB wrote={} expected={} actual={}", wroteB, b, actualB);
             if (!wroteB || !matches(actualB, b)) {
-                restore(entity, writer, baseline);
                 return false;
             }
             /* 锚点分别读回了两个不同的写入值，已直接证明它反映真实存储。
@@ -581,7 +600,6 @@ public final class MethodProbe {
             EcaSetHealthManager.promoteAnchorTrust(entity.getClass());
             writer.write(entity, baseline);
             if (!EcaSetHealthManager.verify(entity, baseline)) {
-                restore(entity, writer, baseline);
                 return false;
             }
             boolean wroteTarget = writer.write(entity, target);
@@ -589,20 +607,10 @@ public final class MethodProbe {
             if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle target wrote={} expected={} actual={}",
                     wroteTarget, target, actualTarget);
             if (wroteTarget && matchesTarget(actualTarget, target)) return true;
-            restore(entity, writer, baseline);
             return false;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            restore(entity, writer, baseline);
             return false;
-        }
-    }
-
-    private static void restore(LivingEntity entity, DirectWriter writer, float baseline) {
-        try {
-            writer.write(entity, baseline);
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
         }
     }
 
