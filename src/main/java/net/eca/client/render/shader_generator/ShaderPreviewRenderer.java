@@ -59,7 +59,9 @@ public final class ShaderPreviewRenderer {
                     right - 16,
                     bottom - 16
                 );
-                case SKYBOX -> renderBlockSurface(source.skybox(), left, top, right, bottom);
+                case SKYBOX -> renderBlockSurface(
+                    source.skybox(), left, top, right, bottom
+                );
                 case BOSS_BAR -> {
                     int width = Math.max(80, Math.min(right - left - 40, 360));
                     int height = Math.max(16, Math.min(42, (bottom - top) / 5));
@@ -162,12 +164,12 @@ public final class ShaderPreviewRenderer {
         Level level = minecraft.level;
         BakedModel model = itemRenderer.getModel(PREVIEW_ITEM, level, minecraft.player, 0);
         MultiBufferSource.BufferSource delegate = MultiBufferSource.immediate(new BufferBuilder(4096));
-        MultiBufferSource forced = ignored -> delegate.getBuffer(source.item());
 
         int size = Math.max(40, Math.min(right - left, bottom - top) * 2 / 5);
         graphics.pose().pushPose();
         try {
             float[] bounds = computeUvBounds(model);
+            MultiBufferSource forced = ignored -> delegate.getBuffer(source.item());
             EcaShaderInstance.setLocalUvBounds(
                 bounds[0],
                 bounds[1],

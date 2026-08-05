@@ -38,6 +38,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class FactionManager {
 
+    private static final int HOSTILE_TARGET_SCAN_INTERVAL_TICKS = 20;
+
     // ==================== 权威数据 ====================
 
     // 阵营注册表（id → Faction，含成员表与首领）
@@ -1014,6 +1016,52 @@ public class FactionManager {
         return rel != FactionRelation.SAME_FACTION && rel != FactionRelation.FRIENDLY;
     }
 
+    // 周期性为有阵营且空闲的 Mob 分配附近敌对阵营目标
+    /**
+     * Assign the nearest hostile faction member to idle faction-bound mobs in one level.
+     * The faction system only supplies targets; each mob's existing combat goals remain
+     * responsible for movement and attacks. Factionless entities are never selected.
+     * @param level the server level whose loaded mobs should be updated
+     */
+    public static void tickHostileTargeting(ServerLevel level) {
+        if (level == null) return;
+
+        int range = EcaConfiguration.getFactionAlertRangeSafely();
+        double rangeSq = (double) range * range;
+        for (Entity entity : level.getAllEntities()) {
+            if (!(entity instanceof Mob mob) || !mob.isAlive()) continue;
+            if (getFactionId(mob) == null) continue;
+
+            LivingEntity current = mob.getTarget();
+            if (current != null && current.isAlive() && FactionUtil.canTarget(mob, current)) {
+                continue;
+            }
+            if (Math.floorMod(mob.tickCount + mob.getId(), HOSTILE_TARGET_SCAN_INTERVAL_TICKS) != 0) {
+                continue;
+            }
+
+            LivingEntity nearest = null;
+            double nearestDistanceSq = Double.MAX_VALUE;
+            AABB area = mob.getBoundingBox().inflate(range);
+            for (LivingEntity candidate : level.getEntitiesOfClass(LivingEntity.class, area,
+                    target -> target != mob && target.isAlive())) {
+                if (getFactionId(candidate) == null) continue;
+                if (getEffectiveRelation(mob, candidate) != FactionRelation.HOSTILE) continue;
+                if (!FactionUtil.canTarget(mob, candidate)) continue;
+
+                double distanceSq = mob.distanceToSqr(candidate);
+                if (distanceSq <= rangeSq && distanceSq < nearestDistanceSq) {
+                    nearest = candidate;
+                    nearestDistanceSq = distanceSq;
+                }
+            }
+
+            if (nearest != null) {
+                mob.setTarget(nearest);
+            }
+        }
+    }
+
     // ==================== 阵营间关系 ====================
 
     // 设置阵营 A 对阵营 B 的关系（内存，不持久化）
@@ -1065,14 +1113,96 @@ public class FactionManager {
         return factionA.getRelation(factionBId);
     }
 
+    // ==================== 阵营合并 ====================
+
+    // 将一个阵营整体并入另一个阵营（成员改绑 → 关系归并 → 源阵营注销）
+    // SAME_FACTION 是派生关系，由 getEffectiveRelation 在两方阵营 ID 相同时给出，存不进关系表。
+    // 要让两个阵营真正成为同一阵营，唯一正确的做法是把其中一个并掉。
+    // 注销必须排在成员迁移之后：dropIndexesOf 会按源阵营剩余成员表回收 MEMBER_INDEX，
+    // 迁移完成后该表为空，回收不会误伤已改绑到存活阵营的成员；同时它清掉
+    // ENTITY_FACTION_CACHE 中指向源阵营的项与快速路径集合，在线实体的陈旧归属随之失效。
+    /**
+     * Merge one faction into another. Every member of {@code fromId} is rebound to
+     * {@code intoId}, relation overrides are folded into the surviving faction, and
+     * {@code fromId} is unregistered. The surviving faction keeps its own display name,
+     * color, default relation, and leader; it only inherits the dissolved faction's leader
+     * when it has none of its own.
+     *
+     * @param intoId the surviving faction id
+     * @param fromId the faction to dissolve
+     * @param level  the server level for persistence
+     * @return the number of members moved, or -1 if the merge could not run
+     */
+    public static int mergeFactions(String intoId, String fromId, Level level) {
+        if (intoId == null || fromId == null || intoId.equals(fromId)) return -1;
+        ensureLoaded(level);
+
+        Faction into = FACTIONS.get(intoId);
+        Faction from = FACTIONS.get(fromId);
+        if (into == null || from == null) {
+            EcaLogger.info("[Faction] Cannot merge '{}' into '{}': faction not registered", fromId, intoId);
+            return -1;
+        }
+
+        // 迁移会改写源阵营成员表，先取快照
+        List<FactionMember> moving = new ArrayList<>(from.getMembers().values());
+        FactionMember formerLeader = from.getLeader();
+        // 先摘掉源阵营首领字段，避免随后的注销把刚接手的 LEADER_INDEX 条目一并回收
+        from.setLeader(null);
+
+        int moved = 0;
+        for (FactionMember member : moving) {
+            if (bindMember(member, intoId, level)) moved++;
+        }
+        // 反向索引与成员表若曾不同步，残留条目会在注销时被当作源阵营成员回收，
+        // 连带抹掉刚写好的归属；清空成员表使回收面恒为空
+        from.clearMembers();
+
+        if (formerLeader != null) {
+            if (into.getLeader() == null && into.hasMember(formerLeader.getUuid())) {
+                into.setLeader(formerLeader);
+                LEADER_INDEX.put(formerLeader.getUuid(), intoId);
+            } else {
+                LEADER_INDEX.remove(formerLeader.getUuid());
+            }
+        }
+
+        // 源阵营对第三方的关系仅在存活阵营未显式设定时继承
+        for (Map.Entry<String, FactionRelation> entry : from.getRelations().entrySet()) {
+            String otherId = entry.getKey();
+            if (otherId.equals(intoId) || otherId.equals(fromId)) continue;
+            if (into.getRelation(otherId) == null) {
+                into.setRelation(otherId, entry.getValue());
+            }
+        }
+        into.removeRelation(fromId);
+        persist(into, level);
+
+        // 第三方指向被解散阵营的条目即将成为死指针，改指存活阵营或直接丢弃
+        for (Faction other : FACTIONS.values()) {
+            if (other == into || other == from) continue;
+            FactionRelation toFrom = other.getRelation(fromId);
+            if (toFrom == null) continue;
+            other.removeRelation(fromId);
+            if (other.getRelation(intoId) == null) {
+                other.setRelation(intoId, toFrom);
+            }
+            persist(other, level);
+        }
+
+        unregisterFaction(fromId, level);
+        EcaLogger.info("[Faction] Merged '{}' into '{}': {} member(s) moved", fromId, intoId, moved);
+        return moved;
+    }
+
     // ==================== 仇恨传导 ====================
 
-    // 阵营求援：当阵营成员被非友方攻击时，附近同阵营生物将攻击者设为目标
+    // 阵营求援：成员受击时，附近同阵营及友方阵营生物共同反击敌对阵营攻击者
     /**
-     * Alert nearby same-faction mobs to target an attacker, used when an ordinary member is
-     * hurt. Candidates come from an AABB around the victim rather than the whole member
-     * table, since this runs on the damage path and only nearby allies should react.
-     *
+     * Alert nearby same-faction and friendly-faction mobs when a member is hurt by a
+     * hostile faction member. Candidates come from an AABB around the victim rather than
+     * the whole member table, since this runs on the damage path and only nearby allies
+     * should react. Factionless attackers are ignored.
      * @param factionId the victim's faction id
      * @param attacker  the entity that attacked
      * @param victim    the entity that was attacked
@@ -1082,17 +1212,21 @@ public class FactionManager {
         if (factionId == null || attacker == null || victim == null || level == null) return;
         if (!(attacker instanceof LivingEntity livingAttacker)) return;
         if (!EcaConfiguration.getFactionAlertEnabledSafely()) return;
+        if (getFactionId(attacker) == null) return;
 
         int range = EcaConfiguration.getFactionAlertRangeSafely();
         double rangeSq = (double) range * range;
         AABB area = victim.getBoundingBox().inflate(range);
         boolean immediate = EcaConfiguration.getFactionImmediateMemberAlertSafely();
 
-        for (Mob mob : level.getEntitiesOfClass(Mob.class, area, m -> m != victim)) {
+        for (Mob mob : level.getEntitiesOfClass(Mob.class, area)) {
             if (!immediate && mob.getTarget() != null) continue;
             // AABB 是方形，仍需按半径裁剪为球形范围
             if (mob.distanceToSqr(victim) > rangeSq) continue;
-            if (!factionId.equals(getFactionId(mob))) continue;
+            if (getFactionId(mob) == null) continue;
+            FactionRelation allyRelation = getEffectiveRelation(mob, victim);
+            if (allyRelation != FactionRelation.SAME_FACTION && allyRelation != FactionRelation.FRIENDLY) continue;
+            if (getEffectiveRelation(mob, livingAttacker) != FactionRelation.HOSTILE) continue;
             if (!FactionUtil.canTarget(mob, livingAttacker)) continue;
 
             mob.setTarget(livingAttacker);
@@ -1116,6 +1250,7 @@ public class FactionManager {
     public static void propagateLeaderTarget(Entity leader, LivingEntity target, ServerLevel level) {
         if (leader == null || target == null || level == null) return;
         if (!EcaConfiguration.getFactionLeaderProtectionEnabledSafely()) return;
+        if (getFactionId(target) == null) return;
 
         String factionId = LEADER_INDEX.get(leader.getUUID());
         if (factionId == null) return;
@@ -1138,6 +1273,7 @@ public class FactionManager {
             if (!(member instanceof Mob mob) || !mob.isAlive()) continue;
             if (!immediate && mob.getTarget() != null) continue;
             // 传导不得让成员攻击自己人
+            if (getEffectiveRelation(mob, target) != FactionRelation.HOSTILE) continue;
             if (!FactionUtil.canTarget(mob, target)) continue;
 
             mob.setTarget(target);

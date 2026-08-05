@@ -95,18 +95,7 @@ public final class StandardShaderSourceAssembler {
             .append(project.fragmentBody().strip())
             .append("\n\n");
 
-        if (usesEffect(project.outputEffects(), "hue_cycle")) {
-            source.append("vec3 ecaHueRotate(vec3 color, float angle) {\n")
-                .append("    float sine = sin(angle);\n")
-                .append("    float cosine = cos(angle);\n")
-                .append("    mat3 rotation = mat3(\n")
-                .append("        0.299 + 0.701 * cosine + 0.168 * sine, 0.587 - 0.587 * cosine + 0.330 * sine, 0.114 - 0.114 * cosine - 0.497 * sine,\n")
-                .append("        0.299 - 0.299 * cosine - 0.328 * sine, 0.587 + 0.413 * cosine + 0.035 * sine, 0.114 - 0.114 * cosine + 0.292 * sine,\n")
-                .append("        0.299 - 0.300 * cosine + 1.250 * sine, 0.587 - 0.588 * cosine - 1.050 * sine, 0.114 + 0.886 * cosine - 0.203 * sine\n")
-                .append("    );\n")
-                .append("    return clamp(rotation * color, vec3(0.0), vec3(1.0));\n")
-                .append("}\n\n");
-        }
+        appendHueRotate(source, project.outputEffects());
 
         source.append("void main() {\n");
 
@@ -160,6 +149,36 @@ public final class StandardShaderSourceAssembler {
         source.append("    fragColor = effectColor * vertexColor * ColorModulator;\n")
             .append("}\n");
         return source.toString();
+    }
+
+    static String assembleOverlayBody(ShaderProject project) {
+        StringBuilder source = new StringBuilder(project.fragmentBody().strip()).append("\n\n");
+        appendHueRotate(source, project.outputEffects());
+        source.append("vec4 ecaApplyVisualOverlay(vec2 effectUv, vec3 effectDirection) {\n");
+        appendEffects(source, project.outputEffects(), ShaderOutputEffectDefinition.Stage.UV);
+        source.append("    vec4 effectColor = renderEffect(effectUv, effectDirection, GameTime);\n");
+        appendEffects(source, project.outputEffects(), ShaderOutputEffectDefinition.Stage.RESAMPLE);
+        appendEffects(source, project.outputEffects(), ShaderOutputEffectDefinition.Stage.COLOR);
+        source.append("    return effectColor;\n")
+            .append("}\n");
+        return source.toString();
+    }
+
+    private static void appendHueRotate(
+        StringBuilder source,
+        List<ShaderOutputEffectInstance> effects
+    ) {
+        if (!usesEffect(effects, "hue_cycle")) return;
+        source.append("vec3 ecaHueRotate(vec3 color, float angle) {\n")
+            .append("    float sine = sin(angle);\n")
+            .append("    float cosine = cos(angle);\n")
+            .append("    mat3 rotation = mat3(\n")
+            .append("        0.299 + 0.701 * cosine + 0.168 * sine, 0.587 - 0.587 * cosine + 0.330 * sine, 0.114 - 0.114 * cosine - 0.497 * sine,\n")
+            .append("        0.299 - 0.299 * cosine - 0.328 * sine, 0.587 + 0.413 * cosine + 0.035 * sine, 0.114 - 0.114 * cosine + 0.292 * sine,\n")
+            .append("        0.299 - 0.300 * cosine + 1.250 * sine, 0.587 - 0.588 * cosine - 1.050 * sine, 0.114 + 0.886 * cosine - 0.203 * sine\n")
+            .append("    );\n")
+            .append("    return clamp(rotation * color, vec3(0.0), vec3(1.0));\n")
+            .append("}\n\n");
     }
 
     private static void appendEffects(

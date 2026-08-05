@@ -5,16 +5,11 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.eca.api.EcaAPI;
-import net.eca.coremod.AllReturnToggle;
-import net.eca.coremod.TransformerWhitelist;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.item.ItemStack;
 
 import java.util.Collection;
 import java.util.HashSet;
@@ -78,66 +73,33 @@ public class AllReturnCommand {
             return 0;
         }
 
-        // 收集目标实体的包名前缀
-        Set<String> targetPrefixes = new HashSet<>();
+        Set<Class<?>> targetClasses = new HashSet<>();
+        int successCount = 0;
         for (Entity entity : targets) {
-            String binaryName = entity.getClass().getName();
-
-            if (TransformerWhitelist.isProtected(binaryName)) {
-                if (entity instanceof LivingEntity livingEntity) {
-                    collectEquipmentModPrefixes(livingEntity, targetPrefixes);
-                }
+            if (!targetClasses.add(entity.getClass())) {
                 continue;
             }
-
-            String internalPrefix = toInternalPrefix(binaryName);
-            if (internalPrefix != null) {
-                targetPrefixes.add(internalPrefix);
+            boolean success = enable
+                    ? EcaAPI.enableAllReturn(entity)
+                    : EcaAPI.disableAllReturn(entity);
+            if (success) {
+                successCount++;
             }
         }
 
-        if (targetPrefixes.isEmpty()) {
-            context.getSource().sendFailure(Component.literal("§cNo valid target packages found."));
+        if (successCount == 0) {
+            context.getSource().sendFailure(Component.literal(
+                "§cNo selected entity mod could be resolved or transformed."
+            ));
             return 0;
         }
 
-        if (enable) {
-            AllReturnToggle.setEnabled(true);
-            for (String prefix : targetPrefixes) {
-                AllReturnToggle.addAllowedPrefix(prefix);
-            }
-            context.getSource().sendSuccess(() -> Component.literal(
-                "§aAllReturn enabled for " + targetPrefixes.size() + " package(s)"
-            ), true);
-        } else {
-            for (String prefix : targetPrefixes) {
-                AllReturnToggle.removeAllowedPrefix(prefix);
-            }
-            context.getSource().sendSuccess(() -> Component.literal(
-                "§aAllReturn disabled for " + targetPrefixes.size() + " package(s)"
-            ), true);
-        }
-        return 1;
-    }
-
-    private static void collectEquipmentModPrefixes(LivingEntity entity, Set<String> targetPrefixes) {
-        for (EquipmentSlot slot : EquipmentSlot.values()) {
-            ItemStack stack = entity.getItemBySlot(slot);
-            if (stack.isEmpty()) continue;
-
-            String itemClassName = stack.getItem().getClass().getName();
-            if (TransformerWhitelist.isProtected(itemClassName)) continue;
-
-            String internalPrefix = toInternalPrefix(itemClassName);
-            if (internalPrefix != null) {
-                targetPrefixes.add(internalPrefix);
-            }
-        }
-    }
-
-    private static String toInternalPrefix(String binaryName) {
-        int lastDot = binaryName.lastIndexOf('.');
-        if (lastDot <= 0) return null;
-        return binaryName.substring(0, lastDot + 1).replace('.', '/');
+        int appliedCount = successCount;
+        context.getSource().sendSuccess(() -> Component.literal(
+            enable
+                    ? "§aAllReturn enabled for " + appliedCount + " selected mod(s)"
+                    : "§aAllReturn disabled for " + appliedCount + " selected mod(s)"
+        ), true);
+        return successCount;
     }
 }

@@ -1,13 +1,19 @@
 package net.eca.client.gui;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import net.eca.client.render.shader_generator.GeneratedShaderPreview;
 import net.eca.client.render.shader_generator.ShaderPreviewRenderer;
 import net.eca.client.render.shader_generator.ShaderPreviewSource;
 import net.eca.client.render.shader_generator.ShaderPreviewSourceCatalog;
 import net.eca.client.render.shader_generator.ShaderPreviewTarget;
+import net.eca.client.render.shader_generator.ShaderPreviewDependencyResolver;
 import net.eca.util.EcaLogger;
+import net.eca.util.shader_generator.ShaderBlendMode;
 import net.eca.util.shader_generator.ShaderCompositionProject;
 import net.eca.util.shader_generator.ShaderExportBundle;
+import net.eca.util.shader_generator.ShaderFolderImporter;
+import net.eca.util.shader_generator.ShaderFolderImporter.Candidate;
 import net.eca.util.shader_generator.ShaderGenerator;
 import net.eca.util.shader_generator.ShaderLayer;
 import net.eca.util.shader_generator.ShaderModuleDefinition;
@@ -20,6 +26,16 @@ import net.eca.util.shader_generator.ShaderProject;
 import net.eca.util.shader_generator.ShaderProjectCodec;
 import net.eca.util.shader_generator.ShaderProjectCodec.ProjectRef;
 import net.eca.util.shader_generator.ShaderTargetProfile;
+import net.eca.util.shader_generator.ShaderSourceAssembler;
+import net.eca.util.shader_generator.ShaderSourceFile;
+import net.eca.util.shader_generator.ShaderSourceWorkspace;
+import net.eca.util.shader_generator.ai.ShaderAiModuleMetadata;
+import net.eca.util.shader_generator.ai.ShaderAiToolContext;
+import net.eca.util.shader_generator.ai.ShaderAiToolResult;
+import net.eca.util.shader_generator.mcp.ShaderMcpServer;
+import net.eca.util.shader_generator.mcp.ShaderMcpSessionInfo;
+import net.eca.util.shader_generator.mcp.ShaderMcpSettings;
+import net.eca.util.shader_generator.mcp.ShaderMcpSettingsCodec;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -29,21 +45,31 @@ import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import net.minecraftforge.fml.loading.FMLPaths;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.util.tinyfd.TinyFileDialogs;
 import org.joml.Quaternionf;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.List;
+import java.util.Deque;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicLong;
 
 @OnlyIn(Dist.CLIENT)
@@ -92,11 +118,17 @@ public final class ShaderGeneratorScreen extends Screen {
     private String projectShaderName;
     private final List<ShaderCompositionProject> undoStack = new ArrayList<>();
     private final List<ShaderCompositionProject> redoStack = new ArrayList<>();
+    private final Deque<ShaderCompositionProject> aiUndoStack = new ArrayDeque<>();
+    private final Deque<ShaderCompositionProject> aiRedoStack = new ArrayDeque<>();
     private final List<LayerRowVisual> visibleLayerRows = new ArrayList<>();
     private final List<ElementRowVisual> visibleElementRows = new ArrayList<>();
     private final List<OutputEffectRowVisual> visibleOutputEffectRows = new ArrayList<>();
     private List<ShaderPreviewSource> registeredSources = List.of();
     private GeneratedShaderPreview generatedPreview;
+    private ShaderAiSession aiSession;
+    private final ShaderMcpServer mcpServer = new ShaderMcpServer();
+    private ShaderMcpSettings mcpSettings;
+    private boolean closed;
     private ShaderPreviewTarget previewTarget = ShaderPreviewTarget.PLANE;
     private int selectedLayerIndex = -1;
     /* 右栏模式：LAYER_LIST 只显示图层列表；LAYER_DETAIL 显示选中图层的完整编辑器 */
@@ -235,7 +267,9 @@ public final class ShaderGeneratorScreen extends Screen {
             rightPanelMode = RightPanelMode.LAYER_LIST;
             addLayerListPanel();
         }
-        addOutputEffectPanel();
+        if (rightPanelMode == RightPanelMode.LAYER_LIST) {
+            addOutputEffectPanel();
+        }
         addMenuBar();
         if (generatedPreview == null) {
             compileCurrentProject();
@@ -270,6 +304,11 @@ public final class ShaderGeneratorScreen extends Screen {
             compileButton.setTooltip(Tooltip.create(status));
         }
         addRenderableWidget(compileButton);
+
+        addRenderableWidget(Button.builder(
+            Component.translatable("gui.eca.shader_generator.ai.button"),
+            button -> openAiAssistant()
+        ).bounds(this.width - 176, PROJECT_ROW_Y, 68, MENU_ITEM_H).build());
 
         /* 关闭 */
         addRenderableWidget(Button.builder(
@@ -338,6 +377,20 @@ public final class ShaderGeneratorScreen extends Screen {
         row++;
 
         dropdownOption(mx, y + row * MENU_ITEM_H, w,
+            Component.translatable("gui.eca.shader_generator.file.import_shader"), () -> {
+                openDropdown = -1;
+                openShaderFolderImport();
+            });
+        row++;
+
+        dropdownOption(mx, y + row * MENU_ITEM_H, w,
+            Component.translatable("gui.eca.shader_generator.file.source_editor"), () -> {
+                openDropdown = -1;
+                openSourceEditor();
+            });
+        row++;
+
+        dropdownOption(mx, y + row * MENU_ITEM_H, w,
             Component.translatable("gui.eca.shader_generator.file.save"), () -> {
                 openDropdown = -1;
                 saveCurrentProject();
@@ -349,6 +402,13 @@ public final class ShaderGeneratorScreen extends Screen {
             Component.translatable("gui.eca.shader_generator.file.rename"), () -> {
                 openDropdown = -1;
                 openProjectDetails(true);
+            });
+        row++;
+
+        dropdownOption(mx, y + row * MENU_ITEM_H, w,
+            Component.translatable("gui.eca.shader_generator.file.delete"), () -> {
+                openDropdown = -1;
+                requestDeleteProject();
             });
         row++;
 
@@ -760,7 +820,8 @@ public final class ShaderGeneratorScreen extends Screen {
         int panelRight = this.width - 8;
         if (openDropdown < 0 && mouseX >= panelLeft && mouseX < panelRight) {
             int direction = delta > 0.0 ? -1 : 1;
-            if (mouseY >= outputEffectListTop && mouseY < outputEffectListBottom) {
+            if (rightPanelMode == RightPanelMode.LAYER_LIST
+                    && mouseY >= outputEffectListTop && mouseY < outputEffectListBottom) {
                 int maxScroll = Math.max(0, project.outputEffects().size() - outputEffectVisibleRows);
                 int next = Math.max(0, Math.min(maxScroll, outputEffectScroll + direction));
                 if (next != outputEffectScroll) {
@@ -879,7 +940,8 @@ public final class ShaderGeneratorScreen extends Screen {
     }
 
     private int upperPanelBottom() {
-        return outputEffectPanelTop() - RIGHT_PANEL_GAP;
+        return rightPanelMode == RightPanelMode.LAYER_DETAIL
+            ? rightPanelBottom() : outputEffectPanelTop() - RIGHT_PANEL_GAP;
     }
 
     /* LAYER_LIST 模式：图层列表独占整条右栏，带滚动 */
@@ -993,8 +1055,9 @@ public final class ShaderGeneratorScreen extends Screen {
             button -> exitLayerDetail()
         ).bounds(x, y, 40, 18).build());
 
+        int deleteWidth = 56;
         int headerNameX = x + 44;
-        int headerNameW = w - 44;
+        int headerNameW = w - 44 - deleteWidth - 4;
         if (editingLayerIndex == selectedLayerIndex) {
             layerNameField = new EditBox(
                 font, headerNameX, y, headerNameW, 18,
@@ -1011,6 +1074,10 @@ public final class ShaderGeneratorScreen extends Screen {
                 Component.literal(layer.name()),
                 () -> handleLayerNameClick(selectedLayerIndex)));
         }
+        addRenderableWidget(Button.builder(
+            Component.translatable("gui.eca.shader_generator.layer.delete"),
+            button -> removeSelectedLayer()
+        ).bounds(x + w - deleteWidth, y, deleteWidth, 18).build());
 
         inspectorTop = y + 24;
         inspectorBottom = panelBottom;
@@ -1034,7 +1101,7 @@ public final class ShaderGeneratorScreen extends Screen {
 
         outputEffectListTop = top + 42;
         outputEffectListBottom = bottom;
-        outputEffectVisibleRows = Math.max(1,
+        outputEffectVisibleRows = Math.max(0,
             (outputEffectListBottom - outputEffectListTop) / OUTPUT_EFFECT_ROW_HEIGHT);
         int maxScroll = Math.max(0, project.outputEffects().size() - outputEffectVisibleRows);
         outputEffectScroll = Math.max(0, Math.min(outputEffectScroll, maxScroll));
@@ -1200,8 +1267,9 @@ public final class ShaderGeneratorScreen extends Screen {
     }
 
     private void addLayerInspector(ShaderLayer layer, int x, int w) {
-        int rowH = 20;
-        int pitch = 24;
+        boolean compact = inspectorBottom - inspectorTop < 142;
+        int rowH = compact ? 16 : 20;
+        int pitch = compact ? 18 : 24;
         int y = inspectorTop;
 
         addRenderableWidget(Button.builder(
@@ -1253,7 +1321,9 @@ public final class ShaderGeneratorScreen extends Screen {
         inspectorListTop = y;
         inspectorListBottom = inspectorBottom;
         int listPitch = 22;
-        inspectorVisibleRows = Math.max(1, (inspectorListBottom - inspectorListTop) / listPitch);
+        inspectorVisibleRows = Math.max(
+            0, (inspectorListBottom - inspectorListTop) / listPitch
+        );
         visibleElementRows.clear();
         List<ShaderModuleInstance> elements = layer.elements();
         int maxScroll = Math.max(0, elements.size() - inspectorVisibleRows);
@@ -1306,8 +1376,10 @@ public final class ShaderGeneratorScreen extends Screen {
 
     private void addElementParamInspector(ShaderLayer layer, int x, int w) {
         ShaderModuleInstance element = selectedElementInLayer(layer);
-        int rowH = 20;
-        int pitch = 24;
+        int fixedRows = element.definition().id().equals("image_element") ? 3 : 2;
+        boolean compact = inspectorBottom - inspectorTop < fixedRows * 24 + 44;
+        int rowH = compact ? 16 : 20;
+        int pitch = compact ? 18 : 24;
         int y = inspectorTop;
 
         addRenderableWidget(Button.builder(
@@ -1337,7 +1409,9 @@ public final class ShaderGeneratorScreen extends Screen {
         inspectorListBottom = inspectorBottom;
         int listPitch = 22;
         List<ShaderModuleDefinition.Parameter> params = visibleParameters(element);
-        inspectorVisibleRows = Math.max(1, (inspectorListBottom - inspectorListTop) / listPitch);
+        inspectorVisibleRows = Math.max(
+            0, (inspectorListBottom - inspectorListTop) / listPitch
+        );
         int maxScroll = Math.max(0, params.size() - inspectorVisibleRows);
         paramScroll = Math.max(0, Math.min(paramScroll, maxScroll));
         int end = Math.min(params.size(), paramScroll + inspectorVisibleRows);
@@ -1755,6 +1829,7 @@ public final class ShaderGeneratorScreen extends Screen {
         }
         pushUndo();
         project.copyStateFrom(new ShaderCompositionProject());
+        clearAiHistory();
         projectModId = modId;
         projectShaderName = shaderName;
         selectedLayerIndex = 0;
@@ -1785,14 +1860,69 @@ public final class ShaderGeneratorScreen extends Screen {
         return true;
     }
 
+    private void requestDeleteProject() {
+        ProjectRef reference = currentProjectRef();
+        if (reference == null) {
+            statusError = true;
+            status = Component.translatable("gui.eca.shader_generator.status.project_required");
+            rebuildWidgets();
+            return;
+        }
+        Path directory = ShaderProjectCodec.projectPath(reference);
+        ConfirmScreen confirm = new ConfirmScreen(
+            confirmed -> {
+                if (confirmed) deleteProject(reference);
+                minecraft.setScreen(this);
+            },
+            Component.translatable("gui.eca.shader_generator.delete.title"),
+            Component.translatable(
+                "gui.eca.shader_generator.delete.body", reference.id(), directory
+            ),
+            Component.translatable("gui.eca.shader_generator.delete.confirm"),
+            Component.translatable("gui.eca.shader_generator.button.cancel")
+        );
+        minecraft.setScreen(confirm);
+    }
+
+    private void deleteProject(ProjectRef reference) {
+        if (!ShaderProjectCodec.delete(reference)) {
+            statusError = true;
+            status = Component.translatable(
+                "gui.eca.shader_generator.status.delete_failed", reference.id()
+            );
+            return;
+        }
+        if (generatedPreview != null) {
+            generatedPreview.close();
+            generatedPreview = null;
+        }
+        project.copyStateFrom(new ShaderCompositionProject());
+        projectModId = null;
+        projectShaderName = null;
+        undoStack.clear();
+        redoStack.clear();
+        clearAiHistory();
+        selectedLayerIndex = -1;
+        selectedElementIndex = -1;
+        elementParamView = false;
+        layerScroll = 0;
+        sourceIndex = 0;
+        dirty = true;
+        statusError = false;
+        status = Component.translatable(
+            "gui.eca.shader_generator.status.deleted", reference.id()
+        );
+    }
+
     private void openProject(ProjectRef reference) {
         pushUndo();
         boolean loaded = ShaderProjectCodec.load(reference, project);
         openDropdown = -1;
         if (loaded) {
+            clearAiHistory();
             projectModId = reference.modId();
             projectShaderName = reference.shaderName();
-            selectedLayerIndex = 0;
+            selectedLayerIndex = project.layers().isEmpty() ? -1 : 0;
             layerScroll = 0;
             compileCurrentProject();
             if (!statusError) {
@@ -1805,6 +1935,134 @@ public final class ShaderGeneratorScreen extends Screen {
         rebuildWidgets();
     }
 
+    void openSourceEditor() {
+        ProjectRef reference = currentProjectRef();
+        if (reference == null) {
+            statusError = true;
+            status = Component.translatable("gui.eca.shader_generator.status.project_required");
+            rebuildWidgets();
+            return;
+        }
+        try {
+            boolean initializedIndependentSource = ensureSourceWorkspaceInitialized();
+            project.setSourceActive(true);
+            if (initializedIndependentSource && hasVisualContent()) {
+                project.sourceWorkspace().setVisualOverlayEnabled(true);
+            }
+            minecraft.setScreen(new ShaderSourceEditorScreen(this, project, reference));
+        } catch (RuntimeException exception) {
+            statusError = true;
+            status = Component.literal(conciseMessage(exception));
+            rebuildWidgets();
+        }
+    }
+
+    private void openAiAssistant() {
+        if (currentProjectRef() == null) {
+            statusError = true;
+            status = Component.translatable("gui.eca.shader_generator.status.project_required");
+            rebuildWidgets();
+            return;
+        }
+        openDropdown = -1;
+        minecraft.setScreen(new ShaderAiAssistantScreen(this, aiSession()));
+    }
+
+    private void openShaderFolderImport() {
+        try {
+            String selected = TinyFileDialogs.tinyfd_selectFolderDialog(
+                Component.translatable("gui.eca.shader_generator.import.folder_dialog").getString(),
+                shaderImportInitialDirectory()
+            );
+            if (selected == null) {
+                rebuildWidgets();
+                return;
+            }
+            List<Candidate> candidates = ShaderFolderImporter.scan(Path.of(selected));
+            if (candidates.isEmpty()) {
+                statusError = true;
+                status = Component.translatable("gui.eca.shader_generator.import.none_found");
+                rebuildWidgets();
+            } else if (candidates.size() == 1) {
+                minecraft.setScreen(new ShaderImportScreen(this, candidates.get(0)));
+            } else {
+                minecraft.setScreen(new ShaderImportSelectionScreen(
+                    this, candidates, this::openShaderImportDetails
+                ));
+            }
+        } catch (Exception exception) {
+            EcaLogger.error("Failed to scan shader folder: {}", exception.getMessage());
+            statusError = true;
+            status = Component.literal(conciseMessage(exception));
+            rebuildWidgets();
+        }
+    }
+
+    private String shaderImportInitialDirectory() throws IOException {
+        Path gameDirectory = FMLPaths.GAMEDIR.get().toAbsolutePath().normalize();
+        if (Files.isDirectory(gameDirectory)) {
+            gameDirectory = gameDirectory.toRealPath();
+        } else {
+            gameDirectory = minecraft.gameDirectory.toPath().toAbsolutePath().normalize();
+        }
+        String separator = gameDirectory.getFileSystem().getSeparator();
+        String value = gameDirectory.toString();
+        return value.endsWith(separator) ? value : value + separator;
+    }
+
+    private void openShaderImportDetails(Candidate candidate) {
+        minecraft.setScreen(new ShaderImportScreen(this, candidate));
+    }
+
+    boolean importShader(Candidate candidate, String modId, String shaderName) {
+        if (candidate == null || !ShaderProjectCodec.isValidModId(modId)
+                || !ShaderProjectCodec.isValidShaderName(shaderName)) {
+            return false;
+        }
+        ProjectRef reference = new ProjectRef(modId, shaderName);
+        if (ShaderProjectCodec.exists(reference)) return false;
+        try {
+            ShaderCompositionProject imported = new ShaderCompositionProject();
+            imported.layers().get(0).setBaseColor(0.0F, 0.0F, 0.0F, 0.0F);
+            imported.sourceWorkspace().copyFrom(candidate.workspace());
+            imported.setSourceActive(true);
+            if (!ShaderProjectCodec.importDependencies(
+                    reference, candidate.dependencyPlan(), imported.sourceWorkspace())) return false;
+            if (!ShaderProjectCodec.save(modId, shaderName, imported)) return false;
+            pushUndo();
+            project.copyStateFrom(imported);
+            clearAiHistory();
+            projectModId = modId;
+            projectShaderName = shaderName;
+            selectedLayerIndex = 0;
+            layerScroll = 0;
+            statusError = false;
+            status = Component.translatable(
+                "gui.eca.shader_generator.import.success", candidate.displayName()
+            );
+            EcaLogger.info(
+                "[ShaderImport] import complete project={} candidate={} sourceFiles={} resources={} atlases={} warnings={}",
+                reference.id(), candidate.displayName(), candidate.fileCount(),
+                imported.sourceWorkspace().previewBindings().resources().size(),
+                imported.sourceWorkspace().previewBindings().atlases().size(),
+                imported.sourceWorkspace().previewBindings().warnings().size()
+            );
+            return true;
+        } catch (Exception exception) {
+            EcaLogger.error(
+                "Failed to import shader {}: {}", candidate.displayName(), exception.getMessage()
+            );
+            statusError = true;
+            status = Component.literal(conciseMessage(exception));
+            return false;
+        }
+    }
+
+    void returnFromSourceEditor() {
+        compileCurrentProject();
+        rebuildWidgets();
+    }
+
     /* 将当前工程生成为标准五文件，写入 config/eca/shadergenerator/<ns>/<name>/ */
     private void exportFiveFiles() {
         ProjectRef reference = currentProjectRef();
@@ -1814,20 +2072,7 @@ public final class ShaderGeneratorScreen extends Screen {
             return;
         }
         try {
-            ShaderProject sp = project.toShaderProject(reference.modId(), reference.shaderName());
-            ShaderGenerator generator = ShaderGenerator.standard();
-            ShaderExportBundle bundle = generator.generate(new ShaderGenerator.Request(
-                sp, project.exportMode(), Set.of(ShaderTargetProfile.BLOCK, ShaderTargetProfile.NEW_ENTITY)
-            ));
-            java.nio.file.Path exportDir = java.nio.file.Path.of(
-                "config", "eca", "shadergenerator", reference.modId(), reference.shaderName()
-            );
-            java.nio.file.Files.createDirectories(exportDir);
-            for (ShaderExportBundle.File file : bundle.files()) {
-                String fileName = java.nio.file.Path.of(file.relativePath()).getFileName().toString();
-                java.nio.file.Path target = exportDir.resolve(fileName);
-                java.nio.file.Files.writeString(target, file.content(), java.nio.charset.StandardCharsets.UTF_8);
-            }
+            writeFiveShaderFiles(reference);
             statusError = false;
             status = Component.translatable("gui.eca.shader_generator.status.exported",
                 reference.modId() + ":" + reference.shaderName());
@@ -1836,6 +2081,29 @@ public final class ShaderGeneratorScreen extends Screen {
             status = Component.translatable("gui.eca.shader_generator.status.export_failed",
                 conciseMessage(t));
         }
+    }
+
+    private Path writeFiveShaderFiles(ProjectRef reference) throws IOException {
+        ShaderProject shaderProject = project.toShaderProject(
+            reference.modId(), reference.shaderName()
+        );
+        ShaderExportBundle bundle = ShaderGenerator.standard().generate(
+            new ShaderGenerator.Request(
+                shaderProject,
+                project.exportMode(),
+                Set.of(ShaderTargetProfile.BLOCK, ShaderTargetProfile.NEW_ENTITY)
+            )
+        );
+        Path exportDirectory = Path.of(
+            "config", "eca", "shadergenerator", reference.modId(), reference.shaderName()
+        );
+        Files.createDirectories(exportDirectory);
+        for (ShaderExportBundle.File file : bundle.files()) {
+            String fileName = Path.of(file.relativePath()).getFileName().toString();
+            Path target = exportDirectory.resolve(fileName);
+            Files.writeString(target, file.content(), StandardCharsets.UTF_8);
+        }
+        return exportDirectory.toAbsolutePath().normalize();
     }
 
     private void saveCurrentProject() {
@@ -1859,6 +2127,879 @@ public final class ShaderGeneratorScreen extends Screen {
         return new ProjectRef(projectModId, projectShaderName);
     }
 
+    String aiProjectSummary() {
+        ProjectRef reference = currentProjectRef();
+        if (reference == null) throw new IllegalStateException("No shader project is open");
+        JsonObject root = new JsonObject();
+        root.addProperty("project", reference.id());
+        root.addProperty("source_initialized", project.sourceWorkspace().isInitialized());
+        root.addProperty("source_active", project.sourceActive());
+        root.addProperty("visual_overlay", project.sourceWorkspace().visualOverlayEnabled());
+        root.addProperty("editing_mode", aiEditingMode());
+        JsonArray layers = new JsonArray();
+        for (int layerIndex = 0; layerIndex < project.layers().size(); layerIndex++) {
+            ShaderLayer layer = project.layers().get(layerIndex);
+            JsonObject layerObject = new JsonObject();
+            layerObject.addProperty("index", layerIndex);
+            layerObject.addProperty("name", layer.name());
+            layerObject.addProperty("visible", layer.visible());
+            layerObject.addProperty("blend_mode", layer.blendMode().name().toLowerCase());
+            JsonArray baseColor = new JsonArray();
+            baseColor.add(layer.baseRed());
+            baseColor.add(layer.baseGreen());
+            baseColor.add(layer.baseBlue());
+            baseColor.add(layer.baseAlpha());
+            layerObject.add("base_color", baseColor);
+            if (layer.backgroundImagePath() != null) {
+                layerObject.addProperty("background_image", layer.backgroundImagePath());
+            }
+            JsonArray elements = new JsonArray();
+            for (int elementIndex = 0; elementIndex < layer.elements().size(); elementIndex++) {
+                ShaderModuleInstance element = layer.elements().get(elementIndex);
+                JsonObject elementObject = new JsonObject();
+                elementObject.addProperty("index", elementIndex);
+                elementObject.addProperty("definition", element.definition().id());
+                elementObject.addProperty("enabled", element.enabled());
+                if (element.imagePath() != null) {
+                    elementObject.addProperty("image", element.imagePath());
+                }
+                JsonObject values = new JsonObject();
+                element.values().forEach(values::addProperty);
+                elementObject.add("parameters", values);
+                elements.add(elementObject);
+            }
+            layerObject.add("elements", elements);
+            layers.add(layerObject);
+        }
+        root.add("layers", layers);
+        return root.toString();
+    }
+
+    String aiReadShaderFile(String serializedFile) {
+        ensureSourceWorkspaceInitialized();
+        return project.sourceWorkspace().source(aiSourceFile(serializedFile));
+    }
+
+    String aiReadShaderFileRange(String serializedFile, int startLine, int endLine) {
+        ensureSourceWorkspaceInitialized();
+        ShaderSourceFile file = aiSourceFile(serializedFile);
+        String source = project.sourceWorkspace().source(file);
+        String[] lines = sourceLines(source);
+        if (startLine < 1 || endLine < startLine) {
+            throw new IllegalArgumentException("Invalid 1-based line range");
+        }
+        if (endLine - startLine + 1 > 400) {
+            throw new IllegalArgumentException("A ranged read cannot exceed 400 lines");
+        }
+        if (startLine > lines.length) {
+            throw new IllegalArgumentException(
+                "Start line exceeds file length " + lines.length
+            );
+        }
+        int actualEnd = Math.min(endLine, lines.length);
+        int startOffset = sourceLineStart(source, startLine);
+        int endOffset = sourceLineContentEnd(source, actualEnd);
+        JsonObject result = aiSourceDescriptor(file, source);
+        result.addProperty("start_line", startLine);
+        result.addProperty("end_line", actualEnd);
+        result.addProperty("content", source.substring(startOffset, endOffset));
+        return result.toString();
+    }
+
+    String aiSearchShaderFile(String serializedFile, String query) {
+        ensureSourceWorkspaceInitialized();
+        if (query == null || query.isEmpty()) {
+            throw new IllegalArgumentException("Search query must not be empty");
+        }
+        ShaderSourceFile file = aiSourceFile(serializedFile);
+        String source = project.sourceWorkspace().source(file);
+        String[] lines = sourceLines(source);
+        JsonArray matches = new JsonArray();
+        int matchingLines = 0;
+        for (int index = 0; index < lines.length; index++) {
+            if (!lines[index].contains(query)) continue;
+            matchingLines++;
+            if (matches.size() >= 20) continue;
+            JsonObject match = new JsonObject();
+            match.addProperty("line", index + 1);
+            match.addProperty("text", abbreviateSourceLine(lines[index]));
+            matches.add(match);
+        }
+        JsonObject result = aiSourceDescriptor(file, source);
+        result.addProperty("occurrences", countOccurrences(source, query));
+        result.addProperty("matching_lines", matchingLines);
+        result.addProperty("results_truncated", matchingLines > matches.size());
+        result.add("matches", matches);
+        return result.toString();
+    }
+
+    String aiReplaceShaderFile(String serializedFile, String content) {
+        ensureSourceWorkspaceInitialized();
+        ShaderSourceFile file = aiSourceFile(serializedFile);
+        return applyAiSourceMutation(file, content, "Replaced complete file");
+    }
+
+    String aiReplaceShaderRange(
+        String serializedFile,
+        int startLine,
+        int endLine,
+        String expectedVersion,
+        String content
+    ) {
+        ensureSourceWorkspaceInitialized();
+        ShaderSourceFile file = aiSourceFile(serializedFile);
+        String source = project.sourceWorkspace().source(file);
+        requireAiSourceVersion(source, expectedVersion);
+        int lineCount = sourceLines(source).length;
+        if (startLine < 1 || endLine < startLine || endLine > lineCount) {
+            throw new IllegalArgumentException(
+                "Invalid line range; file contains " + lineCount + " lines"
+            );
+        }
+        int startOffset = sourceLineStart(source, startLine);
+        int endOffset = sourceLineContentEnd(source, endLine);
+        String replacement = normalizeRangeReplacement(
+            normalizeSourceLineEndings(content, source), endOffset < source.length()
+        );
+        String updated = source.substring(0, startOffset)
+            + replacement
+            + source.substring(endOffset);
+        return applyAiSourceMutation(
+            file, updated, "Replaced lines " + startLine + "-" + endLine
+        );
+    }
+
+    String aiReplaceShaderText(
+        String serializedFile,
+        String oldText,
+        String newText,
+        String expectedVersion
+    ) {
+        ensureSourceWorkspaceInitialized();
+        if (oldText == null || oldText.isEmpty()) {
+            throw new IllegalArgumentException("Old text must not be empty");
+        }
+        ShaderSourceFile file = aiSourceFile(serializedFile);
+        String source = project.sourceWorkspace().source(file);
+        requireAiSourceVersion(source, expectedVersion);
+        requireUniqueSourceText(source, oldText, "old_text");
+        int matchIndex = source.indexOf(oldText);
+        String updated = source.substring(0, matchIndex)
+            + normalizeSourceLineEndings(newText, source)
+            + source.substring(matchIndex + oldText.length());
+        return applyAiSourceMutation(file, updated, "Replaced one exact source fragment");
+    }
+
+    String aiInsertShaderText(
+        String serializedFile,
+        String anchor,
+        String position,
+        String content,
+        String expectedVersion
+    ) {
+        ensureSourceWorkspaceInitialized();
+        if (anchor == null || anchor.isEmpty()) {
+            throw new IllegalArgumentException("Anchor must not be empty");
+        }
+        if (!"before".equals(position) && !"after".equals(position)) {
+            throw new IllegalArgumentException("Position must be before or after");
+        }
+        ShaderSourceFile file = aiSourceFile(serializedFile);
+        String source = project.sourceWorkspace().source(file);
+        requireAiSourceVersion(source, expectedVersion);
+        requireUniqueSourceText(source, anchor, "anchor");
+        int anchorIndex = source.indexOf(anchor);
+        int insertionIndex = "before".equals(position)
+            ? anchorIndex : anchorIndex + anchor.length();
+        String updated = source.substring(0, insertionIndex)
+            + normalizeSourceLineEndings(content, source)
+            + source.substring(insertionIndex);
+        return applyAiSourceMutation(file, updated, "Inserted source " + position + " anchor");
+    }
+
+    String aiAddLayer(String name, JsonObject properties) {
+        pushAiUndo();
+        ShaderLayer layer = project.addLayer();
+        layer.setName(name);
+        layer.setBaseColor(0.0F, 0.0F, 0.0F, 0.0F);
+        applyAiLayerProperties(layer, properties);
+        enableAiVisualOverlayWhenNeeded();
+        dirty = true;
+        return "Added layer " + (project.layers().size() - 1) + ": " + name;
+    }
+
+    String aiUpdateLayer(int layerIndex, JsonObject properties) {
+        ShaderLayer layer = aiLayer(layerIndex);
+        pushAiUndo();
+        applyAiLayerProperties(layer, properties);
+        enableAiVisualOverlayWhenNeeded();
+        dirty = true;
+        return "Updated layer " + layerIndex;
+    }
+
+    String aiAddElement(int layerIndex, String definitionId, JsonObject parameters) {
+        if (layerIndex < 0 || layerIndex >= project.layers().size()) {
+            throw new IllegalArgumentException("Layer index is out of range");
+        }
+        ShaderModuleDefinition definition = ShaderModuleRegistry.get(definitionId);
+        if (definition == null) throw new IllegalArgumentException("Unknown module " + definitionId);
+        validateAiParameters(definition, parameters);
+        pushAiUndo();
+        ShaderModuleInstance element = project.layers().get(layerIndex).addElement(definition);
+        JsonArray applied = applyAiParameters(element, parameters);
+        enableAiVisualOverlayWhenNeeded();
+        dirty = true;
+        return aiElementMutationResult("added", layerIndex,
+            project.layers().get(layerIndex).elements().size() - 1, element, applied);
+    }
+
+    String aiUpdateElement(int layerIndex, int elementIndex, JsonObject parameters) {
+        if (layerIndex < 0 || layerIndex >= project.layers().size()) {
+            throw new IllegalArgumentException("Layer index is out of range");
+        }
+        ShaderLayer layer = project.layers().get(layerIndex);
+        if (elementIndex < 0 || elementIndex >= layer.elements().size()) {
+            throw new IllegalArgumentException("Element index is out of range");
+        }
+        ShaderModuleInstance element = layer.elements().get(elementIndex);
+        validateAiParameters(element.definition(), parameters);
+        pushAiUndo();
+        JsonArray applied = applyAiParameters(element, parameters);
+        enableAiVisualOverlayWhenNeeded();
+        dirty = true;
+        return aiElementMutationResult(
+            "updated", layerIndex, elementIndex, element, applied
+        );
+    }
+
+    String aiSetLayerBackgroundImage(int layerIndex, String sourcePath) {
+        ShaderLayer layer = aiLayer(layerIndex);
+        String importedPath = importAiImage(sourcePath);
+        pushAiUndo();
+        layer.setBackgroundImagePath(importedPath);
+        enableAiVisualOverlayWhenNeeded();
+        dirty = true;
+        return "Set layer " + layerIndex + " background image to " + importedPath;
+    }
+
+    String aiSetElementImage(int layerIndex, int elementIndex, String sourcePath) {
+        ShaderLayer layer = aiLayer(layerIndex);
+        if (elementIndex < 0 || elementIndex >= layer.elements().size()) {
+            throw new IllegalArgumentException("Element index is out of range");
+        }
+        ShaderModuleInstance element = layer.elements().get(elementIndex);
+        if (!"image_element".equals(element.definition().id())) {
+            throw new IllegalArgumentException("Element must use the image_element module");
+        }
+        String importedPath = importAiImage(sourcePath);
+        pushAiUndo();
+        element.setImagePath(importedPath);
+        enableAiVisualOverlayWhenNeeded();
+        dirty = true;
+        return "Set element " + layerIndex + ":" + elementIndex + " image to " + importedPath;
+    }
+
+    private String importAiImage(String sourcePath) {
+        ProjectRef reference = currentProjectRef();
+        if (reference == null) throw new IllegalStateException("No shader project is open");
+        if (sourcePath == null || sourcePath.isBlank()) {
+            throw new IllegalArgumentException("Image source path must not be blank");
+        }
+        Path source = Path.of(sourcePath);
+        if (!source.isAbsolute()) {
+            throw new IllegalArgumentException("Image source path must be absolute: " + source);
+        }
+        source = source.normalize();
+        if (!Files.isRegularFile(source)) {
+            throw new IllegalArgumentException("Image file does not exist: " + source);
+        }
+        if (!source.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".png")) {
+            throw new IllegalArgumentException("Image file must be a PNG: " + source);
+        }
+        String importedPath = ShaderProjectCodec.importTexture(reference, source);
+        if (importedPath == null) {
+            throw new IllegalStateException("Failed to import image: " + source);
+        }
+        return importedPath;
+    }
+
+    String aiRemoveElement(int layerIndex, int elementIndex) {
+        ShaderLayer layer = aiLayer(layerIndex);
+        if (elementIndex < 0 || elementIndex >= layer.elements().size()) {
+            throw new IllegalArgumentException("Element index is out of range");
+        }
+        pushAiUndo();
+        layer.removeElement(elementIndex);
+        clampSelection();
+        dirty = true;
+        return "Removed element " + layerIndex + ":" + elementIndex;
+    }
+
+    String aiRemoveLayer(int layerIndex) {
+        aiLayer(layerIndex);
+        pushAiUndo();
+        project.removeLayer(layerIndex);
+        clampSelection();
+        dirty = true;
+        return "Removed layer " + layerIndex;
+    }
+
+    String aiClearLayerBackground(int layerIndex) {
+        ShaderLayer layer = aiLayer(layerIndex);
+        pushAiUndo();
+        boolean changed = layer.backgroundImagePath() != null;
+        layer.setBackgroundImagePath(null);
+        dirty |= changed;
+        return changed
+            ? "Cleared background image from layer " + layerIndex
+            : "Layer " + layerIndex + " had no background image";
+    }
+
+    String aiClearElementImage(int layerIndex, int elementIndex) {
+        ShaderLayer layer = aiLayer(layerIndex);
+        if (elementIndex < 0 || elementIndex >= layer.elements().size()) {
+            throw new IllegalArgumentException("Element index is out of range");
+        }
+        ShaderModuleInstance element = layer.elements().get(elementIndex);
+        pushAiUndo();
+        boolean changed = element.imagePath() != null;
+        element.setImagePath(null);
+        dirty |= changed;
+        return changed
+            ? "Cleared image from element " + layerIndex + ":" + elementIndex
+            : "Element " + layerIndex + ":" + elementIndex + " had no image";
+    }
+
+    String aiResetToEmptyVisualProject() {
+        pushAiUndo();
+        project.clearVisualContent();
+        project.setSourceActive(false);
+        project.sourceWorkspace().setVisualOverlayEnabled(false);
+        clampSelection();
+        dirty = true;
+        return "Cleared all visual layers and output effects; editing_mode=visual";
+    }
+
+    String aiSetEditingMode(String mode) {
+        String normalized = mode == null ? "" : mode.strip().toLowerCase();
+        if (!"visual".equals(normalized)
+                && !"source".equals(normalized)
+                && !"hybrid".equals(normalized)) {
+            throw new IllegalArgumentException("Editing mode must be visual, source, or hybrid");
+        }
+        pushAiUndo();
+        if ("visual".equals(normalized)) {
+            project.setSourceActive(false);
+            project.sourceWorkspace().setVisualOverlayEnabled(false);
+        } else {
+            ensureSourceWorkspaceInitialized();
+            project.setSourceActive(true);
+            project.sourceWorkspace().setVisualOverlayEnabled("hybrid".equals(normalized));
+        }
+        dirty = true;
+        return "Selected editing_mode=" + normalized;
+    }
+
+    String aiSaveProject() {
+        ProjectRef reference = currentProjectRef();
+        if (reference == null) throw new IllegalStateException("No shader project is open");
+        if (!ShaderProjectCodec.save(reference.modId(), reference.shaderName(), project)) {
+            throw new IllegalStateException("Failed to save project " + reference.id());
+        }
+        return "Saved project " + reference.id() + " to "
+            + ShaderProjectCodec.projectPath(reference).toAbsolutePath().normalize();
+    }
+
+    String aiExportShaderFiles() {
+        ProjectRef reference = currentProjectRef();
+        if (reference == null) throw new IllegalStateException("No shader project is open");
+        try {
+            return "Exported standard shader files to " + writeFiveShaderFiles(reference);
+        } catch (IOException | RuntimeException exception) {
+            throw new IllegalStateException(
+                "Failed to export shader files for " + reference.id(), exception
+            );
+        }
+    }
+
+    private ShaderLayer aiLayer(int layerIndex) {
+        if (layerIndex < 0 || layerIndex >= project.layers().size()) {
+            throw new IllegalArgumentException("Layer index is out of range");
+        }
+        return project.layers().get(layerIndex);
+    }
+
+    String aiCompilePreview() {
+        compileCurrentProject();
+        return "success=" + !statusError + "\n" + status.getString();
+    }
+
+    String aiUndoTransaction() {
+        ShaderCompositionProject snapshot = aiUndoStack.pollLast();
+        if (snapshot == null) return "No AI transaction to undo";
+        pushAiSnapshot(aiRedoStack);
+        project.copyStateFrom(snapshot);
+        clampSelection();
+        compileCurrentProject();
+        rebuildWidgets();
+        return "Undid the most recent AI transaction";
+    }
+
+    String aiRedoTransaction() {
+        ShaderCompositionProject snapshot = aiRedoStack.pollLast();
+        if (snapshot == null) return "No AI transaction to redo";
+        pushAiSnapshot(aiUndoStack);
+        project.copyStateFrom(snapshot);
+        clampSelection();
+        compileCurrentProject();
+        rebuildWidgets();
+        return "Redid the most recently undone AI transaction";
+    }
+
+    void renderAiPreview(
+        GuiGraphics graphics,
+        int left,
+        int top,
+        int right,
+        int bottom,
+        int mouseX,
+        int mouseY,
+        float partialTick
+    ) {
+        ShaderPreviewRenderer.render(
+            graphics, activeSource(), previewTarget,
+            left, top, right, bottom, mouseX, mouseY, partialTick
+        );
+    }
+
+    void returnFromAiAssistant() {
+        rebuildWidgets();
+    }
+
+    private ShaderAiSession aiSession() {
+        if (aiSession == null) aiSession = new ShaderAiSession();
+        return aiSession;
+    }
+
+    ShaderMcpSettings mcpSettings() {
+        if (mcpSettings == null) mcpSettings = ShaderMcpSettingsCodec.load();
+        return mcpSettings;
+    }
+
+    void startMcp(ShaderMcpSettings settings) {
+        if (mcpServer.isRunning()) return;
+        if (!ShaderMcpSettingsCodec.save(settings)) {
+            throw new IllegalStateException("Failed to save MCP settings");
+        }
+        mcpSettings = settings;
+        ShaderAiToolContext context = new ShaderProjectToolContext(
+            this,
+            () -> !closed && mcpServer.isRunning(),
+            this::captureToolPreview
+        );
+        mcpServer.start(settings.port(), context);
+    }
+
+    void stopMcp() {
+        mcpServer.close();
+    }
+
+    boolean isMcpRunning() {
+        return mcpServer.isRunning();
+    }
+
+    String mcpEndpoint() {
+        return mcpServer.isRunning()
+            ? mcpServer.endpoint()
+            : "http://127.0.0.1:" + mcpSettings().port() + ShaderMcpServer.ENDPOINT_PATH;
+    }
+
+    List<ShaderMcpSessionInfo> mcpSessions() {
+        return mcpServer.sessions();
+    }
+
+    ShaderAiToolResult captureToolPreview() {
+        Screen current = minecraft.screen;
+        if (current instanceof ShaderAiAssistantScreen assistant) {
+            return assistant.capturePreview();
+        }
+        if (current instanceof ShaderMcpScreen mcpScreen) {
+            return mcpScreen.capturePreview();
+        }
+        if (current instanceof ShaderSourceEditorScreen sourceEditor) {
+            return sourceEditor.capturePreview();
+        }
+        if (current == this) {
+            PreviewRect viewport = previewViewport();
+            return ShaderPreviewCapture.capture(
+                viewport.left(), viewport.top(), viewport.right(), viewport.bottom()
+            );
+        }
+        throw new IllegalStateException("Open an ECA screen with a visible preview first");
+    }
+
+    ShaderAiSession resetAiSession() {
+        if (aiSession != null) aiSession.close();
+        aiSession = new ShaderAiSession();
+        return aiSession;
+    }
+
+    private ShaderSourceFile aiSourceFile(String serializedFile) {
+        ShaderSourceFile file = ShaderSourceFile.fromSerializedName(serializedFile);
+        if (file == null) throw new IllegalArgumentException(
+            "Unknown shader file " + serializedFile
+        );
+        return file;
+    }
+
+    private JsonObject aiSourceDescriptor(ShaderSourceFile file, String source) {
+        JsonObject descriptor = new JsonObject();
+        descriptor.addProperty("file", file.serializedName());
+        descriptor.addProperty("version", aiSourceVersion(source));
+        descriptor.addProperty("line_count", sourceLines(source).length);
+        descriptor.addProperty("character_count", source.length());
+        return descriptor;
+    }
+
+    private String applyAiSourceMutation(
+        ShaderSourceFile file,
+        String updatedSource,
+        String action
+    ) {
+        String safeSource = updatedSource == null ? "" : updatedSource;
+        String current = project.sourceWorkspace().source(file);
+        if (!current.equals(safeSource)) {
+            pushAiUndo();
+            project.sourceWorkspace().setSource(file, safeSource);
+            project.setSourceActive(true);
+            if (hasVisualContent()) {
+                project.sourceWorkspace().setVisualOverlayEnabled(true);
+            }
+            dirty = true;
+        }
+        JsonObject result = aiSourceDescriptor(file, safeSource);
+        result.addProperty("changed", !current.equals(safeSource));
+        result.addProperty("action", action);
+        return result.toString();
+    }
+
+    private void requireAiSourceVersion(String source, String expectedVersion) {
+        String actualVersion = aiSourceVersion(source);
+        if (!actualVersion.equals(expectedVersion)) {
+            throw new IllegalArgumentException(
+                "Source version conflict; expected " + expectedVersion
+                    + " but current version is " + actualVersion + ". Read the file again."
+            );
+        }
+    }
+
+    private void requireUniqueSourceText(String source, String text, String argumentName) {
+        int occurrences = countOccurrences(source, text);
+        if (occurrences != 1) {
+            throw new IllegalArgumentException(
+                argumentName + " must occur exactly once but occurred " + occurrences + " times"
+            );
+        }
+    }
+
+    private static String aiSourceVersion(String source) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(source.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
+    }
+
+    private static String[] sourceLines(String source) {
+        return source.split("\\r?\\n", -1);
+    }
+
+    private static int sourceLineStart(String source, int lineNumber) {
+        if (lineNumber == 1) return 0;
+        int line = 1;
+        for (int index = 0; index < source.length(); index++) {
+            if (source.charAt(index) != '\n') continue;
+            line++;
+            if (line == lineNumber) return index + 1;
+        }
+        throw new IllegalArgumentException("Line " + lineNumber + " does not exist");
+    }
+
+    private static int sourceLineContentEnd(String source, int lineNumber) {
+        int start = sourceLineStart(source, lineNumber);
+        int newline = source.indexOf('\n', start);
+        if (newline < 0) return source.length();
+        return newline > start && source.charAt(newline - 1) == '\r' ? newline - 1 : newline;
+    }
+
+    private static String normalizeRangeReplacement(String content, boolean followedByLine) {
+        String replacement = content == null ? "" : content;
+        if (!followedByLine) return replacement;
+        if (replacement.endsWith("\r\n")) {
+            return replacement.substring(0, replacement.length() - 2);
+        }
+        if (replacement.endsWith("\n") || replacement.endsWith("\r")) {
+            return replacement.substring(0, replacement.length() - 1);
+        }
+        return replacement;
+    }
+
+    private static String normalizeSourceLineEndings(String content, String source) {
+        String normalized = content == null ? "" : content;
+        normalized = normalized.replace("\r\n", "\n").replace('\r', '\n');
+        return source.contains("\r\n") ? normalized.replace("\n", "\r\n") : normalized;
+    }
+
+    private static int countOccurrences(String source, String text) {
+        if (text.isEmpty()) return 0;
+        int count = 0;
+        int offset = 0;
+        while ((offset = source.indexOf(text, offset)) >= 0) {
+            count++;
+            offset += text.length();
+        }
+        return count;
+    }
+
+    private static String abbreviateSourceLine(String line) {
+        int maximumLength = 320;
+        return line.length() <= maximumLength
+            ? line : line.substring(0, maximumLength - 3) + "...";
+    }
+
+    private boolean ensureSourceWorkspaceInitialized() {
+        ProjectRef reference = currentProjectRef();
+        if (reference == null) throw new IllegalStateException("No shader project is open");
+        if (project.sourceWorkspace().isInitialized()
+                && !ShaderSourceAssembler.hasLegacyNavigation(project.sourceWorkspace())
+                && !ShaderSourceAssembler.hasGeneratedNavigation(project.sourceWorkspace())) {
+            return false;
+        }
+        ShaderProject shaderProject = project.toShaderProject(
+            reference.modId(), reference.shaderName()
+        );
+        ShaderExportBundle bundle = ShaderGenerator.standard().generate(new ShaderGenerator.Request(
+            shaderProject,
+            project.exportMode(),
+            Set.of(ShaderTargetProfile.BLOCK, ShaderTargetProfile.NEW_ENTITY)
+        ));
+        var generatedWorkspace = ShaderSourceAssembler.fromGeneratedBundle(
+            reference.modId(), reference.shaderName(), bundle
+        );
+        boolean replaceGeneratedSnapshot = !project.sourceWorkspace().isInitialized()
+            || ShaderSourceAssembler.matchesGeneratedSnapshot(
+                project.sourceWorkspace(), generatedWorkspace
+            )
+            || ShaderSourceAssembler.matchesLegacyGeneratedSnapshot(
+                project.sourceWorkspace(), generatedWorkspace
+            );
+        if (!replaceGeneratedSnapshot) return false;
+        boolean overlayEnabled = project.sourceWorkspace().visualOverlayEnabled();
+        project.sourceWorkspace().copyFrom(createIndependentBaseWorkspace(reference));
+        project.sourceWorkspace().setVisualOverlayEnabled(overlayEnabled);
+        return true;
+    }
+
+    private ShaderSourceWorkspace createIndependentBaseWorkspace(ProjectRef reference) {
+        ShaderProject baseProject = new ShaderProject(
+            reference.modId(),
+            reference.shaderName(),
+            "vec4 renderEffect(vec2 effectUv, vec3 direction, float gameTime) {\n"
+                + "    return vec4(0.0);\n"
+                + "}",
+            Set.of(),
+            List.of(),
+            List.of()
+        );
+        ShaderExportBundle baseBundle = ShaderGenerator.standard().generate(
+            new ShaderGenerator.Request(
+                baseProject,
+                project.exportMode(),
+                Set.of(ShaderTargetProfile.BLOCK, ShaderTargetProfile.NEW_ENTITY)
+            )
+        );
+        return ShaderSourceAssembler.fromGeneratedBundle(
+            reference.modId(), reference.shaderName(), baseBundle
+        );
+    }
+
+    private boolean hasVisualContent() {
+        if (!project.outputEffects().isEmpty()) return true;
+        for (ShaderLayer layer : project.layers()) {
+            if (!layer.visible()) continue;
+            if (layer.baseAlpha() > 0.0F || layer.backgroundImagePath() != null) return true;
+            for (ShaderModuleInstance element : layer.elements()) {
+                if (element.enabled()) return true;
+            }
+        }
+        return false;
+    }
+
+    private String aiEditingMode() {
+        if (project.sourceWorkspace().visualOverlayEnabled()) return "hybrid";
+        return project.sourceActive() ? "source" : "visual";
+    }
+
+    private void pushAiUndo() {
+        pushAiSnapshot(aiUndoStack);
+        aiRedoStack.clear();
+    }
+
+    private void pushAiSnapshot(Deque<ShaderCompositionProject> stack) {
+        if (stack.size() >= 20) stack.removeFirst();
+        stack.addLast(project.deepCopy());
+    }
+
+    private void clearAiHistory() {
+        aiUndoStack.clear();
+        aiRedoStack.clear();
+    }
+
+    private void enableAiVisualOverlayWhenNeeded() {
+        if (project.sourceActive()) {
+            project.sourceWorkspace().setVisualOverlayEnabled(true);
+        }
+    }
+
+    private JsonArray applyAiParameters(
+        ShaderModuleInstance element,
+        JsonObject parameters
+    ) {
+        JsonArray applied = new JsonArray();
+        for (var entry : parameters.entrySet()) {
+            ShaderModuleDefinition.Parameter parameter = aiParameter(
+                element.definition(), entry.getKey()
+            );
+            float requested = entry.getValue().getAsFloat();
+            element.setValue(entry.getKey(), requested);
+            float actual = element.value(entry.getKey());
+            ShaderAiModuleMetadata.Guidance guidance =
+                ShaderAiModuleMetadata.parameterGuidance(
+                    element.definition().id(), parameter
+                );
+            JsonObject result = new JsonObject();
+            result.addProperty("key", entry.getKey());
+            result.addProperty("requested", requested);
+            result.addProperty("applied", actual);
+            result.addProperty("minimum", parameter.minimum());
+            result.addProperty("maximum", parameter.maximum());
+            result.addProperty("recommended_minimum", guidance.recommendedMinimum());
+            result.addProperty("recommended_maximum", guidance.recommendedMaximum());
+            boolean clamped = Float.compare(requested, actual) != 0;
+            boolean outsideRecommended = actual < guidance.recommendedMinimum()
+                || actual > guidance.recommendedMaximum();
+            result.addProperty("clamped", clamped);
+            result.addProperty("outside_recommended", outsideRecommended);
+            if (clamped) {
+                result.addProperty(
+                    "warning", "Requested value was clamped to the legal range"
+                );
+            } else if (outsideRecommended) {
+                result.addProperty(
+                    "warning",
+                    "Legal advanced value outside the recommended visual range; verify the preview"
+                );
+            }
+            applied.add(result);
+        }
+        return applied;
+    }
+
+    private void validateAiParameters(
+        ShaderModuleDefinition definition,
+        JsonObject parameters
+    ) {
+        for (var entry : parameters.entrySet()) {
+            if (!entry.getValue().isJsonPrimitive()
+                || !entry.getValue().getAsJsonPrimitive().isNumber()) {
+                throw new IllegalArgumentException(
+                    "Shader parameter must be numeric: " + entry.getKey()
+                );
+            }
+            aiParameter(definition, entry.getKey());
+            float value = entry.getValue().getAsFloat();
+            if (!Float.isFinite(value)) {
+                throw new IllegalArgumentException(
+                    "Shader parameter must be finite: " + entry.getKey()
+                );
+            }
+        }
+    }
+
+    private ShaderModuleDefinition.Parameter aiParameter(
+        ShaderModuleDefinition definition,
+        String key
+    ) {
+        for (ShaderModuleDefinition.Parameter parameter : definition.parameters()) {
+            if (parameter.key().equals(key)) return parameter;
+        }
+        throw new IllegalArgumentException(
+            "Unknown shader parameter " + key + " for " + definition.id()
+        );
+    }
+
+    private String aiElementMutationResult(
+        String action,
+        int layerIndex,
+        int elementIndex,
+        ShaderModuleInstance element,
+        JsonArray applied
+    ) {
+        JsonObject result = new JsonObject();
+        result.addProperty("action", action);
+        result.addProperty("layer_index", layerIndex);
+        result.addProperty("element_index", elementIndex);
+        result.addProperty("definition_id", element.definition().id());
+        result.add("parameters", applied);
+        ShaderLayer layer = project.layers().get(layerIndex);
+        if ("black_hole".equals(element.definition().id())
+            && layer.blendMode() != ShaderBlendMode.NORMAL) {
+            result.addProperty(
+                "layer_warning",
+                "black_hole requires a dedicated NORMAL layer to occlude lower layers; "
+                    + layer.blendMode().name().toLowerCase(Locale.ROOT)
+                    + " blending cannot create an opaque dark event horizon"
+            );
+        }
+        return result.toString();
+    }
+
+    private void applyAiLayerProperties(ShaderLayer layer, JsonObject properties) {
+        if (properties == null) return;
+        float red = aiLayerChannel(properties, "color_r", layer.baseRed());
+        float green = aiLayerChannel(properties, "color_g", layer.baseGreen());
+        float blue = aiLayerChannel(properties, "color_b", layer.baseBlue());
+        float alpha = aiLayerChannel(properties, "color_a", layer.baseAlpha());
+        ShaderBlendMode blendMode = aiLayerBlendMode(properties, layer.blendMode());
+        layer.setBaseColor(red, green, blue, alpha);
+        if (properties.has("visible") && properties.get("visible").isJsonPrimitive()) {
+            layer.setVisible(properties.get("visible").getAsBoolean());
+        }
+        layer.setBlendMode(blendMode);
+    }
+
+    private float aiLayerChannel(JsonObject properties, String key, float fallback) {
+        if (!properties.has(key) || !properties.get(key).isJsonPrimitive()) return fallback;
+        return Mth.clamp(properties.get(key).getAsFloat(), 0.0F, 1.0F);
+    }
+
+    private ShaderBlendMode aiLayerBlendMode(
+        JsonObject properties,
+        ShaderBlendMode fallback
+    ) {
+        if (!properties.has("blend_mode")
+                || !properties.get("blend_mode").isJsonPrimitive()) {
+            return fallback;
+        }
+        String value = properties.get("blend_mode").getAsString();
+        try {
+            return ShaderBlendMode.valueOf(value.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("Unknown layer blend mode " + value);
+        }
+    }
+
     private void moveSelectedLayer(int offset) {
         if (selectedLayerIndex < 0) {
             return;
@@ -1876,14 +3017,23 @@ public final class ShaderGeneratorScreen extends Screen {
     }
 
     private void removeSelectedLayer() {
-        if (selectedLayerIndex < 0 || project.layers().size() <= 1) {
+        if (selectedLayerIndex < 0 || selectedLayerIndex >= project.layers().size()) {
             return;
         }
         pushUndo();
         project.removeLayer(selectedLayerIndex);
-        selectLayerForInspector(
-            Math.max(0, Math.min(selectedLayerIndex, project.layers().size() - 1)));
-        ensureSelectedLayerVisible();
+        if (project.layers().isEmpty()) {
+            selectedLayerIndex = -1;
+            selectedElementIndex = -1;
+            elementParamView = false;
+            elementScroll = 0;
+            paramScroll = 0;
+        } else {
+            selectLayerForInspector(Math.min(selectedLayerIndex, project.layers().size() - 1));
+            ensureSelectedLayerVisible();
+        }
+        rightPanelMode = RightPanelMode.LAYER_LIST;
+        resetDragState();
         markDirty("gui.eca.shader_generator.status.layer_removed");
         rebuildWidgets();
     }
@@ -1904,13 +3054,25 @@ public final class ShaderGeneratorScreen extends Screen {
         previewCompilePending = false;
         lastCompileMs = System.currentTimeMillis();
         long rev = PREVIEW_REVISION.incrementAndGet();
+        if (currentProjectRef() != null && project.sourceWorkspace().isInitialized()
+                && (project.sourceActive()
+                    || project.sourceWorkspace().visualOverlayEnabled())) {
+            ensureSourceWorkspaceInitialized();
+        }
         ShaderProject sp = project.toShaderProject("eca_preview", "generated/project_" + rev);
         try {
-            GeneratedShaderPreview compiled = GeneratedShaderPreview.compile(
-                sp,
-                project.exportMode(),
-                previewTexturePaths(sp)
-            );
+            boolean useSourceOverlay = project.sourceWorkspace().isInitialized()
+                && (project.sourceActive() || project.sourceWorkspace().visualOverlayEnabled());
+            GeneratedShaderPreview compiled = useSourceOverlay
+                ? GeneratedShaderPreview.compileSource(
+                    sp,
+                    project.sourceWorkspace(),
+                    previewTexturePaths(sp),
+                    ShaderPreviewDependencyResolver.resolve(currentProjectRef(), project.sourceWorkspace())
+                )
+                : GeneratedShaderPreview.compile(
+                    sp, project.exportMode(), previewTexturePaths(sp)
+                );
             GeneratedShaderPreview prev = generatedPreview;
             generatedPreview = compiled;
             if (prev != null) {
@@ -1919,10 +3081,20 @@ public final class ShaderGeneratorScreen extends Screen {
             sourceIndex = 0;
             dirty = false;
             statusError = false;
-            status = Component.translatable("gui.eca.shader_generator.status.compiled", rev);
+            status = Component.translatable("gui.eca.shader_generator.status.compiled");
+            EcaLogger.info(
+                "[ShaderCompile] preview compiled project={} sourceOverlay={} resources={} atlases={} warnings={}",
+                currentProjectRef() == null ? "unsaved" : currentProjectRef().id(),
+                useSourceOverlay,
+                project.sourceWorkspace().previewBindings().resources().size(),
+                project.sourceWorkspace().previewBindings().atlases().size(),
+                project.sourceWorkspace().previewBindings().warnings().size()
+            );
         } catch (Throwable t) {
             statusError = true;
             status = Component.translatable("gui.eca.shader_generator.status.compile_failed", conciseMessage(t));
+            EcaLogger.error("[ShaderCompile] preview failed project={} reason={}",
+                currentProjectRef() == null ? "unsaved" : currentProjectRef().id(), conciseMessage(t));
         }
     }
 
@@ -1935,7 +3107,14 @@ public final class ShaderGeneratorScreen extends Screen {
         for (ShaderProject.TextureBinding texture : shaderProject.textures()) {
             Path path = ShaderProjectCodec.resolveProjectAsset(reference, texture.projectPath());
             if (path != null) {
-                paths.put(texture.samplerName(), path);
+                boolean overlay = project.sourceWorkspace().visualOverlayEnabled();
+                if (!overlay || project.sourceWorkspace().source(ShaderSourceFile.FRAGMENT)
+                        .contains(texture.samplerName())) {
+                    paths.put(texture.samplerName(), path);
+                }
+                if (overlay) {
+                    paths.put(ShaderSourceAssembler.overlaySamplerName(texture.samplerName()), path);
+                }
             }
         }
         return paths;
@@ -2013,10 +3192,12 @@ public final class ShaderGeneratorScreen extends Screen {
         g.fill(this.width - RIGHT_WIDTH, TOP_HEIGHT, this.width, this.height - BOTTOM_HEIGHT, PANEL_COLOR);
         if (rightPanelMode == RightPanelMode.LAYER_LIST) {
             drawLayerRows(g);
+            drawOutputEffectRows(g);
         }
-        drawOutputEffectRows(g);
         drawUpperScrollbar(g);
-        drawOutputEffectScrollbar(g);
+        if (rightPanelMode == RightPanelMode.LAYER_LIST) {
+            drawOutputEffectScrollbar(g);
+        }
 
         Component projectLabel = currentProjectRef() == null
             ? Component.translatable("gui.eca.shader_generator.project.unnamed")
@@ -2041,12 +3222,14 @@ public final class ShaderGeneratorScreen extends Screen {
             : Component.translatable("gui.eca.shader_generator.panel.layers");
         g.drawString(this.font, panelLabel,
             this.width - RIGHT_WIDTH + 8, TOP_HEIGHT + 4, 0xFFBFC4CC, false);
-        int effectHeaderTop = outputEffectPanelTop();
         int panelLeft = this.width - RIGHT_WIDTH + 8;
-        g.fill(panelLeft, effectHeaderTop - RIGHT_PANEL_GAP / 2,
-            this.width - 8, effectHeaderTop - RIGHT_PANEL_GAP / 2 + 1, BORDER_COLOR);
-        g.drawString(this.font, Component.translatable("gui.eca.shader_generator.panel.effects"),
-            panelLeft, effectHeaderTop + 4, 0xFFBFC4CC, false);
+        if (rightPanelMode == RightPanelMode.LAYER_LIST) {
+            int effectHeaderTop = outputEffectPanelTop();
+            g.fill(panelLeft, effectHeaderTop - RIGHT_PANEL_GAP / 2,
+                this.width - 8, effectHeaderTop - RIGHT_PANEL_GAP / 2 + 1, BORDER_COLOR);
+            g.drawString(this.font, Component.translatable("gui.eca.shader_generator.panel.effects"),
+                panelLeft, effectHeaderTop + 4, 0xFFBFC4CC, false);
+        }
         if (rightPanelMode == RightPanelMode.LAYER_DETAIL) {
             drawInspector(g);
         }
@@ -2088,7 +3271,9 @@ public final class ShaderGeneratorScreen extends Screen {
             }
         }
         ShaderModuleInstance element = selectedElementInLayer(layer);
-        if ((!elementParamView || element == null) && layer.elements().isEmpty()) {
+        if ((!elementParamView || element == null)
+                && layer.elements().isEmpty()
+                && inspectorListBottom - inspectorListTop >= font.lineHeight + 2) {
             g.drawCenteredString(this.font,
                 Component.translatable("gui.eca.shader_generator.layer_editor.no_element"),
                 x + w / 2, inspectorListTop + 6, 0xFF9DA3AC);
@@ -2520,7 +3705,8 @@ public final class ShaderGeneratorScreen extends Screen {
             graphics.fill(row.x(), row.y(), row.x() + row.width(), row.y() + row.height(), background);
             graphics.fill(row.x(), row.y(), row.x() + 4, row.y() + row.height(), row.color());
         }
-        if (project.outputEffects().isEmpty()) {
+        if (project.outputEffects().isEmpty()
+                && outputEffectListBottom - outputEffectListTop >= font.lineHeight + 2) {
             int x = this.width - RIGHT_WIDTH + 8;
             graphics.drawCenteredString(this.font,
                 Component.translatable("gui.eca.shader_generator.output_effect.empty"),
@@ -2564,6 +3750,7 @@ public final class ShaderGeneratorScreen extends Screen {
     }
 
     private ScrollbarGeometry outputEffectScrollbarGeometry() {
+        if (rightPanelMode != RightPanelMode.LAYER_LIST) return null;
         return scrollbarGeometry(outputEffectListTop, outputEffectListBottom,
             project.outputEffects().size(), outputEffectVisibleRows, outputEffectScroll);
     }
@@ -2638,12 +3825,18 @@ public final class ShaderGeneratorScreen extends Screen {
     }
 
     @Override
-    public void removed() {
+    public void onClose() {
+        closed = true;
+        mcpServer.close();
         if (generatedPreview != null) {
             generatedPreview.close();
             generatedPreview = null;
         }
-        super.removed();
+        if (aiSession != null) {
+            aiSession.close();
+            aiSession = null;
+        }
+        super.onClose();
     }
 
     private static final class VisibilityWidget extends AbstractWidget {

@@ -20,6 +20,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Stream;
 
 // 阵营命令
 public class FactionCommand {
@@ -56,6 +57,15 @@ public class FactionCommand {
     private static final SuggestionProvider<CommandSourceStack> COLOR_SUGGESTIONS =
         (ctx, builder) -> SharedSuggestionProvider.suggest(COLOR_PRESETS.keySet(), builder);
 
+    // 关系补全建议提供器
+    private static final SuggestionProvider<CommandSourceStack> RELATION_SUGGESTIONS =
+        (ctx, builder) -> SharedSuggestionProvider.suggest(
+            Stream.of(FactionRelation.values()).map(Enum::name), builder);
+
+    // 阵营 ID 补全建议提供器，取自当前已注册阵营
+    private static final SuggestionProvider<CommandSourceStack> FACTION_ID_SUGGESTIONS =
+        (ctx, builder) -> SharedSuggestionProvider.suggest(EcaAPI.getAllFactions().keySet(), builder);
+
     // 注册子命令
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
         return Commands.literal("faction")
@@ -74,12 +84,14 @@ public class FactionCommand {
             // /eca faction remove <id>
             .then(Commands.literal("remove")
                 .then(Commands.argument("id", StringArgumentType.word())
+                    .suggests(FACTION_ID_SUGGESTIONS)
                     .executes(FactionCommand::removeFaction)
                 )
             )
             // /eca faction join <factionId> [targets]
             .then(Commands.literal("join")
                 .then(Commands.argument("factionId", StringArgumentType.word())
+                    .suggests(FACTION_ID_SUGGESTIONS)
                     .executes(FactionCommand::joinSelf)
                     .then(Commands.argument("targets", EntityArgument.entities())
                         .executes(FactionCommand::joinTargets)
@@ -101,14 +113,18 @@ public class FactionCommand {
             .then(Commands.literal("info")
                 .executes(FactionCommand::infoSelf)
                 .then(Commands.argument("factionId", StringArgumentType.word())
+                    .suggests(FACTION_ID_SUGGESTIONS)
                     .executes(FactionCommand::infoFaction)
                 )
             )
             // /eca faction relation <factionA> <factionB> <relation>
             .then(Commands.literal("relation")
                 .then(Commands.argument("factionA", StringArgumentType.word())
+                    .suggests(FACTION_ID_SUGGESTIONS)
                     .then(Commands.argument("factionB", StringArgumentType.word())
+                        .suggests(FACTION_ID_SUGGESTIONS)
                         .then(Commands.argument("relation", StringArgumentType.word())
+                            .suggests(RELATION_SUGGESTIONS)
                             .executes(FactionCommand::setRelation)
                         )
                     )
@@ -117,6 +133,7 @@ public class FactionCommand {
             // /eca faction leader <factionId> set|clear [targets]
             .then(Commands.literal("leader")
                 .then(Commands.argument("factionId", StringArgumentType.word())
+                    .suggests(FACTION_ID_SUGGESTIONS)
                     .executes(FactionCommand::showLeader)
                     .then(Commands.literal("set")
                         .executes(FactionCommand::setLeaderSelf)
@@ -541,10 +558,10 @@ public class FactionCommand {
 
         FactionRelation relation;
         try {
-            relation = FactionRelation.valueOf(relationStr.toUpperCase());
+            relation = FactionRelation.valueOf(relationStr.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
             source.sendFailure(Component.literal(
-                "§cInvalid relation: '" + relationStr + "'. Valid: HOSTILE, NEUTRAL, FRIENDLY"
+                "§cInvalid relation: '" + relationStr + "'. Valid: HOSTILE, NEUTRAL, FRIENDLY, SAME_FACTION"
             ));
             return 0;
         }
@@ -558,12 +575,43 @@ public class FactionCommand {
             return 0;
         }
 
+        // SAME_FACTION 由“双方阵营 ID 相同”派生，存成跨阵营覆盖永远不会被读到，
+        // 因此在命令层把它解释为唯一能实现该语义的操作：把 B 并入 A
+        if (relation == FactionRelation.SAME_FACTION) {
+            return mergeFactions(source, factionA, factionB);
+        }
+
         EcaAPI.setFactionRelation(factionA, factionB, relation, source.getLevel());
         Faction fA = EcaAPI.getFaction(factionA);
         Faction fB = EcaAPI.getFaction(factionB);
         source.sendSuccess(() -> Component.literal(
             String.format("§aSet relation: %s → %s = %s",
                 fA.getDisplayName(), fB.getDisplayName(), relation.name())
+        ), true);
+        return 1;
+    }
+
+    // 把阵营 B 并入阵营 A，B 随之解散
+    private static int mergeFactions(CommandSourceStack source, String factionAId, String factionBId) {
+        if (factionAId.equals(factionBId)) {
+            source.sendFailure(Component.literal(
+                "§cCannot merge faction '" + factionAId + "' into itself"));
+            return 0;
+        }
+
+        String nameA = EcaAPI.getFaction(factionAId).getDisplayName();
+        String nameB = EcaAPI.getFaction(factionBId).getDisplayName();
+
+        int moved = EcaAPI.mergeFactions(factionAId, factionBId, source.getLevel());
+        if (moved < 0) {
+            source.sendFailure(Component.literal(String.format(
+                "§cFailed to merge '%s' into '%s'", factionBId, factionAId)));
+            return 0;
+        }
+
+        source.sendSuccess(() -> Component.literal(String.format(
+            "§aMerged '%s' into '%s': %d member(s) moved. §7Faction '%s' no longer exists.",
+            nameB, nameA, moved, factionBId)
         ), true);
         return 1;
     }

@@ -281,12 +281,11 @@ public final class ShaderModuleRegistry {
         for (int instance = 0; instance < count; instance++) {
             float offsetX = 0.0F;
             float offsetY = 0.0F;
-            if (instance > 0) {
-                float spreadFactor = (float) instance / (count - 1);
+            if (count > 1) {
                 float effectiveSpreadX = spreadX > 0.001F ? spreadX : size;
                 float effectiveSpreadY = spreadY > 0.001F ? spreadY : size;
-                offsetX = signedRandom(seed, instance, 17.13F) * effectiveSpreadX * spreadFactor;
-                offsetY = signedRandom(seed, instance, 71.91F) * effectiveSpreadY * spreadFactor;
+                offsetX = signedRandom(seed, instance, 17.13F) * effectiveSpreadX;
+                offsetY = signedRandom(seed, instance, 71.91F) * effectiveSpreadY;
             }
             float randomSize = 0.75F + unitRandom(seed, instance, 41.37F) * 0.5F;
             float instanceSize = size * randomSize;
@@ -583,7 +582,7 @@ public final class ShaderModuleRegistry {
                         + "        d%d = smoothstep(%.4f, %.4f, d%d);\n"
                         + "        float rf%d = length(fp%d);\n"
                         + "        d%d *= smoothstep(%.4f, %.4f, rf%d);\n"
-                        + "        d%d *= smoothstep(%.4f, %.4f, rf%d);\n"
+                        + "        d%d *= 1.0 - smoothstep(%.4f, %.4f, rf%d);\n"
                         + "        float sw%d = sin(atan(fp%d.y, fp%d.x) * %.4f + rf%d * 2.0) * 0.5 + 0.5;\n"
                         + "        %s = d%d * (1.0 - %.4f + %.4f * sw%d);\n",
                     instance, pointVar, instanceSize,
@@ -1234,12 +1233,11 @@ public final class ShaderModuleRegistry {
         for (int instance = 0; instance < count; instance++) {
             float offsetX = 0.0F;
             float offsetY = 0.0F;
-            if (instance > 0) {
-                float spreadFactor = (float) instance / (count - 1);
+            if (count > 1) {
                 float effectiveSpreadX = spreadX > 0.001F ? spreadX : size;
                 float effectiveSpreadY = spreadY > 0.001F ? spreadY : size;
-                offsetX = signedRandom(seed, instance, 17.13F) * effectiveSpreadX * spreadFactor;
-                offsetY = signedRandom(seed, instance, 71.91F) * effectiveSpreadY * spreadFactor;
+                offsetX = signedRandom(seed, instance, 17.13F) * effectiveSpreadX;
+                offsetY = signedRandom(seed, instance, 71.91F) * effectiveSpreadY;
             }
             float randomSize = 0.75F + unitRandom(seed, instance, 41.37F) * 0.5F;
             float instanceSize = size * randomSize;
@@ -1307,30 +1305,65 @@ public final class ShaderModuleRegistry {
                     + "        float eventHorizon%s = 1.0 - smoothstep(%.4f, %.4f, blackHoleDistance%s);\n"
                     + "        vec2 diskPoint%s = vec2(blackHolePoint%s.x, blackHolePoint%s.y * %.4f);\n"
                     + "        float diskDistance%s = length(diskPoint%s);\n"
-                    + "        float accretionDisk%s = smoothstep(%.4f, %.4f, diskDistance%s)\n"
-                    + "            * (1.0 - smoothstep(%.4f, %.4f, diskDistance%s));\n"
-                    + "        float diskFlow%s = 0.65 + 0.35 * sin(atan(diskPoint%s.y, diskPoint%s.x) * 6.0\n"
-                    + "            + diskDistance%s * 8.0 + gameTime * 1200.0 * %.4f);\n"
-                    + "        float photonRing%s = exp(-pow(blackHoleDistance%s - %.4f, 2.0) / %.6f);\n"
-                    + "        float blackHoleAlpha%s = effectAlphaScale%d * %.4f;\n"
-                    + "        color += vec3(%.4f, %.4f, %.4f) * eventHorizon%s * blackHoleAlpha%s;\n"
-                    + "        color += vec3(%.4f, %.4f, %.4f) * accretionDisk%s * diskFlow%s * blackHoleAlpha%s;\n"
-                    + "        color += vec3(%.4f, %.4f, %.4f) * photonRing%s * blackHoleAlpha%s;\n"
-                    + "        alpha = max(alpha, max(eventHorizon%s, max(accretionDisk%s, photonRing%s)) * blackHoleAlpha%s);\n",
+                    + "        float diskInnerMask%s = smoothstep(%.4f, %.4f, diskDistance%s);\n"
+                    + "        float diskOuterMask%s = 1.0 - smoothstep(%.4f, %.4f, diskDistance%s);\n",
                 suffix, centerX + offsetX, centerY + offsetY, -rotation,
                 suffix, suffix,
                 suffix, horizonRadius, horizonRadius + instanceSize * module.value("edge_softness"), suffix,
                 suffix, suffix, suffix, module.value("disk_tilt"),
                 suffix, suffix,
                 suffix, horizonRadius, horizonRadius + instanceSize * 0.12F, suffix,
-                outerRadius - instanceSize * 0.18F, outerRadius, suffix,
-                suffix, suffix, suffix, suffix, module.value("disk_rotation_speed"),
-                suffix, suffix, horizonRadius, instanceSize * 0.012F,
+                suffix, outerRadius - instanceSize * 0.18F, outerRadius, suffix
+            ));
+            source.append(String.format(Locale.ROOT,
+                "        float diskRadius%s = diskDistance%s / max(%.4f, 0.001);\n"
+                    + "        float diskAngle%s = atan(diskPoint%s.y, diskPoint%s.x);\n"
+                    + "        float diskTime%s = gameTime * 1200.0 * %.4f;\n"
+                    + "        float diskNoise%s = ecaFbm(vec2(diskAngle%s * 0.70 + diskTime%s * 0.11 + %.4f,\n"
+                    + "            diskRadius%s * 3.50 - diskTime%s * 0.07 - %.4f), 5);\n"
+                    + "        float diskBands%s = 0.68 + 0.32 * sin(diskRadius%s * 36.0\n"
+                    + "            - diskAngle%s * 4.0 + diskTime%s);\n"
+                    + "        float accretionDisk%s = diskInnerMask%s * diskOuterMask%s\n"
+                    + "            * mix(0.42, 1.18, diskNoise%s) * diskBands%s;\n"
+                    + "        float diskFrontFeather%s = max(fwidth(blackHolePoint%s.y), 0.00025);\n"
+                    + "        float diskFront%s = smoothstep(-diskFrontFeather%s, diskFrontFeather%s, blackHolePoint%s.y);\n"
+                    + "        float farDisk%s = accretionDisk%s * (1.0 - diskFront%s) * (1.0 - eventHorizon%s);\n"
+                    + "        float nearDisk%s = accretionDisk%s * diskFront%s;\n"
+                    + "        float diskDoppler%s = clamp(0.78 + 0.32 * diskPoint%s.x / max(%.4f, 0.001), 0.50, 1.15);\n"
+                    + "        float diskHeat%s = 1.0 - smoothstep(%.4f, %.4f, diskDistance%s);\n",
+                suffix, suffix, instanceSize,
+                suffix, suffix, suffix,
+                suffix, module.value("disk_rotation_speed"),
+                suffix, suffix, suffix, seed + instance * 5.31F,
+                suffix, suffix, seed + instance * 2.17F,
+                suffix, suffix, suffix, suffix,
+                suffix, suffix, suffix, suffix, suffix,
+                suffix, suffix,
+                suffix, suffix, suffix, suffix,
+                suffix, suffix, suffix, suffix,
+                suffix, suffix, suffix,
+                suffix, suffix, outerRadius,
+                suffix, horizonRadius, outerRadius, suffix
+            ));
+            source.append(String.format(Locale.ROOT,
+                "        vec3 diskColor%s = mix(vec3(%.4f, %.4f, %.4f), vec3(%.4f, %.4f, %.4f), diskHeat%s * 0.42);\n"
+                    + "        float photonRing%s = exp(-pow(blackHoleDistance%s - %.4f, 2.0) / %.8f);\n"
+                    + "        float blackHoleAlpha%s = effectAlphaScale%d * %.4f;\n"
+                    + "        color += diskColor%s * farDisk%s * diskDoppler%s * blackHoleAlpha%s;\n"
+                    + "        color = mix(color, vec3(%.4f, %.4f, %.4f), eventHorizon%s * blackHoleAlpha%s);\n"
+                    + "        color += diskColor%s * nearDisk%s * diskDoppler%s * blackHoleAlpha%s;\n"
+                    + "        color += vec3(%.4f, %.4f, %.4f) * photonRing%s * blackHoleAlpha%s;\n"
+                    + "        alpha = max(alpha, max(eventHorizon%s, max(max(farDisk%s, nearDisk%s), photonRing%s)) * blackHoleAlpha%s);\n",
+                suffix,
+                module.value("disk_r"), module.value("disk_g"), module.value("disk_b"),
+                module.value("photon_r"), module.value("photon_g"), module.value("photon_b"), suffix,
+                suffix, suffix, horizonRadius, instanceSize * instanceSize * 0.0012F,
                 suffix, moduleIndex, module.value("color_a"),
+                suffix, suffix, suffix, suffix,
                 module.value("color_r"), module.value("color_g"), module.value("color_b"), suffix, suffix,
-                module.value("disk_r"), module.value("disk_g"), module.value("disk_b"), suffix, suffix, suffix,
+                suffix, suffix, suffix, suffix,
                 module.value("photon_r"), module.value("photon_g"), module.value("photon_b"), suffix, suffix,
-                suffix, suffix, suffix, suffix
+                suffix, suffix, suffix, suffix, suffix
             ));
         }
         return source.toString();

@@ -13,6 +13,8 @@ base {
     archivesName = project.archives_name
 }
 
+jarJar.enable()
+
 repositories {
     maven { url = "https://maven.minecraftforge.net/" }
     maven { url = "https://cursemaven.com"; content { includeGroup "curse.maven" } }
@@ -51,6 +53,13 @@ dependencies {
     implementation 'org.ow2.asm:asm-commons:9.7.1'
     implementation 'org.ow2.asm:asm-tree:9.7.1'
     implementation 'org.ow2.asm:asm-analysis:9.7.1'
+    implementation jarJar('io.netty:netty-codec-http:[4.1.82.Final,4.1.83.Final)') {
+        transitive = false
+        jarJar.pin(it, '4.1.82.Final')
+    }
+    minecraftLibrary('io.netty:netty-codec-http:4.1.82.Final') {
+        transitive = false
+    }
     implementation fg.deobf("curse.maven:geckolib-388172:7553267")
     compileOnly 'net.java.dev.jna:jna:5.12.1'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
@@ -84,7 +93,12 @@ tasks.withType(Test).configureEach {
 }
 
 tasks.jar {
+    destinationDirectory = layout.buildDirectory.dir('intermediates/slim')
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+tasks.named('jarJar') {
+    archiveClassifier.set('')
 }
 
 // Agent JAR
@@ -121,12 +135,15 @@ tasks.named('jar') {
 
 tasks.register('devJar', Jar) {
     group = 'build'
-    dependsOn tasks.named('classes'), tasks.named('agentJar')
+    dependsOn tasks.named('classes'), tasks.named('agentJar'), tasks.named('jarJar')
     archiveClassifier.set('dev')
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
     from sourceSets.main.output
     from(sourceSets.main.resources.srcDirs)
+    from({ zipTree(tasks.named('jarJar').get().archiveFile.get().asFile) }) {
+        include 'META-INF/jarjar/**'
+    }
 
     from(tasks.named('agentJar').flatMap { it.archiveFile }) {
         into 'net/eca/agent'

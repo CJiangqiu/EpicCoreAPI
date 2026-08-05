@@ -6,6 +6,9 @@ import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 
 import java.lang.instrument.Instrumentation;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 import java.util.function.Consumer;
 
 public final class EcaTransformerManager {
@@ -102,6 +105,42 @@ public final class EcaTransformerManager {
         return false;
     }
 
+    public static boolean retransformLoadedInternalNames(Set<String> internalNames) {
+        if (internalNames == null || internalNames.isEmpty()) return false;
+        if (backend == Backend.JVMTI) {
+            return retransformInternalNamesWithJvmTi(internalNames);
+        }
+
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst != null) {
+            List<Class<?>> targets = new ArrayList<>();
+            try {
+                for (Class<?> clazz : inst.getAllLoadedClasses()) {
+                    if (!inst.isModifiableClass(clazz)) continue;
+                    if (internalNames.contains(clazz.getName().replace('.', '/'))) {
+                        targets.add(clazz);
+                    }
+                }
+            } catch (Throwable t) {
+                AgentLogWriter.info("[EcaTransformerManager] Agent target enumeration failed: "
+                        + t.getMessage());
+            }
+            if (retransformClassesWithAgent(inst, targets)) {
+                backend = Backend.AGENT;
+                return true;
+            }
+        }
+
+        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+            if (retransformInternalNamesWithJvmTi(internalNames)) {
+                backend = Backend.JVMTI;
+                return true;
+            }
+            logAllFailed();
+        }
+        return false;
+    }
+
     public static boolean forEachLoadedClass(Consumer<Class<?>> consumer) {
         if (consumer == null) return false;
         Instrumentation inst = EcaAgent.getInstrumentation();
@@ -178,6 +217,35 @@ public final class EcaTransformerManager {
         }
     }
 
+    private static boolean retransformClassesWithAgent(Instrumentation inst, List<Class<?>> classes) {
+        if (inst == null || classes == null || classes.isEmpty()) return false;
+        int successCount = 0;
+        int batchSize = 32;
+        for (int start = 0; start < classes.size(); start += batchSize) {
+            int end = Math.min(start + batchSize, classes.size());
+            Class<?>[] batch = classes.subList(start, end).toArray(new Class<?>[0]);
+            try {
+                inst.retransformClasses(batch);
+                successCount += batch.length;
+            } catch (Throwable batchFailure) {
+                for (Class<?> clazz : batch) {
+                    try {
+                        inst.retransformClasses(clazz);
+                        successCount++;
+                    } catch (Throwable classFailure) {
+                        AgentLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
+                                + clazz.getName() + ": " + classFailure.getMessage());
+                    }
+                }
+            }
+        }
+        if (successCount > 0) {
+            AgentLogWriter.info("[EcaTransformerManager] Retransformed " + successCount
+                    + " selected mod classes via agent");
+        }
+        return successCount > 0;
+    }
+
     private static boolean retransformInternalNameWithJvmTi(String internalName) {
         try {
             activateJvmTiIfNeeded();
@@ -187,6 +255,20 @@ public final class EcaTransformerManager {
         } catch (Throwable t) {
             AgentLogWriter.info("[EcaTransformerManager] JVMTI retransform failed for "
                     + internalName + ": " + t.getMessage());
+            return false;
+        }
+    }
+
+    private static boolean retransformInternalNamesWithJvmTi(Set<String> internalNames) {
+        try {
+            activateJvmTiIfNeeded();
+            if (!JvmTiChannel.isAvailable()) return false;
+            EcaClassTransformer.ensureWhitelistLoaded();
+            return JvmTiChannel.retransformLoadedClasses(
+                    info -> internalNames.contains(info.internalName()));
+        } catch (Throwable t) {
+            AgentLogWriter.info("[EcaTransformerManager] JVMTI selected-mod retransform failed: "
+                    + t.getMessage());
             return false;
         }
     }

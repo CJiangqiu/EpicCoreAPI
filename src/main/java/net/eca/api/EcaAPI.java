@@ -41,6 +41,9 @@ import net.eca.client.render.preset.ShaderPreset;
 import net.eca.client.render.preset.ShaderPresetRegistry;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import net.minecraftforge.fml.ModList;
+import net.minecraftforge.forgespi.language.IModFileInfo;
+import net.minecraftforge.forgespi.language.ModFileScanData;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -48,9 +51,12 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
@@ -1338,9 +1344,12 @@ public final class EcaAPI {
 
     // 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
     /**
-     * Enable AllReturn for the specified entity's mod.
+     * Enable AllReturn for the specified entity's entire owning mod file.
+     * Vanilla entities (players included) are protected by the transform whitelist and own no
+     * transformable mod file, so for those the target falls back to the mod files owning their
+     * equipped items — one AllReturn scope per distinct item mod.
      * DANGER! Requires "Enable Radical Logic" in Attack config.
-     * @param entity the entity used to resolve the target mod package
+     * @param entity the entity used to resolve the target mod file
      * @return true if AllReturn was enabled successfully
      */
     public static boolean enableAllReturn(Entity entity) {
@@ -1350,20 +1359,19 @@ public final class EcaAPI {
             return false;
         }
 
-        String binaryName = entity.getClass().getName();
-        if (TransformerWhitelist.isProtected(binaryName)) return false;
+        return setEntityModAllReturn(entity, true);
+    }
 
-        String internalPrefix = toInternalPrefix(binaryName);
-        if (internalPrefix == null) return false;
-
-        AllReturnToggle.setEnabled(true);
-        AllReturnToggle.addAllowedPrefix(internalPrefix);
-        if (!EcaTransformerManager.retransformInternalName(binaryName.replace('.', '/'))) {
-            AllReturnToggle.removeAllowedPrefix(internalPrefix);
-            EcaLogger.warn("AllReturn: target class retransform failed");
-            return false;
-        }
-        return true;
+    // 对指定实体所属mod关闭AllReturn
+    /**
+     * Disable AllReturn for the specified entity's entire owning mod file.
+     * Uses the same target resolution as {@link #enableAllReturn(Entity)}, including the
+     * equipped-item fallback for vanilla entities.
+     * @param entity the entity used to resolve the target mod file
+     * @return true if the target mod was resolved and disabled successfully
+     */
+    public static boolean disableAllReturn(Entity entity) {
+        return setEntityModAllReturn(entity, false);
     }
 
     // 关闭AllReturn
@@ -1432,6 +1440,116 @@ public final class EcaAPI {
         int lastDot = binaryName.lastIndexOf('.');
         if (lastDot <= 0) return null;
         return binaryName.substring(0, lastDot + 1).replace('.', '/');
+    }
+
+    private static boolean setEntityModAllReturn(Entity entity, boolean enable) {
+        if (entity == null) return false;
+        String targetInternalName = entity.getClass().getName().replace('.', '/');
+        /* 实体自身受转换白名单保护(玩家等原版类)时改以其装备所属 mod 为目标：
+           原版实体永远解析不出可转换的 mod，但它穿戴的模组装备可以，这是对玩家开 AllReturn 的唯一入口。 */
+        if (TransformerWhitelist.isProtectedInternal(targetInternalName)) {
+            return setEquipmentModAllReturn(entity, enable);
+        }
+        return applyAllReturnModScope(targetInternalName, enable);
+    }
+
+    // 以实体装备所属 mod 为 AllReturn 目标，逐件解析，任一件成功即算成功
+    private static boolean setEquipmentModAllReturn(Entity entity, boolean enable) {
+        if (!(entity instanceof LivingEntity living)) return false;
+        Set<String> resolved = new HashSet<>();
+        boolean applied = false;
+        for (EquipmentSlot slot : EquipmentSlot.values()) {
+            ItemStack stack = living.getItemBySlot(slot);
+            if (stack.isEmpty()) continue;
+            String itemInternalName = stack.getItem().getClass().getName().replace('.', '/');
+            if (TransformerWhitelist.isProtectedInternal(itemInternalName)) continue;
+            // 同一 mod 的多件装备只需处理一次，作用域是整个 mod 文件
+            if (!resolved.add(itemInternalName)) continue;
+            if (applyAllReturnModScope(itemInternalName, enable)) applied = true;
+        }
+        return applied;
+    }
+
+    private static boolean applyAllReturnModScope(String targetInternalName, boolean enable) {
+        AllReturnModScope scope = resolveAllReturnModScope(targetInternalName);
+        if (scope == null || scope.internalNames().isEmpty() || scope.prefixes().isEmpty()) {
+            EcaLogger.info("AllReturn: unable to resolve owning mod for {}", targetInternalName.replace('/', '.'));
+            return false;
+        }
+
+        if (!enable) {
+            for (String prefix : scope.prefixes()) {
+                AllReturnToggle.removeAllowedPrefix(prefix);
+            }
+            EcaLogger.info("AllReturn: disabled mod file {}", scope.fileName());
+            return true;
+        }
+
+        Set<String> existingPrefixes = AllReturnToggle.getAllowedPrefixes();
+        Set<String> addedPrefixes = new HashSet<>();
+        boolean wasEnabled = AllReturnToggle.isEnabled();
+        AllReturnToggle.setEnabled(true);
+        for (String prefix : scope.prefixes()) {
+            AllReturnToggle.addAllowedPrefix(prefix);
+            if (!existingPrefixes.contains(prefix)) {
+                addedPrefixes.add(prefix);
+            }
+        }
+
+        if (!EcaTransformerManager.retransformLoadedInternalNames(scope.internalNames())) {
+            for (String prefix : addedPrefixes) {
+                AllReturnToggle.removeAllowedPrefix(prefix);
+            }
+            if (!wasEnabled && existingPrefixes.isEmpty()) {
+                AllReturnToggle.setEnabled(false);
+            }
+            EcaLogger.warn("AllReturn: no loaded class from mod file {} could be retransformed",
+                    scope.fileName());
+            return false;
+        }
+
+        EcaLogger.info("AllReturn: enabled mod file {} with {} classes across {} packages",
+                scope.fileName(), scope.internalNames().size(), scope.prefixes().size());
+        return true;
+    }
+
+    private static AllReturnModScope resolveAllReturnModScope(String targetInternalName) {
+        try {
+            for (IModFileInfo modFileInfo : ModList.get().getModFiles()) {
+                ModFileScanData scanData = modFileInfo.getFile().getScanResult();
+                if (scanData == null) continue;
+
+                Set<String> internalNames = new HashSet<>();
+                boolean containsTarget = false;
+                for (ModFileScanData.ClassData classData : scanData.getClasses()) {
+                    String internalName = classData.clazz().getInternalName();
+                    if (internalName == null || TransformerWhitelist.isProtectedInternal(internalName)) {
+                        continue;
+                    }
+                    internalNames.add(internalName);
+                    if (targetInternalName.equals(internalName)) {
+                        containsTarget = true;
+                    }
+                }
+                if (!containsTarget) continue;
+
+                Set<String> prefixes = new HashSet<>();
+                for (String internalName : internalNames) {
+                    String prefix = toInternalPrefix(internalName.replace('/', '.'));
+                    if (prefix != null) {
+                        prefixes.add(prefix);
+                    }
+                }
+                return new AllReturnModScope(modFileInfo.getFile().getFileName(), internalNames, prefixes);
+            }
+        } catch (Throwable t) {
+            EcaLogger.warn("AllReturn: owning mod scan failed for {}: {}",
+                    targetInternalName, t.getMessage());
+        }
+        return null;
+    }
+
+    private record AllReturnModScope(String fileName, Set<String> internalNames, Set<String> prefixes) {
     }
 
     // ==================== 白名单 API ====================
@@ -1756,6 +1874,24 @@ public final class EcaAPI {
         return FactionManager.unregisterFaction(factionId, level);
     }
 
+    // 合并阵营（fromId 并入 intoId 后被删除，持久化）
+    /**
+     * Merge one faction into another. Every member of {@code fromId} is rebound to
+     * {@code intoId}, relation overrides are folded into the surviving faction, and
+     * {@code fromId} is removed. The surviving faction keeps its own display name, color,
+     * default relation, and leader; it inherits the dissolved faction's leader only when
+     * it has none of its own.
+     * 把 fromId 阵营整体并入 intoId，成员改绑、关系归并，随后删除 fromId。
+     *
+     * @param intoId the surviving faction id
+     * @param fromId the faction to dissolve
+     * @param level  the server level for persistence
+     * @return the number of members moved, or -1 if the merge could not run
+     */
+    public static int mergeFactions(String intoId, String fromId, Level level) {
+        return FactionManager.mergeFactions(intoId, fromId, level);
+    }
+
     // 获取阵营定义
     /**
      * Get a faction definition by its id.
@@ -1952,13 +2088,13 @@ public final class EcaAPI {
 
     // ==================== 阵营求援 ====================
 
-    // 阵营求援：附近同阵营生物将攻击者设为目标
+    // 阵营求援：附近同阵营及友方阵营生物共同反击敌对阵营攻击者
     /**
-     * Alert nearby same-faction mobs to target an attacker.
-     * Called when a faction member is hurt by a non-friendly source.
-     * Only affects {@link net.minecraft.world.entity.Mob} entities without an existing target,
-     * within {@code FACTION_ALERT_RANGE} blocks of the victim.
-     *
+     * Alert nearby same-faction and friendly-faction mobs to target an attacker.
+     * Called when a faction member is hurt by a hostile faction member. Factionless
+     * attackers are ignored.
+     * Only affects {@link Mob} entities within {@code FACTION_ALERT_RANGE} blocks of the
+     * victim. Whether an existing target may be replaced is controlled by the faction alert config.
      * @param factionId the victim's faction id
      * @param attacker  the entity that attacked
      * @param victim    the entity that was attacked

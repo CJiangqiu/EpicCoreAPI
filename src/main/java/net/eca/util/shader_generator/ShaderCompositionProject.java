@@ -9,7 +9,9 @@ public final class ShaderCompositionProject {
 
     private final List<ShaderLayer> layers = new ArrayList<>();
     private final List<ShaderOutputEffectInstance> outputEffects = new ArrayList<>();
+    private final ShaderSourceWorkspace sourceWorkspace = new ShaderSourceWorkspace();
     private ShaderExportMode exportMode = ShaderExportMode.PORTABLE_WITH_ECA_HINTS;
+    private boolean sourceActive;
 
     public ShaderCompositionProject() {
         layers.add(ShaderLayer.createDefault());
@@ -66,9 +68,14 @@ public final class ShaderCompositionProject {
     }
 
     public void removeLayer(int index) {
-        if (index >= 0 && index < layers.size() && layers.size() > 1) {
+        if (index >= 0 && index < layers.size()) {
             layers.remove(index);
         }
+    }
+
+    public void clearVisualContent() {
+        layers.clear();
+        outputEffects.clear();
     }
 
     public void moveLayer(int index, int offset) {
@@ -88,6 +95,18 @@ public final class ShaderCompositionProject {
         if (exportMode != null) {
             this.exportMode = exportMode;
         }
+    }
+
+    public ShaderSourceWorkspace sourceWorkspace() {
+        return sourceWorkspace;
+    }
+
+    public boolean sourceActive() {
+        return sourceActive;
+    }
+
+    public void setSourceActive(boolean sourceActive) {
+        this.sourceActive = sourceActive;
     }
 
     /** 仅 ShaderProjectCodec 反序列化时使用，外部不可直接修改 */
@@ -139,6 +158,8 @@ public final class ShaderCompositionProject {
         copy.layers.clear();
         copy.outputEffects.clear();
         copy.exportMode = this.exportMode;
+        copy.sourceWorkspace.copyFrom(this.sourceWorkspace);
+        copy.sourceActive = this.sourceActive;
         for (ShaderLayer layer : layers) {
             copy.layers.add(layer.copy());
         }
@@ -153,6 +174,8 @@ public final class ShaderCompositionProject {
         layers.clear();
         outputEffects.clear();
         exportMode = source.exportMode;
+        sourceWorkspace.copyFrom(source.sourceWorkspace);
+        sourceActive = source.sourceActive;
         for (ShaderLayer layer : source.layers) {
             layers.add(layer.copy());
         }

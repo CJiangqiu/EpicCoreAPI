@@ -107,7 +107,6 @@ public final class ShaderLayerComposer {
 
         int elementCounter = 0;
         if (layers != null) {
-            int layerCount = 0;
             for (int layerIndex = 0; layerIndex < layers.size(); layerIndex++) {
                 ShaderLayer layer = layers.get(layerIndex);
                 boolean hasBase = layer.baseAlpha() > 0.0F || layer.backgroundImagePath() != null;
@@ -125,8 +124,7 @@ public final class ShaderLayerComposer {
                     continue;
                 }
 
-                source.append("    // layer ").append(layerCount)
-                    .append(": ").append(layer.name()).append('\n')
+                source.append("    // @eca-nav layer: ").append(navigationLabel(layer.name())).append('\n')
                     .append("    {\n")
                     .append(String.format(Locale.ROOT,
                         "        vec3 color = vec3(%.4f, %.4f, %.4f);\n"
@@ -148,6 +146,9 @@ public final class ShaderLayerComposer {
                 for (int elementIndex = 0; elementIndex < layer.elements().size(); elementIndex++) {
                     ShaderModuleInstance element = layer.elements().get(elementIndex);
                     if (element.enabled()) {
+                        source.append("        // @eca-nav element: ")
+                            .append(element.definition().id()).append('\n')
+                            .append("        {\n");
                         if (element.imagePath() != null) {
                             source.append(emitImageElement(
                                 element,
@@ -157,6 +158,7 @@ public final class ShaderLayerComposer {
                         } else {
                             source.append(element.definition().emitter().emit(element, elementCounter));
                         }
+                        source.append("        }\n");
                         elementCounter++;
                     }
                 }
@@ -164,14 +166,16 @@ public final class ShaderLayerComposer {
                 source.append("        finalColor = ").append(blendExpression(layer.blendMode())).append(";\n")
                     .append("        finalAlpha = max(finalAlpha, alpha);\n")
                     .append("    }\n\n");
-
-                layerCount++;
             }
         }
 
         source.append("    return vec4(max(finalColor, vec3(0.0)), finalAlpha);\n")
             .append("}\n");
         return source.toString();
+    }
+
+    private static String navigationLabel(String value) {
+        return value.replace('\r', ' ').replace('\n', ' ');
     }
 
     /* 按混合模式生成 finalColor 更新表达式。finalColor 为下方累积色(backdrop)，color 为本图层色(source)，

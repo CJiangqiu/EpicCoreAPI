@@ -25,7 +25,7 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
 - `/eca teleport <targets> <x> <y> <z>` - Teleport entities
 - `/eca lockLocation <targets> <true|false> [x y z]` - Lock/unlock entity location
 - `/eca cleanBossBar <targets>` - Clean up boss bars
-- `/eca allReturn <targets> <true|false>` - DANGER! Requires Attack Radical Logic config. Enable/disable return transformation on all boolean and void methods of the target entity's mod
+- `/eca allReturn <targets> <true|false>` - DANGER! Requires Attack Radical Logic config. Enable/disable return transformation on all boolean and void methods of the mod file owning the target entity, retransforming its already-loaded classes. Vanilla entities (players included) own no transformable mod file, so the target falls back to the mod files owning their equipped items
 - `/eca allReturn global <true|false>` - DANGER! Enable/disable global AllReturn for all non-whitelisted mods
 - `/eca banSpawn <targets> <seconds>` - Ban spawning of selected entities' types for specified duration
 - `/eca banSpawn clear` - Unban all spawns in current dimension
@@ -45,6 +45,7 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
 - `/eca bossShow stop <viewer>` - Stop the viewer's current cutscene
 - `/eca bossShow reload` - Reload all cutscene JSON definitions from disk
 - `/eca bossShow clearHistory <player>` - Clear a player's "already seen" records
+- `/eca shaderGenerator` - Open the in-game shader preset generator
 - `/eca resurrection start` - Start the resurrection daemon thread
 - `/eca resurrection stop` - Stop the resurrection daemon thread
 - `/eca resurrection status` - Show daemon thread state and revival/check counts
@@ -60,7 +61,7 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
 - `/eca faction leave [targets]` - Unbind entities from their current faction
 - `/eca faction list` - List all registered factions
 - `/eca faction info [factionId]` - Show a faction's color, members and relation overrides
-- `/eca faction relation <factionA> <factionB> <relation>` - Set A's relation toward B (hostile/neutral/friendly)
+- `/eca faction relation <factionA> <factionB> <relation>` - Set A's relation toward B. `hostile` / `neutral` / `friendly` store a relation override; `same_faction` instead merges B into A (B's members are rebound to A, relations are folded in, and B is deleted)
 - `/eca faction leader <factionId>` - Show a faction's leader and whether it is currently loaded
 - `/eca faction leader <factionId> set [target]` - Set the leader (defaults to the command source entity; joins the faction automatically)
 - `/eca faction leader <factionId> clear` - Clear the leader; the former leader remains a member
@@ -117,8 +118,9 @@ side="BOTH"
 - `unbanHealing(entity)` - Unban healing for entity
 - `getHealBanValue(entity)` - Get current heal ban value (null if not banned)
 - `isHealingBanned(entity)` - Check if entity has healing banned
-- `getHealth(entity)` - Get vanilla health via VarHandle
-- `setHealth(entity, health)` - Staged health modification that escalates only when a verify step fails: **Vanilla** (write vanilla DATA_HEALTH_ID directly) → **Symbolic** (ASM bytecode dataflow analysis of getHealth() to locate and invert the real storage, with numeric fallback on a located storage) → **Probe** (behavioral probing of candidate numeric setters, name-agnostic) → **Dynamic** (runtime bytecode instrumentation, requires Attack Radical Logic config). Players only run the Vanilla stage. Each stage is verified against `getHealth()` within `max(0.5, abs(target) * 2%)`; the first to pass is cached per entity class.
+- `getHealth(entity)` - Read the health observed through the entity's active life protocol: the analyzer's health anchor first, falling back to vanilla `DATA_HEALTH_ID` when no anchor resolves (0.0f if the entity is null)
+- `getRealHealth(entity)` - The same authoritative observation, returning NaN instead of 0.0f for a null entity
+- `setHealth(entity, health)` - Verified health transaction that escalates through channels only when the previous one fails verification: vanilla write (write `DATA_HEALTH_ID` directly) → dataflow reversal (ASM dataflow analysis of `getHealth()` locates the real storage and inverts its read expression) → external scan (reverse `isAlive` / `isDeadOrDying` / `hurt` / `actuallyHurt` to locate storage, including effective-health models that need conversion) → method probe (borrow the entity's own writer: reflective setters, functional fields, injected bridges) → numeric inversion (search the object graph for writable numeric cells when the storage cannot be inverted). Each attempt is judged by reading the health anchor back within `max(0.5, abs(target) * 2%)`; every write snapshots the affected state beforehand and rolls the whole transaction back when verification fails. A successful server-side write is broadcast to tracking clients and registered for delayed re-verification; classes whose health is reverted a tick later additionally get an out-of-entity health mirror written. Players run the vanilla write only. Every channel past the vanilla write requires Attack Radical Logic plus its own switch under `Attack → setHealth` (Const Override / External Scan / Method Probe / Numeric Inversion), and all four default to off.
 - `setMaxHealth(entity, maxHealth)` - Set max health by reverse-calculating attribute base value from current modifiers
 - `lockMaxHealth(entity, value)` - Lock entity max health at specific value (enforced every tick)
 - `unlockMaxHealth(entity)` - Unlock entity max health
@@ -130,7 +132,7 @@ side="BOTH"
 - `addHealthBlacklistKeyword(keyword)` - Add keyword to health modification blacklist
 - `removeHealthBlacklistKeyword(keyword)` - Remove keyword from health modification blacklist
 - `getHealthBlacklistKeywords()` - Get all health blacklist keywords
-- `hurt(entity, damageSource, amount)` - Damage an entity and guarantee the health loss lands. Vanilla `hurt` writes health only once, inside `actuallyHurt`, as `setHealth(getHealth() - damage)` — through the entity's own getter and setter, so an overridden or storage-decoupled entity runs the whole pipeline and fires all events while losing no health. This method clears the invulnerability cooldown and calls vanilla `hurt` first (mitigation, knockback, aggro and hurt animation all happen normally), then compares the health anchor against `before - amount` within `min(1.0, amount * 50%)`. On mismatch it restores the damage-source bookkeeping vanilla would have left (lastHurtByMob, lastHurtByPlayer/Time, lastDamageSource/Stamp, combat tracker, hurt animation) and forces the health through `setHealth`; when the expected health is at or below zero it routes to `kill` instead, so the death path, loot table and experience drops all run. Entities under ECA's own health lock or invulnerability are left to those systems — vanilla `hurt` still runs, but no forced write is attempted.
+- `hurt(entity, damageSource, amount)` - Damage an entity and guarantee the health loss lands. Vanilla `hurt` writes health only once, inside `actuallyHurt`, as `setHealth(getHealth() - damage)` — through the entity's own getter and setter, so an overridden or storage-decoupled entity runs the whole pipeline and fires all events while losing no health. This method clears the invulnerability cooldown and calls vanilla `hurt` first (mitigation, knockback, aggro and hurt animation all happen normally), then compares the health anchor against `before - amount` within `min(1.0, amount * 50%)`. On mismatch it restores the damage-source bookkeeping vanilla would have left (lastHurtByMob, lastHurtByPlayer/Time, lastDamageSource/Stamp, combat tracker, hurt animation) and forces the health through `setHealth`, clamped at zero. A lethal result is never forced into the death path here: the entity is left at zero health so vanilla `tickDeath` plays the death animation and removes it — use `kill` when an immediate kill is wanted. Entities under ECA's own health lock or invulnerability are left to those systems — vanilla `hurt` still runs, but no forced write is attempted.
 - `hurt(entity, attacker, amount)` - Same pipeline with the damage source derived from the attacker: `playerAttack` for players, `mobAttack` for every other living entity, so kill credit and loot attribution behave as expected
 - `kill(entity, damageSource)` - Kill entity (loot + advancements + removal)
 - `revive(entity)` - Clear death state and restore health
@@ -148,7 +150,8 @@ side="BOTH"
 - `cleanupBossBar(entity)` - Remove boss bars without removing entity
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
 - `setInvulnerable(entity, invulnerable)` - Set invulnerability (enable: revive + lock health + block damage + remove harmful effects per tick + prevent mob targeting + protect player inventory; disable: clear all protections)
-- `enableAllReturn(entity)` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the target entity's mod
+- `enableAllReturn(entity)` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the mod file owning the target entity, and retransforms that mod's already-loaded classes. Vanilla entities (players included) fall back to the mod files owning their equipped items
+- `disableAllReturn(entity)` - Disable AllReturn for that entity's owning mod file, using the same target resolution including the equipped-item fallback
 - `setGlobalAllReturn(enable)` - DANGER! Requires Attack Radical Logic config. Enable/disable global AllReturn for all non-whitelisted mods
 - `disableAllReturn()` - Disable AllReturn and clear targets
 - `isAllReturnEnabled()` - Check if AllReturn is enabled
@@ -201,6 +204,11 @@ side="BOTH"
 - `getEntities(level, area, entityClass)` - Get entities of specified type in area
 - `getEntities(server)` - Get all entities across all server levels
 - `getEntities(server, filter)` - Get entities across all levels using custom predicate
+- `getNearestEntity(level, pos, filter)` - Get the nearest entity matching a predicate (ECA resolver, so invulnerable entities are included)
+- `getNearestEntity(level, pos, area, filter)` - Same, narrowed to an AABB
+- `getNearestEntity(level, pos, entityClass)` - Get the nearest entity of a given type
+- `getNearestEntity(level, pos, area, entityClass)` - Get the nearest entity of a given type inside an AABB
+- `shaderPreset(id)` - Get a shader preset by id, exposing its ready-made render targets
 - `startResurrection()` - Start the resurrection daemon thread (idempotent)
 - `stopResurrection()` - Stop the resurrection daemon thread
 - `isResurrectionRunning()` - Check whether the daemon is running
@@ -219,6 +227,7 @@ side="BOTH"
 - `createFaction(id, displayName, color, level)` - Create and register a faction, persisted to world SavedData
 - `removeFaction(id)` - Remove a faction definition (memory only)
 - `removeFaction(id, level)` - Remove a faction definition and drop every entity binding pointing at it
+- `mergeFactions(intoId, fromId, level)` - Merge one faction into another: members are rebound, relation overrides are folded in, and the dissolved faction is removed. Returns the number of members moved, or -1 if the merge could not run
 - `getFaction(id)` - Get a faction definition by id
 - `getAllFactions()` - Get all registered factions
 - `joinFaction(entity, factionId)` - Bind an entity to a faction
@@ -441,6 +450,11 @@ public class MyBossExtension extends EntityExtension {
     @Override
     protected String getModId() {
         return "your_mod_id";  // your mod id, used for all resource path resolution (textures, sounds, etc.)
+    }
+
+    @Override
+    public String getFactionId() {
+        return "undead_legion";  // entities of this type automatically join this faction. Default null = opt out. The faction must already be registered via @RegisterFaction or EcaAPI.createFaction(), otherwise the binding is refused and logged
     }
 
     @Override
@@ -717,7 +731,7 @@ Note: Like entity extensions, each item can only have one extension. Duplicate r
 
 ### Shader Presets
 
-This mod also provides several shader presets for the entity extension and item extension systems, which can be used directly in your extensions. Simply replace `CustomRenderTypes` in the example code with the corresponding preset name. Each preset provides 4 RenderTypes: `BOSS_BAR`, `BOSS_LAYER`, `SKYBOX` for entity extensions, and `ITEM` for item extensions. Entity texture overlays are supported through `EntityLayerExtension.getTexture()` — return a texture to overlay it on the entity model, optionally combined with the shader RenderType for a texture‑plus‑shader effect (matching the boss‑bar overlay technique).
+This mod also provides several shader presets for the entity extension and item extension systems, which can be used directly in your extensions. Simply replace `CustomRenderTypes` in the example code with the corresponding preset name. Each built-in preset class exposes 4 ready RenderTypes — `BOSS_BAR`, `BOSS_LAYER`, `SKYBOX` for entity extensions and `ITEM` for item extensions — plus `createEntityEffect(texture)` for entity texture overlays. Entity texture overlays are supported through `EntityLayerExtension.getTexture()` — return a texture to overlay it on the entity model, optionally combined with the shader RenderType for a texture‑plus‑shader effect (matching the boss‑bar overlay technique).
 
 Available presets:
 - `TheLastEndRenderTypes` — The Last End
@@ -755,7 +769,13 @@ ECA provides an in-game shader preset generator for building portable Minecraft 
 /eca shaderGenerator
 ```
 
-The generator edits a layered composition project. Each layer can contain multiple visual modules, including basic shapes, starry sky effects, magic symbols, and image elements. The editor supports live preview, undo/redo, layer visibility, layer ordering, blend modes, canvas editing, project save/load, and five-file shader export.
+The generator edits a layered composition project. Each layer can contain multiple visual modules, including basic shapes, starry sky effects, magic symbols, and image elements. The editor supports live preview, undo/redo, layer visibility, layer ordering, blend modes, canvas editing, project save/load, five-file shader export, and project deletion (**File -> Delete Current Project**, which asks for confirmation and then permanently removes the project directory with its source, textures and imported dependencies).
+
+Each project also owns a five-file source workspace. Use **File -> Source Editor** to switch the same project to manual GLSL/JSON editing with a single-row menu, comment-based quick navigation, undo/redo, save, compile shortcuts, and debounced live preview. The right side places the preview above a scrollable compiler-output panel. Generated fragment shaders emit `// @eca-nav layer: ...` and `// @eca-nav element: ...` markers; manually written `// @eca-nav ...` comments create custom navigation points. Returning to the visual editor does not discard either representation. **File -> Import Shader Folder** opens the native folder picker at Forge's canonical game directory and copies a selected standard JSON/VSH/FSH core shader into a new local ECA project. A folder may contain multiple shader programs, in which case the editor asks which one to import. When a source path contains `assets/<modid>/shaders/core`, the project dialog pre-fills that Mod ID; otherwise the field remains empty. Standard three-file shaders are duplicated into the BLOCK and NEW_ENTITY source slots for independent compile validation; folders containing ECA's shared-fragment `_block`/`_entity` five-file layout preserve both profiles directly. The source folder is never modified.
+
+Import supports standard Minecraft core shader JSON/VSH/FSH resources. Common time, camera, scale, opacity, and cosmic-UV uniforms receive preview bindings. A shader that depends on a mod-specific render pipeline, Java callbacks, textures, or uniforms may still need a dedicated adapter; unsupported fragment structure is reported as a compile error instead of being silently rewritten.
+
+Texture dependencies are resolved as well. When an imported shader references a numbered sequence of PNG files, ECA attempts to copy those files, combine them into one preview texture, and provide the matching sampler and uniform with the UV range of each image. A PNG with a `.mcmeta` animation section updates frame by frame inside that combined texture while preserving frame order, per-frame duration, and interpolation. If ECA cannot determine how the files correspond to a sampler or uniform, the compiler-output panel names the unresolved dependency and scanned directory instead of failing silently; the shader compilation itself can still succeed.
 
 Preview targets currently include plane, item, entity, skybox, and Boss bar. The exported preset uses the standard core shader five-file layout:
 
@@ -826,7 +846,35 @@ import net.minecraft.resources.ResourceLocation;
 ShaderPreset preset = EcaAPI.shaderPreset(new ResourceLocation("mymod", "my_nebula"));
 ```
 
-The returned `ShaderPreset` exposes four ready-made render targets: `bossBar()`, `bossLayer()`, `skybox()`, and `item()`. For entity texture overlays, use `EntityLayerExtension.getTexture()` with `bossLayer()`.
+The returned `ShaderPreset` exposes `bossBar()`, `bossLayer()`, `skybox()`, `item()`, `block()`, `geoBlock(texture)` and `entityForPreview(texture)`; `EcaPresets` mirrors the first six as static lookups by preset id. `block()` and `geoBlock(texture)` are the BLOCK and NEW_ENTITY profiles used by block extensions. For entity texture overlays, use `EntityLayerExtension.getTexture()` with `bossLayer()`.
+
+#### AI Assistant
+
+The source editor also has an AI assistant that drives the same project through a model of your choice. Three API formats are supported — OpenAI Responses, OpenAI Chat compatible, and Anthropic Messages — each stored as a profile with its own base URL, model, API key or key environment variable, custom headers, and a 10–600 second timeout in `config/eca/shadergenerator/settings.json`.
+
+The model acts through tools, not free text: read the project summary and module schemas, edit layers and elements, import PNG images, modify any of the five source files, save the project, export the five shader files, compile and read diagnostics, capture the preview, and undo or redo its own mutations. Three switches bound how far it acts alone — allow automatic edits, compile after every edit, send preview images to vision models. With automatic editing off it can still inspect and explain but every write is refused; with automatic compiling on it recompiles after each edit and repairs from the diagnostics, capped by an automatic-repair limit and an overall tool-round limit.
+
+#### MCP
+
+The **MCP** button on the AI assistant page starts a local ECA Shader MCP that lets an external agent drive the current shader project. The service speaks Streamable HTTP, binds only to `127.0.0.1`, and needs no access token; the MCP page shows the port and connected agents, and the port is stored in `config/eca/shadergenerator/mcp_settings.json`. The URL port must match the MCP page, and both Minecraft and the MCP service must stay running.
+
+Order of operations: start the service in-game first via **Shader Generator → AI Assistant → MCP**, then launch and connect the agent. An agent cannot connect while the service is not running.
+
+##### Codex
+
+Register from the command line:
+
+```bash
+codex mcp add eca_shader --url http://localhost:8767/mcp
+```
+
+##### Claude Code
+
+Register from the command line:
+
+```bash
+claude mcp add --transport http eca_shader http://127.0.0.1:8767/mcp
+```
 
 ### BossShow Cinematics
 
@@ -879,7 +927,7 @@ JSON example — `frames` are generated by the recorder; you typically only hand
 }
 ```
 
-- `frames`: one object per tick, in playback order. **A frame's index in the array is its tick** — there is no separate time field. Generated by the editor.
+- `frames`: one object per tick, in playback order. A frame's index in the array is its tick — there is no separate time field. Generated by the editor.
 - `frames[].dx/dy/dz`: camera offset in anchor-local coordinates.
 - `frames[].yaw/pitch`: camera orientation (yaw is anchor-local).
 - `frames[].keyframe`: optional. Its presence marks this frame as a keyframe (an empty object `{}` is a valid bare keyframe). Fields inside:
@@ -952,17 +1000,19 @@ EcaAPI.isBossShowPlaying(viewer); // check if viewer is in a cutscene
 
 ### Faction System
 
-ECA provides a faction system that constrains targeting and damage relationships. Binding an entity makes vanilla alliance checks and target assignment respect same-faction, friendly and neutral rules without requiring an interface or mixin. It does not add target-acquisition AI: a `HOSTILE` relation permits combat, but the entity's own goals or an alert mechanism must still acquire the target. Standard `LivingEntity` damage paths enforce friendly protection; direct state-changing APIs remain the caller's responsibility. `FactionUtil.isFriendly` resolves alliances, while `FactionUtil.canAttack` additionally enforces creative/spectator and ECA invulnerability protection.
+ECA provides a faction system that controls targeting and damage relationships. Binding an entity makes vanilla alliance checks and target assignment respect same-faction, friendly and neutral rules without requiring an interface. Faction-bound mobs periodically acquire nearby faction-bound entities with a `HOSTILE` relation through `Mob.setTarget`; their existing combat goals still perform movement and attacks. Entities without a faction are never selected by this faction acquisition pass. Standard `LivingEntity` damage paths enforce friendly protection; direct state-changing APIs remain the caller's responsibility. `FactionUtil.isFriendly` resolves alliances, while `FactionUtil.canAttack` additionally enforces creative/spectator and ECA invulnerability protection.
 
 `EcaAPI.isFriendly(a, b)` is the public complete friendly check. It returns true for the same ECA faction, friendly ECA factions, vanilla scoreboard allies, owner-pet pairs, pets with the same owner, and pets whose owners are scoreboard allies. Creative mode, spectator mode and ECA invulnerability are deliberately excluded because they are attack protections rather than alliance relationships. Use `areSameFaction` only when exact ECA faction identity matters; `canHarm` checks ECA faction relations only, while `canTarget` also rejects neutral relations and complete target immunity.
 
-Factions are registered by extending `FactionDefinition` and annotating the class with `@RegisterFaction`. Definitions are scanned during `FMLLoadCompleteEvent`; duplicate ids are logged and skipped (first one scanned wins). Factions can also be created at runtime through `EcaAPI.createFaction`, with or without persistence.
+Factions are registered by extending `FactionDefinition` and annotating the class with `@RegisterFaction`. Definitions are scanned during `FMLLoadCompleteEvent`; duplicate ids are logged and skipped (first one scanned wins). Factions can also be created at runtime through `EcaAPI.createFaction`, with or without persistence. An `EntityExtension` may declare `getFactionId()` so that every entity of that type joins a faction automatically — the faction has to be registered before those entities spawn, otherwise the binding is refused and logged.
 
 Four relations are available:
 - `SAME_FACTION` — same faction id, fully immune to each other and never targeted
 - `FRIENDLY` — different factions but allied, no damage and no targeting
 - `NEUTRAL` — not deliberately targeted, but incidental damage still applies
 - `HOSTILE` — normal combat
+
+`SAME_FACTION` is derived, not stored: it is produced whenever both sides resolve to the same faction id, so storing it as a cross-faction override would never be read back. Making two factions genuinely one therefore means merging them — `EcaAPI.mergeFactions(intoId, fromId, level)`, which `/eca faction relation A B same_faction` calls with A as the survivor. Members of B are rebound to A, B's relation overrides are inherited only where A has none of its own, third-party entries pointing at B are retargeted to A or dropped, and B is then deleted. A keeps its own display name, color, default relation and leader, inheriting B's leader only when it has none.
 
 Relation resolution runs in this order, and the first match wins:
 1. Same faction id → `SAME_FACTION`
@@ -972,7 +1022,7 @@ Relation resolution runs in this order, and the first match wins:
 5. A's `getDefaultRelation(self, target)` conditional override (only when the other side has no faction)
 6. A's static default relation
 
-Each faction owns its **member table**. A member is recorded as a UUID plus its entity type, which means a roster can be listed, filtered by type and counted **without loading a single entity** — members sitting in unloaded chunks or other dimensions are still fully visible and manageable. Factions live in the overworld's SavedData, so membership is global across dimensions and survives restarts.
+Each faction owns its member table. A member is recorded as a UUID plus its entity type, so a roster can be listed, filtered by type and counted without loading a single entity — members sitting in unloaded chunks or other dimensions are still fully visible and manageable. Factions live in the overworld's SavedData, so membership is global across dimensions and survives restarts.
 
 A binding is dropped when the entity is permanently removed; chunk unloads and dimension changes keep it, and players keep theirs across death and respawn. Membership cannot outlive its faction — unregistering a faction drops its whole member table, and joining a faction that does not exist is refused rather than silently recorded.
 
@@ -1017,7 +1067,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 **Leaders:** A faction may designate one member as its leader. Setting a leader adds it to the faction automatically if it was not a member — a leader outside its own faction would be a contradictory state. Leaving the faction also vacates the post, and a leader that is permanently removed is cleared automatically.
 
-**Threat propagation:** When a leader attacks something, or is attacked, that entity is offered as the target of every resolvable mob in the faction member table. Existing targets and faction target permissions may still prevent a switch. Two mechanisms coexist:
+**Threat propagation:** When a leader attacks a hostile faction member, or is attacked by one, that entity is offered as the target of every resolvable mob in the faction member table. Existing targets and faction target permissions may still prevent a switch. Ordinary member alerts are answered by nearby mobs from both the victim's own faction and friendly factions. Two mechanisms coexist:
 
 | | Trigger | Range |
 |---|---|---|
@@ -1026,7 +1076,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 Leader protection is deliberately not range-limited: the member table is walked directly, so summons far from their master still answer. Members that cannot be resolved in the leader's dimension are skipped, and propagation never hands a member a target it is forbidden to attack. Repeat propagation of the same target within one tick is dropped, so a rapidly attacking leader does not walk the table on every hit.
 
-Both mechanisms are governed **entirely by config** — there are no per-faction overrides, so every faction behaves the same way on a given server:
+Both mechanisms are governed entirely by config — there are no per-faction overrides, so every faction behaves the same way on a given server:
 
 - `Leader Protection Enabled` (default `true`)
 - `Immediate Leader Protection` (default `false`)
@@ -1059,13 +1109,13 @@ Raids are registered by extending `RaidDefinition` and annotating with `@Registe
 
 **Waves:** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws that pull from a faction's `getMemberEntityTypes()` pool by weight.
 
-**Raiders:** Spawned raiders are bound to `getRaiderFactionId()`. Spawned `Mob` instances also receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight an already acquired target and otherwise advance. Any entity type can be spawned and no interface is required, but faction hostility does not create target-acquisition AI; non-`Mob` entities receive neither the navigation goal nor mob callbacks. Override `getRaiderGoalPriority()` or return a negative value to change or disable goal injection.
+**Raiders:** Spawned raiders are bound to `getRaiderFactionId()`. Spawned `Mob` instances also receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight an already acquired hostile-faction target and otherwise advance. Any entity type can be spawned and no interface is required, but non-`Mob` entities receive neither faction target acquisition, the navigation goal, nor mob callbacks. Override `getRaiderGoalPriority()` or return a negative value to change or disable goal injection.
 
 **Boss:** A wave may declare a leader with `RaidWave.setLeader(type)`. The spawned entity becomes the leader of the raid's raider faction, so the faction's threat propagation applies to it for free. Eligible, loaded mobs without an existing target respond by default; `Immediate Leader Protection` allows them to replace an existing target. Declaring a leader requires `getRaiderFactionId()`; without a faction there is nothing to lead and the entry spawns as an ordinary raider.
 
-Note that propagation walks the **entire faction member table**, not just this raid's participants. If the raider faction has other members elsewhere in the world, they answer too. Use a raid-specific faction if you want the response confined to the raid.
+Note that propagation walks the entire faction member table, not just this raid's participants. If the raider faction has other members elsewhere in the world, they answer too. Use a raid-specific faction if you want the response confined to the raid.
 
-**Validation:** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction **refuses the start** outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
+**Validation:** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction refuses the start outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
 
 **Progression:** `shouldAdvanceWave`, `checkVictory` and `checkDefeat` are all overridable. The defaults reproduce vanilla semantics: the next wave spawns once the previous one is dead, and the defenders win when every wave has spawned and every raider is gone.
 
@@ -1191,7 +1241,7 @@ Any `.json` filename works, and you can have multiple files.
 - `/eca teleport <目标> <x> <y> <z>` - 传送实体
 - `/eca lockLocation <目标> <true|false> [x y z]` - 锁定/解除实体位置
 - `/eca cleanBossBar <目标>` - 清理 Boss 血条
-- `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体的所属 mod 的全部布尔和 void 方法的 return transformation
+- `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体所属 mod 文件全部布尔和 void 方法的 return transformation，并对其已加载的类执行 retransform。原版实体（含玩家）没有可转换的 mod 文件，此时改以其装备所属 mod 文件为目标
 - `/eca allReturn global <true|false>` - 危险！启用/禁用全局 AllReturn，影响所有非白名单 mod
 - `/eca banSpawn <目标> <秒数>` - 禁止选中实体的类型生成指定时长
 - `/eca banSpawn clear` - 解除当前维度所有禁生成
@@ -1211,6 +1261,7 @@ Any `.json` filename works, and you can have multiple files.
 - `/eca bossShow stop <观看者>` - 停止该玩家当前的演出
 - `/eca bossShow reload` - 从磁盘重新加载所有演出 JSON 定义
 - `/eca bossShow clearHistory <玩家>` - 清除该玩家的"已观看"记录
+- `/eca shaderGenerator` - 打开游戏内着色器预设生成器
 - `/eca resurrection start` - 启动线程复活守护线程
 - `/eca resurrection stop` - 停止守护线程
 - `/eca resurrection status` - 查看线程状态及复活/检查计数
@@ -1226,7 +1277,7 @@ Any `.json` filename works, and you can have multiple files.
 - `/eca faction leave [目标]` - 将实体移出当前阵营
 - `/eca faction list` - 列出全部已注册阵营
 - `/eca faction info [阵营ID]` - 查看阵营的颜色、成员与关系覆盖
-- `/eca faction relation <阵营A> <阵营B> <关系>` - 设置 A 对 B 的关系（hostile/neutral/friendly）
+- `/eca faction relation <阵营A> <阵营B> <关系>` - 设置 A 对 B 的关系。`hostile` / `neutral` / `friendly` 写入关系覆盖；`same_faction` 则是把 B 并入 A（B 的成员改绑到 A，关系归并，随后删除 B）
 - `/eca faction leader <阵营ID>` - 查看阵营首领及其当前是否已加载
 - `/eca faction leader <阵营ID> set [目标]` - 设置首领（省略目标时为命令执行者，会自动加入该阵营）
 - `/eca faction leader <阵营ID> clear` - 清除首领，原首领仍保留成员身份
@@ -1283,8 +1334,9 @@ side="BOTH"
 - `unbanHealing(entity)` - 解除禁疗
 - `getHealBanValue(entity)` - 获取当前禁疗值（未禁疗返回 null）
 - `isHealingBanned(entity)` - 检查是否被禁疗
-- `getHealth(entity)` - 使用 VarHandle 获取原版血量值
-- `setHealth(entity, health)` - 分阶段血量修改，仅在 verify 失败时逐级升级：**Vanilla**（直接写 vanilla DATA_HEALTH_ID）→ **Symbolic**（ASM 字节码数据流分析 getHealth() 定位并反演真实存储，无法反演时对已定位存储做数值求解）→ **Probe**（对候选数值 setter 做行为探测，不依赖方法名）→ **Dynamic**（运行时字节码插桩，需开启激进攻击逻辑配置）。玩家仅执行 Vanilla 阶段。每阶段以 `getHealth()` 在 `max(0.5, abs(目标) * 2%)` 容差内验证，第一个通过的阶段按实体类缓存。
+- `getHealth(entity)` - 读取实体当前生命协议观测到的血量：先取分析器确定的血量锚点，锚点无法解析时回退原版 `DATA_HEALTH_ID`（实体为 null 返回 0.0f）
+- `getRealHealth(entity)` - 同一份权威观测值，实体为 null 时返回 NaN 而非 0.0f
+- `setHealth(entity, health)` - 带校验的改血事务，仅在上一通道校验失败时逐级升级：原版直写（直接写 `DATA_HEALTH_ID`）→ 数据流逆向（ASM 数据流分析 `getHealth()` 定位真实存储并反演其读取表达式）→ 外部扫描（逆向 `isAlive` / `isDeadOrDying` / `hurt` / `actuallyHurt` 定位存储，含需要换算的有效血量模型）→ 方法探针（借实体自身的 writer：反射 setter、函数式字段、注入桥接）→ 数值反演（存储不可反演时在对象图中搜索可写数值单元）。每次尝试都以回读血量锚点、落在 `max(0.5, abs(目标) * 2%)` 容差内为判据；写入前先对受影响状态快照，校验失败整体回滚。服务端写入成功后广播给追踪客户端并登记延迟复查；血量会在下一 tick 被改回的类，还会追加写入实体之外的血量镜像。玩家只执行原版直写。原版直写之后的每条通道都需要激进攻击逻辑，外加 `Attack → setHealth` 下各自的开关（Const Override / External Scan / Method Probe / Numeric Inversion），这四个默认全部关闭。
 - `setMaxHealth(entity, maxHealth)` - 通过反算属性基础值设置最大生命值
 - `lockMaxHealth(entity, value)` - 锁定实体最大生命值（每 tick 强制维持）
 - `unlockMaxHealth(entity)` - 解锁最大生命值
@@ -1296,7 +1348,7 @@ side="BOTH"
 - `addHealthBlacklistKeyword(keyword)` - 添加血量值修改黑名单关键词
 - `removeHealthBlacklistKeyword(keyword)` - 移除血量值修改黑名单关键词
 - `getHealthBlacklistKeywords()` - 获取全部黑名单关键词
-- `hurt(entity, damageSource, amount)` - 强制实体受伤并保证血量确实扣掉。原版 `hurt` 的实际扣血只有 `actuallyHurt` 末尾的 `setHealth(getHealth() - damage)` 一处，走的是实体自己的 getter 与 setter：两者被重写或与真实存储解耦时，整套流程照常跑完、事件照常发出，血却没掉。本方法先清无敌帧并调用原版 `hurt`（减免、击退、仇恨与受击表现均正常发生），再以 `min(1.0, 伤害值 * 50%)` 容差比对血量锚点与 `受伤前 - 伤害值`。不符时补齐原版本该留下的伤害源记账（lastHurtByMob、lastHurtByPlayer/Time、lastDamageSource/Stamp、战斗记录、受击动画）并通过 `setHealth` 强制落血量；预期血量小于等于 0 时改走 `kill`，使死亡流程、战利品表与经验掉落全部执行。处于 ECA 锁血或无敌状态的实体交由那两套系统处理——原版 `hurt` 照常调用，但不做强制写入。
+- `hurt(entity, damageSource, amount)` - 强制实体受伤并保证血量确实扣掉。原版 `hurt` 的实际扣血只有 `actuallyHurt` 末尾的 `setHealth(getHealth() - damage)` 一处，走的是实体自己的 getter 与 setter：两者被重写或与真实存储解耦时，整套流程照常跑完、事件照常发出，血却没掉。本方法先清无敌帧并调用原版 `hurt`（减免、击退、仇恨与受击表现均正常发生），再以 `min(1.0, 伤害值 * 50%)` 容差比对血量锚点与 `受伤前 - 伤害值`。不符时补齐原版本该留下的伤害源记账（lastHurtByMob、lastHurtByPlayer/Time、lastDamageSource/Stamp、战斗记录、受击动画）并通过 `setHealth` 强制落血量，下限钳到 0。致死结果不会在此强行推进死亡流程：实体停在 0 血，由原版 `tickDeath` 播放死亡动画并移除——需要立即击杀请改用 `kill`。处于 ECA 锁血或无敌状态的实体交由那两套系统处理——原版 `hurt` 照常调用，但不做强制写入。
 - `hurt(entity, attacker, amount)` - 同一流程，伤害源由攻击者推导：玩家用 `playerAttack`，其他生物用 `mobAttack`，使击杀归属与掉落归属符合预期
 - `kill(entity, damageSource)` - 击杀实体（掉落 + 成就 + 移除）
 - `revive(entity)` - 复活实体（清除死亡状态）
@@ -1314,7 +1366,8 @@ side="BOTH"
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
 - `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活、锁血、阻断伤害、每 tick 清除有害效果、阻止怪物锁定、保护玩家物品栏；关闭：清除所有保护）
-- `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属 mod 的全部布尔和 void 方法进行 return transformation
+- `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，对目标实体所属 mod 文件的全部布尔和 void 方法进行 return transformation，并 retransform 该 mod 已加载的类。原版实体（含玩家）回退为以其装备所属 mod 文件为目标
+- `disableAllReturn(entity)` - 关闭该实体所属 mod 文件的 AllReturn，目标解析规则与开启一致，同样包含装备回退
 - `setGlobalAllReturn(enable)` - 危险！需要开启激进攻击逻辑配置，启用/禁用全局 AllReturn，影响所有非白名单 mod
 - `disableAllReturn()` - 关闭 AllReturn 并清除目标
 - `isAllReturnEnabled()` - 检查 AllReturn 是否启用
@@ -1367,6 +1420,11 @@ side="BOTH"
 - `getEntities(level, area, entityClass)` - 获取范围内指定类型实体
 - `getEntities(server)` - 获取全服全部实体
 - `getEntities(server, filter)` - 使用自定义条件获取全服实体
+- `getNearestEntity(level, pos, filter)` - 按自定义条件获取最近实体（走 ECA 解析器，无敌实体同样在搜索范围内）
+- `getNearestEntity(level, pos, area, filter)` - 同上，限定在 AABB 范围内
+- `getNearestEntity(level, pos, entityClass)` - 获取最近的指定类型实体
+- `getNearestEntity(level, pos, area, entityClass)` - 获取 AABB 范围内最近的指定类型实体
+- `shaderPreset(id)` - 按 ID 获取着色器预设对象，取用其现成的渲染目标
 - `startResurrection()` - 启动复活守护线程（幂等）
 - `stopResurrection()` - 停止复活守护线程
 - `isResurrectionRunning()` - 检查守护线程是否运行
@@ -1385,6 +1443,7 @@ side="BOTH"
 - `createFaction(id, displayName, color, level)` - 创建并注册阵营，持久化到世界存档
 - `removeFaction(id)` - 删除阵营定义（仅内存）
 - `removeFaction(id, level)` - 删除阵营定义，并清除指向它的全部实体绑定
+- `mergeFactions(intoId, fromId, level)` - 将一个阵营并入另一个：成员改绑、关系覆盖归并，被解散的阵营随后删除。返回迁移的成员数，无法执行时返回 -1
 - `getFaction(id)` - 按 ID 获取阵营定义
 - `getAllFactions()` - 获取全部已注册阵营
 - `joinFaction(entity, factionId)` - 将实体绑定到阵营
@@ -1607,6 +1666,11 @@ public class MyBossExtension extends EntityExtension {
     @Override
     protected String getModId() {
         return "your_mod_id";  // 你的 Mod ID，用于所有资源路径解析（纹理、音效等）
+    }
+
+    @Override
+    public String getFactionId() {
+        return "undead_legion";  // 该类型实体自动加入的阵营，默认 null 表示不加入。阵营必须已通过 @RegisterFaction 或 EcaAPI.createFaction() 注册，否则绑定会被拒绝并记录日志
     }
 
     @Override
@@ -1883,7 +1947,7 @@ public class DiamondSwordExtension extends ItemExtension {
 
 ### 着色器预设
 
-本 Mod 还提供了一些用于实体扩展和物品扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个预设提供 4 个 RenderType：实体扩展用的 `BOSS_BAR`、`BOSS_LAYER`、`SKYBOX`，以及物品扩展用的 `ITEM`。实体纹理叠加通过 `EntityLayerExtension.getTexture()` 支持——返回纹理即可叠加到实体模型上，可与着色器 RenderType 组合，实现 Boss 血条同款的纹理+着色器叠加效果。
+本 Mod 还提供了一些用于实体扩展和物品扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个内置预设类提供 4 个现成 RenderType：实体扩展用的 `BOSS_BAR`、`BOSS_LAYER`、`SKYBOX`，以及物品扩展用的 `ITEM`；另有 `createEntityEffect(texture)` 用于实体纹理叠加。实体纹理叠加通过 `EntityLayerExtension.getTexture()` 支持——返回纹理即可叠加到实体模型上，可与着色器 RenderType 组合，实现 Boss 血条同款的纹理+着色器叠加效果。
 
 可用预设：
 - `TheLastEndRenderTypes` — 终焉
@@ -1913,7 +1977,7 @@ public class DiamondSwordExtension extends ItemExtension {
 - `TOXIC` — 剧毒
 - `COSMOS` — 宇宙
 
-### 着色器生成器
+### ECA 着色器生成器
 
 ECA 提供了游戏内着色器预设生成器，用于在不手写 GLSL 的情况下制作可移植的 Minecraft core shader 预设。使用以下命令打开：
 
@@ -1921,7 +1985,13 @@ ECA 提供了游戏内着色器预设生成器，用于在不手写 GLSL 的情�
 /eca shaderGenerator
 ```
 
-生成器编辑的是一个分层合成工程。每个图层可以包含多个视觉模块，例如基础形状、星空效果、魔法符号和图片元素。编辑器支持实时预览、撤销/重做、图层显隐、图层排序、混合模式、画布编辑、工程保存/读取，以及标准五文件导出。
+生成器编辑的是一个分层合成工程。每个图层可以包含多个视觉模块，例如基础形状、星空效果、魔法符号和图片元素。编辑器支持实时预览、撤销/重做、图层显隐、图层排序、混合模式、画布编辑、工程保存/读取、标准五文件导出，以及删除工程（**文件 -> 删除当前工程**，二次确认后永久删除该工程目录及其源码、贴图与已导入的依赖）。
+
+每个工程还拥有一套独立持久化的五文件源码工作区。使用 **文件 -> 源码编辑器** 可在同一工程中切换到手写 GLSL/JSON，源码页面提供单行菜单、基于注释的快速导航、撤销/重做、保存、编译快捷键和防抖实时预览；右侧上方是预览，下方是可滚动的编译信息与报错面板。生成的片段源码会为图层和元素写入 `// @eca-nav layer: ...` 与 `// @eca-nav element: ...` 标记，手写 `// @eca-nav ...` 注释也可创建自定义导航点。返回图层编辑器不会丢弃任意一侧的数据。使用 **文件 -> 导入已有着色器文件夹** 会从 Forge 规范化后的当前游戏目录打开系统原生文件夹选择器，把所选文件夹中的标准 JSON/VSH/FSH core shader 复制为新的本地 ECA 工程；一个文件夹检测到多个程序时会先要求选择。源码路径符合 `assets/<modid>/shaders/core` 时，工程对话框会自动填写该 Mod ID，否则保持空白。标准三文件会复制到 BLOCK 与 NEW_ENTITY 源码槽位并分别接受编译验证；符合 ECA 共享片元 `_block`/`_entity` 命名的五文件则直接保留两个 profile。源文件夹不会被修改。
+
+导入范围是标准 Minecraft core shader 的 JSON/VSH/FSH 资源。预览运行时会为常见的时间、相机、缩放、不透明度及 cosmic UV uniform 提供绑定。若着色器依赖原 Mod 专用渲染管线、Java 回调、纹理或特殊 uniform，仍可能需要单独适配；无法支持的片元结构会明确报告编译错误，不会静默改写。
+
+贴图依赖同样会被解析。外部着色器引用多张连续编号的 PNG 时，ECA 会尝试复制这些文件，在预览时将它们组合成一张纹理，并向对应的 sampler 和 uniform 提供每张图片在组合纹理中的 UV 范围。带 `.mcmeta` 动画段的 PNG 会在组合纹理中逐帧更新，并遵循帧序、每帧时长与插值设置。如果无法确认文件与 sampler 或 uniform 的对应关系，编译输出面板会说明未解析的依赖和扫描目录，而不是静默失败；着色器编译本身仍可成功。
 
 当前预览目标包括平面、物品、实体、天空盒和 Boss 血条。导出的预设使用标准 core shader 五文件结构：
 
@@ -1992,7 +2062,35 @@ import net.minecraft.resources.ResourceLocation;
 ShaderPreset preset = EcaAPI.shaderPreset(new ResourceLocation("mymod", "my_nebula"));
 ```
 
-返回的 `ShaderPreset` 提供四个可直接用于扩展系统的渲染入口：`bossBar()`、`bossLayer()`、`skybox()` 和 `item()`。实体纹理叠加请通过 `EntityLayerExtension.getTexture()` 配合 `bossLayer()` 使用。
+返回的 `ShaderPreset` 提供 `bossBar()`、`bossLayer()`、`skybox()`、`item()`、`block()`、`geoBlock(texture)` 和 `entityForPreview(texture)`；`EcaPresets` 以预设 ID 静态查询的形式镜像了前六个。`block()` 与 `geoBlock(texture)` 分别是方块扩展使用的 BLOCK 与 NEW_ENTITY profile。实体纹理叠加请通过 `EntityLayerExtension.getTexture()` 配合 `bossLayer()` 使用。
+
+#### ECA 着色器 AI 助手
+
+着色器生成器内置 AI 助手，可以让所选模型直接操作当前工程。支持 OpenAI Responses、OpenAI Chat 兼容和 Anthropic Messages 三种接口格式；每种格式保存为独立 profile，可配置 API URL、模型、API Key 或 Key 环境变量、自定义请求头及 10–600 秒超时。配置保存在 `config/eca/shadergenerator/settings.json`。
+
+模型可以读取工程与模块参数、编辑图层和元素、导入 PNG、局部修改五个源码文件、保存工程、导出五个着色器文件、编译并读取诊断、获取实时预览，以及撤销或重做自己的改动。用户可以分别控制自动编辑、编辑后自动编译和向视觉模型发送预览图；关闭自动编辑后，模型只能查看和讲解工程。
+
+#### MCP
+
+AI 助手页面中的 **MCP** 按钮会启动本地 ECA Shader MCP，让外部 Agent 操作当前着色器工程。服务使用 Streamable HTTP，只监听 `127.0.0.1`，无需访问令牌；MCP 页面会显示端口和已连接 Agent，端口配置保存在 `config/eca/shadergenerator/mcp_settings.json`。URL 端口应与 MCP 页面一致，并且 Minecraft 和 MCP 服务需要保持运行。
+
+使用顺序：先在游戏内 **着色器生成器 → AI 助手 → MCP** 点击按钮启动服务，再启动并连接 Agent。服务未启动时 Agent 无法连接。
+
+##### Codex
+
+命令行注册：
+
+```bash
+codex mcp add eca_shader --url http://localhost:8767/mcp
+```
+
+##### Claude Code
+
+命令行注册：
+
+```bash
+claude mcp add --transport http eca_shader http://127.0.0.1:8767/mcp
+```
 
 ### BossShow 演出
 
@@ -2045,7 +2143,7 @@ JSON 示例 — `frames` 由录制器自动生成，通常只需手动编辑帧�
 }
 ```
 
-- `frames`：每 tick 一个对象，按播放顺序排列。**帧在数组里的下标就是它的 tick**，没有单独的时间字段。由编辑器录制生成。
+- `frames`：每 tick 一个对象，按播放顺序排列。帧在数组里的下标就是它的 tick，没有单独的时间字段。由编辑器录制生成。
 - `frames[].dx/dy/dz`：相机在锚点局部坐标系下的偏移。
 - `frames[].yaw/pitch`：相机朝向（yaw 为锚点局部）。
 - `frames[].keyframe`：可选。存在即表示该帧是关键帧（空对象 `{}` 也是合法的"裸"关键帧）。内部字段：
@@ -2122,13 +2220,15 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 
 对外可通过 `EcaAPI.isFriendly(a, b)` 完整判断友方关系。它涵盖 ECA 同阵营、ECA 友好阵营、原版计分板同盟、玩家与自己的宠物、同主人的宠物，以及主人属于原版同盟队伍的宠物。创造模式、旁观模式和 ECA 无敌刻意不计入友方，因为它们属于攻击保护而非同盟关系。只有需要判断 ECA 阵营 ID 完全相同时才使用 `areSameFaction`；`canHarm` 只检查 ECA 阵营伤害关系，`canTarget` 则同时拒绝中立关系和完整目标免疫。
 
-注册阵营需要创建继承 `FactionDefinition` 的子类，并在类上标注 `@RegisterFaction`。ECA 在 `FMLLoadCompleteEvent` 期间扫描全部 Mod，重复 ID 会被记录并跳过（先扫描到的生效）。也可以通过 `EcaAPI.createFaction` 在运行时创建阵营，可选择是否持久化。
+注册阵营需要创建继承 `FactionDefinition` 的子类，并在类上标注 `@RegisterFaction`。ECA 在 `FMLLoadCompleteEvent` 期间扫描全部 Mod，重复 ID 会被记录并跳过（先扫描到的生效）。也可以通过 `EcaAPI.createFaction` 在运行时创建阵营，可选择是否持久化。实体扩展还可以重写 `getFactionId()`，使该类型实体自动加入某个阵营——阵营必须在这些实体生成前完成注册，否则绑定会被拒绝并记录日志。
 
 四种关系：
 - `SAME_FACTION` — 同一阵营，完全免伤且不会被设为目标
 - `FRIENDLY` — 不同阵营但结盟，不造成伤害也不设目标
 - `NEUTRAL` — 不会被主动设为目标，但误伤仍然生效
 - `HOSTILE` — 正常敌对
+
+`SAME_FACTION` 是派生关系而非可存储关系：它由"双方解析出同一阵营 ID"产生，写成跨阵营覆盖永远不会被读回。要让两个阵营真正成为同一个，只能合并——`EcaAPI.mergeFactions(intoId, fromId, level)`，`/eca faction relation A B same_faction` 即以 A 为存活方调用它。B 的成员改绑到 A，B 的关系覆盖仅在 A 未显式设定时被继承，第三方指向 B 的条目改指 A 或直接丢弃，随后删除 B。A 保留自己的显示名、颜色、默认关系与首领，仅在自身无首领时接手 B 的首领。
 
 关系解析按以下顺序进行，命中即返回：
 1. 阵营 ID 相同 → `SAME_FACTION`
@@ -2138,7 +2238,7 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 5. A 的 `getDefaultRelation(self, target)` 条件覆写（仅当对方无阵营时）
 6. A 的静态默认关系
 
-每个阵营拥有自己的**成员表**。成员以 UUID 加实体类型的形式记录，因此列出名单、按类型筛选、统计数量**完全不需要加载任何实体**——处于未加载区块或其他维度的成员同样可见、可管理。阵营存储于主世界存档，成员归属跨维度全局共享并能在重启后恢复。
+每个阵营拥有自己的成员表。成员以 UUID 加实体类型的形式记录，因此列出名单、按类型筛选、统计数量都无需加载任何实体——处于未加载区块或其他维度的成员同样可见、可管理。阵营存储于主世界存档，成员归属跨维度全局共享并能在重启后恢复。
 
 实体被永久移除时绑定会被清除；区块卸载和跨维度传送会保留绑定，玩家的绑定则在死亡重生后始终保留。成员身份不能脱离阵营存在——注销阵营会一并清空其成员表，加入不存在的阵营会被拒绝而不是被静默记录。
 
@@ -2192,7 +2292,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 首领保护刻意不设范围限制：直接遍历成员表，因此远离主人的召唤物同样会响应。无法在首领所在维度解析到的成员会被跳过，传导也绝不会让成员获得一个它本就不允许攻击的目标。同一 tick 内对同一目标的重复传导会被丢弃，避免首领连续攻击时反复遍历成员表。
 
-两套机制**完全由配置文件控制**，不提供按阵营覆写，因此同一服务器上所有阵营表现一致：
+两套机制完全由配置文件控制，不提供按阵营覆写，因此同一服务器上所有阵营表现一致：
 
 - `Leader Protection Enabled`（默认 `true`）
 - `Immediate Leader Protection`（默认 `false`）
@@ -2229,9 +2329,9 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 **Boss。** 波次可以通过 `RaidWave.setLeader(type)` 声明一名首领。生成的实体会被设为该袭击所属袭击者阵营的首领，从而使用阵营仇恨传导。默认只有已加载、符合目标权限且当前没有目标的生物会响应；开启 `Immediate Leader Protection` 后才会替换已有目标。声明首领需要 `getRaiderFactionId()`；没有阵营就没有可领导的对象，该条目会作为普通袭击者生成。
 
-需要注意传导遍历的是**整张阵营成员表**，而非仅本场袭击的参与者。若该袭击者阵营在世界其他地方还有成员，它们同样会响应。希望响应范围限定在本场袭击内，请为袭击使用专属阵营。
+需要注意传导遍历的是整张阵营成员表，而非仅本场袭击的参与者。若该袭击者阵营在世界其他地方还有成员，它们同样会响应。希望响应范围限定在本场袭击内，请为袭击使用专属阵营。
 
-**启动校验。** 发起袭击时会校验其引用的阵营。非空但未注册的袭击者阵营会**直接拒绝启动**，因为所请求的友伤和求援规则无法应用。主动返回 `null` 则是允许的，此时每个生成实体完全由自身 AI 控制。波次抽取的阵营若未注册或未声明成员池，则记录错误并跳过该组，袭击仍会启动。
+**启动校验。** 发起袭击时会校验其引用的阵营。非空但未注册的袭击者阵营会直接拒绝启动，因为所请求的友伤和求援规则无法应用。主动返回 `null` 则是允许的，此时每个生成实体完全由自身 AI 控制。波次抽取的阵营若未注册或未声明成员池，则记录错误并跳过该组，袭击仍会启动。
 
 **流程控制。** `shouldAdvanceWave`、`checkVictory` 和 `checkDefeat` 均可覆写。默认实现复现原版语义：上一波清空后生成下一波，全部波次生成完毕且袭击者全灭时防守方获胜。
 

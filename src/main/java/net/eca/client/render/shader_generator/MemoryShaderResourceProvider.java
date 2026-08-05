@@ -13,7 +13,10 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -22,14 +25,25 @@ final class MemoryShaderResourceProvider implements ResourceProvider {
 
     private final Map<ResourceLocation, byte[]> resources = new HashMap<>();
     private final ResourceProvider fallback;
+    private final Map<ResourceLocation, Path> externalResources;
+    private final Map<String, Path> externalResourcesByPath;
     private final PackResources pack = new MemoryPackResources();
 
     MemoryShaderResourceProvider(
         String namespace,
         ShaderExportBundle bundle,
-        ResourceProvider fallback
+        ResourceProvider fallback,
+        Map<ResourceLocation, Path> externalResources
     ) {
         this.fallback = fallback;
+        this.externalResources = externalResources == null ? Map.of() : Map.copyOf(externalResources);
+        Map<String, Path> byPath = new HashMap<>();
+        Set<String> ambiguousPaths = new HashSet<>();
+        this.externalResources.forEach((location, path) -> {
+            if (byPath.putIfAbsent(location.getPath(), path) != null) ambiguousPaths.add(location.getPath());
+        });
+        ambiguousPaths.forEach(byPath::remove);
+        this.externalResourcesByPath = Map.copyOf(byPath);
         String prefix = "assets/" + namespace + "/";
         for (ShaderExportBundle.File file : bundle.files()) {
             if (!file.relativePath().startsWith(prefix)) {
@@ -48,6 +62,12 @@ final class MemoryShaderResourceProvider implements ResourceProvider {
         byte[] bytes = resources.get(location);
         if (bytes != null) {
             return Optional.of(new Resource(pack, () -> new ByteArrayInputStream(bytes)));
+        }
+        Path external = externalResources.get(location);
+        if (external == null) external = externalResourcesByPath.get(location.getPath());
+        if (external != null && Files.isRegularFile(external)) {
+            Path resourcePath = external;
+            return Optional.of(new Resource(pack, () -> Files.newInputStream(resourcePath)));
         }
         return fallback.getResource(location);
     }

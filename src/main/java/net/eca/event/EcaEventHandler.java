@@ -143,6 +143,7 @@ public class EcaEventHandler {
             EntityExtensionManager.tickDimension(serverLevel);
             ForceLoadingManager.tickDimension(serverLevel);
             RaidManager.tickDimension(serverLevel);
+            FactionManager.tickHostileTargeting(serverLevel);
         }
     }
 

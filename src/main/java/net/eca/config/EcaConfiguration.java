@@ -182,8 +182,8 @@ public class EcaConfiguration {
             .define("Same Faction Glow Color", "FF00FF00");
 
         FACTION_ALERT_ENABLED = BUILDER
-            .comment("When enabled, attacking a faction member causes nearby same-faction mobs to target the attacker.",
-                     "开启后，攻击阵营成员会导致附近同阵营生物将攻击者设为目标。")
+            .comment("When enabled, attacking a faction member causes nearby same-faction and friendly-faction mobs to target a hostile-faction attacker.",
+                     "开启后，阵营成员受击会使附近同阵营及友方阵营生物将敌对阵营攻击者设为目标。")
             .define("Alert Enabled", true);
 
         FACTION_ALERT_RANGE = BUILDER
