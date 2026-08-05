@@ -95,7 +95,7 @@ dependencies {
     implementation fg.deobf("maven.modrinth:epic-core-api:VERSION")
 }
 ```
-> Replace `VERSION` with the version you need (e.g. `1.1.5-fix-fix`). Go to [ECA Modrinth page](https://modrinth.com/mod/epic-core-api) to find available versions.
+> Replace `VERSION` with the version you need (e.g. `1.1.7-fix-fix`). Go to [ECA Modrinth page](https://modrinth.com/mod/epic-core-api) to find available versions.
 
 **Step 3: Declare dependency** (mods.toml)
 ```toml
@@ -117,8 +117,8 @@ side="BOTH"
 - `unbanHealing(entity)` - Unban healing for entity
 - `getHealBanValue(entity)` - Get current heal ban value (null if not banned)
 - `isHealingBanned(entity)` - Check if entity has healing banned
-- `getHealth(entity)` - Get vanilla health via VarHandle
-- `setHealth(entity, health)` - Staged health modification that escalates only when a verify step fails: **Vanilla** (write vanilla DATA_HEALTH_ID directly) → **Symbolic** (ASM bytecode dataflow analysis of getHealth() to locate and invert the real storage, with numeric fallback on a located storage) → **Probe** (behavioral probing of candidate numeric setters, name-agnostic) → **Dynamic** (runtime bytecode instrumentation, requires Attack Radical Logic config). Players only run the Vanilla stage. Each stage is verified against `getHealth()` within `max(0.5, abs(target) * 2%)`; the first to pass is cached per entity class.
+- `getHealth(entity)` - Read the health observed through the entity's active life protocol: the analyzer's health anchor, falling back to vanilla `DATA_HEALTH_ID` when no anchor resolves
+- `setHealth(entity, health)` - Verified health transaction that escalates through channels only when the previous one fails verification: vanilla write (write `DATA_HEALTH_ID` directly) → dataflow reversal (ASM dataflow analysis of `getHealth()` locates the real storage and inverts its read expression) → external scan (reverse `isAlive` / `isDeadOrDying` / `hurt` / `actuallyHurt` to locate storage, including effective-health models that need conversion) → method probe (borrow the entity's own writer: reflective setters, functional fields, injected bridges) → numeric inversion (search the object graph for writable numeric cells when the storage cannot be inverted). Each attempt is verified by reading the health anchor back within `max(0.5, abs(target) * 2%)`, and a failed write rolls the whole transaction back. Players run the vanilla write only. Every channel past the vanilla write requires Attack Radical Logic plus its own switch under `Attack → setHealth` (Const Override / External Scan / Method Probe / Numeric Inversion), all off by default.
 - `setMaxHealth(entity, maxHealth)` - Set max health by reverse-calculating attribute base value from current modifiers
 - `lockMaxHealth(entity, value)` - Lock entity max health at specific value (enforced every tick)
 - `unlockMaxHealth(entity)` - Unlock entity max health
@@ -130,7 +130,7 @@ side="BOTH"
 - `addHealthBlacklistKeyword(keyword)` - Add keyword to health modification blacklist
 - `removeHealthBlacklistKeyword(keyword)` - Remove keyword from health modification blacklist
 - `getHealthBlacklistKeywords()` - Get all health blacklist keywords
-- `hurt(entity, damageSource, amount)` - Damage an entity and guarantee the health loss lands. Vanilla `hurt` writes health only once, inside `actuallyHurt`, as `setHealth(getHealth() - damage)` — through the entity's own getter and setter, so an overridden or storage-decoupled entity runs the whole pipeline and fires all events while losing no health. This method clears the invulnerability cooldown and calls vanilla `hurt` first (mitigation, knockback, aggro and hurt animation all happen normally), then compares the health anchor against `before - amount` within `min(1.0, amount * 50%)`. On mismatch it restores the damage-source bookkeeping vanilla would have left (lastHurtByMob, lastHurtByPlayer/Time, lastDamageSource/Stamp, combat tracker, hurt animation) and forces the health through `setHealth`; when the expected health is at or below zero it routes to `kill` instead, so the death path, loot table and experience drops all run. Entities under ECA's own health lock or invulnerability are left to those systems — vanilla `hurt` still runs, but no forced write is attempted.
+- `hurt(entity, damageSource, amount)` - Damage an entity and guarantee the health loss lands. Vanilla `hurt` writes health only once, inside `actuallyHurt`, as `setHealth(getHealth() - damage)` — through the entity's own getter and setter, so an overridden or storage-decoupled entity runs the whole pipeline and fires all events while losing no health. This method clears the invulnerability cooldown and calls vanilla `hurt` first (mitigation, knockback, aggro and hurt animation all happen normally), then compares the health anchor against `before - amount` within `min(1.0, amount * 50%)`. On mismatch it restores the damage-source bookkeeping vanilla would have left (lastHurtByMob, lastHurtByPlayer/Time, lastDamageSource/Stamp, combat tracker, hurt animation) and forces the health through `setHealth`, clamped at zero. A lethal result is never forced into the death path here: the entity is left at zero health so vanilla `tickDeath` plays the death animation and removes it — use `kill` when an immediate kill is wanted. Entities under ECA's own health lock or invulnerability are left to those systems — vanilla `hurt` still runs, but no forced write is attempted.
 - `hurt(entity, attacker, amount)` - Same pipeline with the damage source derived from the attacker: `playerAttack` for players, `mobAttack` for every other living entity, so kill credit and loot attribution behave as expected
 - `kill(entity, damageSource)` - Kill entity (loot + advancements + removal)
 - `revive(entity)` - Clear death state and restore health
@@ -262,12 +262,9 @@ side="BOTH"
 - `getNearestRaid(level, pos, maxDistance)` - Find the nearest active raid within a distance
 - `getAllRaidDefinitions()` - Get all registered raid definitions
 
-Here is a simple example:
-
-
 ### Entity Extensions
 
-This mod also provides a customizable entity type extension feature for adding special visual effects to your entities. You need to create a subclass extending `EntityExtension` and annotate it with `@RegisterEntityExtension` to register the extension. Here is a quick start example:
+This mod also provides a customizable entity type extension feature for adding special visual effects to your entities. You need to create a subclass extending `EntityExtension` and annotate it with `@RegisterEntityExtension` to register the extension.
 
 Entity shader layers use ordered `ShaderMaskPass` lists. Each pass can select a different color from the same UV-aligned mask and render that region with a different shader; black is the default target color and near-color tolerance is configurable. The same mask pipeline works with vanilla and GeckoLib entity renderers, while Geo masks also intersect with bone filtering.
 
@@ -331,7 +328,7 @@ ECA provides an in-game shader preset generator for building portable Minecraft 
 /eca shaderGenerator
 ```
 
-The generator edits a layered composition project. Each layer can contain multiple visual modules, including basic shapes, starry sky effects, magic symbols, and image elements. The editor supports live preview, undo/redo, layer visibility, layer ordering, blend modes, canvas editing, project save/load, and five-file shader export.
+The generator edits a layered composition project. Each layer can contain multiple visual modules, including basic shapes, starry sky effects, magic symbols, and image elements. The editor supports live preview, undo/redo, layer visibility, layer ordering, blend modes, canvas editing, project save/load, five-file shader export, project deletion, a source editor for hand-writing the five GLSL/JSON files, and importing an existing standard shader folder into a project. It also ships an AI assistant that drives the current project through a model of your choice, and a local MCP server that lets an external agent do the same.
 
 Preview targets currently include plane, item, entity, skybox, and Boss bar. The exported preset uses the standard core shader five-file layout:
 
@@ -356,16 +353,9 @@ Export modes:
 
 Project files are saved under `config/eca/shadergenerator/<namespace>/<name>/project.json`. Use **File -> Export As <shader>** to export a runtime-loadable five-file preset into `config/eca/shadergenerator/<namespace>/<name>/`. ECA automatically discovers presets from both mod assets and exported config presets. A preset ID is always `<namespace>:<name>`.
 
-For mod-packaged presets, place the five files under `src/main/resources/assets/<namespace>/shaders/core/`. You may also declare the preset with `@RegisterShaderPreset`. The annotation registers the preset ID during startup scanning and is useful for mods that want to expose custom presets through an explicit Java marker class:
+For mod-packaged presets, place the five files under `src/main/resources/assets/<namespace>/shaders/core/`. You may also declare the preset with `@RegisterShaderPreset`, which registers the preset ID during startup scanning.
 
-
-At runtime, use `EcaPresets` to obtain the generated RenderTypes:
-
-
-You can also query the preset object through `EcaAPI`:
-
-
-The returned `ShaderPreset` exposes four ready-made render targets: `bossBar()`, `bossLayer()`, `skybox()`, and `item()`. For entity texture overlays, use `EntityLayerExtension.getTexture()` with `bossLayer()`.
+At runtime, obtain the generated RenderTypes through `EcaPresets`, or query the preset object through `EcaAPI.shaderPreset(id)`. The returned `ShaderPreset` exposes `bossBar()`, `bossLayer()`, `skybox()`, `item()`, `block()`, `geoBlock(texture)` and `entityForPreview(texture)`; `block()` and `geoBlock(texture)` are the BLOCK and NEW_ENTITY profiles used by block extensions. For entity texture overlays, use `EntityLayerExtension.getTexture()` with `bossLayer()`.
 
 ### BossShow Cinematics
 
@@ -418,7 +408,7 @@ JSON example — `frames` are generated by the recorder; you typically only hand
 }
 ```
 
-- `frames`: one object per tick, in playback order. **A frame's index in the array is its tick** — there is no separate time field. Generated by the editor.
+- `frames`: one object per tick, in playback order. A frame's index in the array is its tick — there is no separate time field. Generated by the editor.
 - `frames[].dx/dy/dz`: camera offset in anchor-local coordinates.
 - `frames[].yaw/pitch`: camera orientation (yaw is anchor-local).
 - `frames[].keyframe`: optional. Its presence marks this frame as a keyframe (an empty object `{}` is a valid bare keyframe). Fields inside:
@@ -429,11 +419,7 @@ JSON example — `frames` are generated by the recorder; you typically only hand
 
 > The old `samples` + `markers` format is no longer recognized — files using it load as zero-frame cutscenes. Re-record or migrate to `frames`.
 
-Event handler example — the `event_id` strings in the JSON above are dispatched to `onKeyframeEvent` on the server at the corresponding tick:
-
-
-Triggering from code:
-
+The `event_id` strings in the JSON above are dispatched to `onKeyframeEvent` on the server at the corresponding tick, and cutscenes can also be triggered from code through `EcaAPI.playBossShow(...)` / `launchBossShowEvent(...)`.
 
 > If a `@RegisterBossShow` class has no matching JSON on first launch, an empty template JSON is auto-generated at `config/eca/bossshow/<namespace>/<path>.json`.
 
@@ -451,7 +437,7 @@ Triggering from code:
 
 ### Faction System
 
-ECA provides a faction system that constrains targeting and damage relationships. Binding an entity makes vanilla alliance checks and target assignment respect same-faction, friendly and neutral rules without requiring an interface or mixin. It does not add target-acquisition AI: a `HOSTILE` relation permits combat, but the entity's own goals or an alert mechanism must still acquire the target. Standard `LivingEntity` damage paths enforce friendly protection; direct state-changing APIs remain the caller's responsibility. `FactionUtil.isFriendly` resolves alliances, while `FactionUtil.canAttack` additionally enforces creative/spectator and ECA invulnerability protection.
+ECA provides a faction system that constrains targeting and damage relationships. Binding an entity makes vanilla alliance checks and target assignment respect same-faction, friendly and neutral rules without requiring an interface or mixin. Faction-bound mobs periodically acquire the nearest faction-bound entity with a `HOSTILE` relation through `Mob.setTarget`; their existing combat goals still perform movement and attacks, and factionless entities are never selected. Standard `LivingEntity` damage paths enforce friendly protection; direct state-changing APIs remain the caller's responsibility. `FactionUtil.isFriendly` resolves alliances, while `FactionUtil.canAttack` additionally enforces creative/spectator and ECA invulnerability protection.
 
 `EcaAPI.isFriendly(a, b)` is the public complete friendly check. It returns true for the same ECA faction, friendly ECA factions, vanilla scoreboard allies, owner-pet pairs, pets with the same owner, and pets whose owners are scoreboard allies. Creative mode, spectator mode and ECA invulnerability are deliberately excluded because they are attack protections rather than alliance relationships. Use `areSameFaction` only when exact ECA faction identity matters; `canHarm` checks ECA faction relations only, while `canTarget` also rejects neutral relations and complete target immunity.
 
@@ -471,7 +457,7 @@ Relation resolution runs in this order, and the first match wins:
 5. A's `getDefaultRelation(self, target)` conditional override (only when the other side has no faction)
 6. A's static default relation
 
-Each faction owns its **member table**. A member is recorded as a UUID plus its entity type, which means a roster can be listed, filtered by type and counted **without loading a single entity** — members sitting in unloaded chunks or other dimensions are still fully visible and manageable. Factions live in the overworld's SavedData, so membership is global across dimensions and survives restarts.
+Each faction owns its member table. A member is recorded as a UUID plus its entity type, which means a roster can be listed, filtered by type and counted without loading a single entity — members sitting in unloaded chunks or other dimensions are still fully visible and manageable. Factions live in the overworld's SavedData, so membership is global across dimensions and survives restarts.
 
 A binding is dropped when the entity is permanently removed; chunk unloads and dimension changes keep it, and players keep theirs across death and respawn. Membership cannot outlive its faction — unregistering a faction drops its whole member table, and joining a faction that does not exist is refused rather than silently recorded.
 
@@ -491,7 +477,7 @@ A faction may optionally declare which entity types it consists of through `getM
 
 Leader protection is deliberately not range-limited: the member table is walked directly, so summons far from their master still answer. Members that cannot be resolved in the leader's dimension are skipped, and propagation never hands a member a target it is forbidden to attack. Repeat propagation of the same target within one tick is dropped, so a rapidly attacking leader does not walk the table on every hit.
 
-Both mechanisms are governed **entirely by config** — there are no per-faction overrides, so every faction behaves the same way on a given server:
+Both mechanisms are governed entirely by config — there are no per-faction overrides, so every faction behaves the same way on a given server:
 
 - `Leader Protection Enabled` (default `true`)
 - `Immediate Leader Protection` (default `false`)
@@ -524,13 +510,13 @@ Raids are registered by extending `RaidDefinition` and annotating with `@Registe
 
 **Waves:** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws that pull from a faction's `getMemberEntityTypes()` pool by weight.
 
-**Raiders:** Spawned raiders are bound to `getRaiderFactionId()`. Spawned `Mob` instances also receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight an already acquired target and otherwise advance. Any entity type can be spawned and no interface is required, but faction hostility does not create target-acquisition AI; non-`Mob` entities receive neither the navigation goal nor mob callbacks. Override `getRaiderGoalPriority()` or return a negative value to change or disable goal injection.
+**Raiders:** Spawned raiders are bound to `getRaiderFactionId()`. Spawned `Mob` instances also receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight an already acquired hostile-faction target and otherwise advance. Any entity type can be spawned and no interface is required, but non-`Mob` entities receive neither faction target acquisition, the navigation goal, nor mob callbacks. Override `getRaiderGoalPriority()` or return a negative value to change or disable goal injection.
 
 **Boss:** A wave may declare a leader with `RaidWave.setLeader(type)`. The spawned entity becomes the leader of the raid's raider faction, so the faction's threat propagation applies to it for free. Eligible, loaded mobs without an existing target respond by default; `Immediate Leader Protection` allows them to replace an existing target. Declaring a leader requires `getRaiderFactionId()`; without a faction there is nothing to lead and the entry spawns as an ordinary raider.
 
-Note that propagation walks the **entire faction member table**, not just this raid's participants. If the raider faction has other members elsewhere in the world, they answer too. Use a raid-specific faction if you want the response confined to the raid.
+Note that propagation walks the entire faction member table, not just this raid's participants. If the raider faction has other members elsewhere in the world, they answer too. Use a raid-specific faction if you want the response confined to the raid.
 
-**Validation:** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction **refuses the start** outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
+**Validation:** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction refuses the start outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
 
 **Progression:** `shouldAdvanceWave`, `checkVictory` and `checkDefeat` are all overridable. The defaults reproduce vanilla semantics: the next wave spawns once the previous one is dead, and the defenders win when every wave has spawned and every raider is gone.
 
@@ -541,7 +527,7 @@ Note that propagation walks the **entire faction member table**, not just this r
 Raids run per dimension and automatically restore their latest periodic checkpoint after a restart. Permanent casualties and terminal operations are saved immediately; ordinary progression is checkpointed once per second. The center chunk is force-loaded for the duration, but raiders that travel into other unloaded chunks are not force-loaded with it.
 
 
-Registering a definition does not start anything. Raids are started explicitly so that any trigger condition can drive them — entering a region, using an item, a command, a scheduled event:
+Registering a definition does not start anything. Raids are started explicitly through `EcaAPI.startRaid(...)` / `startRaidAt(...)` so that any trigger condition can drive them — entering a region, using an item, a command, a scheduled event.
 
 
 ### ECA Transformer Whitelist

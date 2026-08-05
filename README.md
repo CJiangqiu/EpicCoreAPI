@@ -96,7 +96,7 @@ dependencies {
     implementation fg.deobf("maven.modrinth:epic-core-api:VERSION")
 }
 ```
-> Replace `VERSION` with the version you need (e.g. `1.1.5-fix-fix`). Go to [ECA Modrinth page](https://modrinth.com/mod/epic-core-api) to find available versions.
+> Replace `VERSION` with the version you need (e.g. `1.1.7-fix-fix`). Go to [ECA Modrinth page](https://modrinth.com/mod/epic-core-api) to find available versions.
 
 **Step 3: Declare dependency** (mods.toml)
 ```toml
@@ -1312,7 +1312,7 @@ dependencies {
     implementation fg.deobf("maven.modrinth:epic-core-api:VERSION")
 }
 ```
-> 将 `VERSION` 替换为所需版本（如 `1.1.5-fix-fix`）。前往 [ECA Modrinth 页面](https://modrinth.com/mod/epic-core-api) 查看可用版本。
+> 将 `VERSION` 替换为所需版本（如 `1.1.7-fix-fix`）。前往 [ECA Modrinth 页面](https://modrinth.com/mod/epic-core-api) 查看可用版本。
 
 **第三步：声明依赖** (mods.toml)
 ```toml
@@ -2216,7 +2216,7 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 
 ### 阵营系统
 
-本 Mod 提供了一套约束目标选择与伤害关系的阵营系统。实体绑定阵营后，原版同盟判断和目标设置会遵守同阵营、友好与中立规则，无需实现接口或编写混入。阵营系统不会自动添加索敌 AI：`HOSTILE` 只代表允许交战，仍需实体自身 Goal 或求援机制取得目标。标准 `LivingEntity` 伤害路径会执行友军保护，直接修改状态的 API 则仍需调用方自行判断。`FactionUtil.isFriendly` 负责解析同盟关系，`FactionUtil.canAttack` 则额外执行创造/旁观与 ECA 无敌保护。
+本 Mod 提供了一套约束目标选择与伤害关系的阵营系统。实体绑定阵营后，原版同盟判断和目标设置会遵守同阵营、友好与中立规则，无需实现接口或编写混入。绑定阵营的生物会周期性地通过 `Mob.setTarget` 获取附近与之为 `HOSTILE` 关系的阵营实体，其既有战斗 Goal 仍负责移动与攻击；无阵营的实体不会被这一索敌流程选中。标准 `LivingEntity` 伤害路径会执行友军保护，直接修改状态的 API 则仍需调用方自行判断。`FactionUtil.isFriendly` 负责解析同盟关系，`FactionUtil.canAttack` 则额外执行创造/旁观与 ECA 无敌保护。
 
 对外可通过 `EcaAPI.isFriendly(a, b)` 完整判断友方关系。它涵盖 ECA 同阵营、ECA 友好阵营、原版计分板同盟、玩家与自己的宠物、同主人的宠物，以及主人属于原版同盟队伍的宠物。创造模式、旁观模式和 ECA 无敌刻意不计入友方，因为它们属于攻击保护而非同盟关系。只有需要判断 ECA 阵营 ID 完全相同时才使用 `areSameFaction`；`canHarm` 只检查 ECA 阵营伤害关系，`canTarget` 则同时拒绝中立关系和完整目标免疫。
 
@@ -2325,7 +2325,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 **波次。** 每个 `RaidWave` 可自由混用两种生成源——显式指定实体类型，以及按权重从阵营的 `getMemberEntityTypes()` 池中抽取。
 
-**袭击者。** 生成的袭击者会被绑定到 `getRaiderFactionId()`；其中 `Mob` 实例还会被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先处理已经取得的目标，否则向中心推进。任意实体类型均可生成且不要求实现接口，但阵营敌对不会自动创建索敌 AI；非 `Mob` 实体不会获得导航 Goal，也不会执行生物回调。可覆写 `getRaiderGoalPriority()` 调整优先级，返回负数则禁用注入。
+**袭击者。** 生成的袭击者会被绑定到 `getRaiderFactionId()`；其中 `Mob` 实例还会被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先处理已经取得的敌对阵营目标，否则向中心推进。任意实体类型均可生成且不要求实现接口，但非 `Mob` 实体不会获得阵营索敌、导航 Goal 或生物回调。可覆写 `getRaiderGoalPriority()` 调整优先级，返回负数则禁用注入。
 
 **Boss。** 波次可以通过 `RaidWave.setLeader(type)` 声明一名首领。生成的实体会被设为该袭击所属袭击者阵营的首领，从而使用阵营仇恨传导。默认只有已加载、符合目标权限且当前没有目标的生物会响应；开启 `Immediate Leader Protection` 后才会替换已有目标。声明首领需要 `getRaiderFactionId()`；没有阵营就没有可领导的对象，该条目会作为普通袭击者生成。
 
