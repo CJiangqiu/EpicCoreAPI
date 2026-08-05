@@ -1,6 +1,6 @@
 # EpicCoreAPI
 
-This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and VarHandle technologies. Note that while method names may resemble vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
+This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
 
 The original intent of this mod is to provide developers with simplified entity manipulation APIs while achieving a certain level of strength under the premise of ensuring performance and compatibility. Therefore, please do not use this mod for mod power comparisons or endless code arms races. Additionally, in modpack survival environments, it is best to ensure that the Attack and Defence Radical Logic config options are disabled.
 
@@ -139,7 +139,7 @@ side="BOTH"
 - `revive(level, uuid)` - Clear death state and restore health by UUID in specified level
 - `reviveAllContainers(entity)` - Revive all critical entity containers (tickList, lookup, sections, tracker)
 - `reviveAllContainers(level, uuid)` - Revive all critical entity containers by UUID in specified level
-- `teleport(entity, x, y, z)` - Teleport via VarHandle with client sync
+- `teleport(entity, x, y, z)` - Teleport via direct field access with client sync
 - `lockLocation(entity)` - Lock entity location at current position
 - `lockLocation(entity, position)` - Lock entity location at specified position
 - `unlockLocation(entity)` - Unlock entity location
@@ -998,7 +998,7 @@ EcaAPI.isBossShowPlaying(viewer); // check if viewer is in a cutscene
     ```
 - **Hot reload** — `/eca bossShow reload` picks up all JSON changes without restarting.
 
-### Faction System
+### Custom Factions
 
 ECA provides a faction system that controls targeting and damage relationships. Binding an entity makes vanilla alliance checks and target assignment respect same-faction, friendly and neutral rules without requiring an interface. Faction-bound mobs periodically acquire nearby faction-bound entities with a `HOSTILE` relation through `Mob.setTarget`; their existing combat goals still perform movement and attacks. Entities without a faction are never selected by this faction acquisition pass. Standard `LivingEntity` damage paths enforce friendly protection; direct state-changing APIs remain the caller's responsibility. `FactionUtil.isFriendly` resolves alliances, while `FactionUtil.canAttack` additionally enforces creative/spectator and ECA invulnerability protection.
 
@@ -1099,7 +1099,7 @@ Both mechanisms are governed entirely by config — there are no per-faction ove
 
 Faction members can also glow in their relation color for nearby players, which is configurable and off by default.
 
-### Raid System
+### Custom Raids
 
 ECA provides a customizable raid system. The vanilla raid only works on villages, only accepts entities implementing `Raider`, and hardcodes its victory condition and rewards; an ECA raid can target any structure, use any entity type, and replace every rule that governs how it progresses and ends.
 
@@ -1216,7 +1216,7 @@ Any `.json` filename works, and you can have multiple files.
 
 # 中文
 
-本 Mod 提供了一些基于 CoreMod (ITransformationService)、Java Agent 和 VarHandle 等技术所实现的实体操作 API 和相关命令。注意，虽然在方法命名上本 Mod 提供的各种逻辑和原版相似，但是本质上的实现完全不同。例如，设置生命值 API 可以修改部分使用自定义生命值（包括但不限于实体数据、数字类型字段、部分哈希表）的实体；清除 API 则是进行了 Minecraft 底层容器的相关清除；设置无敌 API 则是提供了比原版创造模式无敌更强大的实现。此外，本 Mod 还将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
+本 Mod 提供了一些基于 CoreMod (ITransformationService)、Java Agent 和 Mixin 等技术所实现的实体操作 API 和相关命令，此外还提供一系列功能模块：BossShow、实体扩展、方块扩展、物品扩展、屏幕滤镜、ECA 着色器生成器、自定义阵营与自定义袭击。注意，本 Mod 的实体操作方法虽然在命名上可能与原版一致，但本质上的实现完全不同。例如，设置生命值 API 可以修改部分使用自定义生命值（包括但不限于实体数据、数字类型字段、部分哈希表）的实体；清除 API 则是进行了 Minecraft 底层容器的相关清除；设置无敌 API 则是提供了比原版创造模式无敌更强大的实现。此外，本 Mod 还将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
 
 本 Mod 的初衷是为开发者提供简化的实体操作 API，并在确保性能和兼容性的前提下获得一定的强度。因此，请不要将本 Mod 用于 Mod 战力对比和无休止的代码军火竞赛中。此外，在整合包生存环境下，最好确保攻击和防御逻辑的激进配置项处于关闭状态。
 
@@ -1355,7 +1355,7 @@ side="BOTH"
 - `revive(level, uuid)` - 在指定维度按 UUID 复活实体
 - `reviveAllContainers(entity)` - 复活实体的所有关键容器（tickList、lookup、sections、tracker）
 - `reviveAllContainers(level, uuid)` - 在指定维度按 UUID 复活实体的所有关键容器
-- `teleport(entity, x, y, z)` - VarHandle 传送并同步到客户端
+- `teleport(entity, x, y, z)` - 直接字段访问传送并同步到客户端
 - `lockLocation(entity)` - 锁定实体当前位置
 - `lockLocation(entity, position)` - 锁定实体到指定位置
 - `unlockLocation(entity)` - 解除实体位置锁定
@@ -2214,7 +2214,7 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
     ```
 - **热重载** — `/eca bossShow reload` 立即加载所有 JSON 更改，无需重启游戏。
 
-### 阵营系统
+### 自定义阵营
 
 本 Mod 提供了一套约束目标选择与伤害关系的阵营系统。实体绑定阵营后，原版同盟判断和目标设置会遵守同阵营、友好与中立规则，无需实现接口或编写混入。绑定阵营的生物会周期性地通过 `Mob.setTarget` 获取附近与之为 `HOSTILE` 关系的阵营实体，其既有战斗 Goal 仍负责移动与攻击；无阵营的实体不会被这一索敌流程选中。标准 `LivingEntity` 伤害路径会执行友军保护，直接修改状态的 API 则仍需调用方自行判断。`FactionUtil.isFriendly` 负责解析同盟关系，`FactionUtil.canAttack` 则额外执行创造/旁观与 ECA 无敌保护。
 
@@ -2315,7 +2315,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 阵营成员还可以按关系颜色对附近玩家发光，该功能可在配置中开关，默认关闭。
 
-### 袭击系统
+### 自定义袭击
 
 本 Mod 提供了一套可自定义的袭击系统。原版袭击只能作用于村庄、只接受实现了 `Raider` 接口的实体，且胜利条件与奖励全部硬编码；ECA 的袭击可以指向任意结构、使用任意实体类型，并且能替换掉决定袭击如何推进与结束的每一条规则。
 

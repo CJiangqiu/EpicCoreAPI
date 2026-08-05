@@ -13,7 +13,7 @@ credits = '''
 Contributor:WZZ,Mascot:MCreator
 '''
 description = '''
-A library mod that provides powerful entity manipulation APIs through CoreMod (ITransformationService), Java Agent, and VarHandle technologies.
+A library mod that provides powerful entity manipulation APIs through CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids.
 '''
 
 [[dependencies.eca]]

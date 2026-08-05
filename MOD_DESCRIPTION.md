@@ -1,6 +1,6 @@
 # EpicCoreAPI
 
-This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and VarHandle technologies. Note that while method names may resemble vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
+This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
 
 The original intent of this mod is to provide developers with simplified entity manipulation APIs while achieving a certain level of strength under the premise of ensuring performance and compatibility. Therefore, please do not use this mod for mod power comparisons or endless code arms races. Additionally, in modpack survival environments, it is best to ensure that the Attack and Defence Radical Logic config options are disabled.
 
@@ -137,7 +137,7 @@ side="BOTH"
 - `revive(level, uuid)` - Clear death state and restore health by UUID in specified level
 - `reviveAllContainers(entity)` - Revive all critical entity containers (tickList, lookup, sections, tracker)
 - `reviveAllContainers(level, uuid)` - Revive all critical entity containers by UUID in specified level
-- `teleport(entity, x, y, z)` - Teleport via VarHandle with client sync
+- `teleport(entity, x, y, z)` - Teleport via direct field access with client sync
 - `lockLocation(entity)` - Lock entity location at current position
 - `lockLocation(entity, position)` - Lock entity location at specified position
 - `unlockLocation(entity)` - Unlock entity location
@@ -435,7 +435,7 @@ The `event_id` strings in the JSON above are dispatched to `onKeyframeEvent` on 
     ```
 - **Hot reload** — `/eca bossShow reload` picks up all JSON changes without restarting.
 
-### Faction System
+### Custom Factions
 
 ECA provides a faction system that constrains targeting and damage relationships. Binding an entity makes vanilla alliance checks and target assignment respect same-faction, friendly and neutral rules without requiring an interface or mixin. Faction-bound mobs periodically acquire the nearest faction-bound entity with a `HOSTILE` relation through `Mob.setTarget`; their existing combat goals still perform movement and attacks, and factionless entities are never selected. Standard `LivingEntity` damage paths enforce friendly protection; direct state-changing APIs remain the caller's responsibility. `FactionUtil.isFriendly` resolves alliances, while `FactionUtil.canAttack` additionally enforces creative/spectator and ECA invulnerability protection.
 
@@ -500,7 +500,7 @@ Both mechanisms are governed entirely by config — there are no per-faction ove
 
 Faction members can also glow in their relation color for nearby players, which is configurable and off by default.
 
-### Raid System
+### Custom Raids
 
 ECA provides a customizable raid system. The vanilla raid only works on villages, only accepts entities implementing `Raider`, and hardcodes its victory condition and rewards; an ECA raid can target any structure, use any entity type, and replace every rule that governs how it progresses and ends.
 

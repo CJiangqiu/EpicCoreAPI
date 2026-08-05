@@ -1159,7 +1159,7 @@ public class EntityUtil {
     // ==================== 传送模块 ====================
 
     /**
-     * Teleport an entity to the specified location using VarHandle direct access.
+     * Teleport an entity to the specified location using direct field access.
      * This method directly modifies the entity's position fields and updates the bounding box.
      * @param entity the entity to teleport
      * @param x the target x coordinate
