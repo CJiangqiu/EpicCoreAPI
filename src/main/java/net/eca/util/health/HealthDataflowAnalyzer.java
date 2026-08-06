@@ -194,6 +194,15 @@ public final class HealthDataflowAnalyzer {
         return MAINTENANCE_PLAN_CACHE.getOrDefault(entityClass, MaintenancePlan.EMPTY);
     }
 
+    /* 维护扫描抓到的写入落点，去重后按 tick/权威扫描顺序保留。
+       它由字节码写入扫描独立得出，与比较表达式无关，因此可以作为有效血量模型的候选来源
+       而不构成"存储与校验同出一源"的闭环——后者会使写入与回读互为逆运算而恒等通过。
+       真实血量存储未必被任何改血通道写过，只认写入记录会形成"不提名就没记录、没记录就不提名"的死锁。 */
+    public static List<Source> maintenanceSinks(Class<?> entityClass) {
+        if (entityClass == null) return List.of();
+        return MAINTENANCE_SINKS_CACHE.getOrDefault(entityClass, List.of());
+    }
+
     public static boolean isMaintenancePlanResolved(Class<?> entityClass) {
         MaintenanceParts parts = entityClass == null ? null : MAINTENANCE_PARTS_CACHE.get(entityClass);
         return parts != null && parts.tickResolved && parts.authorityResolved;
@@ -212,6 +221,7 @@ public final class HealthDataflowAnalyzer {
     static void clearMaintenancePlans() {
         MAINTENANCE_PLAN_CACHE.clear();
         MAINTENANCE_PARTS_CACHE.clear();
+        MAINTENANCE_SINKS_CACHE.clear();
         MAINTENANCE_SCAN_DIAG_DUMPED.clear();
     }
 
@@ -219,6 +229,9 @@ public final class HealthDataflowAnalyzer {
         if (entity == null) return false;
         boolean expressionMatches = externalExpressionMatches(root, sink, expected, newContext(entity));
         if (expected <= 0.0f) {
+            /* 生死观测口与 getHealth 同属一组可被重写的观测出口：锚点已证明解耦时，
+               它们同样不可采信，不能用来否决一次符合表达式的写入。 */
+            if (EcaSetHealthManager.isAnchorUntrusted(entity)) return expressionMatches;
             return expressionMatches && (!entity.isAlive() || entity.isDeadOrDying());
         }
         if (!expressionMatches || entity.isRemoved()) return false;
@@ -1799,6 +1812,21 @@ public final class HealthDataflowAnalyzer {
                     return s.substring(0, begin) + target;
                 return null;
             });
+
+        /* String.substring(str, begin)：定长前缀式编码(前缀 + 数字字面量)的解码半边。
+           前缀不可从调用本身还原，改由 sink 当前值的前 begin 个字符提供。 */
+        TABLE.registerCall("java/lang/String", "substring", "(I)Ljava/lang/String;",
+            (t, args, idx, ctx) -> {
+                if (idx != 0 || !(t instanceof String target)) return null;
+                Object beginObj = ctx.eval(args.get(1));
+                if (!(beginObj instanceof Number beginNum)) return null;
+                int begin = beginNum.intValue();
+                if (begin < 0) return null;
+                if (!(args.get(0) instanceof Source src)) return null;
+                Object cur = src.read(ctx.entity());
+                if (!(cur instanceof String s) || s.length() < begin) return null;
+                return s.substring(0, begin) + target;
+            });
     }
 
     private static void registerArith(int op, char domain) {
@@ -2264,6 +2292,7 @@ public final class HealthDataflowAnalyzer {
             List<StoreWrite> combined = mergeMaintenanceWrites(parts.tickWrites, parts.authorityWrites);
             MaintenancePlan plan = buildMaintenancePlan(semantic.observedAuthorities(), combined);
             MAINTENANCE_PLAN_CACHE.put(entityClass, plan);
+            MAINTENANCE_SINKS_CACHE.put(entityClass, distinctSinks(combined));
             if (parts.tickResolved && parts.authorityResolved && MAINTENANCE_SCAN_DIAG_DUMPED.add(entityClass)) {
                 List<String> methods = new ArrayList<>();
                 if (!parts.tickWrites.isEmpty()) methods.add("tickWrites");
@@ -2276,8 +2305,47 @@ public final class HealthDataflowAnalyzer {
                 EcaLogger.info("[ExternalScan]   fingerprint entity={} usable={} scope={} tickWrites={} authorityWrites={} causalWrites={}",
                         entityClass.getName(), fingerprint.usable(), fingerprint.cacheScope(), parts.tickWrites.size(),
                         parts.authorityWrites.size(), plan.maintenanceWriteCount());
+                dumpMaintenanceSinks(entityClass, combined, plan);
             }
             return plan;
+        }
+    }
+
+    private static final Map<Class<?>, List<Source>> MAINTENANCE_SINKS_CACHE = new ConcurrentHashMap<>();
+
+    // 按 canonicalKey 去重，保留扫描顺序；ECA 自注入的落点在此剔除，不进入候选
+    private static List<Source> distinctSinks(List<StoreWrite> writes) {
+        Map<String, Source> byKey = new LinkedHashMap<>();
+        for (StoreWrite write : writes) {
+            if (write == null || write.sink() == null) continue;
+            Source sink = write.sink();
+            if (isEcaHealthWrapperSource(sink)) continue;
+            byKey.putIfAbsent(sink.canonicalKey(), sink);
+        }
+        return List.copyOf(byKey.values());
+    }
+
+    private static final int MAINTENANCE_SINK_DUMP_LIMIT = 40;
+
+    /* 维护扫描抓到的写入落在哪些存储单元上。计数无法回答"真实血量存储在不在里面"，
+       而这决定了它能否作为有效血量模型的候选来源，故按标签逐一列出。 */
+    private static void dumpMaintenanceSinks(Class<?> entityClass, List<StoreWrite> writes, MaintenancePlan plan) {
+        Set<String> labels = new LinkedHashSet<>();
+        for (StoreWrite write : writes) {
+            if (write == null || write.sink() == null) continue;
+            if (labels.size() >= MAINTENANCE_SINK_DUMP_LIMIT) break;
+            labels.add(write.sink().label);
+        }
+        EcaLogger.info("[ExternalScan]   maintenance sinks entity={} distinct={} {}",
+                entityClass.getName(), labels.size(), labels);
+        for (MaintenanceBranch branch : plan.branches()) {
+            Set<String> causal = new LinkedHashSet<>();
+            for (StoreWrite write : branch.maintenanceWrites()) {
+                if (write != null && write.sink() != null) causal.add(write.sink().label);
+            }
+            EcaLogger.info("[ExternalScan]   causal branch entity={} authority={} causalSinks={} transactionSources={}",
+                    entityClass.getName(), branch.authority().label, causal,
+                    branch.transactionSources().stream().map(source -> source.label).toList());
         }
     }
 
@@ -3127,6 +3195,7 @@ public final class HealthDataflowAnalyzer {
         EffectiveHealthModel best = null;
         int bestScore = Integer.MIN_VALUE;
         int matched = 0;
+        int rejectedForLiteralBound = 0;
         for (ComparisonFact fact : comparisons) {
             Expr expr = fact.operand();
             /* 候选由外部记录和表达式内提取的存储源共同组成。
@@ -3139,6 +3208,10 @@ public final class HealthDataflowAnalyzer {
                 if (rejected.contains(candidate.canonicalKey())) continue;
                 // 表达式即存储本身时两者同向，由原通道处理，无需模型
                 if (sameSource(expr, candidate) || !containsSink(expr, candidate)) continue;
+                if (!hasIndependentBound(expr, candidate)) {
+                    rejectedForLiteralBound++;
+                    continue;
+                }
                 matched++;
                 int score = effectiveModelScore(expr);
                 if (score > bestScore) {
@@ -3147,8 +3220,8 @@ public final class HealthDataflowAnalyzer {
                 }
             }
         }
-        EcaLogger.info("[EffectiveHealth] scan entity={} stage={} comparisons={} matched={}",
-                entityClass.getName(), stage, comparisons.size(), matched);
+        EcaLogger.info("[EffectiveHealth] scan entity={} stage={} comparisons={} matched={} rejectedLiteralBound={}",
+                entityClass.getName(), stage, comparisons.size(), matched, rejectedForLiteralBound);
         // 未找到匹配项时输出样本，用于区分存储未参与比较和调用未内联两种情况。
         // 优先段未命中属于正常回退，只在全类扫描仍无结果时输出。
         if (matched == 0 && "full".equals(stage)) dumpComparisonSamples(entityClass, comparisons);
@@ -3184,7 +3257,8 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static final int COMPARISON_SAMPLE_LIMIT = 6;
-    private static final int COMPARISON_SAMPLE_CHARS = 300;
+    /* 上溯父类后表达式层数更深，截断过早会把含存储的那一段切掉，判断不了内联展开到哪一层 */
+    private static final int COMPARISON_SAMPLE_CHARS = 900;
 
     /* 优先输出含可写源的表达式，用于判断内联展开到哪一层，以及存储是否参与了比较。 */
     private static void dumpComparisonSamples(Class<?> entityClass, List<ComparisonFact> comparisons) {
@@ -3321,6 +3395,21 @@ public final class HealthDataflowAnalyzer {
         EFFECTIVE_MODEL_MISSES.remove(entityClass);
     }
 
+    /* 有效血量模型必须算的是「上限 − 已消耗」，而上限须是实体状态：属性调用、另一处存储或配置字段。
+       上限写成字面量常数的「余额 ≤ 0」是伤害配额、冷却与阈值判定的形态，不是血量——
+       它与死亡判定在字节码上完全同形，只能靠上限的来源区分。
+       求解与校验共用同一表达式，选错存储时恒真，故此判据必须在建模阶段就挡住，事后无从补救。 */
+    private static boolean hasIndependentBound(Expr expr, Source storage) {
+        return referencesMaxHealth(expr) || referencesSourceOtherThan(expr, storage);
+    }
+
+    private static boolean referencesSourceOtherThan(Expr expr, Source storage) {
+        for (Source source : collectSources(expr)) {
+            if (!sameSource(source, storage)) return true;
+        }
+        return false;
+    }
+
     private static boolean referencesMaxHealth(Expr expr) {
         if (expr instanceof Call call) {
             if ((call.name().equals(GET_MAX_HEALTH.srg()) || call.name().equals(GET_MAX_HEALTH.mcp()))
@@ -3358,47 +3447,72 @@ public final class HealthDataflowAnalyzer {
     private static List<ComparisonFact> collectClassComparisons(Class<?> entityClass, boolean priorityOnly) {
         List<ComparisonFact> out = new ArrayList<>();
         List<String> failures = new ArrayList<>();
-        ClassNode classNode = classNode(entityClass);
-        if (classNode == null) return out;
-        String ownerInternal = internalName(entityClass);
         // 后台分析串行执行，单个类达到时间预算后使用已经收集的结果
         long scanStart = System.nanoTime();
         long deadline = scanStart + COMPARISON_SCAN_BUDGET_NANOS;
         boolean timedOut = false;
         int analyzed = 0;
         List<String> slow = new ArrayList<>();
-        for (MethodNode method : classNode.methods) {
-            if (method.instructions.size() == 0 || method.name.startsWith("<")) continue;
-            if ((method.access & Opcodes.ACC_STATIC) != 0) continue;
-            if (priorityOnly && !hasFloatComparison(method)) continue;
-            if (System.nanoTime() > deadline) { timedOut = true; break; }
-            /* 每个方法使用独立的预算和递归检测集，避免前序方法耗尽预算或残留状态影响后续分析。 */
-            AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
-            ctx.inheritedInline = true;
-            long methodStart = System.nanoTime();
-            int fetchStart = bytesFetchCount();
-            analyzed++;
+        Map<String, Integer> dropped = new LinkedHashMap<>();
+        /* 沿继承链上溯至原版边界：运行期类可能只是一层转发壳，生死判定与血量算式都在模组父类里。
+           边界与 collectTickWrites 一致——原版比较不承载模组血量语义，且会吃光扫描预算。
+           子类覆写遮蔽父类同签名方法，故按 name+desc 去重，先到者(更靠近运行期类)优先。 */
+        Set<String> visitedMethods = new HashSet<>();
+        for (Class<?> owner = entityClass;
+             owner != null && owner != LivingEntity.class && !timedOut;
+             owner = owner.getSuperclass()) {
+            ClassNode classNode;
             try {
-                TaintValue[] seed = seedMethodInputs(method.desc, false);
-                TaintInterpreter interpreter = new TaintInterpreter(ctx, 0, ownerInternal, method, seed);
-                Frame<TaintValue>[] frames = new Analyzer<>(interpreter).analyze(ownerInternal, method);
-                int index = 0;
-                for (AbstractInsnNode insn : method.instructions) {
-                    collectComparisonFacts(out, frames[index++], insn);
-                }
+                classNode = classNode(owner);
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                // 大型方法可能包含生死判定，分析失败时记录诊断以区分无匹配结果
-                if (failures.size() < COMPARISON_FAILURE_LIMIT) {
-                    failures.add(method.name + method.desc + " -> " + t.getClass().getSimpleName());
-                }
+                continue;
             }
-            // 预算是被少数几个方法吃光还是被普遍拖慢，只有逐方法计时能区分
-            if (System.nanoTime() - methodStart >= COMPARISON_SLOW_METHOD_NANOS
-                    && slow.size() < COMPARISON_SLOW_METHOD_LIMIT) {
-                slow.add(method.name + method.desc + " " + millisSince(methodStart)
-                        + "ms bytes=" + (bytesFetchCount() - fetchStart)
-                        + " inlineLeft=" + ctx.inlineBudget + " nodeLeft=" + ctx.nodeBudget);
+            if (classNode == null) continue;
+            String ownerInternal = internalName(owner);
+            for (MethodNode method : classNode.methods) {
+                if (method.instructions.size() == 0 || method.name.startsWith("<")) continue;
+                if ((method.access & Opcodes.ACC_STATIC) != 0) continue;
+                if (!visitedMethods.add(method.name + method.desc)) continue;
+                if (priorityOnly && !hasFloatComparison(method)) continue;
+                if (System.nanoTime() > deadline) { timedOut = true; break; }
+                /* 每个方法使用独立的预算和递归检测集，避免前序方法耗尽预算或残留状态影响后续分析。 */
+                AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
+                ctx.inheritedInline = true;
+                /* 周期性覆写方法里的生死判定要穿透多层转发才能露出存储，默认额度在此必然耗尽
+                   并把操作数坍缩成 Unknown——与 tick 写源扫描遇到的是同一现象，故用同一档额度。
+                   只对这类方法放宽，避免把整轮扫描的时间预算吃光。 */
+                if (isRecurringOverride(owner, method)) {
+                    ctx.inlineBudget = TICK_WRITE_INLINE_BUDGET;
+                    ctx.nodeBudget = TICK_WRITE_NODE_BUDGET;
+                    ctx.configureAdaptiveDeadline(deadline);
+                }
+                long methodStart = System.nanoTime();
+                int fetchStart = bytesFetchCount();
+                analyzed++;
+                try {
+                    TaintValue[] seed = seedMethodInputs(method.desc, false);
+                    TaintInterpreter interpreter = new TaintInterpreter(ctx, 0, ownerInternal, method, seed);
+                    Frame<TaintValue>[] frames = new Analyzer<>(interpreter).analyze(ownerInternal, method);
+                    int index = 0;
+                    for (AbstractInsnNode insn : method.instructions) {
+                        collectComparisonFacts(out, frames[index++], insn, dropped);
+                    }
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                    // 大型方法可能包含生死判定，分析失败时记录诊断以区分无匹配结果
+                    if (failures.size() < COMPARISON_FAILURE_LIMIT) {
+                        failures.add(owner.getSimpleName() + "." + method.name + method.desc
+                                + " -> " + t.getClass().getSimpleName());
+                    }
+                }
+                // 预算是被少数几个方法吃光还是被普遍拖慢，只有逐方法计时能区分
+                if (System.nanoTime() - methodStart >= COMPARISON_SLOW_METHOD_NANOS
+                        && slow.size() < COMPARISON_SLOW_METHOD_LIMIT) {
+                    slow.add(owner.getSimpleName() + "." + method.name + method.desc + " " + millisSince(methodStart)
+                            + "ms bytes=" + (bytesFetchCount() - fetchStart)
+                            + " inlineLeft=" + ctx.inlineBudget + " nodeLeft=" + ctx.nodeBudget);
+                }
             }
         }
         if (timedOut || System.nanoTime() - scanStart >= COMPARISON_SLOW_SCAN_NANOS) {
@@ -3416,6 +3530,10 @@ public final class HealthDataflowAnalyzer {
         if (!failures.isEmpty()) {
             EcaLogger.info("[EffectiveHealth]   method analysis failures entity={} count={} {}",
                     entityClass.getName(), failures.size(), failures);
+        }
+        if (!dropped.isEmpty()) {
+            EcaLogger.info("[EffectiveHealth]   dropped unknown operands entity={} stage={} {}",
+                    entityClass.getName(), priorityOnly ? "priority" : "full", dropped);
         }
         return out;
     }
@@ -4139,6 +4257,13 @@ public final class HealthDataflowAnalyzer {
 
     private static void collectComparisonFacts(List<ComparisonFact> facts, Frame<TaintValue> frame,
                                                AbstractInsnNode insn) {
+        collectComparisonFacts(facts, frame, insn, null);
+    }
+
+    /* dropped 非空时统计被丢弃的 Unknown 操作数来源：坍缩原因决定该调哪个预算，
+       "有多少比较事实丢了"和"为什么丢"是两件事，只有后者能指导修改。 */
+    private static void collectComparisonFacts(List<ComparisonFact> facts, Frame<TaintValue> frame,
+                                               AbstractInsnNode insn, Map<String, Integer> dropped) {
         if (frame == null || insn == null) return;
         int opcode = insn.getOpcode();
         boolean numericCompare = opcode == Opcodes.FCMPL || opcode == Opcodes.FCMPG
@@ -4149,12 +4274,12 @@ public final class HealthDataflowAnalyzer {
             int predicate = numericCompare ? predicateAfterCompare(insn) : directPredicate(opcode);
             Expr left = frame.getStack(frame.getStackSize() - 2).expr;
             Expr right = frame.getStack(frame.getStackSize() - 1).expr;
-            addComparisonFact(facts, left, right, predicate);
-            addComparisonFact(facts, right, left, mirrorPredicate(predicate));
+            addComparisonFact(facts, left, right, predicate, dropped);
+            addComparisonFact(facts, right, left, mirrorPredicate(predicate), dropped);
             return;
         }
         if (opcode >= Opcodes.IFEQ && opcode <= Opcodes.IFLE && frame.getStackSize() >= 1) {
-            addComparisonFact(facts, frame.getStack(frame.getStackSize() - 1).expr, null, opcode);
+            addComparisonFact(facts, frame.getStack(frame.getStackSize() - 1).expr, null, opcode, dropped);
         }
     }
 
@@ -4190,8 +4315,12 @@ public final class HealthDataflowAnalyzer {
     /* 只有与常数比较的操作数才是候选：阈值未知时无法判定血量极性，此时记录事实但不带方向。
        counterpart 为 null 表示单操作数条件跳转，阈值即 0。 */
     private static void addComparisonFact(List<ComparisonFact> facts, Expr candidate, Expr counterpart,
-                                          int predicate) {
-        if (candidate == null || candidate instanceof Primitive || candidate instanceof UnknownExpr) return;
+                                          int predicate, Map<String, Integer> dropped) {
+        if (candidate instanceof UnknownExpr unknown) {
+            if (dropped != null) dropped.merge(unknown.provenance(), 1, Integer::sum);
+            return;
+        }
+        if (candidate == null || candidate instanceof Primitive) return;
         if (counterpart != null && !(counterpart instanceof Primitive) && !(counterpart instanceof UnknownExpr)) return;
         float threshold = 0.0f;
         int resolved = predicate;
@@ -4203,9 +4332,28 @@ public final class HealthDataflowAnalyzer {
         List<Expr> flattened = new ArrayList<>();
         addUniqueExpr(flattened, candidate);
         for (Expr expr : flattened) {
+            /* 比较扫描沿继承链上溯后会扫到 ECA 注入进宿主实体的判定，其中的锁血密文与密钥
+               在结构上与宿主自定义存储无法区分。含自有状态的事实整条丢弃，而非只剥离该源——
+               剥离会留下一个缺了操作数的算式，求值必得 NaN。 */
+            if (containsEcaOwnedSource(expr)) continue;
             ComparisonFact fact = new ComparisonFact(expr, resolved, threshold);
             if (!facts.contains(fact)) facts.add(fact);
         }
+    }
+
+    private static boolean containsEcaOwnedSource(Expr expr) {
+        if (expr instanceof Source source) return isEcaHealthWrapperSource(source);
+        if (expr instanceof Op op) {
+            for (Expr arg : op.args()) if (containsEcaOwnedSource(arg)) return true;
+        } else if (expr instanceof Call call) {
+            if (isEcaHealthWrapperCall(call)) return true;
+            for (Expr arg : call.args()) if (containsEcaOwnedSource(arg)) return true;
+        } else if (expr instanceof Choice choice) {
+            for (Expr alt : choice.alternatives()) if (containsEcaOwnedSource(alt)) return true;
+        } else if (expr instanceof OptionalContentExpr optional) {
+            return containsEcaOwnedSource(optional.optionalExpr());
+        }
+        return false;
     }
 
     /* 通用分析入口(查表版)：传入方法表项 + 提取策略即可分析。method.matchIn(cls) 内置 SRG 优先 MCP 后备查找。 */

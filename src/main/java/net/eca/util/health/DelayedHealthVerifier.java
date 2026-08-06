@@ -110,6 +110,12 @@ public final class DelayedHealthVerifier {
             ExternalMirrorWriter.revert(ticket);
             return;
         }
+        /* 锚点已被证明与真实存储解耦时，它读回什么都不构成"被改回去了"的证据。
+           此处据它判失败会把诱饵型目标上的每次成功都揭成假成功，并误启外部镜像。 */
+        if (EcaSetHealthManager.isAnchorUntrusted(entity)) {
+            ExternalMirrorWriter.commit(ticket);
+            return;
+        }
         float actual = EcaSetHealthManager.readHealthAnchor(entity);
         if (!Float.isFinite(actual)) {
             ExternalMirrorWriter.commit(ticket);
@@ -118,6 +124,7 @@ public final class DelayedHealthVerifier {
         /* 只认向上偏离：血量自行回升是回滚与强制回血的特征。向下偏离可能只是这一 tick 内的
            正常受伤，据此判失败会把大量真成功误杀。 */
         if (HealthValueSemantics.retainedAfterDelay(actual, pending.target())) {
+            EcaSetHealthManager.onDelayedRetained(pending.entityClass());
             ExternalMirrorWriter.commit(ticket);
             return;
         }

@@ -125,7 +125,8 @@ public final class HealthDataFlow {
         boolean firstWrite = FIRST_WRITE_DUMPED.add(cls.getName());
         if (firstWrite) dumpAnalysisStructure(cls, tree, target);
         return writeViaSources(cls, tree, entity, target, firstWrite,
-                (verifiedEntity, verifiedTarget, sink) -> EcaSetHealthManager.verify(verifiedEntity, verifiedTarget),
+                (verifiedEntity, verifiedTarget, sink) ->
+                    EcaSetHealthManager.judgeAnchor(verifiedEntity, verifiedTarget),
                 "dataflow");
     }
 
@@ -142,7 +143,8 @@ public final class HealthDataFlow {
                 (verifiedEntity, verifiedTarget, sink) ->
                     // 自回读只能证明候选可写，不能证明它承载真实血量。
                     HealthDataflowAnalyzer.verifyExternalDataflow(tree.returnExpr, verifiedEntity, verifiedTarget, sink)
-                        && EcaSetHealthManager.verifyExternalRaw(verifiedEntity, verifiedTarget),
+                        ? EcaSetHealthManager.judgeAnchorExternal(verifiedEntity, verifiedTarget)
+                        : EcaSetHealthManager.AnchorVerdict.FAIL,
                 "external");
     }
 
@@ -455,7 +457,7 @@ public final class HealthDataFlow {
 
     @FunctionalInterface
     public interface HealthVerifier {
-        boolean verify(LivingEntity entity, float expected, Source sink);
+        EcaSetHealthManager.AnchorVerdict verify(LivingEntity entity, float expected, Source sink);
     }
 
     private record PreparedSourceWrite(Source sink, Object snapshot, Object value) {}
@@ -526,7 +528,9 @@ public final class HealthDataFlow {
             }
             // 锚点若随本次写入位移到目标值，即为它反映真实存储的证据，据此补正弱取证的误判
             EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected);
-            if (verifier.verify(entity, expected, sink)) {
+            EcaSetHealthManager.AnchorVerdict verdict = verifier.verify(entity, expected, sink);
+            if (verdict == EcaSetHealthManager.AnchorVerdict.INDETERMINATE) dumpIndeterminate(cls, sink.label);
+            if (verdict == EcaSetHealthManager.AnchorVerdict.PASS) {
                 EcaSetHealthManager.recordObservedWrite(cls);
                 if (logSuccess) {
                     EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}",
@@ -539,7 +543,7 @@ public final class HealthDataFlow {
             // 写入成功但校验失败时，单独记录观测锚点与存储可能解耦
             EcaSetHealthManager.recordUnobservedWrite(cls, sink, sink.label);
             diag.add("    [" + sink.label + "] solved=" + solved.value()
-                    + " verify=FAIL restore=" + (restored ? "OK" : "FAIL"));
+                    + " verify=" + verdict + " restore=" + (restored ? "OK" : "FAIL"));
         }
 
         if (System.nanoTime() > deadline) {
@@ -555,6 +559,18 @@ public final class HealthDataFlow {
             for (String line : diag) EcaLogger.info("[{}] {}", diagnosticChannel, line);
         }
         return false;
+    }
+
+    private static final Set<String> INDETERMINATE_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 锚点交出裁决权的候选留痕。这些写入本身可能是对的，只是没有可信标尺来判定，
+       当前一律回滚——排查时凭此定位需要替代锚点的实体与具体单元。 */
+    private static void dumpIndeterminate(Class<?> cls, String sinkLabel) {
+        String className = cls == null ? "null" : cls.getName();
+        if (INDETERMINATE_DUMPED.add(className + "|" + sinkLabel)) {
+            EcaLogger.info("[HealthAnchor] verdict indeterminate (no trustworthy anchor) entity={} sink={} — write rolled back",
+                    className, sinkLabel);
+        }
     }
 
     private static void dumpRuntimeBudget(Class<?> cls, String channel, String reason) {
@@ -630,7 +646,12 @@ public final class HealthDataFlow {
         }
         // 单源逐个写时锚点不动、多源同时写才生效的存储，取证只能在联合写之后进行
         if (wroteAll) EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected);
-        if (wroteAll && verifier.verify(entity, expected, null)) {
+        EcaSetHealthManager.AnchorVerdict verdict = wroteAll
+                ? verifier.verify(entity, expected, null)
+                : EcaSetHealthManager.AnchorVerdict.FAIL;
+        if (verdict == EcaSetHealthManager.AnchorVerdict.INDETERMINATE)
+            dumpIndeterminate(entity.getClass(), "all-sources");
+        if (verdict == EcaSetHealthManager.AnchorVerdict.PASS) {
             EcaSetHealthManager.recordObservedWrite(entity.getClass());
             if (logSuccess) {
                 EcaLogger.info("[HealthDataflow] setHealth success entity={} sink=all-sources expected={}",

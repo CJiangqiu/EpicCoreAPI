@@ -10,6 +10,7 @@ import net.minecraft.world.entity.player.Player;
 
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -236,7 +237,8 @@ public final class EcaSetHealthManager {
             /* 比较表达式已缓存时建模只剩遍历与打分，当场完成即可，省去一次改血往返；
                未缓存则需扫描字节码，耗时较长，仍转后台并跳过本次。 */
             if (HealthDataflowAnalyzer.hasComparisonCache(cls)) {
-                model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, unobservedSinks(cls));
+                // 候选集合必须与后台建模一致，否则同步兜底会因少喂候选而漏掉后台能选中的存储
+                model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, effectiveModelCandidates(cls));
             }
             if (model == null) {
                 submitEffectiveModelAnalysis(cls);
@@ -289,7 +291,9 @@ public final class EcaSetHealthManager {
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
         boolean success = HealthDataFlow.writeEffective(oriented, target, targetHealth);
         if (success) {
-            HealthModel.forClass(cls).setEffectiveObservationConfirmed(true);
+            /* 写入后的校验读的是模型自身表达式，选对选错都恒真，不能据此确认锚点。
+               确认交给延迟复查：值在实体自己跑过一次 tick 后仍留得住，才是独立于该表达式的证据。 */
+            PENDING_EFFECTIVE_CONFIRM.add(cls);
             return true;
         }
         snapshot.restore();
@@ -397,8 +401,7 @@ public final class EcaSetHealthManager {
     }
 
     private static void submitEffectiveModelAnalysis(Class<?> cls) {
-        // 比较表达式可以直接提供候选，因此无需等待其他分析通道产生候选
-        List<HealthDataflowAnalyzer.Source> candidates = unobservedSinks(cls);
+        List<HealthDataflowAnalyzer.Source> candidates = effectiveModelCandidates(cls);
         if (HealthDataflowAnalyzer.isEffectiveModelMiss(cls, candidates)) return;
         String signature = HealthDataflowAnalyzer.candidateSignature(candidates);
         if (signature.equals(EFFECTIVE_MODEL_SUBMITTED.put(cls, signature))) return;
@@ -420,6 +423,21 @@ public final class EcaSetHealthManager {
             EcaLogger.info("[EffectiveHealth] model analysis submit rejected entity={} type={} msg={}",
                     cls.getName(), t.getClass().getName(), t.getMessage());
         }
+    }
+
+    /* 有效血量模型的候选存储有两个来源：
+       改血通道写过但锚点没反应的存储(unobservedSinks)，以及维护扫描抓到的周期写入落点。
+       只用前者会死锁——真实存储从未被提名就不会被写，没有写入记录又当不上候选。
+       后者由字节码写入扫描独立得出，与比较表达式无关，故不会构成写入与回读互为逆运算的闭环。 */
+    private static List<HealthDataflowAnalyzer.Source> effectiveModelCandidates(Class<?> cls) {
+        Map<String, HealthDataflowAnalyzer.Source> byKey = new LinkedHashMap<>();
+        for (HealthDataflowAnalyzer.Source sink : unobservedSinks(cls)) {
+            byKey.putIfAbsent(sink.label, sink);
+        }
+        for (HealthDataflowAnalyzer.Source sink : HealthDataflowAnalyzer.maintenanceSinks(cls)) {
+            byKey.putIfAbsent(sink.label, sink);
+        }
+        return List.copyOf(byKey.values());
     }
 
     /* 外部扫描在后台去重执行，完成后写入分析缓存。任务异常必须记录，
@@ -792,12 +810,39 @@ public final class EcaSetHealthManager {
         }
     }
 
+    /* 锚点对本次写入的裁决力。诱饵 getHealth 恒返回常量，既证明不了成功也证明不了失败，
+       故不可信的锚点必须交出裁决权而不是一律判否——后者会把正确写入连同错误写入一起回滚。 */
+    public enum AnchorVerdict { PASS, FAIL, INDETERMINATE }
+
+    /* 先判可信度再读数：不可信时连读都不读，杜绝诱饵读数以任何形式参与裁决。 */
+    public static AnchorVerdict judgeAnchor(LivingEntity target, float targetHealth) {
+        if (target == null) return AnchorVerdict.FAIL;
+        if (!isAnchorTrustworthy(target)) return AnchorVerdict.INDETERMINATE;
+        float actual = readHealthAnchor(target);
+        if (!Float.isFinite(actual)) return AnchorVerdict.FAIL;
+        return HealthValueSemantics.matches(actual, targetHealth) ? AnchorVerdict.PASS : AnchorVerdict.FAIL;
+    }
+
+    /* 外部扫描裁决：目标≤0 时按死亡语义比较，其余与 judgeAnchor 一致。 */
+    public static AnchorVerdict judgeAnchorExternal(LivingEntity target, float targetHealth) {
+        if (target == null) return AnchorVerdict.FAIL;
+        if (!isAnchorTrustworthy(target)) return AnchorVerdict.INDETERMINATE;
+        float actual = readHealthAnchor(target);
+        if (!Float.isFinite(actual)) return AnchorVerdict.FAIL;
+        boolean matched = targetHealth <= 0.0f
+                ? HealthValueSemantics.matchesWithDeathSemantics(actual, targetHealth)
+                : HealthValueSemantics.matches(actual, targetHealth);
+        return matched ? AnchorVerdict.PASS : AnchorVerdict.FAIL;
+    }
+
+    // 锚点是否已被证明与真实存储解耦，供其它模块避免拿它下结论
+    public static boolean isAnchorUntrusted(LivingEntity target) {
+        return target != null && !isAnchorTrustworthy(target);
+    }
+
     // 校验改血是否生效：观测锚点落在目标值容差内，且锚点本身能反映写入
     public static boolean verify(LivingEntity target, float targetHealth) {
-        float actual = readHealthAnchor(target);
-        if (!Float.isFinite(actual)) return false;
-        if (!HealthValueSemantics.matches(actual, targetHealth)) return false;
-        return isAnchorTrustworthy(target);
+        return judgeAnchor(target, targetHealth) == AnchorVerdict.PASS;
     }
 
     static boolean verifyProtocol(LivingEntity target, float targetHealth) {
@@ -847,14 +892,9 @@ public final class EcaSetHealthManager {
     // 外部扫描专用实读校验(带死亡语义：target≤0 需实读血量≤0，正值走容差匹配)。
     // 外部扫描的符号表达式可能在存储未更新时通过校验，因此还需检查观测锚点
     public static boolean verifyExternalRaw(LivingEntity target, float targetHealth) {
-        float actual = readHealthAnchor(target);
-        if (!Float.isFinite(actual)) return false;
-        if (targetHealth <= 0.0f) {
-            return HealthValueSemantics.matchesWithDeathSemantics(actual, targetHealth)
-                    && isAnchorTrustworthy(target);
-        }
-        return verify(target, targetHealth);
+        return judgeAnchorExternal(target, targetHealth) == AnchorVerdict.PASS;
     }
+
 
     /* ==================== 锚点可信度 ==================== */
 
@@ -1000,6 +1040,9 @@ public final class EcaSetHealthManager {
         if (ANCHOR_OBSERVED.add(cls)) UNOBSERVED_WRITES.remove(cls);
     }
 
+    /* 有效血量通道写入成功、但尚未被延迟复查确认的类。 */
+    private static final Set<Class<?>> PENDING_EFFECTIVE_CONFIRM = ConcurrentHashMap.newKeySet();
+
     /* 延迟复查发现写入被实体自身逻辑改回：解除该类"已验证可写"的两处闭锁，
        使后续改血重新收集解耦证据、并允许重新裁决有效血量模型。
        不撤销模型与桥接本身——值没留住说明防护把它改回去了，不说明存储定位错了。 */
@@ -1008,8 +1051,17 @@ public final class EcaSetHealthManager {
         ANCHOR_OBSERVED.remove(cls);
         HealthModel model = HealthModel.forClass(cls);
         model.setEffectiveObservationConfirmed(false);
+        /* 只销掉待确认登记，不动模型与锚点：值没留住说明防护把它改回去了，不说明存储定位错了。
+           据此拉黑模型会把正确存储一并丢掉，正确应对是下方放行的实体外镜像。 */
+        PENDING_EFFECTIVE_CONFIRM.remove(cls);
         // 下次改血时放行第三阶段，去实体之外找持有真实血量的镜像
         model.markDelayedRollbackObserved();
+    }
+
+    /* 延迟复查确认值留住了：这是独立于模型表达式的证据，至此才认可该锚点。 */
+    static void onDelayedRetained(Class<?> cls) {
+        if (cls == null || !PENDING_EFFECTIVE_CONFIRM.remove(cls)) return;
+        HealthModel.forClass(cls).setEffectiveObservationConfirmed(true);
     }
 
     /* 存在写入成功但观测不到的源，且该类从未通过校验时判定为解耦，供后续通道决定是否改用替代锚点。 */
@@ -1040,6 +1092,7 @@ public final class EcaSetHealthManager {
         ANCHOR_REFLECTS_WRITES.clear();
         ANCHOR_TRUST_DUMPED.clear();
         ANCHOR_OBSERVED.clear();
+        PENDING_EFFECTIVE_CONFIRM.clear();
         UNOBSERVED_WRITES.clear();
         UNOBSERVED_DUMPED.clear();
         JOIN_PREWARM_SUBMITTED.clear();
