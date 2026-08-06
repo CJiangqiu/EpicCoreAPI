@@ -947,6 +947,103 @@ public final class HealthDataflowAnalyzer {
         return HealthSolveResult.failure(HealthSolveFailure.CALL_NOT_RESOLVED, root.getClass().getSimpleName());
     }
 
+    static Float solveProtocolFloatInput(EffectiveHealthModel model, float target, EvalContext ctx) {
+        if (model == null || model.readExpr() == null || model.storage() == null || ctx == null) return null;
+        Float boundary = solveFloatInputBoundary(
+                model.readExpr(), model.storage(), Float.valueOf(target), ctx);
+        if (boundary == null || !Float.isFinite(boundary) || boundary == 0.0f) {
+            boundary = readFloatInputBoundary(model.readExpr(), model.storage(), ctx);
+        }
+        if (boundary == null || !Float.isFinite(boundary) || boundary == 0.0f) return null;
+        float magnitude = Math.max(0.0f, target);
+        return Math.copySign(magnitude, boundary);
+    }
+
+    static Float readProtocolFloatBoundary(EffectiveHealthModel model, EvalContext ctx) {
+        if (model == null || model.readExpr() == null || model.storage() == null || ctx == null) return null;
+        return readFloatInputBoundary(model.readExpr(), model.storage(), ctx);
+    }
+
+    private static Float readFloatInputBoundary(Expr root, Source sink, EvalContext ctx) {
+        if (root instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) {
+                if (!containsSink(alternative, sink)) continue;
+                Float value = readFloatInputBoundary(alternative, sink, ctx);
+                if (value != null) return value;
+            }
+            return null;
+        }
+        if (root instanceof Op op) {
+            for (Expr argument : op.args()) {
+                if (!containsSink(argument, sink)) continue;
+                Float value = readFloatInputBoundary(argument, sink, ctx);
+                if (value != null) return value;
+            }
+            return null;
+        }
+        if (root instanceof Call call) {
+            int sinkIndex = findArgWithSinkDetailed(call.args(), sink);
+            if (sinkIndex < 0) return null;
+            Type returnType = Type.getReturnType(call.desc());
+            Type[] argumentTypes = Type.getArgumentTypes(call.desc());
+            if (call.args().size() == argumentTypes.length
+                    && sinkIndex < argumentTypes.length
+                    && returnType.getSort() == Type.FLOAT
+                    && argumentTypes[sinkIndex].getSort() == Type.INT) {
+                Object value = evaluate(call, ctx);
+                if (value instanceof Number number) {
+                    float result = number.floatValue();
+                    return Float.isFinite(result) ? result : null;
+                }
+                return null;
+            }
+            return readFloatInputBoundary(call.args().get(sinkIndex), sink, ctx);
+        }
+        return null;
+    }
+
+    private static Float solveFloatInputBoundary(Expr root, Source sink, Object target, EvalContext ctx) {
+        if (root instanceof Choice choice) {
+            for (Expr alternative : choice.alternatives()) {
+                if (!containsSink(alternative, sink)) continue;
+                Float solved = solveFloatInputBoundary(alternative, sink, target, ctx);
+                if (solved != null) return solved;
+            }
+            return null;
+        }
+        if (root instanceof Op op) {
+            Inverter inverter = TABLE.lookupOp(op.opcode());
+            if (inverter == null) return null;
+            for (int i = 0; i < op.args().size(); i++) {
+                if (!containsSink(op.args().get(i), sink)) continue;
+                Object next = inverter.invert(target, op.args(), i, ctx);
+                if (next == null) continue;
+                Float solved = solveFloatInputBoundary(op.args().get(i), sink, next, ctx);
+                if (solved != null) return solved;
+            }
+            return null;
+        }
+        if (root instanceof Call call) {
+            int sinkIndex = findArgWithSinkDetailed(call.args(), sink);
+            if (sinkIndex < 0) return null;
+            Type returnType = Type.getReturnType(call.desc());
+            Type[] argumentTypes = Type.getArgumentTypes(call.desc());
+            if (call.args().size() == argumentTypes.length
+                    && sinkIndex < argumentTypes.length
+                    && returnType.getSort() == Type.FLOAT
+                    && argumentTypes[sinkIndex].getSort() == Type.INT
+                    && target instanceof Number number) {
+                float value = number.floatValue();
+                return Float.isFinite(value) ? value : null;
+            }
+            Inverter inverter = lookupCallInverter(call);
+            if (inverter == null) return null;
+            Object next = inverter.invert(target, call.args(), sinkIndex, ctx);
+            return next == null ? null : solveFloatInputBoundary(call.args().get(sinkIndex), sink, next, ctx);
+        }
+        return null;
+    }
+
     private static Object solveStoreWriteValue(Expr valueExpr, Object target, EvalContext ctx) {
         List<Object> candidates = writeInputCandidates(valueExpr, target);
         for (Object candidate : candidates) {
@@ -2890,6 +2987,7 @@ public final class HealthDataflowAnalyzer {
     public record EffectiveHealthModel(Expr readExpr, Source storage, int predicate, float threshold) {}
 
     private static final Map<Class<?>, EffectiveHealthModel> EFFECTIVE_MODEL_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, EffectiveHealthModel> PROTOCOL_TARGET_MODEL_CACHE = new ConcurrentHashMap<>();
     /* 分析失败按候选签名缓存，而不对实体类永久缓存；后续新增候选时仍可重新分析。 */
     private static final Map<Class<?>, String> EFFECTIVE_MODEL_MISSES = new ConcurrentHashMap<>();
     /* 写入失败的存储，后续分析不再将其作为候选。 */
@@ -2898,6 +2996,14 @@ public final class HealthDataflowAnalyzer {
     /* 仅查模型缓存、绝不触发分析(供运行期非阻塞查询)。扫全类比较指令可达数秒，必须在后台预填。 */
     public static EffectiveHealthModel peekEffectiveHealthModel(Class<?> entityClass) {
         return entityClass == null ? null : EFFECTIVE_MODEL_CACHE.get(entityClass);
+    }
+
+    static void rememberProtocolTargetModel(Class<?> entityClass, EffectiveHealthModel model) {
+        if (entityClass != null && model != null) PROTOCOL_TARGET_MODEL_CACHE.put(entityClass, model);
+    }
+
+    static EffectiveHealthModel peekProtocolTargetModel(Class<?> entityClass) {
+        return entityClass == null ? null : PROTOCOL_TARGET_MODEL_CACHE.get(entityClass);
     }
 
     /* 是否已有任一段比较表达式缓存。有则建模只剩遍历与打分，调用方可当场完成而无需转入后台。 */

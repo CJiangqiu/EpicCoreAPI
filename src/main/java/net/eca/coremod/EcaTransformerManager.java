@@ -262,6 +262,14 @@ public final class EcaTransformerManager {
         return false;
     }
 
+    public static boolean retransformLoadedInternalNamesWithJvmTi(Set<String> internalNames) {
+        if (internalNames == null || internalNames.isEmpty()
+                || !EcaConfiguration.getDefenceEnableRadicalLogicSafely()) return false;
+        boolean transformed = retransformInternalNamesWithJvmTi(internalNames);
+        if (transformed) backend = Backend.JVMTI;
+        return transformed;
+    }
+
     public static boolean forEachLoadedClass(Consumer<Class<?>> consumer) {
         if (consumer == null) return false;
         Instrumentation inst = EcaAgent.getInstrumentation();

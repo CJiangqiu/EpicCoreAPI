@@ -96,12 +96,16 @@ public final class ObfuscationMapping {
         methods.put("LivingEntity.dropAllDeathLoot", "m_6668_");
         methods.put("LivingEntity.getRecordMaxHp", "m_21233_");
         methods.put("LivingEntity.actuallyHurt", "m_6475_");
+        methods.put("LivingEntity.hurt", "m_6469_");
         methods.put("LivingEntity.setHealth", "m_21153_");
         methods.put("LivingEntity.isDeadOrDying", "m_21224_");
         methods.put("LivingEntity.isAlive", "m_6084_");
+        methods.put("LivingEntity.aiStep", "m_8107_");
 
         // Entity
         methods.put("Entity.setRemoved", "m_142467_");
+        methods.put("Entity.tick", "m_8119_");
+        methods.put("Entity.baseTick", "m_6075_");
 
         // CompoundTag
         methods.put("CompoundTag.getBoolean", "m_128471_");
@@ -144,6 +148,25 @@ public final class ObfuscationMapping {
     public static String getMethodMapping(String methodKey) {
         Map<String, String> mappings = METHOD_MAPPINGS.get(CURRENT_VERSION);
         return mappings != null ? mappings.get(methodKey) : null;
+    }
+
+    // 将运行期方法名还原为映射键中的源码名
+    /**
+     * Resolve an obfuscated runtime method name to its mapped source name.
+     * @param runtimeName the runtime method name
+     * @return the mapped source name, or null if no mapping exists
+     */
+    public static String getDeobfuscatedMethodName(String runtimeName) {
+        if (runtimeName == null) return null;
+        Map<String, String> mappings = METHOD_MAPPINGS.get(CURRENT_VERSION);
+        if (mappings == null) return null;
+        for (Map.Entry<String, String> entry : mappings.entrySet()) {
+            if (!runtimeName.equals(entry.getValue())) continue;
+            String key = entry.getKey();
+            int separator = key.lastIndexOf('.');
+            return separator < 0 ? key : key.substring(separator + 1);
+        }
+        return null;
     }
 
     // 检查字段映射是否存在

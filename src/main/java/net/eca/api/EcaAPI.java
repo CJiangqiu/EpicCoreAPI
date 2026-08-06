@@ -9,6 +9,7 @@ import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityUtil;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
+import net.eca.util.call_bridge.CallBridgeManager;
 import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.HealthLockManager;
 import net.eca.util.reflect.UnsafeUtil;
@@ -69,6 +70,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 public final class EcaAPI {
 
@@ -84,6 +86,30 @@ public final class EcaAPI {
     // 恢复快速路径条目（由 LivingEntityMixin.readAdditionalSaveData 调用，确保重启后快速路径不为空）
     public static void restoreInvulnerableFastPath(int entityId) {
         INVULNERABLE_IDS.add(entityId);
+    }
+
+    // 在目标来源的调用栈检测器已桥接时执行受控调用
+    /**
+     * Execute a value-returning invocation inside an authorized call-bridge scope.
+     * The target determines which loaded code source is scanned for stack watchdogs.
+     * @param target the target object or target class whose code source should be prepared
+     * @param invocation the invocation to execute
+     * @param <T> the invocation result type
+     * @return the invocation result
+     */
+    public static <T> T callAuthorized(Object target, Supplier<T> invocation) {
+        return CallBridgeManager.callAuthorized(target, invocation);
+    }
+
+    // 在目标来源的调用栈检测器已桥接时执行无返回值受控调用
+    /**
+     * Execute a void invocation inside an authorized call-bridge scope.
+     * The target determines which loaded code source is scanned for stack watchdogs.
+     * @param target the target object or target class whose code source should be prepared
+     * @param invocation the invocation to execute
+     */
+    public static void runAuthorized(Object target, Runnable invocation) {
+        CallBridgeManager.runAuthorized(target, invocation);
     }
 
     // 锁定血量

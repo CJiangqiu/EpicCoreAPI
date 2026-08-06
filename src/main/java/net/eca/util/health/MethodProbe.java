@@ -4,6 +4,7 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.coremod.EcaTransformerManager;
 import net.eca.coremod.LivingEntityHook;
 import net.eca.util.EcaLogger;
+import net.eca.util.call_bridge.CallBridgeManager;
 import net.eca.util.reflect.UnsafeUtil;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.Entity;
@@ -104,6 +105,11 @@ public final class MethodProbe {
         private final Entity entity;
         private final float target;
         private boolean guardObserved;
+        private boolean commandObserved;
+        private boolean commandProduced;
+        private boolean consumerObserved;
+        private float beforeConsume = Float.NaN;
+        private float afterConsume = Float.NaN;
 
         private ProtocolActivation(Entity entity, float target) {
             this.entity = entity;
@@ -128,7 +134,8 @@ public final class MethodProbe {
         }
     }
 
-    private record ProtocolInvocationResult(boolean success, String stage, Throwable failure) {}
+    private record ProtocolInvocationResult(boolean success, String stage, Throwable failure,
+                                            boolean authorizationObserved) {}
 
     public enum WriterKind { METHOD, FUNCTIONAL_FIELD, METHOD_HANDLE_FIELD, FIELD_COMMIT }
 
@@ -885,8 +892,13 @@ public final class MethodProbe {
                 spec.marker().name(), spec.marker().desc()));
         prefix.add(new MethodInsnNode(Opcodes.INVOKESTATIC, spec.producer().owner(),
                 spec.producer().name(), spec.producer().desc(), false));
+        prefix.add(new InsnNode(Opcodes.DUP));
+        prefix.add(new MethodInsnNode(Opcodes.INVOKESTATIC, RUNTIME, "protocolBridgeCommand",
+                "(Ljava/lang/Object;)V", false));
         prefix.add(new MethodInsnNode(Opcodes.INVOKESTATIC, spec.consumer().owner(),
                 spec.consumer().name(), spec.consumer().desc(), false));
+        prefix.add(new MethodInsnNode(Opcodes.INVOKESTATIC, RUNTIME, "protocolBridgeConsumed",
+                "()V", false));
         appendDefaultReturn(prefix, Type.getReturnType(spec.methodDesc()));
         prefix.add(skip);
         method.instructions.insert(prefix);
@@ -938,6 +950,7 @@ public final class MethodProbe {
     /* Register the bridge site and bake it through the active transform backend. */
     public static void installBridge(Class<?> entityClass) {
         if (entityClass == null) return;
+        CallBridgeManager.prepare(entityClass);
         BridgeSpec spec = findBridgeSpec(entityClass);
         String lookupInternal = Type.getInternalName(entityClass);
         Set<Class<?>> owners = new HashSet<>();
@@ -1049,6 +1062,23 @@ public final class MethodProbe {
     public static float protocolBridgeTarget() {
         ProtocolActivation activation = ACTIVE_PROTOCOL.get();
         return activation == null ? Float.NaN : activation.target();
+    }
+
+    public static void protocolBridgeCommand(Object command) {
+        ProtocolActivation activation = ACTIVE_PROTOCOL.get();
+        if (activation == null) return;
+        activation.commandObserved = true;
+        activation.commandProduced = command != null;
+        activation.beforeConsume = EcaSetHealthManager.readProtocolHealthAnchor(
+                (LivingEntity) activation.entity());
+    }
+
+    public static void protocolBridgeConsumed() {
+        ProtocolActivation activation = ACTIVE_PROTOCOL.get();
+        if (activation == null) return;
+        activation.consumerObserved = true;
+        activation.afterConsume = EcaSetHealthManager.readProtocolHealthAnchor(
+                (LivingEntity) activation.entity());
     }
 
     // ==================== DirectCall：行为探测 ====================
@@ -1346,7 +1376,10 @@ public final class MethodProbe {
         try {
             BridgeActivation activation = new BridgeActivation(entity);
             ACTIVE_ENTITY.set(activation);
-            method.invoke(entity, target);
+            CallBridgeManager.callAuthorizedThrowing(entity, () -> {
+                method.invoke(entity, target);
+                return null;
+            });
             if (!activation.guardObserved) {
                 snapshot.restore();
                 Class<?> owner = HealthDataflowAnalyzer.loadClass(spec.ownerInternal());
@@ -1360,7 +1393,10 @@ public final class MethodProbe {
                 snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
                 activation = new BridgeActivation(entity);
                 ACTIVE_ENTITY.set(activation);
-                method.invoke(entity, target);
+                CallBridgeManager.callAuthorizedThrowing(entity, () -> {
+                    method.invoke(entity, target);
+                    return null;
+                });
                 if (!activation.guardObserved) {
                     if (reinstall.backend() != EcaTransformerManager.Backend.AGENT) {
                         snapshot.restore();
@@ -1373,7 +1409,10 @@ public final class MethodProbe {
                     snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
                     activation = new BridgeActivation(entity);
                     ACTIVE_ENTITY.set(activation);
-                    method.invoke(entity, target);
+                    CallBridgeManager.callAuthorizedThrowing(entity, () -> {
+                        method.invoke(entity, target);
+                        return null;
+                    });
                     if (!activation.guardObserved) {
                         snapshot.restore();
                         return false;
@@ -1422,13 +1461,23 @@ public final class MethodProbe {
                     entity.getClass().getName(), loaderIdentity(MethodProbe.class.getClassLoader()),
                     loaderIdentity(entity.getClass().getClassLoader()));
         }
-        float baseline = EcaSetHealthManager.readHealthAnchor(entity);
+        float baseline = EcaSetHealthManager.readProtocolHealthAnchor(entity);
+        Float protocolInput = resolveProtocolInput(entity, target);
         Set<ProtocolBridgeSpec> runtimeReady = new HashSet<>();
         for (ProtocolBridgeSpec spec : specs) {
             String diagnosticKey = entity.getClass().getName() + "|" + spec.ownerInternal()
                     + "#" + spec.methodName() + spec.methodDesc();
             Class<?> specOwner = HealthDataflowAnalyzer.loadClass(spec.ownerInternal());
             if (specOwner == null) continue;
+            boolean external = !specOwner.isInstance(entity);
+            if (spec.input() == ProtocolInput.TARGET_FLOAT && protocolInput == null) {
+                if (PROTOCOL_BRIDGE_DIAGNOSTICS.add(diagnosticKey + "|input-unsolved")) {
+                    EcaLogger.info("[MethodProbe] protocol bridge input unresolved entity={} method={} requested={} origin={}",
+                            entity.getClass().getName(), spec.methodName(), target,
+                            external ? "external" : "entity");
+                }
+                continue;
+            }
             boolean agentRuntimeFailed = AGENT_RUNTIME_FAILED_OWNERS.contains(spec.ownerInternal());
             if (agentRuntimeFailed) {
                 if (!EcaTransformerManager.isHealthTransformConfirmed(
@@ -1440,9 +1489,26 @@ public final class MethodProbe {
             }
             ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
             try {
-                ProtocolActivation activation = new ProtocolActivation(entity, target);
+                ProtocolActivation activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
                 ACTIVE_PROTOCOL.set(activation);
                 ProtocolInvocationResult invocation = invokeProtocolMethod(entity, spec);
+                boolean jvmTiRetried = false;
+                if (!invocation.authorizationObserved() && CallBridgeManager.hasWatchdogs(entity)
+                        && !CallBridgeManager.isRuntimeConfirmed(entity)) {
+                    snapshot.restore();
+                    if (CallBridgeManager.forceJvmTi(entity)) {
+                        jvmTiRetried = true;
+                        snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+                        activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
+                        ACTIVE_PROTOCOL.set(activation);
+                        invocation = invokeProtocolMethod(entity, spec);
+                    }
+                }
+                if (jvmTiRetried && !invocation.authorizationObserved()
+                        && PROTOCOL_BRIDGE_DIAGNOSTICS.add(diagnosticKey + "|call-bridge-runtime")) {
+                    EcaLogger.info("[MethodProbe] call bridge runtime receipt missing entity={} owner={} method={}",
+                            entity.getClass().getName(), spec.ownerInternal(), spec.methodName());
+                }
                 if (!activation.guardObserved) {
                     snapshot.restore();
                     Class<?> owner = HealthDataflowAnalyzer.loadClass(spec.ownerInternal());
@@ -1454,7 +1520,7 @@ public final class MethodProbe {
                                     : EcaTransformerManager.retransformHealthClass(owner, true);
                     if (reinstall.confirmed()) {
                         snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
-                        activation = new ProtocolActivation(entity, target);
+                        activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
                         ACTIVE_PROTOCOL.set(activation);
                         invocation = invokeProtocolMethod(entity, spec);
                     }
@@ -1469,7 +1535,7 @@ public final class MethodProbe {
                         reinstall = jvmTiInstall;
                         if (jvmTiInstall.confirmed()) {
                             snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
-                            activation = new ProtocolActivation(entity, target);
+                            activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
                             ACTIVE_PROTOCOL.set(activation);
                             invocation = invokeProtocolMethod(entity, spec);
                         }
@@ -1495,16 +1561,25 @@ public final class MethodProbe {
                     continue;
                 }
                 runtimeReady.add(spec);
-                EcaSetHealthManager.noteAnchorResponse(entity, baseline, target);
-                if (EcaSetHealthManager.verify(entity, target)) {
-                    EcaLogger.info("[MethodProbe] protocol bridge hit entity={} method={}",
-                            entity.getClass().getName(), spec.methodName());
+                if (EcaSetHealthManager.verifyProtocol(entity, target)) {
+                    float actual = EcaSetHealthManager.readProtocolHealthAnchor(entity);
+                    EcaSetHealthManager.confirmProtocolHealthAnchor(entity);
+                    EcaLogger.info("[MethodProbe] protocol bridge hit entity={} method={} baseline={} requested={} protocolInput={} actual={} origin={} commandObserved={} produced={} consumed={} beforeConsume={} afterConsume={}",
+                            entity.getClass().getName(), spec.methodName(), baseline, target,
+                            protocolInputValue(spec, target, protocolInput), actual,
+                            external ? "external" : "entity", activation.commandObserved,
+                            activation.commandProduced, activation.consumerObserved,
+                            activation.beforeConsume, activation.afterConsume);
                     return true;
                 }
                 if (PROTOCOL_BRIDGE_DIAGNOSTICS.add(diagnosticKey + "|verify")) {
-                    EcaLogger.info("[MethodProbe] protocol bridge not observed entity={} method={} target={} actual={}",
-                            entity.getClass().getName(), spec.methodName(), target,
-                            EcaSetHealthManager.readHealthAnchor(entity));
+                    EcaLogger.info("[MethodProbe] protocol bridge not observed entity={} method={} baseline={} requested={} protocolInput={} actual={} origin={} commandObserved={} produced={} consumed={} beforeConsume={} afterConsume={}",
+                            entity.getClass().getName(), spec.methodName(), baseline, target,
+                            protocolInputValue(spec, target, protocolInput),
+                            EcaSetHealthManager.readProtocolHealthAnchor(entity),
+                            external ? "external" : "entity", activation.commandObserved,
+                            activation.commandProduced, activation.consumerObserved,
+                            activation.beforeConsume, activation.afterConsume);
                 }
                 snapshot.restore();
             } catch (Throwable t) {
@@ -1514,12 +1589,26 @@ public final class MethodProbe {
                 ACTIVE_PROTOCOL.remove();
             }
         }
-        return invokeProtocolCombinations(entity, specs, runtimeReady, target, rollbackRoots, baseline);
+        return invokeProtocolCombinations(entity, specs, runtimeReady, target, protocolInput,
+                rollbackRoots, baseline);
+    }
+
+    private static Float resolveProtocolInput(LivingEntity entity, float target) {
+        HealthDataflowAnalyzer.EffectiveHealthModel model =
+                HealthDataflowAnalyzer.peekProtocolTargetModel(entity.getClass());
+        if (model == null) return target;
+        return HealthDataflowAnalyzer.solveProtocolFloatInput(
+                model, target, HealthDataflowAnalyzer.newContext(entity));
+    }
+
+    private static float protocolInputValue(ProtocolBridgeSpec spec, float target, Float protocolInput) {
+        return spec.input() == ProtocolInput.TARGET_FLOAT && protocolInput != null ? protocolInput : target;
     }
 
     /* 前置控制和目标写入必须共享事务，单独回滚会重新建立刚解除的门控。 */
     private static boolean invokeProtocolCombinations(LivingEntity entity, List<ProtocolBridgeSpec> specs,
                                                       Set<ProtocolBridgeSpec> runtimeReady, float target,
+                                                      Float protocolInput,
                                                       List<Object> rollbackRoots, float baseline) {
         List<ProtocolBridgeSpec> controls = new ArrayList<>();
         List<ProtocolBridgeSpec> writers = new ArrayList<>();
@@ -1540,25 +1629,42 @@ public final class MethodProbe {
                     ProtocolInvocationResult controlResult = invokeProtocolMethod(entity, control);
                     if (!controlResult.success() || !controlActivation.guardObserved) continue;
 
-                    ProtocolActivation writerActivation = new ProtocolActivation(entity, target);
+                    ProtocolActivation writerActivation = new ProtocolActivation(
+                            entity, protocolInputValue(writer, target, protocolInput));
                     ACTIVE_PROTOCOL.set(writerActivation);
                     ProtocolInvocationResult writerResult = invokeProtocolMethod(entity, writer);
                     if (!writerResult.success() || !writerActivation.guardObserved) continue;
 
-                    EcaSetHealthManager.noteAnchorResponse(entity, baseline, target);
-                    if (EcaSetHealthManager.verify(entity, target)) {
+                    if (EcaSetHealthManager.verifyProtocol(entity, target)) {
                         committed = true;
-                        EcaLogger.info("[MethodProbe] protocol bridge composition hit entity={} control={} writer={}",
-                                entity.getClass().getName(), control.methodName(), writer.methodName());
+                        boolean writerExternal = isExternalProtocol(entity, writer);
+                        float actual = EcaSetHealthManager.readProtocolHealthAnchor(entity);
+                        EcaSetHealthManager.confirmProtocolHealthAnchor(entity);
+                        EcaLogger.info("[MethodProbe] protocol bridge composition hit entity={} control={} writer={} baseline={} requested={} protocolInput={} actual={} origin={} controlProduced={} controlConsumed={} controlBefore={} controlAfter={} writerProduced={} writerConsumed={} writerBefore={} writerAfter={}",
+                                entity.getClass().getName(), control.methodName(), writer.methodName(), baseline,
+                                target, protocolInputValue(writer, target, protocolInput),
+                                actual,
+                                writerExternal ? "external" : "entity",
+                                controlActivation.commandProduced, controlActivation.consumerObserved,
+                                controlActivation.beforeConsume, controlActivation.afterConsume,
+                                writerActivation.commandProduced, writerActivation.consumerObserved,
+                                writerActivation.beforeConsume, writerActivation.afterConsume);
                         return true;
                     }
                     String diagnosticKey = entity.getClass().getName() + "|composition|"
                             + control.ownerInternal() + "#" + control.methodName() + "|"
                             + writer.ownerInternal() + "#" + writer.methodName();
                     if (PROTOCOL_BRIDGE_DIAGNOSTICS.add(diagnosticKey)) {
-                        EcaLogger.info("[MethodProbe] protocol bridge composition not observed entity={} control={} writer={} target={} actual={}",
-                                entity.getClass().getName(), control.methodName(), writer.methodName(), target,
-                                EcaSetHealthManager.readHealthAnchor(entity));
+                        boolean writerExternal = isExternalProtocol(entity, writer);
+                        EcaLogger.info("[MethodProbe] protocol bridge composition not observed entity={} control={} writer={} baseline={} requested={} protocolInput={} actual={} origin={} controlProduced={} controlConsumed={} controlBefore={} controlAfter={} writerProduced={} writerConsumed={} writerBefore={} writerAfter={}",
+                                entity.getClass().getName(), control.methodName(), writer.methodName(), baseline,
+                                target, protocolInputValue(writer, target, protocolInput),
+                                EcaSetHealthManager.readProtocolHealthAnchor(entity),
+                                writerExternal ? "external" : "entity",
+                                controlActivation.commandProduced, controlActivation.consumerObserved,
+                                controlActivation.beforeConsume, controlActivation.afterConsume,
+                                writerActivation.commandProduced, writerActivation.consumerObserved,
+                                writerActivation.beforeConsume, writerActivation.afterConsume);
                     }
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
@@ -1571,9 +1677,29 @@ public final class MethodProbe {
         return false;
     }
 
+    private static boolean isExternalProtocol(LivingEntity entity, ProtocolBridgeSpec spec) {
+        Class<?> owner = spec == null ? null : HealthDataflowAnalyzer.loadClass(spec.ownerInternal());
+        return entity != null && owner != null && !owner.isInstance(entity);
+    }
+
     private static ProtocolInvocationResult invokeProtocolMethod(LivingEntity entity, ProtocolBridgeSpec spec) {
+        try {
+            CallBridgeManager.AuthorizedResult<ProtocolInvocationResult> result =
+                    CallBridgeManager.callAuthorizedObservedThrowing(entity,
+                            () -> invokeProtocolMethodAuthorized(entity, spec));
+            ProtocolInvocationResult value = result.value();
+            return new ProtocolInvocationResult(value.success(), value.stage(), value.failure(),
+                    result.runtimeObserved());
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return new ProtocolInvocationResult(false, "authorization", t, false);
+        }
+    }
+
+    private static ProtocolInvocationResult invokeProtocolMethodAuthorized(
+            LivingEntity entity, ProtocolBridgeSpec spec) {
         Class<?> owner = HealthDataflowAnalyzer.loadClass(spec.ownerInternal());
-        if (owner == null) return new ProtocolInvocationResult(false, "owner-resolution", null);
+        if (owner == null) return new ProtocolInvocationResult(false, "owner-resolution", null, false);
         MethodType type;
         MethodHandle handle;
         try {
@@ -1581,21 +1707,21 @@ public final class MethodProbe {
             handle = resolveProtocolMethod(owner, spec, type);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            return new ProtocolInvocationResult(false, "handle-resolution", t);
+            return new ProtocolInvocationResult(false, "handle-resolution", t, false);
         }
         try {
             List<Object> arguments = new ArrayList<>();
             if (!spec.methodStatic()) {
                 Object receiver = owner.isInstance(entity) ? entity : externalProtocolReceiver(owner);
-                if (receiver == null) return new ProtocolInvocationResult(false, "receiver-resolution", null);
+                if (receiver == null) return new ProtocolInvocationResult(false, "receiver-resolution", null, false);
                 arguments.add(receiver);
             }
             for (Class<?> parameter : type.parameterArray()) arguments.add(defaultValue(parameter));
             handle.invokeWithArguments(arguments);
-            return new ProtocolInvocationResult(true, "complete", null);
+            return new ProtocolInvocationResult(true, "complete", null, false);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            return new ProtocolInvocationResult(false, "execution", t);
+            return new ProtocolInvocationResult(false, "execution", t, false);
         }
     }
 
@@ -1653,7 +1779,10 @@ public final class MethodProbe {
         if (bridge == null) return false;
         float baseline = EcaSetHealthManager.readHealthAnchor(entity);
         try {
-            bridge.apply().invokeExact((Entity) entity, target);
+            CallBridgeManager.callAuthorizedThrowing(entity, () -> {
+                bridge.apply().invokeExact((Entity) entity, target);
+                return null;
+            });
             // 桥没有两点探测，改用写入前后的锚点位移取证，否则读自定义存储的 getHealth 会被弱取证永久判死
             EcaSetHealthManager.noteAnchorResponse(entity, baseline, target);
             if (EcaSetHealthManager.verify(entity, target)) {

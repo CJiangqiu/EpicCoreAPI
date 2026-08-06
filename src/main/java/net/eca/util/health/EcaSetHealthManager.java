@@ -276,6 +276,7 @@ public final class EcaSetHealthManager {
                     cls.getName(), oriented.storage().label,
                     HealthDataFlow.expressionSummary(oriented.readExpr()));
         }
+        HealthDataflowAnalyzer.rememberProtocolTargetModel(cls, oriented);
 
         // 使用有效血量表达式校验，避免 getHealth 与存储解耦时错误接受或拒绝写入
         boolean anchorWasPresent = hasHealthAnchor(cls);
@@ -797,6 +798,45 @@ public final class EcaSetHealthManager {
         if (!Float.isFinite(actual)) return false;
         if (!HealthValueSemantics.matches(actual, targetHealth)) return false;
         return isAnchorTrustworthy(target);
+    }
+
+    static boolean verifyProtocol(LivingEntity target, float targetHealth) {
+        HealthDataflowAnalyzer.EffectiveHealthModel model =
+                HealthDataflowAnalyzer.peekProtocolTargetModel(target == null ? null : target.getClass());
+        if (model == null) return verify(target, targetHealth);
+        float actual = readProtocolHealthAnchor(target);
+        return Float.isFinite(actual) && HealthValueSemantics.matches(actual, targetHealth);
+    }
+
+    static float readProtocolHealthAnchor(LivingEntity target) {
+        if (target == null) return Float.NaN;
+        HealthDataflowAnalyzer.EffectiveHealthModel model =
+                HealthDataflowAnalyzer.peekProtocolTargetModel(target.getClass());
+        if (model == null) return readHealthAnchor(target);
+        return readProtocolModelHealth(model, target);
+    }
+
+    private static float readProtocolModelHealth(HealthDataflowAnalyzer.EffectiveHealthModel model,
+                                                 LivingEntity target) {
+        try {
+            Float boundary = HealthDataflowAnalyzer.readProtocolFloatBoundary(
+                    model, HealthDataflowAnalyzer.newContext(target));
+            if (boundary == null || !Float.isFinite(boundary)) return Float.NaN;
+            return Math.abs(boundary);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return Float.NaN;
+        }
+    }
+
+    static void confirmProtocolHealthAnchor(LivingEntity target) {
+        if (target == null) return;
+        Class<?> cls = target.getClass();
+        HealthDataflowAnalyzer.EffectiveHealthModel model =
+                HealthDataflowAnalyzer.peekProtocolTargetModel(cls);
+        if (model == null) return;
+        registerEffectiveHealthAnchor(cls, entity -> readProtocolModelHealth(model, entity));
+        HealthModel.forClass(cls).setEffectiveObservationConfirmed(true);
     }
 
     // 外部扫描专用实读校验(带死亡语义：target≤0 需实读血量≤0，正值走容差匹配)。

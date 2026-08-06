@@ -2,6 +2,9 @@ package net.eca.coremod;
 
 import net.eca.agent.AgentLogWriter;
 import net.eca.config.EcaConfiguration;
+import net.eca.util.call_bridge.CallBridgeManager;
+import net.eca.util.call_bridge.CallBridgeRuntime;
+import net.eca.util.call_bridge.CallWatchdogTransformer;
 import net.eca.util.health.ConstOverride;
 import net.eca.util.health.MethodProbe;
 import org.objectweb.asm.ClassReader;
@@ -218,6 +221,9 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             TransformerWhitelist.class,
             AllReturnToggle.class,
             AllReturnTransformer.class,
+            CallBridgeManager.class,
+            CallBridgeRuntime.class,
+            CallWatchdogTransformer.class,
             ConstOverride.class,
             MethodProbe.class
         };
@@ -471,6 +477,12 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         byte[] bridgeResult = MethodProbe.transform(className, result);
         if (bridgeResult != null) {
             result = bridgeResult;
+            anyTransformed = true;
+        }
+
+        byte[] watchdogResult = CallWatchdogTransformer.transform(className, result);
+        if (watchdogResult != null) {
+            result = watchdogResult;
             anyTransformed = true;
         }
 
