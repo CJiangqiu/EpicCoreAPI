@@ -949,14 +949,14 @@ public final class HealthDataflowAnalyzer {
 
     static Float solveProtocolFloatInput(EffectiveHealthModel model, float target, EvalContext ctx) {
         if (model == null || model.readExpr() == null || model.storage() == null || ctx == null) return null;
+        if (target <= 0.0f) return 0.0f;
         Float boundary = solveFloatInputBoundary(
                 model.readExpr(), model.storage(), Float.valueOf(target), ctx);
         if (boundary == null || !Float.isFinite(boundary) || boundary == 0.0f) {
             boundary = readFloatInputBoundary(model.readExpr(), model.storage(), ctx);
         }
         if (boundary == null || !Float.isFinite(boundary) || boundary == 0.0f) return null;
-        float magnitude = Math.max(0.0f, target);
-        return Math.copySign(magnitude, boundary);
+        return Math.copySign(target, boundary);
     }
 
     static Float readProtocolFloatBoundary(EffectiveHealthModel model, EvalContext ctx) {

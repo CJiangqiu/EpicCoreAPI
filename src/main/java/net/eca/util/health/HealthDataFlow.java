@@ -264,6 +264,13 @@ public final class HealthDataFlow {
                                          LivingEntity entity, float target) {
         if (model == null || entity == null) return false;
         Class<?> cls = entity.getClass();
+        if (isSharedStaticScalar(model.storage())) {
+            if (EFFECTIVE_DUMPED.add(cls.getName())) {
+                EcaLogger.info("[EffectiveHealth] skipped entity={} storage={} reason=SHARED_STATIC_SCALAR",
+                        cls.getName(), model.storage().label);
+            }
+            return false;
+        }
         EvalContext ctx = HealthDataflowAnalyzer.newContext(entity);
         HealthSolveResult solved = HealthDataflowAnalyzer.buildWritePath(
                 model.readExpr(), model.storage(), Float.valueOf(target), ctx);
@@ -315,12 +322,14 @@ public final class HealthDataFlow {
         EvalContext context = HealthDataflowAnalyzer.newContext(entity);
         List<AssociatedSourceCandidates> groups = new ArrayList<>();
         for (Source sink : tree.sources) {
+            if (isSharedStaticScalar(sink)) continue;
             List<Object> candidates = HealthDataflowAnalyzer.buildWriteCandidates(
                     tree.returnExpr, sink, Float.valueOf(target), context,
                     MAX_ASSOCIATED_CANDIDATES_PER_SOURCE);
             if (candidates.isEmpty()) return false;
             groups.add(new AssociatedSourceCandidates(sink, sink.read(entity), candidates));
         }
+        if (groups.size() < 2) return false;
 
         AssociatedSearch search = new AssociatedSearch();
         boolean verified = tryAssociatedCombinations(groups, 0, new ArrayList<>(), entity, target, search);
@@ -481,6 +490,10 @@ public final class HealthDataFlow {
         int examined = 0;
         boolean candidateScanComplete = true;
         for (Source sink : withoutEcaOwnedSources(ar.sources)) {
+            if (isSharedStaticScalar(sink)) {
+                diag.add("    [" + sink.label + "] skipped=SHARED_STATIC_SCALAR");
+                continue;
+            }
             if (++examined > MAX_RUNTIME_SOURCES) {
                 dumpRuntimeBudget(cls, diagnosticChannel, "source cap exceeded");
                 candidateScanComplete = false;
@@ -694,6 +707,15 @@ public final class HealthDataFlow {
             if (source.label.contains(key)) return true;
         }
         return false;
+    }
+
+    /* 单实体事务不能把共享静态标量作为血量落点；专用外部维护链仍可通过 dispatchWrite 写入。 */
+    private static boolean isSharedStaticScalar(Source source) {
+        if (!(source instanceof StaticFieldSource staticField)) return false;
+        Class<?> type = staticField.field.getType();
+        if (type == null) return false;
+        return type.isPrimitive() || Number.class.isAssignableFrom(type)
+                || type == Boolean.class || type == Character.class || type == String.class;
     }
 
     /* ==================== Source 写入分发(按子类形态) ==================== */

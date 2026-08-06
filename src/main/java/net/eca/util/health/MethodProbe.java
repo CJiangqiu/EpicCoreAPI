@@ -950,7 +950,6 @@ public final class MethodProbe {
     /* Register the bridge site and bake it through the active transform backend. */
     public static void installBridge(Class<?> entityClass) {
         if (entityClass == null) return;
-        CallBridgeManager.prepare(entityClass);
         BridgeSpec spec = findBridgeSpec(entityClass);
         String lookupInternal = Type.getInternalName(entityClass);
         Set<Class<?>> owners = new HashSet<>();

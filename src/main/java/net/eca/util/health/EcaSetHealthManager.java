@@ -804,6 +804,11 @@ public final class EcaSetHealthManager {
         HealthDataflowAnalyzer.EffectiveHealthModel model =
                 HealthDataflowAnalyzer.peekProtocolTargetModel(target == null ? null : target.getClass());
         if (model == null) return verify(target, targetHealth);
+        if (targetHealth <= 0.0f) {
+            Float boundary = HealthDataflowAnalyzer.readProtocolFloatBoundary(
+                    model, HealthDataflowAnalyzer.newContext(target));
+            return boundary != null && Float.floatToRawIntBits(boundary) == Float.floatToRawIntBits(0.0f);
+        }
         float actual = readProtocolHealthAnchor(target);
         return Float.isFinite(actual) && HealthValueSemantics.matches(actual, targetHealth);
     }

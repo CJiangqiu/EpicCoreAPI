@@ -17,13 +17,13 @@ import java.util.function.Supplier;
 public final class CallBridgeManager {
 
     private static final int MAX_SCAN_CLASSES = 4096;
-    private static final long EMPTY_SCAN_RETRY_NANOS = 30_000_000_000L;
+    private static final long PREPARATION_RETRY_NANOS = 30_000_000_000L;
     private static final ThreadLocal<Authorization> AUTHORIZATION = new ThreadLocal<>();
     private static final Set<String> INSTALLED_SOURCES = ConcurrentHashMap.newKeySet();
     private static final Set<String> INSTALLING_SOURCES = ConcurrentHashMap.newKeySet();
     private static final Set<String> RUNTIME_CONFIRMED_SOURCES = ConcurrentHashMap.newKeySet();
     private static final Set<String> JVMTI_INSTALLED_SOURCES = ConcurrentHashMap.newKeySet();
-    private static final Map<String, Long> EMPTY_SOURCES = new ConcurrentHashMap<>();
+    private static final Map<String, Long> PREPARATION_RETRY = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, Class<?>>> WATCHDOGS_BY_SOURCE = new ConcurrentHashMap<>();
 
     private static final class Authorization {
@@ -140,12 +140,13 @@ public final class CallBridgeManager {
         String sourceKey = loaderIdentity(targetClass.getClassLoader()) + "|" + source.getLocation();
         if (INSTALLED_SOURCES.contains(sourceKey) || !INSTALLING_SOURCES.add(sourceKey)) return;
         try {
-            Long retryAfter = EMPTY_SOURCES.get(sourceKey);
+            Long retryAfter = PREPARATION_RETRY.get(sourceKey);
             if (retryAfter != null && System.nanoTime() - retryAfter < 0L) return;
-            EMPTY_SOURCES.remove(sourceKey, retryAfter);
-            Map<String, Class<?>> watchdogs = scanWatchdogs(targetClass, source);
+            PREPARATION_RETRY.remove(sourceKey, retryAfter);
+            Map<String, Class<?>> watchdogs = WATCHDOGS_BY_SOURCE.get(sourceKey);
+            if (watchdogs == null) watchdogs = scanWatchdogs(targetClass, source);
             if (watchdogs.isEmpty()) {
-                EMPTY_SOURCES.put(sourceKey, System.nanoTime() + EMPTY_SCAN_RETRY_NANOS);
+                PREPARATION_RETRY.put(sourceKey, System.nanoTime() + PREPARATION_RETRY_NANOS);
                 return;
             }
             registerWatchdogs(sourceKey, watchdogs);
@@ -164,6 +165,7 @@ public final class CallBridgeManager {
                 EcaLogger.info("[CallBridge] watchdog bridge confirmed classes={} agentRequested={} jvmTiRequested={} source={}",
                         confirmed.size(), agentRequested, jvmTiRequested, source.getLocation());
             } else {
+                PREPARATION_RETRY.put(sourceKey, System.nanoTime() + PREPARATION_RETRY_NANOS);
                 EcaLogger.info("[CallBridge] watchdog bridge unconfirmed confirmed={} missing={} agentRequested={} jvmTiRequested={} source={}",
                         confirmed.size(), missing.size(), agentRequested, jvmTiRequested,
                         source.getLocation());
@@ -180,7 +182,7 @@ public final class CallBridgeManager {
     private static void registerWatchdogs(String sourceKey, Map<String, Class<?>> watchdogs) {
         WATCHDOGS_BY_SOURCE.put(sourceKey, Map.copyOf(watchdogs));
         for (String watchdog : watchdogs.keySet()) CallWatchdogTransformer.register(watchdog);
-        EMPTY_SOURCES.remove(sourceKey);
+        PREPARATION_RETRY.remove(sourceKey);
     }
 
     private static void markRuntimeConfirmed(Object target) {
