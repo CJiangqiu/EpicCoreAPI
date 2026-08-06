@@ -202,9 +202,9 @@ public final class EcaSetHealthManager {
                 || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return false;
         HealthModel model = HealthModel.forClass(target.getClass());
         if (model == null || !model.delayedRollbackObserved()) return false;
-        /* co-write 已成功写入实体外权威后仍未留住，是模组地板/钳制(路西打的 max(_,10) 等)所致，
-           不是未知镜像回滚。此时再按"值吻合"破坏性扫描世界存档既定位不到真镜像，又有改坏其他
-           模组世界数据的风险，直接抑制。 */
+        /* co-write 已成功写入实体外权威后仍未留住，是模组地板/钳制所致，不是未知镜像回滚。
+           此时再按"值吻合"破坏性扫描世界存档既定位不到真镜像，又有改坏其他模组世界数据的风险，
+           直接抑制。 */
         if (EXTERNAL_AUTHORITY_WRITTEN.contains(target.getClass())) {
             if (EXTERNAL_MIRROR_SUPPRESSED_DUMPED.add(target.getClass().getName())) {
                 EcaLogger.info("[ExternalMirror] suppressed entity={} reason=external authority already co-written (mod floor/clamp, not a hidden mirror)",
@@ -597,7 +597,7 @@ public final class EcaSetHealthManager {
         if (writer == null) return false;
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
         // 带死亡语义：target≤0 是斩杀意图，writer 会把血量 clamp 到≥0(实际写成 0)，故实读≤0 即成功，
-        // 不能拿负 target 做容差匹配(否则 |0-(-75)| 恒超容差，斩杀永远误判失败)。
+        // 不能拿负 target 做容差匹配(实读被 clamp 到 0，与负目标的差恒超容差，斩杀永远误判失败)。
         // 快速改血时存储写入/读值可能瞬时偏差，重试几次再判失败，避免一次偏差就丢缓存进冷却。
         boolean wrote = false;
         float actual = Float.NaN;

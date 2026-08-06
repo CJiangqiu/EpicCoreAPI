@@ -317,8 +317,8 @@ public final class HealthDataFlow {
     private static final Set<String> EFFECTIVE_DUMPED = ConcurrentHashMap.newKeySet();
     private static final Set<String> EFFECTIVE_SUCCESS_DUMPED = ConcurrentHashMap.newKeySet();
 
-    /* Runtime-revealed writers commonly maintain ciphertext, keys and integrity tags as one unit.
-       Their write set must be committed as a group; probing individual stores creates invalid states. */
+    /* 运行期暴露的 writer 常把密文、密钥与完整性标签作为一个单元维护，其写集必须整组提交；
+       逐个探测单一存储会造出非法中间态。 */
     public static boolean writeAssociated(AnalysisResult tree, LivingEntity entity, float target) {
         if (tree == null || entity == null || tree.sources.size() < 2) return false;
         EvalContext context = HealthDataflowAnalyzer.newContext(entity);

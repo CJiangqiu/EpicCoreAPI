@@ -1407,8 +1407,8 @@ public final class HealthDataflowAnalyzer {
         return null;
     }
 
-    /* Exception fallbacks often merge before the normal data-bearing branch. Store writes must
-       prefer expressions tied to live state and the requested input over literal defaults. */
+    /* 异常兜底分支常在正常载值分支之前汇合。存储写入须优先取绑定活状态与请求输入的表达式，
+       而非字面量默认值。 */
     private static List<Expr> orderedWriteAlternatives(Choice choice) {
         List<Expr> alternatives = new ArrayList<>(choice.alternatives());
         alternatives.sort(Comparator.comparingInt(HealthDataflowAnalyzer::writeBranchScore).reversed());
@@ -4594,8 +4594,8 @@ public final class HealthDataflowAnalyzer {
         }
     }
 
-    /* Analyze the complete write set of a runtime-revealed writer. The entity receiver and the
-       single numeric input are seeded symbolically so every correlated store can be solved together. */
+    /* 分析运行期暴露 writer 的完整写集。实体接收者与那个唯一数值入参按符号播种，
+       使全部关联写入能一并求解。 */
     public static AnalysisResult analyzeWriterMethod(Class<?> owner, String methodName, String desc,
                                                      boolean isStatic) {
         if (owner == null || methodName == null || desc == null) return null;
@@ -6087,8 +6087,8 @@ public final class HealthDataflowAnalyzer {
         return solveDetailed(root, sink, target, ctx);
     }
 
-    /* Path-insensitive control flow can expose several writes to the same storage location. Keep
-       every representable value so the landing layer can validate complete transactions. */
+    /* 路径不敏感的控制流会让同一存储位置暴露多处写入。保留每个可表示的值，
+       交由落地层校验完整事务。 */
     public static List<Object> buildWriteCandidates(Expr root, Source sink, Object target,
                                                     EvalContext ctx, int limit) {
         if (root == null || sink == null || ctx == null || limit <= 0) return List.of();

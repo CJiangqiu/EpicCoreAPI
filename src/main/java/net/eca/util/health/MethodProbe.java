@@ -947,7 +947,7 @@ public final class MethodProbe {
         }
     }
 
-    /* Register the bridge site and bake it through the active transform backend. */
+    /* 登记桥接站点，并经当前生效的转换后端烤入。 */
     public static void installBridge(Class<?> entityClass) {
         if (entityClass == null) return;
         BridgeSpec spec = findBridgeSpec(entityClass);
