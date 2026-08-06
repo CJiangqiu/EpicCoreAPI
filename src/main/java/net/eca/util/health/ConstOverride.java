@@ -66,7 +66,18 @@ public final class ConstOverride {
 
     /* 写入 holder 的覆写血量。由数据流写入侧(dispatchWrite 的 ConstOverrideSource 分支)调用。 */
     public static void setOverride(Object holder, float value) {
-        if (holder != null) OVERRIDES.put(holder, value);
+        if (holder == null) return;
+        ensureHolderTransform(holder);
+        OVERRIDES.put(holder, value);
+    }
+
+    private static void ensureHolderTransform(Object holder) {
+        for (Class<?> current = holder.getClass(); current != null && current != Object.class;
+             current = current.getSuperclass()) {
+            String internalName = current.getName().replace('.', '/');
+            if (!hasSites(internalName) || EcaTransformerManager.isHealthTransformConfirmed(current)) continue;
+            EcaTransformerManager.retransformHealthClass(current, true);
+        }
     }
 
     /* 读取 holder 当前覆写值，无则返回 null。供 ConstOverrideSource.read() 经注入查表。 */
@@ -106,6 +117,25 @@ public final class ConstOverride {
     public static boolean hasSites(String classInternal) {
         List<Site> list = SPECS.get(classInternal);
         return list != null && !list.isEmpty();
+    }
+
+    public static boolean verifyTransform(String classInternal, byte[] bytes) {
+        List<Site> sites = SPECS.get(classInternal);
+        if (sites == null || sites.isEmpty() || bytes == null) return false;
+        try {
+            ClassNode owner = new ClassNode();
+            new ClassReader(bytes).accept(owner, ClassReader.EXPAND_FRAMES);
+            int confirmed = 0;
+            for (MethodNode method : owner.methods) {
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (isResolveCall(insn)) confirmed++;
+                }
+            }
+            return confirmed >= sites.size();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
     }
 
     /* 对持有者类字节码施加全部已登记 patch；无 spec 或无命中返回 null。由 EcaClassTransformer.doTransform 链尾调用。
@@ -269,10 +299,13 @@ public final class ConstOverride {
                 continue;
             }
             try {
-                if (!EcaTransformerManager.retransformClass(owner)
+                EcaTransformerManager.HealthTransformResult result =
+                        EcaTransformerManager.retransformHealthClass(owner, false);
+                if (!result.confirmed()
                         && !EcaSetHealthManager.isWarmupDiagnosticsSuppressed()
                         && INSTALL_DUMPED.add("unmodifiable:" + internal)) {
-                    EcaLogger.info("[ConstOverride] install skipped: owner retransform unavailable {}", owner.getName());
+                    EcaLogger.info("[ConstOverride] install skipped: owner transform not confirmed {} backend={}",
+                            owner.getName(), result.backend());
                 }
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;

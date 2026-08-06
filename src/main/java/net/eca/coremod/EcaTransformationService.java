@@ -41,8 +41,7 @@ public class EcaTransformationService implements ITransformationService {
         AgentLoader.loadAgent();
         // prepare() 必须在 dual loading 移除 ECA 模块之前：否则 JvmTiChannel 及其 JNA 依赖在模块移除后无法再加载（NoClassDefFoundError）
         try {
-            boolean collectPreparedClasses = EcaAgent.getInstrumentation() == null
-                    && isRadicalDefenceRequestedEarly();
+            boolean collectPreparedClasses = isRadicalDefenceRequestedEarly();
             JvmTiChannel.prepare(collectPreparedClasses);
         } catch (Throwable t) {
             log("[CoreMod] JvmTiChannel prepare skipped: " + t.getMessage());

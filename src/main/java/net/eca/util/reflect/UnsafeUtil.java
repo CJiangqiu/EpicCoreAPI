@@ -75,6 +75,7 @@ public class UnsafeUtil {
     private static Method PUT_BYTE_METHOD;
     private static Method GET_OBJECT_METHOD;
     private static Method OBJECT_FIELD_OFFSET_METHOD;
+    private static Method ALLOCATE_INSTANCE_METHOD;
 
     private static boolean initialized = false;
     private static boolean available = false;
@@ -157,6 +158,7 @@ public class UnsafeUtil {
         PUT_BYTE_METHOD = unsafeClass.getMethod("putByte", Object.class, long.class, byte.class);
         GET_OBJECT_METHOD = unsafeClass.getMethod("getObject", Object.class, long.class);
         OBJECT_FIELD_OFFSET_METHOD = unsafeClass.getMethod("objectFieldOffset", Field.class);
+        ALLOCATE_INSTANCE_METHOD = unsafeClass.getMethod("allocateInstance", Class.class);
     }
 
     private static void initFieldOffsets() throws Exception {
@@ -221,6 +223,16 @@ public class UnsafeUtil {
     }
 
     // ==================== 底层内存操作方法 ====================
+
+    public static Object lwjglAllocateInstance(Class<?> type) {
+        if (type == null || LWJGL_UNSAFE == null || ALLOCATE_INSTANCE_METHOD == null) return null;
+        try {
+            return ALLOCATE_INSTANCE_METHOD.invoke(LWJGL_UNSAFE, type);
+        } catch (Exception e) {
+            EcaLogger.info("[UnsafeUtil] allocateInstance failed: {}", e.getMessage());
+            return null;
+        }
+    }
 
     public static void lwjglPutObject(Object target, long offset, Object value) {
         if (!available || PUT_OBJECT_METHOD == null) return;

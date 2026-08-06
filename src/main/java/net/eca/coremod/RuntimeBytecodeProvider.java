@@ -9,10 +9,10 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /*
- * 运行期字节码提供器：类首次加载时由永久捕获器(排在 transformer 链末尾)自动缓存最终字节码，
+ * 运行期字节码提供器：类首次加载与重转换时由永久捕获器自动缓存主转换链输出，
  * get() 直接从缓存返回，不触发 retransform，消除按需捕获造成的卡顿。
  * 捕获器由 EcaClassTransformer 的 register()/init() 在 transformer 注册后、retransformLoadedClasses 前注册，
- * 确保已加载类的批量重转换也能被截获。
+ * 确保已加载类的批量重转换也能被截获；按需末端健康变换由独立回执器验证。
  *
  * 激进防御开启时额外注册 JVM TI 捕获函数（排在 transformFunctions 列表末尾），
  * 使 JVM TI 层的变换结果也进入缓存。
@@ -26,7 +26,7 @@ public final class RuntimeBytecodeProvider {
     private static volatile boolean captureRegistered = false;
     private static volatile boolean jvmTiRegistered = false;
 
-    //注册永久捕获器：排在链尾，所有类加载/retransform 时自动截获 post-all-transforms(含 Mixin)最终字节码
+    // 注册永久捕获器：截获主转换器之后的运行期字节码，并使该类旧健康变换回执失效
     public static void registerPermanentCapture(Instrumentation inst) {
         if (captureRegistered) return;
         captureRegistered = true;
@@ -72,6 +72,7 @@ public final class RuntimeBytecodeProvider {
                 internalName = new ClassReader(bytes).getClassName();
             }
             if (internalName == null || internalName.isEmpty()) return;
+            EcaTransformerManager.invalidateHealthTransformReceipt(internalName);
             byte[] copy = bytes.clone();
             put(target, internalName.replace('.', '/'), copy, replace);
             int hiddenSuffix = internalName.indexOf("/0x");

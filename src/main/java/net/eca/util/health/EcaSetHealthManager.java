@@ -118,7 +118,7 @@ public final class EcaSetHealthManager {
         boolean success = HealthDataFlow.write(tree, target, targetHealth);
         if (!success) snapshot.restore();
         /* dataflow 写实体存储成功后，追加写实体外的 SavedData 真实权威。
-           路西法这类实体：dataflow 只覆盖实体镜像 SD:48，当场 verify 通过，但真实血量
+           dataflow 可能只覆盖实体内同步单元镜像，当场 verify 通过，但真实血量
            (SavedData) 未写，下一 tick 被钳制回。ExternalScan(tick 收集)能定位 SavedData 写源，
            追加写入使真实权威与实体镜像一致。外部扫描关闭或未就绪时不阻塞 dataflow 的成功结果。 */
         tryExternalScanCoWrite(target, targetHealth);
@@ -151,9 +151,9 @@ public final class EcaSetHealthManager {
         if (!maintenance.hasExternalTransactionSource()) return;
         try {
             /* 只补写实体外权威(SavedData 等)：dataflow 已把实体内存储写成目标值，此处必须让
-               tick 权威同 tick 也等于目标值，否则路西法的钳制会拿高水位把实体存储改回。
+               tick 权威同 tick 也等于目标值，否则 tick 侧的高水位钳制会把实体存储改回。
                逐个全写并回读自证，不能借用 applyExternalScan——它首个校验通过的 sink(常是实体内
-               镜像)就返回，永远碰不到 lucifer_health2 这类真正的 tick 权威。 */
+               镜像)就返回，永远碰不到实体外那个真正的 tick 权威。 */
             if (HealthDataFlow.coWriteExternalAuthorities(maintenance, target, targetHealth)) {
                 markExternalAuthorityWritten(cls);
             }
@@ -348,7 +348,7 @@ public final class EcaSetHealthManager {
             HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(cls);
             /* getHealth 定义在原版(未被模组重写)→真血就在原版存储，原版直写即可，跳过外部扫描。
                分析失败时定义类不可知，仍需外部扫描兜底；模组重写了 getHealth 的类(无论其 getHealth
-               读实体内还是实体外)都要扫描，否则路西法这类"读得对但权威在实体外"的实体会被漏掉。 */
+               读实体内还是实体外)都要扫描，否则"读得对但权威在实体外"的实体会被漏掉。 */
             if (tree != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
                     && isVanillaGetHealthOwner(tree)) return;
             EcaLogger.info("[ExternalScan] join prewarm started entity={}", cls.getName());
@@ -524,8 +524,8 @@ public final class EcaSetHealthManager {
 
     /* 数据流和外部扫描无法写入存储时，尝试调用实体自身的血量 writer。
        激进逻辑或方法探针关闭时直接返回。
-       第一阶段依次尝试反射 setter、函数式字段和 HeadBridge；第二阶段尝试 MethodHandle 字段及暂存字段提交。
-       第二阶段可能触发不可回滚的目标状态，因此必须在 HeadBridge 之后执行。 */
+       第一阶段尝试反射 setter 和函数式字段，随后进入事务桥与 HeadBridge；第二阶段尝试 MethodHandle 字段及暂存字段提交。
+       第二阶段可能触发不可回滚的目标状态，因此必须在可信方法帧桥接之后执行。 */
     public static boolean applyMethodProbe(LivingEntity target, float targetHealth) {
         if (target == null) return false;
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
@@ -538,7 +538,10 @@ public final class EcaSetHealthManager {
                 DIRECT_PROBE_RETRY_LEGACY, DIRECT_WRITER_LEGACY)) return true;
 
         installMethodBridgeOnce(cls);
-        MethodProbe.BridgeSpec spec = MethodProbe.getSpec(cls.getName().replace('.', '/'));
+        String classInternal = cls.getName().replace('.', '/');
+        if (MethodProbe.invokeProtocolBridges(target, MethodProbe.getProtocolSpecs(classInternal),
+                targetHealth, rollbackRoots)) return true;
+        MethodProbe.BridgeSpec spec = MethodProbe.getSpec(classInternal);
         if (spec != null) {
             if (MethodProbe.invokeTrustedBridge(target, spec, targetHealth)) return true;
             if (MethodProbe.invokeBridge(target, spec, targetHealth, rollbackRoots)) return true;
@@ -693,7 +696,7 @@ public final class EcaSetHealthManager {
                     ar.definingClass != null ? ar.definingClass.getName() : "null",
                     ar.sources.size(), eligible);
         }
-        // 失败诊断：按 getHealth 定义类去重，打印返回表达式与各源 label，判断 10 个源是别的 mod 叠的还是 ECA 剥离残留
+        // 失败诊断：按 getHealth 定义类去重，打印返回表达式与各源 label，判断多余的源是外部叠加的还是 ECA 剥离残留
         if (!eligible) {
             String dc = ar.definingClass != null ? ar.definingClass.getName() : "null";
             if (!isWarmupDiagnosticsSuppressed() && UNRESOLVED_DUMPED.add(dc)) {

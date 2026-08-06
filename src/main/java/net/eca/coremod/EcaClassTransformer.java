@@ -96,6 +96,53 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         }
     }
 
+    static byte[] transformHealthTail(String className, byte[] classfileBuffer) {
+        if (className == null || classfileBuffer == null) return null;
+        if (FORCE_COMPATIBILITY_MODE) return null;
+        byte[] result = classfileBuffer;
+        boolean changed = false;
+        try {
+            byte[] hookResult = SINGLETON.doHookTransform(className, result);
+            if (hookResult != null) {
+                result = hookResult;
+                changed = true;
+            }
+            byte[] bridgeResult = MethodProbe.transform(className, result);
+            if (bridgeResult != null) {
+                result = bridgeResult;
+                changed = true;
+            }
+            byte[] constantResult = ConstOverride.transform(className, result);
+            if (constantResult != null) {
+                result = constantResult;
+                changed = true;
+            }
+            return changed ? result : null;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
+    static boolean verifyHealthTail(String className, byte[] bytes) {
+        if (className == null || bytes == null) return false;
+        if (FORCE_COMPATIBILITY_MODE) return false;
+        boolean requested = false;
+        if (hasHealthHookTarget(className, bytes)) {
+            requested = true;
+            if (!verifyHealthHooks(className, bytes)) return false;
+        }
+        if (MethodProbe.hasTransformSpecs(className)) {
+            requested = true;
+            if (!MethodProbe.verifyTransform(className, bytes)) return false;
+        }
+        if (ConstOverride.hasSites(className)) {
+            requested = true;
+            if (!ConstOverride.verifyTransform(className, bytes)) return false;
+        }
+        return requested;
+    }
+
     // 实体健康 hook 目标：基类 LivingEntity/Entity 恒为目标（不依赖 KNOWN_* 预填充），子类由收集阶段填入 KNOWN_*
     private static boolean isHealthHookTarget(String className) {
         return LIVING_ENTITY.equals(className) || ENTITY.equals(className)
@@ -444,13 +491,13 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
         // 确认类声明了目标方法（跳过代码/调试/帧，只遍历方法签名）
         ClassReader cr = new ClassReader(classfileBuffer);
-        MethodScanner scanner = new MethodScanner();
-        cr.accept(scanner, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+        MethodScanner scanner = new MethodScanner(isLivingEntity);
+        cr.accept(scanner, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
         if (!scanner.hasAnyTarget) return null;
 
         // ASM 转换（复用同一个 ClassReader）
         ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-        HookInjector injector = new HookInjector(cw, isLivingEntity);
+        HookInjector injector = new HookInjector(cw, isLivingEntity, scanner.hookedMethods);
         cr.accept(injector, ClassReader.EXPAND_FRAMES);
 
         if (!injector.transformed) return null;
@@ -463,20 +510,34 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     // ==================== 快速方法扫描 ====================
 
     private static class MethodScanner extends ClassVisitor {
+        final boolean isLivingEntity;
+        final Set<String> targetMethods = ConcurrentHashMap.newKeySet();
+        final Set<String> hookedMethods = ConcurrentHashMap.newKeySet();
         boolean hasAnyTarget = false;
 
-        MethodScanner() {
+        MethodScanner(boolean isLivingEntity) {
             super(Opcodes.ASM9);
+            this.isLivingEntity = isLivingEntity;
         }
 
         @Override
         public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
-            if (desc.equals("()F") && (name.equals(GET_HEALTH) || name.equals(GET_MAX_HEALTH))) {
-                hasAnyTarget = true;
-            } else if (desc.equals("()Z") && (name.equals(IS_DEAD_OR_DYING) || name.equals(IS_ALIVE) || name.equals(IS_REMOVED))) {
-                hasAnyTarget = true;
-            }
-            return null;
+            String expectedOwner = expectedHookOwner(isLivingEntity, name, desc);
+            String expectedName = expectedHookName(isLivingEntity, name, desc);
+            if (expectedOwner == null || (access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) return null;
+            hasAnyTarget = true;
+            String key = methodKey(name, desc);
+            targetMethods.add(key);
+            return new MethodVisitor(Opcodes.ASM9) {
+                @Override
+                public void visitMethodInsn(int opcode, String owner, String methodName, String descriptor,
+                                            boolean isInterface) {
+                    if (opcode == Opcodes.INVOKESTATIC && expectedOwner.equals(owner)
+                            && expectedName.equals(methodName)) {
+                        hookedMethods.add(key);
+                    }
+                }
+            };
         }
     }
 
@@ -484,16 +545,20 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
     private static class HookInjector extends ClassVisitor {
         final boolean isLivingEntity;
+        final Set<String> hookedMethods;
         boolean transformed = false;
 
-        HookInjector(ClassWriter cw, boolean isLivingEntity) {
+        HookInjector(ClassWriter cw, boolean isLivingEntity, Set<String> hookedMethods) {
             super(Opcodes.ASM9, cw);
             this.isLivingEntity = isLivingEntity;
+            this.hookedMethods = hookedMethods;
         }
 
         @Override
         public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
+            if ((access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) return mv;
+            if (hookedMethods.contains(methodKey(name, desc))) return mv;
 
             if (isLivingEntity) {
                 if (name.equals(GET_HEALTH) && desc.equals("()F")) {
@@ -526,6 +591,46 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
             return mv;
         }
+    }
+
+    private static boolean hasHealthHookTarget(String className, byte[] bytes) {
+        boolean isLivingEntity = LIVING_ENTITY.equals(className) || KNOWN_LIVING_ENTITY_CLASSES.contains(className);
+        boolean isEntity = !isLivingEntity && (ENTITY.equals(className) || KNOWN_ENTITY_ONLY_CLASSES.contains(className));
+        if (!isLivingEntity && !isEntity) return false;
+        MethodScanner scanner = new MethodScanner(isLivingEntity);
+        new ClassReader(bytes).accept(scanner, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+        return scanner.hasAnyTarget;
+    }
+
+    private static boolean verifyHealthHooks(String className, byte[] bytes) {
+        boolean isLivingEntity = LIVING_ENTITY.equals(className) || KNOWN_LIVING_ENTITY_CLASSES.contains(className);
+        MethodScanner scanner = new MethodScanner(isLivingEntity);
+        new ClassReader(bytes).accept(scanner, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+        return scanner.hasAnyTarget && scanner.hookedMethods.containsAll(scanner.targetMethods);
+    }
+
+    private static String expectedHookOwner(boolean isLivingEntity, String name, String desc) {
+        if (isLivingEntity && desc.equals("()F") && (name.equals(GET_HEALTH) || name.equals(GET_MAX_HEALTH))) {
+            return LIVING_HOOK;
+        }
+        if (isLivingEntity && desc.equals("()Z") && (name.equals(IS_DEAD_OR_DYING) || name.equals(IS_ALIVE))) {
+            return LIVING_HOOK;
+        }
+        if (name.equals(IS_REMOVED) && desc.equals("()Z")) return ENTITY_HOOK;
+        return null;
+    }
+
+    private static String expectedHookName(boolean isLivingEntity, String name, String desc) {
+        if (expectedHookOwner(isLivingEntity, name, desc) == null) return null;
+        if (name.equals(GET_HEALTH)) return "processGetHealth";
+        if (name.equals(GET_MAX_HEALTH)) return "processGetMaxHealth";
+        if (name.equals(IS_DEAD_OR_DYING)) return "processIsDeadOrDying";
+        if (name.equals(IS_ALIVE)) return "processIsAlive";
+        return "processIsRemoved";
+    }
+
+    private static String methodKey(String name, String desc) {
+        return name + desc;
     }
 
     // ==================== HEAD Hook 注入器 ====================

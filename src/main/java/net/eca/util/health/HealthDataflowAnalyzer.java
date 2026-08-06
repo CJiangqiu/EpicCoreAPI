@@ -2091,7 +2091,7 @@ public final class HealthDataflowAnalyzer {
         }
         /* 权威指纹必须在 tick 收集之前定出来：tick 没有语义锚点，不带指纹进去就会把过程图里
            每一条写指令都收成候选。指纹取 getHealth 数据流的源与上面四个语义出口的源之并——
-           getHealth 读的正是实体内镜像(路西法的 SD:48 即由此而来)，语义出口补上它不读的那部分。 */
+           getHealth 读的正是实体内同步单元镜像，语义出口补上它不读的那部分。 */
         List<Source> observedAuthorities = observedAuthoritySources(entityClass, candidates);
         AuthorityFingerprint fingerprint = fingerprintAuthorities(entityClass, observedAuthorities);
         /* 语义出口是运行期直接写入的唯一候选树。tick/authority writer 只描述跨 tick 维护关系，
@@ -2230,7 +2230,7 @@ public final class HealthDataflowAnalyzer {
     }
 
     /* ==================== 外部扫描：tick 过程写源收集 ====================
-       实体真实血量常由 tick 过程(baseTick/tick/aiStep)经静态过程链维护(LuciferDefenseProcedure 等)，
+       实体真实血量常由 tick 过程(baseTick/tick/aiStep)经静态过程链维护，
        权威存储可能是实体外的 SavedData/静态状态。从这些周期性回调提取 StoreWrite 的 sink，
        使真实存储成为可写 Source。旧架构经 collectRecurringWrites 完成同样收集，此处对齐移植。 */
 
@@ -2288,7 +2288,7 @@ public final class HealthDataflowAnalyzer {
     }
 
     /* 从实体类层次沿 superclass 收集所有 tick 覆写方法分析出的写源，返回 StoreWrite 列表。
-       tick 过程常把血量维护转发给大型静态过程(LuciferETProcedure 等)，默认 500 内联额度不够穿透，
+       tick 过程常把血量维护转发给静态过程转发链，默认 500 内联额度不够穿透，
        故放宽内联预算(仍保留 maxDepth 防环)，使实体外真实存储能暴露为写源。 */
     private static BudgetedWrites collectTickWrites(Class<?> entityClass, AuthorityFingerprint fingerprint) {
         List<StoreWrite> writes = new ArrayList<>();
@@ -2399,7 +2399,7 @@ public final class HealthDataflowAnalyzer {
                     causalWrites.add(write);
                 }
             }
-            /* 路西法一类实体把实体内真实血量单向同步到 SavedData。该镜像不在强连通分量内，
+            /* 部分实体把实体内真实血量单向同步到 SavedData。该镜像不在强连通分量内，
                但若不与权威同事务写入，下一 tick 的高水位仍会把实体值拉回。只接一跳且要求
                写值直接依赖当前闭包，避免沿整个 tick 写图扩散。 */
             List<Source> causalCore = List.copyOf(transactionSources);
@@ -2464,8 +2464,8 @@ public final class HealthDataflowAnalyzer {
         return sources;
     }
 
-    /* tick 过程写源收集的预算：按实测放宽的 override 扫描额度。
-       巨型静态过程转发链在默认 50 万节点预算内 merge 必然耗尽，receiver 链坍缩成
+    /* tick 过程写源收集的预算：较常规放宽的 override 扫描额度。
+       静态过程转发链在默认 50 万节点预算内 merge 必然耗尽，receiver 链坍缩成
        Unknown 后写源全部 NOT_ADDRESSABLE；节点与内联额度须同步放大，缺一不可。 */
     private static final int TICK_WRITE_INLINE_BUDGET = 40_000;
     private static final int TICK_WRITE_NODE_BUDGET = 12_000_000;
@@ -3421,8 +3421,8 @@ public final class HealthDataflowAnalyzer {
     }
 
     /* ==================== 权威可达性剪枝 ====================
-       tick/aiStep 这类周期入口没有语义锚点，不剪枝就会把过程图里每一条写指令都收进来
-       (实测塞纳非亚 428 个源，绝大多数是朝向、目标、冷却等无关字段)。内联前先限深预扫
+       tick/aiStep 这类周期入口没有语义锚点，不剪枝就会把过程图里每一条写指令都收进来，
+       其中绝大多数是朝向、目标、冷却等无关字段。内联前先限深预扫
        被调方能否触及权威存储，到不了的整条不展开：既是相关性判据，也是预算的天然上界。 */
     private static final int MAY_WRITE_SCAN_DEPTH = 24;
     private static final int MAY_WRITE_CACHE_LIMIT = 20_000;
@@ -3530,7 +3530,7 @@ public final class HealthDataflowAnalyzer {
             return analyzeMethodWrites(target.owner(), target.name(), target.desc(), seedLocals, ctx, depth + 1);
         }
         if (depth + 1 >= ctx.maxDepth || ctx.inlineBudget <= 0 || call.name.startsWith("<")) return null;
-        // 实体控制类静态过程(LuciferETProcedure.execute 等)带实体参数，是实体周期行为的转发链，须放行内联才能
+        // 实体控制类静态过程带实体参数，是实体周期行为的转发链，须放行内联才能
         // 从 tick 链反推到真实血量写入点；其余无关静态调用仍拦掉，避免把无关工具方法拖进分析。
         if (call.getOpcode() == Opcodes.INVOKESTATIC && !isHealthLifecycleCall(call)
                 && !isEntityControlCall(call, args)) return null;
