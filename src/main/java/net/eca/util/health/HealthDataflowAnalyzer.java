@@ -61,6 +61,7 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static final String DAMAGE_SOURCE_DESC = "Lnet/minecraft/world/damagesource/DamageSource;";
+    private static final String ENTITY_DATA_ACCESSOR_DESC = "Lnet/minecraft/network/syncher/EntityDataAccessor;";
     public static final McMethod GET_HEALTH       = new McMethod("m_21223_", "getHealth", "()F");
     public static final McMethod GET_MAX_HEALTH   = new McMethod("m_21233_", "getMaxHealth", "()F");
     public static final McMethod IS_ALIVE         = new McMethod("m_6084_", "isAlive", "()Z");
@@ -3577,6 +3578,11 @@ public final class HealthDataflowAnalyzer {
                 if (insn.getOpcode() == Opcodes.PUTFIELD && fingerprint.matchesField(field)) return true;
                 // 读取 accessor 静态字段是使用该同步单元的必经指令，读写在此不作区分
                 if (insn.getOpcode() == Opcodes.GETSTATIC && fingerprint.matchesAccessor(field)) return true;
+                // 任意 EntityDataAccessor 静态读取都是写入该同步单元的必经指令；真实血量存储
+                // 常不在 getHealth 派生指纹里，仅按指纹剪枝会把写真实存储的方法整体剪掉，
+                // 形成"找不到→不内联→永远找不到"的死锁
+                if (insn.getOpcode() == Opcodes.GETSTATIC
+                        && ENTITY_DATA_ACCESSOR_DESC.equals(field.desc)) return true;
                 continue;
             }
             if (!(insn instanceof MethodInsnNode call)) continue;

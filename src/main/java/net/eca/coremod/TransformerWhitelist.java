@@ -281,7 +281,7 @@ public final class TransformerWhitelist {
     private static final String TYPE_ALLRETURN = "allreturn";
     private static final String TYPE_TRANSFORM = "transform";
 
-    //从 config/eca/ 加载 JSON 白名单（必须在 ClassFileTransformer 注册前��用）
+    //从 config/eca/ 加载 JSON 白名单（必须在 ClassFileTransformer 注册前调用）
     public static void loadJsonWhitelist() {
         if (jsonLoaded) return;
         jsonLoaded = true;
