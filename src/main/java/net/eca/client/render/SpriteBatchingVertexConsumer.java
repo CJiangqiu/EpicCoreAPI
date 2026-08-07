@@ -4,6 +4,7 @@ import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.VertexFormat;
+import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraftforge.api.distmarker.Dist;
@@ -16,12 +17,25 @@ import java.util.function.Consumer;
 @OnlyIn(Dist.CLIENT)
 public final class SpriteBatchingVertexConsumer implements VertexConsumer {
 
+    // 烘焙方块的光照只经 putBulkData 的 lightmap 数组进入缓冲，没有独立的 packedLight 形参，
+    // 所以发光只能在这里替换该数组。VertexConsumer 的默认实现只读不写，共享常量数组安全。
+    private static final int[] FULL_BRIGHT_LIGHTMAP = {
+        LightTexture.FULL_BRIGHT, LightTexture.FULL_BRIGHT,
+        LightTexture.FULL_BRIGHT, LightTexture.FULL_BRIGHT
+    };
+
     private final VertexFormat format;
+    private final boolean fullBright;
     private final Map<TextureAtlasSprite, BufferBuilder> builders = new IdentityHashMap<>();
     private BufferBuilder fallback;
 
     public SpriteBatchingVertexConsumer(VertexFormat format) {
+        this(format, false);
+    }
+
+    public SpriteBatchingVertexConsumer(VertexFormat format, boolean fullBright) {
         this.format = format;
+        this.fullBright = fullBright;
     }
 
     public void finish(Consumer<SpriteBatch> consumer) {
@@ -39,7 +53,7 @@ public final class SpriteBatchingVertexConsumer implements VertexConsumer {
                             float red, float green, float blue, float alpha,
                             int[] lights, int overlay, boolean readExistingColor) {
         builder(quad.getSprite()).putBulkData(pose, quad, brightness, red, green, blue,
-            alpha, lights, overlay, readExistingColor);
+            alpha, fullBright ? FULL_BRIGHT_LIGHTMAP : lights, overlay, readExistingColor);
     }
 
     private BufferBuilder builder(TextureAtlasSprite sprite) {

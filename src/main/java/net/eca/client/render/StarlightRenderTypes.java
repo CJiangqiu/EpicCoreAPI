@@ -2,6 +2,7 @@ package net.eca.client.render;
 
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormat;
+import net.eca.client.render.preset.PresetRenderTypes;
 import net.eca.client.render.shader.StarlightShader;
 import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
@@ -99,6 +100,9 @@ public class StarlightRenderTypes {
                 .createCompositeState(true)
         );
     }
+
+    //方块扩展覆盖层：该着色器仅在 Color-Key 分支采样 Sampler0，用绑方块图集的默认档
+    public static final RenderType BLOCK = PresetRenderTypes.block("starlight", SHADER_STATE);
 
     private StarlightRenderTypes() {}
 }

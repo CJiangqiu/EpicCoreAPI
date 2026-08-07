@@ -7,6 +7,7 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import net.eca.client.render.preset.PresetRenderTypes;
 import net.eca.client.render.shader.OceanShader;
 
 @SuppressWarnings("removal")
@@ -104,6 +105,10 @@ public class OceanRenderTypes {
                 .createCompositeState(true)
         );
     }
+
+    //方块扩展覆盖层：Sampler0 绑的整张贴图即一个气泡，着色器按 UV 全域取它再撒布
+    public static final RenderType BLOCK = PresetRenderTypes.block("ocean", SHADER_STATE,
+        new RenderStateShard.TextureStateShard(BUBBLE_TEXTURE, false, false));
 
     private OceanRenderTypes() {}
 }

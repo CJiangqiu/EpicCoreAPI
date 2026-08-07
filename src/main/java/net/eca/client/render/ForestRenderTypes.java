@@ -7,6 +7,7 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import net.eca.client.render.preset.PresetRenderTypes;
 import net.eca.client.render.shader.ForestShader;
 @SuppressWarnings("removal")
 @OnlyIn(Dist.CLIENT)
@@ -103,6 +104,10 @@ public class ForestRenderTypes {
                 .createCompositeState(true)
         );
     }
+
+    //方块扩展覆盖层：Sampler0 绑的整张贴图即一片叶子，着色器按 UV 全域取它再平铺撒布
+    public static final RenderType BLOCK = PresetRenderTypes.block("forest", SHADER_STATE,
+        new RenderStateShard.TextureStateShard(LEAVES_TEXTURE, false, false));
 
     private ForestRenderTypes() {}
 }

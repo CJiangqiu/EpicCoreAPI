@@ -82,7 +82,20 @@ public final class PresetRenderTypes {
         );
     }
 
+    //Sampler0 绑方块图集，适用于只在 Color-Key 分支采样基础贴图的着色器
     public static RenderType block(String name, RenderStateShard.ShaderStateShard shaderState) {
+        return block(name, shaderState, RenderType.BLOCK_SHEET_MIPPED);
+    }
+
+    /* 叠加层顶点由「世界坐标 − 摄像机」直接烘出，原方块则经区块相对坐标 + per-chunk 平移得到；
+       两条浮点路径给出同一平面的不同深度，逐帧摇摆即 Z-fighting。用与原版破坏贴花同一档的
+       多边形偏移把片元按坡度拉向观察者，任意距离与视角下都成立。
+       CULL 是该偏移的配套前提，不是风格取舍：偏移同样作用于背面片元，保留 NO_CULL 会让背面
+       被拉到正面之前透出来，等于把 Z-fighting 换成一种更稳定的穿模。
+       textureState 由调用方给出——有的着色器 Sampler0 绑的是自己的单图贴图，整张即一片花瓣或
+       叶片，按 UV 全域取用后程序化撒布，绑成方块图集会取错像素。 */
+    public static RenderType block(String name, RenderStateShard.ShaderStateShard shaderState,
+                                   RenderStateShard.EmptyTextureStateShard textureState) {
         return RenderType.create(name + "_block_overlay",
             DefaultVertexFormat.BLOCK,
             VertexFormat.Mode.QUADS,
@@ -91,11 +104,12 @@ public final class PresetRenderTypes {
             true,
             RenderType.CompositeState.builder()
                 .setShaderState(shaderState)
-                .setTextureState(RenderType.BLOCK_SHEET_MIPPED)
+                .setTextureState(textureState)
                 .setTransparencyState(RenderType.TRANSLUCENT_TRANSPARENCY)
                 .setDepthTestState(RenderType.LEQUAL_DEPTH_TEST)
+                .setLayeringState(RenderType.POLYGON_OFFSET_LAYERING)
                 .setLightmapState(RenderType.LIGHTMAP)
-                .setCullState(RenderType.NO_CULL)
+                .setCullState(RenderType.CULL)
                 .setWriteMaskState(RenderType.COLOR_WRITE)
                 .createCompositeState(true)
         );

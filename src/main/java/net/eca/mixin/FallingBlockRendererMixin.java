@@ -44,9 +44,11 @@ public class FallingBlockRendererMixin {
         BlockPos renderPos = BlockPos.containing(entity.getX(), entity.getBoundingBox().maxY, entity.getZ());
         Minecraft minecraft = Minecraft.getInstance();
         BakedModel model = minecraft.getBlockRenderer().getBlockModel(state);
+        boolean fullBright = BlockExtensionSafeAccess.isGlow(extension);
         for (ShaderMaskPass pass : passes) {
             if (pass == null || pass.alpha() <= 0.0f) continue;
-            SpriteBatchingVertexConsumer consumer = new SpriteBatchingVertexConsumer(pass.renderType().format());
+            SpriteBatchingVertexConsumer consumer =
+                new SpriteBatchingVertexConsumer(pass.renderType().format(), fullBright);
             poseStack.pushPose();
             poseStack.translate(-0.5, 0.0, -0.5);
             minecraft.getBlockRenderer().getModelRenderer().tesselateBlock(entity.level(), model, state, renderPos,

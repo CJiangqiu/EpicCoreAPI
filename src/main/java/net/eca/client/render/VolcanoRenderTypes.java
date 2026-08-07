@@ -7,6 +7,7 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
+import net.eca.client.render.preset.PresetRenderTypes;
 import net.eca.client.render.shader.VolcanoShader;
 
 @OnlyIn(Dist.CLIENT)
@@ -98,6 +99,9 @@ public class VolcanoRenderTypes {
                 .createCompositeState(true)
         );
     }
+
+    //方块扩展覆盖层：该着色器仅在 Color-Key 分支采样 Sampler0，用绑方块图集的默认档
+    public static final RenderType BLOCK = PresetRenderTypes.block("volcano", SHADER_STATE);
 
     private VolcanoRenderTypes() {}
 }

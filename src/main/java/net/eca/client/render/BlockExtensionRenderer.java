@@ -16,6 +16,7 @@ import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
@@ -119,12 +120,13 @@ public final class BlockExtensionRenderer {
         }
 
         Camera camera = event.getCamera();
-        Map<ShaderMaskPass, SpriteBatchingVertexConsumer> batches = new LinkedHashMap<>();
+        Vec3 camPos = camera.getPosition();
+        Map<BatchKey, SpriteBatchingVertexConsumer> batches = new LinkedHashMap<>();
         Map<BlockExtension, List<ShaderMaskPass>> passCache = new HashMap<>();
         List<BlockPos> stale = new ArrayList<>();
         for (Set<BlockPos> section : SECTION_BLOCKS.values()) {
             for (BlockPos pos : section) {
-                if (pos.distToCenterSqr(camera.getPosition()) > MAX_RENDER_DISTANCE_SQR) {
+                if (pos.distToCenterSqr(camPos) > MAX_RENDER_DISTANCE_SQR) {
                     continue;
                 }
                 BlockState state = level.getBlockState(pos);
@@ -140,27 +142,30 @@ public final class BlockExtensionRenderer {
                 List<ShaderMaskPass> passes = passCache.computeIfAbsent(extension,
                     ignored -> extension.getBlockShaderPasses());
                 if (passes == null) continue;
+                boolean fullBright = BlockExtensionSafeAccess.isGlow(extension);
                 for (ShaderMaskPass pass : passes) {
                     if (pass == null || pass.alpha() <= 0.0f) continue;
-                    SpriteBatchingVertexConsumer batch = batches.computeIfAbsent(pass,
-                        ignored -> new SpriteBatchingVertexConsumer(pass.renderType().format()));
-                    renderBlock(level, event.getPoseStack(), pos, state, batch);
+                    BatchKey key = new BatchKey(pass, fullBright);
+                    SpriteBatchingVertexConsumer batch = batches.computeIfAbsent(key,
+                        ignored -> new SpriteBatchingVertexConsumer(pass.renderType().format(), fullBright));
+                    renderBlock(level, event.getPoseStack(), camPos, pos, state, batch);
                 }
             }
         }
         for (BlockPos pos : stale) {
             onBlockChanged(level, pos, level.getBlockState(pos));
         }
-        batches.forEach(BlockExtensionRenderer::enqueue);
+        batches.forEach((key, batch) -> enqueue(key.pass(), batch));
     }
 
-    private static void renderBlock(ClientLevel level, PoseStack poseStack, BlockPos pos, BlockState state,
-                                    SpriteBatchingVertexConsumer consumer) {
+    private static void renderBlock(ClientLevel level, PoseStack poseStack, Vec3 camPos, BlockPos pos,
+                                    BlockState state, SpriteBatchingVertexConsumer consumer) {
         Minecraft minecraft = Minecraft.getInstance();
         BakedModel model = minecraft.getBlockRenderer().getBlockModel(state);
         ModelData modelData = model.getModelData(level, pos, state, ModelData.EMPTY);
         poseStack.pushPose();
-        poseStack.translate(pos.getX(), pos.getY(), pos.getZ());
+        // RenderLevelStageEvent 的 PoseStack 只含摄像机旋转，世界坐标须自行减去摄像机位置
+        poseStack.translate(pos.getX() - camPos.x, pos.getY() - camPos.y, pos.getZ() - camPos.z);
         minecraft.getBlockRenderer().getModelRenderer().tesselateBlock(level, model, state, pos, poseStack,
             consumer, true, RandomSource.create(), state.getSeed(pos), 0, modelData, null);
         poseStack.popPose();
@@ -169,5 +174,9 @@ public final class BlockExtensionRenderer {
     private static void enqueue(ShaderMaskPass pass, SpriteBatchingVertexConsumer batch) {
         batch.finish(spriteBatch -> ShaderMaskRenderQueue.enqueue(pass, spriteBatch.builder(),
             spriteBatch.builder().end(), spriteBatch.uvTransform()));
+    }
+
+    // 发光是消费端属性而非 pass 属性，共用同一 pass 的发光与非发光方块必须分批
+    private record BatchKey(ShaderMaskPass pass, boolean fullBright) {
     }
 }

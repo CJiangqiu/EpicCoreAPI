@@ -31,4 +31,17 @@ public final class BlockExtensionSafeAccess {
             return false;
         }
     }
+
+    public static boolean isGlow(BlockExtension extension) {
+        try {
+            return extension.isGlow();
+        } catch (Throwable throwable) {
+            String key = extension.getClass().getName() + "#isGlow";
+            if (LOGGED.add(key)) {
+                EcaLogger.info("BlockExtension " + extension.getClass().getName()
+                    + " threw while resolving glow: " + throwable);
+            }
+            return false;
+        }
+    }
 }
