@@ -31,6 +31,12 @@ public final class ForceLoadingManager {
     private static final Set<UUID> FORCE_LOADED_MANUAL = ConcurrentHashMap.newKeySet();
     private static final Map<EntityType<?>, Boolean> FORCE_LOADED_TYPE_CACHE = new ConcurrentHashMap<>();
 
+    /* 票据申请推迟到主线程任务队列执行，落地之前实体不在可见存储里、按 UUID 查不到。
+       陈旧清理必须容忍这段窗口，否则会把尚未生效的条目当成"实体已消失"收走，
+       而条目一没，延迟任务的守卫就再也匹配不上，强加载会永久失效。
+       任务最迟 3 tick 派发，落地时区块是同步取的，20 tick 留了足够余量。 */
+    private static final int STALE_GRACE_TICKS = 20;
+
     private static final ThreadLocal<Entity> CURRENT_RENDERING_ENTITY = new ThreadLocal<>();
 
     public static void setCurrentRenderingEntity(Entity entity) {
@@ -140,6 +146,10 @@ public final class ForceLoadingManager {
 
             Entity entity = level.getEntity(uuid);
             if (entity == null) {
+                // 票据尚未落地时实体本就查不到，攒够宽限才认定它真的消失了
+                if (++tracked.missTicks < STALE_GRACE_TICKS) {
+                    continue;
+                }
                 // UUID 对应实体不存在，移除陈旧票据
                 if (TRACKED.remove(uuid, tracked)) {
                     ForgeChunkManager.forceChunk(tracked.level, EcaMod.MOD_ID, uuid,
@@ -147,6 +157,7 @@ public final class ForceLoadingManager {
                 }
                 continue;
             }
+            tracked.missTicks = 0;
 
             if (entity instanceof LivingEntity living) {
                 onEntityTick(living, level);
@@ -274,6 +285,8 @@ public final class ForceLoadingManager {
     private static class TrackedChunk {
         ServerLevel level;
         ChunkPos chunkPos;
+        // 连续查不到实体的 tick 数，判定陈旧的依据，见 STALE_GRACE_TICKS
+        int missTicks;
 
         TrackedChunk(ServerLevel level, ChunkPos chunkPos) {
             this.level = level;
