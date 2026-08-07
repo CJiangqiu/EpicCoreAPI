@@ -416,7 +416,20 @@ public class RaidManager {
     // 申请或释放袭击中心区块的强制加载
     private static void forceLoadCenter(ServerLevel level, RaidInstance raid, boolean add) {
         ChunkPos chunk = new ChunkPos(raid.getCenter());
-        level.setChunkForced(chunk.x, chunk.z, add);
+        if (!add) {
+            level.setChunkForced(chunk.x, chunk.z, false);
+            return;
+        }
+        /* 申请侧内部会同步阻塞取块，而本方法可经实体停止追踪的回调被调用——那里正处于
+           区块票据距离更新的集合迭代中，阻塞取块会重入该更新并清空正在遍历的集合。
+           推迟到主线程任务队列顶层执行以避开该窗口。释放侧不阻塞且必须保持同步：
+           服务器停止后任务队列不再排空，延迟释放会丢失。 */
+        level.getServer().execute(() -> {
+            // 延迟期间袭击可能已结束，届时不再申请，否则票据无人释放
+            if (getRaids(level).get(raid.getId()) == raid) {
+                level.setChunkForced(chunk.x, chunk.z, true);
+            }
+        });
     }
 
     // ==================== 清理 ====================

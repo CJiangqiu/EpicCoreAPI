@@ -57,8 +57,24 @@ public final class ForceLoadingManager {
             return;
         }
 
-        ForgeChunkManager.forceChunk(level, EcaMod.MOD_ID, uuid, chunkPos.x, chunkPos.z, true, true);
         TRACKED.put(uuid, new TrackedChunk(level, chunkPos));
+        requestForceLoad(level, uuid, chunkPos);
+    }
+
+    /* 申请区块票据。申请侧内部会同步阻塞取块，而本类的入口挂在实体加入世界的回调上，
+       该回调有机会落在区块票据距离更新的集合迭代中，阻塞取块会重入该更新并破坏迭代。
+       推迟到主线程任务队列顶层执行以避开该窗口。释放侧不阻塞，全部保持同步。
+       TRACKED 是权威表，先落表再申请票据，守卫据此判断这张票是否仍是当前目标。 */
+    private static void requestForceLoad(ServerLevel level, UUID uuid, ChunkPos pos) {
+        level.getServer().execute(() -> {
+            TrackedChunk tracked = TRACKED.get(uuid);
+            // 延迟期间实体可能已离开或已移动到别的区块，此时这张票据不再是当前目标
+            if (tracked == null || tracked.level != level
+                    || tracked.chunkPos.x != pos.x || tracked.chunkPos.z != pos.z) {
+                return;
+            }
+            ForgeChunkManager.forceChunk(level, EcaMod.MOD_ID, uuid, pos.x, pos.z, true, true);
+        });
     }
 
     public static void onEntityTick(LivingEntity entity, ServerLevel level) {
@@ -81,10 +97,9 @@ public final class ForceLoadingManager {
         // 实体移动到新区块，更新票据
         ForgeChunkManager.forceChunk(tracked.level, EcaMod.MOD_ID, uuid,
                 tracked.chunkPos.x, tracked.chunkPos.z, false, true);
-        ForgeChunkManager.forceChunk(level, EcaMod.MOD_ID, uuid,
-                current.x, current.z, true, true);
         tracked.level = level;
         tracked.chunkPos = current;
+        requestForceLoad(level, uuid, current);
     }
 
     public static void onEntityLeave(LivingEntity entity, ServerLevel level) {
@@ -162,8 +177,8 @@ public final class ForceLoadingManager {
         FORCE_LOADED_MANUAL.add(uuid);
         ChunkPos chunkPos = new ChunkPos(entity.blockPosition());
         if (!isValidChunkPos(chunkPos)) return;
-        ForgeChunkManager.forceChunk(level, EcaMod.MOD_ID, uuid, chunkPos.x, chunkPos.z, true, true);
         TRACKED.put(uuid, new TrackedChunk(level, chunkPos));
+        requestForceLoad(level, uuid, chunkPos);
     }
 
     public static void disableForceLoading(LivingEntity entity, ServerLevel level) {
