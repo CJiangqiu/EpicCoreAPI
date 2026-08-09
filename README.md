@@ -731,21 +731,23 @@ Note: Like entity extensions, each item can only have one extension. Duplicate r
 
 ### Shader Presets
 
-This mod also provides several shader presets for the entity extension and item extension systems, which can be used directly in your extensions. Simply replace `CustomRenderTypes` in the example code with the corresponding preset name. Each built-in preset class exposes 4 ready RenderTypes — `BOSS_BAR`, `BOSS_LAYER`, `SKYBOX` for entity extensions and `ITEM` for item extensions — plus `createEntityEffect(texture)` for entity texture overlays. Entity texture overlays are supported through `EntityLayerExtension.getTexture()` — return a texture to overlay it on the entity model, optionally combined with the shader RenderType for a texture‑plus‑shader effect (matching the boss‑bar overlay technique).
+This mod also provides several shader presets for the entity, item, and block extension systems, which can be used directly in your extensions. Simply replace `CustomRenderTypes` in the example code with the corresponding preset name. Each built-in preset class exposes 5 ready RenderTypes — `BOSS_BAR`, `BOSS_LAYER`, `SKYBOX` for entity extensions, `ITEM` for item extensions, and `BLOCK` for block extensions — plus `createEntityEffect(texture)` for entity texture overlays. Entity texture overlays are supported through `EntityLayerExtension.getTexture()` — return a texture to overlay it on the entity model, optionally combined with the shader RenderType for a texture‑plus‑shader effect (matching the boss‑bar overlay technique).
+
+Every built-in preset is also packaged in the five-file layout, so it is registered as the preset ID `eca:<name>` and can be returned from `BlockExtension.getShaderPresetId()`. The NEW_ENTITY profile a GeckoLib block entity needs is obtained through `EcaPresets.geoBlock("eca:<name>", texture)`, since the preset classes carry no geo field.
 
 Available presets:
-- `TheLastEndRenderTypes` — The Last End
-- `DreamSakuraRenderTypes` — Dream Sakura
-- `ForestRenderTypes` — Forest
-- `OceanRenderTypes` — Ocean
-- `StormRenderTypes` — Storm
-- `VolcanoRenderTypes` — Volcano
-- `ArcaneRenderTypes` — Arcane
-- `AuroraRenderTypes` — Aurora
-- `HackerRenderTypes` — Hacker
-- `StarlightRenderTypes` — Starlight
-- `CosmosRenderTypes` — Cosmos
-- `BlackHoleRenderTypes` — Black Hole
+- `TheLastEndRenderTypes` / `eca:the_last_end` — The Last End
+- `DreamSakuraRenderTypes` / `eca:dream_sakura` — Dream Sakura
+- `ForestRenderTypes` / `eca:forest` — Forest
+- `OceanRenderTypes` / `eca:ocean` — Ocean
+- `StormRenderTypes` / `eca:storm` — Storm
+- `VolcanoRenderTypes` / `eca:volcano` — Volcano
+- `ArcaneRenderTypes` / `eca:arcane` — Arcane
+- `AuroraRenderTypes` / `eca:aurora` — Aurora
+- `HackerRenderTypes` / `eca:hacker` — Hacker
+- `StarlightRenderTypes` / `eca:starlight` — Starlight
+- `CosmosRenderTypes` / `eca:cosmos` — Cosmos
+- `BlackHoleRenderTypes` / `eca:black_hole` — Black Hole
 
 ### Screen Filters
 
@@ -1947,21 +1949,23 @@ public class DiamondSwordExtension extends ItemExtension {
 
 ### 着色器预设
 
-本 Mod 还提供了一些用于实体扩展和物品扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个内置预设类提供 4 个现成 RenderType：实体扩展用的 `BOSS_BAR`、`BOSS_LAYER`、`SKYBOX`，以及物品扩展用的 `ITEM`；另有 `createEntityEffect(texture)` 用于实体纹理叠加。实体纹理叠加通过 `EntityLayerExtension.getTexture()` 支持——返回纹理即可叠加到实体模型上，可与着色器 RenderType 组合，实现 Boss 血条同款的纹理+着色器叠加效果。
+本 Mod 还提供了一些用于实体扩展、物品扩展和方块扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个内置预设类提供 5 个现成 RenderType：实体扩展用的 `BOSS_BAR`、`BOSS_LAYER`、`SKYBOX`，物品扩展用的 `ITEM`，方块扩展用的 `BLOCK`；另有 `createEntityEffect(texture)` 用于实体纹理叠加。实体纹理叠加通过 `EntityLayerExtension.getTexture()` 支持——返回纹理即可叠加到实体模型上，可与着色器 RenderType 组合，实现 Boss 血条同款的纹理+着色器叠加效果。
+
+每个内置预设同时以五文件形式打包，因此会注册为预设 ID `eca:<name>`，可由 `BlockExtension.getShaderPresetId()` 返回。GeckoLib 方块实体所需的 NEW_ENTITY 档通过 `EcaPresets.geoBlock("eca:<name>", texture)` 获取——预设类本身没有 geo 字段。
 
 可用预设：
-- `TheLastEndRenderTypes` — 终焉
-- `DreamSakuraRenderTypes` — 梦之樱
-- `ForestRenderTypes` — 森林
-- `OceanRenderTypes` — 海洋
-- `StormRenderTypes` — 风暴
-- `VolcanoRenderTypes` — 火山
-- `ArcaneRenderTypes` — 奥术
-- `AuroraRenderTypes` — 极光
-- `HackerRenderTypes` — 黑客
-- `StarlightRenderTypes` — 星辉
-- `CosmosRenderTypes` — 宇宙
-- `BlackHoleRenderTypes` — 黑洞
+- `TheLastEndRenderTypes` / `eca:the_last_end` — 终焉
+- `DreamSakuraRenderTypes` / `eca:dream_sakura` — 梦之樱
+- `ForestRenderTypes` / `eca:forest` — 森林
+- `OceanRenderTypes` / `eca:ocean` — 海洋
+- `StormRenderTypes` / `eca:storm` — 风暴
+- `VolcanoRenderTypes` / `eca:volcano` — 火山
+- `ArcaneRenderTypes` / `eca:arcane` — 奥术
+- `AuroraRenderTypes` / `eca:aurora` — 极光
+- `HackerRenderTypes` / `eca:hacker` — 黑客
+- `StarlightRenderTypes` / `eca:starlight` — 星辉
+- `CosmosRenderTypes` / `eca:cosmos` — 宇宙
+- `BlackHoleRenderTypes` / `eca:black_hole` — 黑洞
 
 ### 屏幕滤镜
 
