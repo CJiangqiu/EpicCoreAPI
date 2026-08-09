@@ -504,7 +504,8 @@ public class MyBossExtension extends EntityExtension {
             @Override public int getFrameOffsetY() { return -10; }  // frame Y offset
             @Override public int getFillOffsetX() { return 0; }  // fill X offset
             @Override public int getFillOffsetY() { return 0; }  // fill Y offset
-            @Override public float getAlpha() { return 1.0f; }  // overall boss bar opacity, 0.0~1.0 (default 1.0)
+            @Override public float getFrameAlpha() { return 1.0f; }  // frame opacity, 0.0~1.0 (default 1.0)
+            @Override public float getFillAlpha() { return 1.0f; }  // fill opacity, 0.0~1.0 (default 1.0)
         };
     }
 
@@ -1722,7 +1723,8 @@ public class MyBossExtension extends EntityExtension {
             @Override public int getFrameOffsetY() { return -10; }  // 外框 Y 偏移
             @Override public int getFillOffsetX() { return 0; }  // 填充 X 偏移
             @Override public int getFillOffsetY() { return 0; }  // 填充 Y 偏移
-            @Override public float getAlpha() { return 1.0f; }  // Boss 血条整体不透明度，0.0~1.0（默认 1.0）
+            @Override public float getFrameAlpha() { return 1.0f; }  // 外框不透明度，0.0~1.0（默认 1.0）
+            @Override public float getFillAlpha() { return 1.0f; }  // 填充不透明度，0.0~1.0（默认 1.0）
         };
     }
 
