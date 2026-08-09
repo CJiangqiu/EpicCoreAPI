@@ -428,8 +428,6 @@ EcaAPI.endRaid(serverLevel, raid, true);                                       /
 
 This mod also provides a customizable entity type extension feature for adding special visual effects to your entities. You need to create a subclass extending `EntityExtension` and annotate it with `@RegisterEntityExtension` to register the extension. Here is a quick start example:
 
-Entity, item, and block shader overlays share the same `ShaderMaskPass` pipeline. Every pass supplies a RenderType, an optional UV-aligned mask texture, a target RGB color (black by default), a near-color tolerance, and opacity. An extension may return multiple passes so different colors in one mask use different shaders. Passes render in list order, and later passes draw over earlier passes where selected regions overlap. Transparent and non-matching mask pixels are discarded.
-
 ```java
 @RegisterEntityExtension
 public class MyBossExtension extends EntityExtension {
@@ -729,6 +727,10 @@ Each line accepts either a normal `Component` or an `EcaText` built through `Ite
 Item mask passes use sprite-local UVs automatically. `ShaderMaskPass.masked(...)` samples an external mask texture, while `ShaderMaskPass.baseTexture(...)` selects colors directly from the item texture. The old `getRenderType()`, Color-Key, and single-mask getters are deprecated compatibility adapters.
 
 Note: Like entity extensions, each item can only have one extension. Duplicate registrations are rejected with an error log. Both entity layer extensions (`EntityLayerExtension.getAlpha()`, default 0.5) and item extensions (`ItemExtension.getAlpha()`, default 1.0) support adjustable transparency for their shader overlay layers.
+
+### Shader Mask Passes
+
+Entity, item, and block shader overlays share the same `ShaderMaskPass` pipeline. Every pass supplies a RenderType, an optional UV-aligned mask texture, a target RGB color (black by default), a near-color tolerance, and opacity. An extension may return multiple passes so different colors in one mask use different shaders. Passes render in list order, and later passes draw over earlier passes where selected regions overlap. Transparent and non-matching mask pixels are discarded.
 
 ### Shader Presets
 
@@ -1647,8 +1649,6 @@ EcaAPI.endRaid(serverLevel, raid, true);                                       /
 
 本 Mod 还提供了一个可自定义的实体类型扩展功能，用于为你的实体增加一些特殊的视觉效果。你需要创建继承 `EntityExtension` 的子类，并在类上标注 `@RegisterEntityExtension` 进行注册扩展。以下是一个快速上手的示例：
 
-实体、物品和方块着色器覆盖层共用同一套 `ShaderMaskPass` 流程。每个 pass 包含一个 RenderType、可选的 UV 对齐遮罩贴图、目标 RGB 颜色（默认黑色）、近色容差和透明度。一个扩展可以返回多个 pass，让同一张遮罩中的不同颜色分别使用不同着色器。pass 按列表顺序绘制，选区重叠时后面的 pass 覆盖在前面的 pass 之上；透明或颜色不匹配的像素不会渲染。
-
 ```java
 @RegisterEntityExtension
 public class MyBossExtension extends EntityExtension {
@@ -1948,6 +1948,10 @@ public class DiamondSwordExtension extends ItemExtension {
 
 注意：和实体扩展一样，每个物品只能有一个扩展，重复注册会被拒绝并输出错误日志。实体层扩展（`EntityLayerExtension.getAlpha()`，默认 0.5）和物品扩展（`ItemExtension.getAlpha()`，默认 1.0）均支持调整着色器叠加层的透明度。
 
+
+### 着色器遮罩 Pass
+
+实体、物品和方块着色器覆盖层共用同一套 `ShaderMaskPass` 流程。每个 pass 包含一个 RenderType、可选的 UV 对齐遮罩贴图、目标 RGB 颜色（默认黑色）、近色容差和透明度。一个扩展可以返回多个 pass，让同一张遮罩中的不同颜色分别使用不同着色器。pass 按列表顺序绘制，选区重叠时后面的 pass 覆盖在前面的 pass 之上；透明或颜色不匹配的像素不会渲染。
 
 ### 着色器预设
 
@@ -2287,9 +2291,9 @@ public class UndeadLegionFaction extends FactionDefinition {
 }
 ```
 
-**首领。** 阵营可以指定一名成员作为首领。设置首领时若该实体尚未入营会自动加入——首领不属于自己的阵营是自相矛盾的状态。退出阵营同时卸任首领，首领被永久移除时首领记录会自动清除。
+**首领**：阵营可以指定一名成员作为首领。设置首领时若该实体尚未入营会自动加入——首领不属于自己的阵营是自相矛盾的状态。退出阵营同时卸任首领，首领被永久移除时首领记录会自动清除。
 
-**仇恨传导。** 当首领攻击某个实体或被某个实体攻击时，系统会尝试把该实体交给成员表中可解析的全部生物作为目标；已有目标和阵营目标权限仍可能阻止切换。系统中并存两套机制：
+**仇恨传导**：当首领攻击某个实体或被某个实体攻击时，系统会尝试把该实体交给成员表中可解析的全部生物作为目标；已有目标和阵营目标权限仍可能阻止切换。系统中并存两套机制：
 
 | | 触发条件 | 范围 |
 |---|---|---|
@@ -2306,7 +2310,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 "Immediate" 关闭时只有当前没有目标的成员才会响应；开启时成员会放弃正在交战的目标。
 
-**查询。** 归属关系可以从两个方向查询，其中不解析实体的方法完全离线可用：
+**查询**：归属关系可以从两个方向查询，其中不解析实体的方法完全离线可用：
 
 | 方向 | 方法 |
 |---|---|
@@ -2327,23 +2331,23 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 注册袭击需要创建继承 `RaidDefinition` 的子类，并标注 `@RegisterRaid`。扫描排在阵营扫描之后，因此袭击定义可以自由引用阵营 ID。只有 `getId()`、`getDisplayName()` 和 `getWaves()` 必须覆写，其余全部带有仿原版的可用默认值。
 
-**目标锚定。** 覆写 `getTargetStructure()` 指向单一结构，或覆写 `getTargetStructureTag()` 匹配带有某个标签的任意结构，使一个袭击适用于多种结构。锚定决定了默认的失败条件：当目标结构不再覆盖袭击中心时判定防守失败。两者都不声明则袭击不锚定结构，此时只能通过胜利、超时或主动结束来终止。
+**目标锚定**：覆写 `getTargetStructure()` 指向单一结构，或覆写 `getTargetStructureTag()` 匹配带有某个标签的任意结构，使一个袭击适用于多种结构。锚定决定了默认的失败条件：当目标结构不再覆盖袭击中心时判定防守失败。两者都不声明则袭击不锚定结构，此时只能通过胜利、超时或主动结束来终止。
 
-**波次。** 每个 `RaidWave` 可自由混用两种生成源——显式指定实体类型，以及按权重从阵营的 `getMemberEntityTypes()` 池中抽取。
+**波次**：每个 `RaidWave` 可自由混用两种生成源——显式指定实体类型，以及按权重从阵营的 `getMemberEntityTypes()` 池中抽取。
 
-**袭击者。** 生成的袭击者会被绑定到 `getRaiderFactionId()`；其中 `Mob` 实例还会被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先处理已经取得的敌对阵营目标，否则向中心推进。任意实体类型均可生成且不要求实现接口，但非 `Mob` 实体不会获得阵营索敌、导航 Goal 或生物回调。可覆写 `getRaiderGoalPriority()` 调整优先级，返回负数则禁用注入。
+**袭击者**：生成的袭击者会被绑定到 `getRaiderFactionId()`；其中 `Mob` 实例还会被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先处理已经取得的敌对阵营目标，否则向中心推进。任意实体类型均可生成且不要求实现接口，但非 `Mob` 实体不会获得阵营索敌、导航 Goal 或生物回调。可覆写 `getRaiderGoalPriority()` 调整优先级，返回负数则禁用注入。
 
-**Boss。** 波次可以通过 `RaidWave.setLeader(type)` 声明一名首领。生成的实体会被设为该袭击所属袭击者阵营的首领，从而使用阵营仇恨传导。默认只有已加载、符合目标权限且当前没有目标的生物会响应；开启 `Immediate Leader Protection` 后才会替换已有目标。声明首领需要 `getRaiderFactionId()`；没有阵营就没有可领导的对象，该条目会作为普通袭击者生成。
+**Boss**：波次可以通过 `RaidWave.setLeader(type)` 声明一名首领。生成的实体会被设为该袭击所属袭击者阵营的首领，从而使用阵营仇恨传导。默认只有已加载、符合目标权限且当前没有目标的生物会响应；开启 `Immediate Leader Protection` 后才会替换已有目标。声明首领需要 `getRaiderFactionId()`；没有阵营就没有可领导的对象，该条目会作为普通袭击者生成。
 
 需要注意传导遍历的是整张阵营成员表，而非仅本场袭击的参与者。若该袭击者阵营在世界其他地方还有成员，它们同样会响应。希望响应范围限定在本场袭击内，请为袭击使用专属阵营。
 
-**启动校验。** 发起袭击时会校验其引用的阵营。非空但未注册的袭击者阵营会直接拒绝启动，因为所请求的友伤和求援规则无法应用。主动返回 `null` 则是允许的，此时每个生成实体完全由自身 AI 控制。波次抽取的阵营若未注册或未声明成员池，则记录错误并跳过该组，袭击仍会启动。
+**启动校验**：发起袭击时会校验其引用的阵营。非空但未注册的袭击者阵营会直接拒绝启动，因为所请求的友伤和求援规则无法应用。主动返回 `null` 则是允许的，此时每个生成实体完全由自身 AI 控制。波次抽取的阵营若未注册或未声明成员池，则记录错误并跳过该组，袭击仍会启动。
 
-**流程控制。** `shouldAdvanceWave`、`checkVictory` 和 `checkDefeat` 均可覆写。默认实现复现原版语义：上一波清空后生成下一波，全部波次生成完毕且袭击者全灭时防守方获胜。
+**流程控制**：`shouldAdvanceWave`、`checkVictory` 和 `checkDefeat` 均可覆写。默认实现复现原版语义：上一波清空后生成下一波，全部波次生成完毕且袭击者全灭时防守方获胜。
 
-**时间与回调。** `getMaxDurationTicks()` 默认 48000，`getWaveCooldownTicks()` 默认 300，`getParticipantRadius()` 默认 96 格，`getCelebrationTicks()` 默认 600。每个波次还可设置 `spawnDelay()` 和 `spawnRadius()`。生命周期回调包括 `onStart`、`onWaveStart`、`onWaveEnd`、`onVictory`、`onDefeat` 与 `onStop`；客户端 `bossBarExtension()` 可在保留服务端袭击状态同步的同时替换血条外观。
+**时间与回调**：`getMaxDurationTicks()` 默认 48000，`getWaveCooldownTicks()` 默认 300，`getParticipantRadius()` 默认 96 格，`getCelebrationTicks()` 默认 600。每个波次还可设置 `spawnDelay()` 和 `spawnRadius()`。生命周期回调包括 `onStart`、`onWaveStart`、`onWaveEnd`、`onVictory`、`onDefeat` 与 `onStop`；客户端 `bossBarExtension()` 可在保留服务端袭击状态同步的同时替换血条外观。
 
-**无限波次。** `isEndless()` 会循环使用波次列表且永远不满足默认胜利条件。此类袭击需要通过 `EcaAPI.endRaid` 收尾，该方法会清除全部仍存活的袭击者。
+**无限波次**：`isEndless()` 会循环使用波次列表且永远不满足默认胜利条件。此类袭击需要通过 `EcaAPI.endRaid` 收尾，该方法会清除全部仍存活的袭击者。
 
 袭击按维度独立运行，并会在重启后自动恢复最近一次周期检查点。永久减员和终止操作会立即保存，普通流程每秒保存一次。袭击期间只强制加载中心区块；走入其他未加载区块的袭击者不会随中心区块一起强制加载。
 
