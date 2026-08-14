@@ -72,14 +72,39 @@ public final class ForceLoadingManager {
        推迟到主线程任务队列顶层执行以避开该窗口。释放侧不阻塞，全部保持同步。
        TRACKED 是权威表，先落表再申请票据，守卫据此判断这张票是否仍是当前目标。 */
     private static void requestForceLoad(ServerLevel level, UUID uuid, ChunkPos pos) {
+        TrackedChunk tracked = TRACKED.get(uuid);
+        if (tracked == null || tracked.hasTicket(level, pos) || tracked.hasPendingRequest(level, pos)) {
+            return;
+        }
+        tracked.pendingLevel = level;
+        tracked.pendingChunkPos = pos;
         level.getServer().execute(() -> {
-            TrackedChunk tracked = TRACKED.get(uuid);
+            TrackedChunk current = TRACKED.get(uuid);
+            if (current == tracked && tracked.hasPendingRequest(level, pos)) {
+                tracked.pendingLevel = null;
+                tracked.pendingChunkPos = null;
+            }
             // 延迟期间实体可能已离开或已移动到别的区块，此时这张票据不再是当前目标
-            if (tracked == null || tracked.level != level
+            if (current != tracked || tracked.level != level
                     || tracked.chunkPos.x != pos.x || tracked.chunkPos.z != pos.z) {
                 return;
             }
+            if (tracked.hasTicket(level, pos)) {
+                return;
+            }
+            // 返回 false 也可能只是持久化票据已经存在，此时对应区块仍处于强加载状态
             ForgeChunkManager.forceChunk(level, EcaMod.MOD_ID, uuid, pos.x, pos.z, true, true);
+
+            ServerLevel previousLevel = tracked.ticketLevel;
+            ChunkPos previousPos = tracked.ticketChunkPos;
+            tracked.ticketLevel = level;
+            tracked.ticketChunkPos = pos;
+            // 新票据落地后再释放旧票据，避免远离玩家时出现无票据卸载窗口
+            if (previousLevel != null && previousPos != null
+                    && (previousLevel != level || previousPos.x != pos.x || previousPos.z != pos.z)) {
+                ForgeChunkManager.forceChunk(previousLevel, EcaMod.MOD_ID, uuid,
+                        previousPos.x, previousPos.z, false, true);
+            }
         });
     }
 
@@ -92,6 +117,9 @@ public final class ForceLoadingManager {
 
         ChunkPos current = new ChunkPos(entity.blockPosition());
         if (current.x == tracked.chunkPos.x && current.z == tracked.chunkPos.z) {
+            if (!tracked.hasTicket(level, current)) {
+                requestForceLoad(level, uuid, current);
+            }
             return;
         }
 
@@ -100,9 +128,7 @@ public final class ForceLoadingManager {
             return;
         }
 
-        // 实体移动到新区块，更新票据
-        ForgeChunkManager.forceChunk(tracked.level, EcaMod.MOD_ID, uuid,
-                tracked.chunkPos.x, tracked.chunkPos.z, false, true);
+        // 只更新目标区块；旧票据由异步任务在新票据落地后释放
         tracked.level = level;
         tracked.chunkPos = current;
         requestForceLoad(level, uuid, current);
@@ -116,8 +142,7 @@ public final class ForceLoadingManager {
             return;
         }
 
-        ForgeChunkManager.forceChunk(tracked.level, EcaMod.MOD_ID, uuid,
-                tracked.chunkPos.x, tracked.chunkPos.z, false, true);
+        releaseTicket(uuid, tracked);
     }
 
     /**
@@ -152,8 +177,7 @@ public final class ForceLoadingManager {
                 }
                 // UUID 对应实体不存在，移除陈旧票据
                 if (TRACKED.remove(uuid, tracked)) {
-                    ForgeChunkManager.forceChunk(tracked.level, EcaMod.MOD_ID, uuid,
-                            tracked.chunkPos.x, tracked.chunkPos.z, false, true);
+                    releaseTicket(uuid, tracked);
                 }
                 continue;
             }
@@ -199,8 +223,7 @@ public final class ForceLoadingManager {
         if (isForceLoadedType(entity.getType())) return;
         TrackedChunk tracked = TRACKED.remove(uuid);
         if (tracked == null) return;
-        ForgeChunkManager.forceChunk(tracked.level, EcaMod.MOD_ID, uuid,
-                tracked.chunkPos.x, tracked.chunkPos.z, false, true);
+        releaseTicket(uuid, tracked);
     }
 
     public static boolean isManualForceLoaded(UUID uuid) {
@@ -282,15 +305,44 @@ public final class ForceLoadingManager {
                 && pos.z >= -MAX_CHUNK_COORD && pos.z <= MAX_CHUNK_COORD;
     }
 
+    private static void releaseTicket(UUID uuid, TrackedChunk tracked) {
+        ServerLevel ticketLevel = tracked.ticketLevel;
+        ChunkPos ticketPos = tracked.ticketChunkPos;
+        tracked.ticketLevel = null;
+        tracked.ticketChunkPos = null;
+        tracked.pendingLevel = null;
+        tracked.pendingChunkPos = null;
+        if (ticketLevel != null && ticketPos != null) {
+            ForgeChunkManager.forceChunk(ticketLevel, EcaMod.MOD_ID, uuid,
+                    ticketPos.x, ticketPos.z, false, true);
+        }
+    }
+
     private static class TrackedChunk {
         ServerLevel level;
         ChunkPos chunkPos;
+        ServerLevel ticketLevel;
+        ChunkPos ticketChunkPos;
+        ServerLevel pendingLevel;
+        ChunkPos pendingChunkPos;
         // 连续查不到实体的 tick 数，判定陈旧的依据，见 STALE_GRACE_TICKS
         int missTicks;
 
         TrackedChunk(ServerLevel level, ChunkPos chunkPos) {
             this.level = level;
             this.chunkPos = chunkPos;
+        }
+
+        boolean hasTicket(ServerLevel expectedLevel, ChunkPos expectedPos) {
+            return ticketLevel == expectedLevel && sameChunk(ticketChunkPos, expectedPos);
+        }
+
+        boolean hasPendingRequest(ServerLevel expectedLevel, ChunkPos expectedPos) {
+            return pendingLevel == expectedLevel && sameChunk(pendingChunkPos, expectedPos);
+        }
+
+        private static boolean sameChunk(ChunkPos first, ChunkPos second) {
+            return first != null && second != null && first.x == second.x && first.z == second.z;
         }
     }
 

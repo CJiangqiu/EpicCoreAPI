@@ -25,6 +25,13 @@ public class ClientLevelMixin {
         }
     }
 
+    @Inject(method = "setServerVerifiedBlockState", at = @At("RETURN"), require = 0)
+    private void eca$trackServerVerifiedBlockExtension(BlockPos pos, BlockState state, int flags,
+                                                        CallbackInfo ci) {
+        ClientLevel level = (ClientLevel) (Object) this;
+        BlockExtensionRenderer.onBlockChanged(level, pos, level.getBlockState(pos));
+    }
+
     @Inject(method = "removeEntity", at = @At("HEAD"), cancellable = true, require = 0)
     private void eca$preventClientRemoval(int entityId, Entity.RemovalReason reason, CallbackInfo ci) {
         try {
