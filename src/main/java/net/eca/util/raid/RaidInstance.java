@@ -24,6 +24,7 @@ import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.MobSpawnType;
 import net.minecraft.world.entity.SpawnPlacements;
 import net.minecraft.world.level.NaturalSpawner;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.structure.Structure;
 
@@ -58,6 +59,7 @@ public class RaidInstance {
     private static final String NBT_STATUS = "status";
     private static final String NBT_WAVES_SPAWNED = "wavesSpawned";
     private static final String NBT_WAVES_COMPLETED = "wavesCompleted";
+    private static final int WAVE_SPAWN_RETRY_TICKS = 20;
     private static final String NBT_TICKS_ACTIVE = "ticksActive";
     private static final String NBT_WAVE_COOLDOWN = "waveCooldown";
     private static final String NBT_CELEBRATION = "celebrationTicks";
@@ -357,6 +359,13 @@ public class RaidInstance {
             spawned++;
         }
 
+        if (spawned == 0) {
+            waveCooldown = WAVE_SPAWN_RETRY_TICKS;
+            EcaLogger.info("[Raid] Raid {} ('{}') spawned no raiders for wave {} — retrying in {} ticks",
+                    id, definitionId, index, WAVE_SPAWN_RETRY_TICKS);
+            return;
+        }
+
         wavesSpawned++;
         started = true;
         currentWaveTotal = Math.max(spawned, 1);
@@ -449,7 +458,11 @@ public class RaidInstance {
 
             if (!level.hasChunksAt(x - 10, z - 10, x + 10, z + 10)) continue;
             if (!level.isPositionEntityTicking(mutable)) continue;
-            if (!NaturalSpawner.isSpawnPositionOk(SpawnPlacements.Type.ON_GROUND, level, mutable, type)) continue;
+            boolean validGround = NaturalSpawner.isSpawnPositionOk(
+                    SpawnPlacements.Type.ON_GROUND, level, mutable, type);
+            boolean validSnowSurface = level.getBlockState(mutable.below()).is(Blocks.SNOW)
+                    && level.getBlockState(mutable).isAir();
+            if (!validGround && !validSnowSurface) continue;
 
             return mutable.immutable();
         }

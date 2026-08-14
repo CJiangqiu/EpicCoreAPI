@@ -132,7 +132,9 @@ public class EntityUtil {
         }
 
         // 使用UUID集合判断，避免字段读取的时序问题和残留问题
-        return DIMENSION_CHANGING_ENTITIES.contains(entity.getUUID());
+        // 本方法挂在 isRemoved 高频路径上，跳过构造器创建的实体 UUID 可能为 null，集合查询不接受 null 键
+        UUID uuid = entity.getUUID();
+        return uuid != null && DIMENSION_CHANGING_ENTITIES.contains(uuid);
     }
 
     //通过UUID检查实体是否正在切换维度（供容器层使用）

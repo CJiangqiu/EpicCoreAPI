@@ -78,6 +78,10 @@ public final class EcaAPI {
     // isInvulnerable() 先查此集，不在则直接返回 false 跳过 SynchedEntityData 读取。
     private static final Set<Integer> INVULNERABLE_IDS = ConcurrentHashMap.newKeySet();
 
+    private static boolean isValidHealthLockValue(float value) {
+        return value > 0.0f && (Float.isFinite(value) || value == Float.POSITIVE_INFINITY);
+    }
+
     // 清除快速路径条目（供 EntityUtil 内部清理调用）
     public static void clearInvulnerableFastPath(int entityId) {
         INVULNERABLE_IDS.remove(entityId);
@@ -127,17 +131,29 @@ public final class EcaAPI {
      * - Heal negation effects
      * The locked value is synchronized to clients via SynchedEntityData.
      * @param entity the living entity
-     * @param value the health lock value
+     * @param value the positive finite health lock value, or positive infinity
      */
     public static void lockHealth(LivingEntity entity, float value) {
         if (entity == null) {
-            throw new IllegalArgumentException("Entity cannot be null");
+            EcaLogger.info("[EcaAPI] lockHealth rejected entity=null value={}", value);
+            return;
         }
-        if (!Float.isFinite(value) || value <= 0.0f) {
-            throw new IllegalArgumentException("Lock health value must be finite and greater than 0");
+        if (!isValidHealthLockValue(value)) {
+            EcaLogger.info("[EcaAPI] lockHealth rejected entity={} value={} reason=invalid-lock-value",
+                    entity.getClass().getName(), value);
+            return;
         }
-        setHealth(entity, value);
-        HealthLockManager.setLock(entity, value);
+        try {
+            if (value == Float.POSITIVE_INFINITY) {
+                EntityUtil.setBasicHealth(entity, value);
+            } else {
+                setHealth(entity, value);
+            }
+            HealthLockManager.setLock(entity, value);
+        } catch (Exception e) {
+            EcaLogger.info("[EcaAPI] lockHealth failed entity={} value={} msg={}",
+                    entity.getClass().getName(), value, e.getMessage());
+        }
     }
 
     // 解锁血量
@@ -166,14 +182,20 @@ public final class EcaAPI {
      * - Boss phase mechanics
      * The heal ban value is synchronized to clients via SynchedEntityData.
      * @param entity the living entity
-     * @param value the heal ban value (current health that will be maintained)
+     * @param value the unrestricted heal ban value to maintain
      */
     public static void banHealing(LivingEntity entity, float value) {
         if (entity == null) {
-            throw new IllegalArgumentException("Entity cannot be null");
+            EcaLogger.info("[EcaAPI] banHealing rejected entity=null value={}", value);
+            return;
         }
-        setHealth(entity, value);
-        HealthLockManager.setHealBan(entity, value);
+        try {
+            setHealth(entity, value);
+            HealthLockManager.setHealBan(entity, value);
+        } catch (Exception e) {
+            EcaLogger.info("[EcaAPI] banHealing failed entity={} value={} msg={}",
+                    entity.getClass().getName(), value, e.getMessage());
+        }
     }
 
     // 解除禁疗
@@ -906,17 +928,25 @@ public final class EcaAPI {
      * via reverse-calculating the attribute base value.
      * Any external modifications (equipment, potions, other mods) will be overridden each tick.
      * @param entity the living entity
-     * @param value the max health lock value
+     * @param value the positive finite max health lock value, or positive infinity
      */
     public static void lockMaxHealth(LivingEntity entity, float value) {
         if (entity == null) {
-            throw new IllegalArgumentException("Entity cannot be null");
+            EcaLogger.info("[EcaAPI] lockMaxHealth rejected entity=null value={}", value);
+            return;
         }
-        if (!Float.isFinite(value) || value <= 0.0f) {
-            throw new IllegalArgumentException("Max health lock value must be finite and greater than 0");
+        if (!isValidHealthLockValue(value)) {
+            EcaLogger.info("[EcaAPI] lockMaxHealth rejected entity={} value={} reason=invalid-lock-value",
+                    entity.getClass().getName(), value);
+            return;
         }
-        HealthLockManager.setMaxHealthLock(entity, value);
-        EntityUtil.setMaxHealth(entity, value);
+        try {
+            HealthLockManager.setMaxHealthLock(entity, value);
+            EntityUtil.setMaxHealth(entity, value);
+        } catch (Exception e) {
+            EcaLogger.info("[EcaAPI] lockMaxHealth failed entity={} value={} msg={}",
+                    entity.getClass().getName(), value, e.getMessage());
+        }
     }
 
     // 解锁最大生命值

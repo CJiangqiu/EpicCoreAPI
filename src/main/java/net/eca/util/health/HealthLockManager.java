@@ -246,7 +246,11 @@ public class HealthLockManager {
 
     static Float decodeLockValue(int payload, boolean floatFormat) {
         float value = floatFormat ? Float.intBitsToFloat(payload) : (float) payload;
-        return Float.isFinite(value) && value > 0.0f ? value : null;
+        return isValidLockValue(value) ? value : null;
+    }
+
+    private static boolean isValidLockValue(float value) {
+        return value > 0.0f && (Float.isFinite(value) || value == Float.POSITIVE_INFINITY);
     }
 
     // ==================== NBT 回退：三字段写入/清除/解密 ====================
@@ -299,7 +303,7 @@ public class HealthLockManager {
     // ==================== 血量锁定（新加密） ====================
 
     public static void setLock(LivingEntity entity, float value) {
-        if (entity == null || !Float.isFinite(value) || value <= 0.0f) return;
+        if (entity == null || !isValidLockValue(value)) return;
         HEALTH_LOCK_IDS.add(entity.getId());
         if (EntityUtil.HEALTH_LOCK_VALUE != null
                 && EntityUtil.HEALTH_LOCK_KEY != null
@@ -352,7 +356,7 @@ public class HealthLockManager {
     // ==================== 最大血量锁定（新加密） ====================
 
     public static void setMaxHealthLock(LivingEntity entity, float value) {
-        if (entity == null || !Float.isFinite(value) || value <= 0.0f) return;
+        if (entity == null || !isValidLockValue(value)) return;
         MAX_HEALTH_LOCK_IDS.add(entity.getId());
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null
                 && EntityUtil.MAX_HEALTH_LOCK_KEY != null

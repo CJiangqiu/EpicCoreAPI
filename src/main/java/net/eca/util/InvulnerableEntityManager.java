@@ -16,30 +16,41 @@ public class InvulnerableEntityManager {
     private static final Map<String, Set<UUID>> INVULNERABLE_ENTITIES_BY_SAVE = new ConcurrentHashMap<>();
     private static final Map<MinecraftServer, String> SAVE_KEY_CACHE = new ConcurrentHashMap<>();
 
+    // 跳过构造器创建的实体 UUID 可能为 null，ConcurrentHashMap 不接受 null 键
+    private static UUID uuidOf(Entity entity) {
+        return entity == null ? null : entity.getUUID();
+    }
+
     public static void addInvulnerable(Entity entity) {
+        UUID uuid = uuidOf(entity);
+        if (uuid == null) return;
         String saveKey = getSaveKey(entity);
         if (saveKey == null) return;
         INVULNERABLE_ENTITIES_BY_SAVE
             .computeIfAbsent(saveKey, key -> ConcurrentHashMap.newKeySet())
-            .add(entity.getUUID());
+            .add(uuid);
     }
 
     public static void removeInvulnerable(Entity entity) {
+        UUID uuid = uuidOf(entity);
+        if (uuid == null) return;
         String saveKey = getSaveKey(entity);
         if (saveKey == null) return;
         Set<UUID> uuids = INVULNERABLE_ENTITIES_BY_SAVE.get(saveKey);
         if (uuids == null) return;
-        uuids.remove(entity.getUUID());
+        uuids.remove(uuid);
         if (uuids.isEmpty()) {
             INVULNERABLE_ENTITIES_BY_SAVE.remove(saveKey, uuids);
         }
     }
 
     public static boolean isInvulnerable(Entity entity) {
+        UUID uuid = uuidOf(entity);
+        if (uuid == null) return false;
         String saveKey = getSaveKey(entity);
         if (saveKey == null) return false;
         Set<UUID> uuids = INVULNERABLE_ENTITIES_BY_SAVE.get(saveKey);
-        return uuids != null && uuids.contains(entity.getUUID());
+        return uuids != null && uuids.contains(uuid);
     }
 
     public static Set<UUID> getAllInvulnerableUUIDs(ServerLevel level) {
