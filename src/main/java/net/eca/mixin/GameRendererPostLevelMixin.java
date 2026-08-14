@@ -9,6 +9,7 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.math.Axis;
 import net.eca.client.render.ShaderMaskRenderQueue;
 import net.eca.client.render.shader.EcaShaderInstance;
+import net.eca.config.EcaConfiguration;
 import net.eca.util.entity_extension.EntityExtensionClientState;
 import net.eca.util.entity_extension.GlobalSkyboxExtension;
 import net.minecraft.client.Camera;
@@ -27,6 +28,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @OnlyIn(Dist.CLIENT)
 @Mixin(GameRenderer.class)
@@ -39,6 +41,14 @@ public class GameRendererPostLevelMixin {
     @Shadow
     @Final
     private Camera mainCamera;
+
+    @Inject(method = "getDepthFar", at = @At("RETURN"), cancellable = true)
+    private void eca$extendForceLoadedDepthFar(CallbackInfoReturnable<Float> cir) {
+        float forceLoadedFar = EcaConfiguration.getForceLoadingMaxRenderDistanceSafely() + 32.0f;
+        if (cir.getReturnValue() < forceLoadedFar) {
+            cir.setReturnValue(forceLoadedFar);
+        }
+    }
 
     // 在renderLevel()返回后注入，此时Oculus延迟渲染管线已完成合成，主帧缓冲区活跃
     @Inject(method = "renderLevel", at = @At("RETURN"))

@@ -17,6 +17,7 @@ import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelRenderer;
+import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
@@ -35,6 +36,15 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(LevelRenderer.class)
 public abstract class LevelRendererMixin {
 
+    @Unique
+    private boolean eca$forceLoadedFogActive;
+
+    @Unique
+    private float eca$savedFogStart;
+
+    @Unique
+    private float eca$savedFogEnd;
+
     // ==================== 强加载实体渲染 ====================
 
     @Inject(method = "isChunkCompiled", at = @At("HEAD"), cancellable = true)
@@ -43,6 +53,47 @@ public abstract class LevelRendererMixin {
         if (entity != null && ForceLoadingManager.shouldForceLoad(entity)) {
             cir.setReturnValue(true);
         }
+    }
+
+    @Inject(method = "renderEntity", at = @At("HEAD"))
+    private void eca$beginForceLoadedEntityRender(Entity entity, double camX, double camY, double camZ,
+                                                   float partialTick, PoseStack poseStack,
+                                                   MultiBufferSource bufferSource, CallbackInfo ci) {
+        eca$forceLoadedFogActive = false;
+        if (!ForceLoadingManager.shouldForceLoad(entity)) {
+            return;
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        Camera camera = minecraft.gameRenderer.getMainCamera();
+        if (camera == null || camera.getFluidInCamera() != FogType.NONE) {
+            return;
+        }
+
+        flushEntityBuffers(minecraft);
+        eca$savedFogStart = RenderSystem.getShaderFogStart();
+        eca$savedFogEnd = RenderSystem.getShaderFogEnd();
+        RenderSystem.setShaderFogStart(Float.MAX_VALUE);
+        RenderSystem.setShaderFogEnd(Float.MAX_VALUE);
+        eca$forceLoadedFogActive = true;
+    }
+
+    @Inject(method = "renderEntity", at = @At("RETURN"))
+    private void eca$endForceLoadedEntityRender(Entity entity, double camX, double camY, double camZ,
+                                                 float partialTick, PoseStack poseStack,
+                                                 MultiBufferSource bufferSource, CallbackInfo ci) {
+        if (!eca$forceLoadedFogActive) {
+            return;
+        }
+        flushEntityBuffers(Minecraft.getInstance());
+        RenderSystem.setShaderFogStart(eca$savedFogStart);
+        RenderSystem.setShaderFogEnd(eca$savedFogEnd);
+        eca$forceLoadedFogActive = false;
+    }
+
+    @Unique
+    private static void flushEntityBuffers(Minecraft minecraft) {
+        minecraft.renderBuffers().bufferSource().endBatch();
+        minecraft.renderBuffers().outlineBufferSource().endOutlineBatch();
     }
 
     // ==================== 全局天空盒渲染 ====================
