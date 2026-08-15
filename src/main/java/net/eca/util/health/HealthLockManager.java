@@ -10,24 +10,27 @@ import net.minecraft.world.entity.LivingEntity;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /*
- * 血量锁定管理器 — 三字段加密 + 完整性校验 + MethodHandle 间接调用
- *
- * 新加密体系（锁血 + 最大血量锁定）：
- *   VALUE  = key - (int)锁定值   （密文）
- *   KEY    = 随机 0000-9999      （setLock 时一次生成，不轮换）
- *   CHECK  = key + encrypted     （校验码）
- *
- * 读时先校验 CHECK，失败视为篡改，返回 null（记录日志）。
- * 禁疗保持旧加密（不变）。
+ * 服务端权威锁使用进程私钥与动态 nonce 编码，不进入实体同步数据。
+ * 三个同步字段仅承担客户端表现和旧存档迁移，篡改它们不能解除服务端锁定。
  */
 public class HealthLockManager {
 
     private static final String FLOAT_PAYLOAD_PREFIX = "F:";
+    private static final long INVALID_PAYLOAD = -1L;
+    private static final long HEALTH_LOCK_DOMAIN = 0x4845414C54484C4FL;
+    private static final long MAX_HEALTH_LOCK_DOMAIN = 0x4D41584845414C54L;
+    private static final long VALUE_SECRET = ThreadLocalRandom.current().nextLong();
+    private static final long TAG_SECRET = ThreadLocalRandom.current().nextLong();
+
+    private static final Map<UUID, LockRecord> HEALTH_LOCKS = new ConcurrentHashMap<>();
+    private static final Map<UUID, LockRecord> MAX_HEALTH_LOCKS = new ConcurrentHashMap<>();
 
     // ==================== MethodHandle 间接调用（防字节码静态分析） ====================
 
@@ -64,6 +67,95 @@ public class HealthLockManager {
         return key - value;
     }
 
+    private static long mix64(long value) {
+        value = (value ^ (value >>> 30)) * 0xBF58476D1CE4E5B9L;
+        value = (value ^ (value >>> 27)) * 0x94D049BB133111EBL;
+        return value ^ (value >>> 31);
+    }
+
+    private static long entityIdentity(UUID entityId, long domain) {
+        return entityId.getMostSignificantBits()
+                ^ Long.rotateLeft(entityId.getLeastSignificantBits(), 29)
+                ^ domain;
+    }
+
+    private static long payloadMask(UUID entityId, long nonce, long domain) {
+        return mix64(VALUE_SECRET ^ entityIdentity(entityId, domain) ^ nonce);
+    }
+
+    private static long payloadTag(UUID entityId, long nonce, long encoded, long domain) {
+        return mix64(TAG_SECRET ^ entityIdentity(entityId, domain)
+                ^ Long.rotateLeft(nonce, 17) ^ encoded);
+    }
+
+    private static long decodeSlot(UUID entityId, long nonce, long encoded, long tag, long domain) {
+        if (tag != payloadTag(entityId, nonce, encoded, domain)) return INVALID_PAYLOAD;
+        long payload = encoded ^ payloadMask(entityId, nonce, domain);
+        return (payload & 0xFFFFFFFF00000000L) == 0L ? payload : INVALID_PAYLOAD;
+    }
+
+    private static final class LockRecord {
+        private volatile long nonceA;
+        private volatile long encodedA;
+        private volatile long tagA;
+        private volatile long nonceB;
+        private volatile long encodedB;
+        private volatile long tagB;
+        private volatile int activeSlot;
+        private volatile int lastRotationTick = Integer.MIN_VALUE;
+        private volatile int lastRepairTick = Integer.MIN_VALUE;
+        private volatile boolean damageLogged;
+
+        private LockRecord(UUID entityId, int payload, long domain) {
+            writeSlot(entityId, payload, domain, 0, ThreadLocalRandom.current().nextLong());
+            writeSlot(entityId, payload, domain, 1, ThreadLocalRandom.current().nextLong());
+            activeSlot = 1;
+        }
+
+        private long readPayload(UUID entityId, long domain) {
+            int preferred = activeSlot;
+            long payload = readSlot(entityId, domain, preferred);
+            return payload != INVALID_PAYLOAD ? payload : readSlot(entityId, domain, preferred ^ 1);
+        }
+
+        private void rotateIfNeeded(UUID entityId, long domain, int tickCount) {
+            if (lastRotationTick == tickCount) return;
+            long payload = readPayload(entityId, domain);
+            if (payload == INVALID_PAYLOAD) return;
+            int nextSlot = activeSlot ^ 1;
+            writeSlot(entityId, (int) payload, domain, nextSlot, ThreadLocalRandom.current().nextLong());
+            activeSlot = nextSlot;
+            lastRotationTick = tickCount;
+        }
+
+        private boolean beginRepair(int tickCount, int entityId) {
+            if ((tickCount & 15) != (entityId & 15) || lastRepairTick == tickCount) return false;
+            lastRepairTick = tickCount;
+            return true;
+        }
+
+        private long readSlot(UUID entityId, long domain, int slot) {
+            if (slot == 0) {
+                return decodeSlot(entityId, nonceA, encodedA, tagA, domain);
+            }
+            return decodeSlot(entityId, nonceB, encodedB, tagB, domain);
+        }
+
+        private void writeSlot(UUID entityId, int payload, long domain, int slot, long nonce) {
+            long encoded = (payload & 0xFFFFFFFFL) ^ payloadMask(entityId, nonce, domain);
+            long tag = payloadTag(entityId, nonce, encoded, domain);
+            if (slot == 0) {
+                nonceA = nonce;
+                encodedA = encoded;
+                tagA = tag;
+            } else {
+                nonceB = nonce;
+                encodedB = encoded;
+                tagB = tag;
+            }
+        }
+    }
+
     // ==================== NBT Key ====================
 
     // 锁血（新加密，int）
@@ -80,37 +172,21 @@ public class HealthLockManager {
 
     // ==================== 快速路径 ====================
 
-    /*
-      按 entityId 记录当前有活跃锁的实体。
-      绝大多数实体从未被锁定——get 方法中先查此集合，不在直接返回 null。
-     */
-    private static final Set<Integer> HEALTH_LOCK_IDS      = ConcurrentHashMap.newKeySet();
+    // 禁疗保留按 entityId 的旧快速路径，避免未启用实体解析同步字符串。
     private static final Set<Integer> HEAL_BAN_IDS         = ConcurrentHashMap.newKeySet();
-    private static final Set<Integer> MAX_HEALTH_LOCK_IDS  = ConcurrentHashMap.newKeySet();
 
-    // 从 NBT 恢复后重新填充快速路径集合（由 LivingEntityMixin.readAdditionalSaveData 调用）
+    // 从旧存档同步字段恢复服务端权威记录与禁疗快速路径。
     /**
-     * Repopulate the fast-path sets from already-restored SynchedEntityData.
-     * Called after NBT data is read back into SynchedEntityData during entity load,
-     * so that {@link #getLock}, {@link #getHealBan}, and {@link #getMaxHealthLock}
-     * don't return null due to an empty fast-path set.
+     * Restore authoritative lock records and fast paths from migrated entity data.
+     * Called after saved fields have been copied into SynchedEntityData during entity load.
      *
      * @param entity the entity whose fast paths should be restored
      */
     public static void restoreFastPaths(LivingEntity entity) {
         if (entity == null) return;
 
-        // 锁血快速路径
-        if (EntityUtil.HEALTH_LOCK_VALUE != null
-                && EntityUtil.HEALTH_LOCK_KEY != null
-                && EntityUtil.HEALTH_LOCK_CHECK != null
-                && validateIntegrity(entity,
-                    EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY, EntityUtil.HEALTH_LOCK_CHECK)) {
-            Float decrypted = decryptLockValue(entity, EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY);
-            if (decrypted != null && decrypted > 0.0f) {
-                HEALTH_LOCK_IDS.add(entity.getId());
-            }
-        }
+        restoreAuthoritativeLock(entity, HEALTH_LOCKS, HEALTH_LOCK_DOMAIN,
+                EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY, EntityUtil.HEALTH_LOCK_CHECK);
 
         // 禁疗快速路径
         if (EntityUtil.HEAL_BAN_VALUE != null) {
@@ -123,17 +199,21 @@ public class HealthLockManager {
             }
         }
 
-        // 最大血量锁定快速路径
-        if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null
-                && EntityUtil.MAX_HEALTH_LOCK_KEY != null
-                && EntityUtil.MAX_HEALTH_LOCK_CHECK != null
-                && validateIntegrity(entity,
-                    EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY, EntityUtil.MAX_HEALTH_LOCK_CHECK)) {
-            Float decrypted = decryptLockValue(entity,
-                    EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY);
-            if (decrypted != null && decrypted > 0.0f) {
-                MAX_HEALTH_LOCK_IDS.add(entity.getId());
-            }
+        restoreAuthoritativeLock(entity, MAX_HEALTH_LOCKS, MAX_HEALTH_LOCK_DOMAIN,
+                EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY,
+                EntityUtil.MAX_HEALTH_LOCK_CHECK);
+    }
+
+    private static void restoreAuthoritativeLock(LivingEntity entity, Map<UUID, LockRecord> records, long domain,
+                                                  EntityDataAccessor<String> encField,
+                                                  EntityDataAccessor<String> keyField,
+                                                  EntityDataAccessor<String> checkField) {
+        if (entity.level().isClientSide || records.containsKey(entity.getUUID())
+                || encField == null || keyField == null || checkField == null
+                || !validateIntegrity(entity, encField, keyField, checkField)) return;
+        Float value = decryptLockValue(entity, encField, keyField);
+        if (value != null) {
+            records.put(entity.getUUID(), new LockRecord(entity.getUUID(), encodeFloatPayload(value), domain));
         }
     }
 
@@ -205,12 +285,12 @@ public class HealthLockManager {
                                               EntityDataAccessor<String> encField,
                                               EntityDataAccessor<String> keyField,
                                               EntityDataAccessor<String> checkField) {
-        String encStr   = readSynchedSafely(entity, encField);
-        String keyStr   = readSynchedSafely(entity, keyField);
+        String encStr = readSynchedSafely(entity, encField);
+        if (encStr == null || encStr.isEmpty()) return false;
+        String keyStr = readSynchedSafely(entity, keyField);
+        if (keyStr == null || keyStr.isEmpty()) return false;
         String checkStr = readSynchedSafely(entity, checkField);
-        if (encStr == null || encStr.isEmpty()
-                || keyStr == null || keyStr.isEmpty()
-                || checkStr == null || checkStr.isEmpty()) return false;
+        if (checkStr == null || checkStr.isEmpty()) return false;
         int encrypted    = parseEncryptedPayload(encStr);
         int key          = parseIntSafe(keyStr);
         int storedCheck  = parseIntSafe(checkStr);
@@ -251,6 +331,62 @@ public class HealthLockManager {
 
     private static boolean isValidLockValue(float value) {
         return value > 0.0f && (Float.isFinite(value) || value == Float.POSITIVE_INFINITY);
+    }
+
+    private static Float readAuthoritative(LivingEntity entity, LockRecord record, long domain) {
+        if (record == null) return null;
+        record.rotateIfNeeded(entity.getUUID(), domain, entity.tickCount);
+        long payload = record.readPayload(entity.getUUID(), domain);
+        if (payload == INVALID_PAYLOAD) {
+            if (!record.damageLogged) {
+                record.damageLogged = true;
+                EcaLogger.info("[HealthLock] authoritative state damaged entity={} id={}",
+                        entity.getClass().getName(), entity.getId());
+            }
+            return Float.POSITIVE_INFINITY;
+        }
+        Float value = decodeLockValue((int) payload, true);
+        return value != null ? value : Float.POSITIVE_INFINITY;
+    }
+
+    private static Float readPresentation(LivingEntity entity,
+                                          EntityDataAccessor<String> encField,
+                                          EntityDataAccessor<String> keyField,
+                                          EntityDataAccessor<String> checkField) {
+        if (encField == null || keyField == null || checkField == null
+                || !validateIntegrity(entity, encField, keyField, checkField)) return null;
+        return decryptLockValue(entity, encField, keyField);
+    }
+
+    private static void repairPresentation(LivingEntity entity, Float authoritative,
+                                           EntityDataAccessor<String> encField,
+                                           EntityDataAccessor<String> keyField,
+                                           EntityDataAccessor<String> checkField) {
+        if (authoritative == null || encField == null || keyField == null || checkField == null) return;
+        Float presentation = readPresentation(entity, encField, keyField, checkField);
+        if (presentation == null
+                || Float.floatToRawIntBits(presentation) != Float.floatToRawIntBits(authoritative)) {
+            writeEncrypted(entity, authoritative, encField, keyField, checkField);
+        }
+    }
+
+    public static void prepareForSave(LivingEntity entity) {
+        if (entity == null || entity.level().isClientSide) return;
+        Float healthLock = readAuthoritative(entity, HEALTH_LOCKS.get(entity.getUUID()), HEALTH_LOCK_DOMAIN);
+        repairPresentation(entity, healthLock,
+                EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY, EntityUtil.HEALTH_LOCK_CHECK);
+        Float maxHealthLock = readAuthoritative(entity, MAX_HEALTH_LOCKS.get(entity.getUUID()),
+                MAX_HEALTH_LOCK_DOMAIN);
+        repairPresentation(entity, maxHealthLock,
+                EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY,
+                EntityUtil.MAX_HEALTH_LOCK_CHECK);
+    }
+
+    public static void clearAll() {
+        HEALTH_LOCKS.clear();
+        MAX_HEALTH_LOCKS.clear();
+        HEAL_BAN_IDS.clear();
+        synchedReadFailureLogged = false;
     }
 
     // ==================== NBT 回退：三字段写入/清除/解密 ====================
@@ -304,7 +440,10 @@ public class HealthLockManager {
 
     public static void setLock(LivingEntity entity, float value) {
         if (entity == null || !isValidLockValue(value)) return;
-        HEALTH_LOCK_IDS.add(entity.getId());
+        if (!entity.level().isClientSide) {
+            HEALTH_LOCKS.put(entity.getUUID(),
+                    new LockRecord(entity.getUUID(), encodeFloatPayload(value), HEALTH_LOCK_DOMAIN));
+        }
         if (EntityUtil.HEALTH_LOCK_VALUE != null
                 && EntityUtil.HEALTH_LOCK_KEY != null
                 && EntityUtil.HEALTH_LOCK_CHECK != null) {
@@ -318,7 +457,7 @@ public class HealthLockManager {
 
     public static void removeLock(LivingEntity entity) {
         if (entity == null) return;
-        HEALTH_LOCK_IDS.remove(entity.getId());
+        if (!entity.level().isClientSide) HEALTH_LOCKS.remove(entity.getUUID());
         if (EntityUtil.HEALTH_LOCK_VALUE != null
                 && EntityUtil.HEALTH_LOCK_KEY != null
                 && EntityUtil.HEALTH_LOCK_CHECK != null) {
@@ -334,18 +473,22 @@ public class HealthLockManager {
 
     public static Float getLock(LivingEntity entity) {
         if (entity == null) return null;
-        if (!HEALTH_LOCK_IDS.contains(entity.getId())) return null;
+        if (!entity.level().isClientSide) {
+            LockRecord record = HEALTH_LOCKS.get(entity.getUUID());
+            Float value = readAuthoritative(entity, record, HEALTH_LOCK_DOMAIN);
+            if (record != null && record.beginRepair(entity.tickCount, entity.getId())) {
+                // 错峰修复让同步字段不再拥有解除服务端锁定的裁决权。
+                repairPresentation(entity, value,
+                        EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY, EntityUtil.HEALTH_LOCK_CHECK);
+            }
+            return value;
+        }
 
         if (EntityUtil.HEALTH_LOCK_VALUE != null
                 && EntityUtil.HEALTH_LOCK_KEY != null
                 && EntityUtil.HEALTH_LOCK_CHECK != null) {
-            if (!validateIntegrity(entity,
-                    EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY, EntityUtil.HEALTH_LOCK_CHECK)) {
-                EcaLogger.info("[HealthLock] integrity check failed entity={} id={}",
-                        entity.getClass().getName(), entity.getId());
-                return null;
-            }
-            return decryptLockValue(entity, EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY);
+            return readPresentation(entity,
+                    EntityUtil.HEALTH_LOCK_VALUE, EntityUtil.HEALTH_LOCK_KEY, EntityUtil.HEALTH_LOCK_CHECK);
         }
         // NBT 回退
         Float nbtResult = readNbtDecrypt(entity.getPersistentData(),
@@ -357,7 +500,10 @@ public class HealthLockManager {
 
     public static void setMaxHealthLock(LivingEntity entity, float value) {
         if (entity == null || !isValidLockValue(value)) return;
-        MAX_HEALTH_LOCK_IDS.add(entity.getId());
+        if (!entity.level().isClientSide) {
+            MAX_HEALTH_LOCKS.put(entity.getUUID(),
+                    new LockRecord(entity.getUUID(), encodeFloatPayload(value), MAX_HEALTH_LOCK_DOMAIN));
+        }
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null
                 && EntityUtil.MAX_HEALTH_LOCK_KEY != null
                 && EntityUtil.MAX_HEALTH_LOCK_CHECK != null) {
@@ -371,7 +517,7 @@ public class HealthLockManager {
 
     public static void removeMaxHealthLock(LivingEntity entity) {
         if (entity == null) return;
-        MAX_HEALTH_LOCK_IDS.remove(entity.getId());
+        if (!entity.level().isClientSide) MAX_HEALTH_LOCKS.remove(entity.getUUID());
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null
                 && EntityUtil.MAX_HEALTH_LOCK_KEY != null
                 && EntityUtil.MAX_HEALTH_LOCK_CHECK != null) {
@@ -387,19 +533,23 @@ public class HealthLockManager {
 
     public static Float getMaxHealthLock(LivingEntity entity) {
         if (entity == null) return null;
-        if (!MAX_HEALTH_LOCK_IDS.contains(entity.getId())) return null;
+        if (!entity.level().isClientSide) {
+            LockRecord record = MAX_HEALTH_LOCKS.get(entity.getUUID());
+            Float value = readAuthoritative(entity, record, MAX_HEALTH_LOCK_DOMAIN);
+            if (record != null && record.beginRepair(entity.tickCount, entity.getId())) {
+                repairPresentation(entity, value,
+                        EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY,
+                        EntityUtil.MAX_HEALTH_LOCK_CHECK);
+            }
+            return value;
+        }
 
         if (EntityUtil.MAX_HEALTH_LOCK_VALUE != null
                 && EntityUtil.MAX_HEALTH_LOCK_KEY != null
                 && EntityUtil.MAX_HEALTH_LOCK_CHECK != null) {
-            if (!validateIntegrity(entity,
-                    EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY, EntityUtil.MAX_HEALTH_LOCK_CHECK)) {
-                EcaLogger.info("[HealthLock] max health integrity check failed entity={} id={}",
-                        entity.getClass().getName(), entity.getId());
-                return null;
-            }
-            return decryptLockValue(entity,
-                    EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY);
+            return readPresentation(entity,
+                    EntityUtil.MAX_HEALTH_LOCK_VALUE, EntityUtil.MAX_HEALTH_LOCK_KEY,
+                    EntityUtil.MAX_HEALTH_LOCK_CHECK);
         }
         // NBT 回退
         Float nbtResult = readNbtDecrypt(entity.getPersistentData(),

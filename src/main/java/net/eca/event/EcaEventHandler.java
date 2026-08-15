@@ -6,6 +6,7 @@ import net.eca.config.EcaConfiguration;
 import net.eca.network.FactionGlowSyncPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EntityLocationManager;
+import net.eca.util.EntityRemovalQuarantine;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
 import net.eca.util.bossshow.BossShowPlaybackTracker;
@@ -13,10 +14,10 @@ import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.eca.util.faction.FactionManager;
-import net.eca.util.health.DelayedHealthVerifier;
-import net.eca.util.EntityRemovalQuarantine;
-import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.faction.FactionRelation;
+import net.eca.util.health.DelayedHealthVerifier;
+import net.eca.util.health.EcaSetHealthManager;
+import net.eca.util.health.HealthLockManager;
 import net.eca.util.raid.RaidManager;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
@@ -249,6 +250,7 @@ public class EcaEventHandler {
         // 传入全部维度以便释放袭击期间强制加载的区块
         RaidManager.clearAll(event.getServer().getAllLevels());
         EcaSetHealthManager.clear();
+        HealthLockManager.clearAll();
         //实体 id 重启后重排，残留复查条目会拿旧目标值比对新实体，必须清空
         DelayedHealthVerifier.clear();
         EntityRemovalQuarantine.clear();

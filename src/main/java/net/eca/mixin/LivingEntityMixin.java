@@ -97,6 +97,7 @@ LivingEntityMixin {
             return;
         }
 
+        HealthLockManager.prepareForSave(entity);
         tag.putBoolean(NBT_INVULNERABLE, entity.getEntityData().get(EntityUtil.INVULNERABLE));
         tag.putString(NBT_HEALTH_LOCK_ENC, entity.getEntityData().get(EntityUtil.HEALTH_LOCK_VALUE));
         tag.putInt(NBT_HEALTH_LOCK_KEY, parseIntSafe(entity.getEntityData().get(EntityUtil.HEALTH_LOCK_KEY)));
@@ -157,7 +158,7 @@ LivingEntityMixin {
             entity.getEntityData().set(EntityUtil.MAX_HEALTH_LOCK_CHECK, String.valueOf(tag.getInt(NBT_MAX_HEALTH_LOCK_CHECK)));
         }
 
-        // NBT 恢复完成后重新填充快速路径集合（否则 getLock/getHealBan/getMaxHealthLock 因快速路径为空返回 null）
+        // NBT 恢复完成后建立服务端权威锁记录，并恢复禁疗快速路径。
         HealthLockManager.restoreFastPaths(entity);
 
         // 恢复复活追踪状态
