@@ -203,6 +203,25 @@ public final class HealthDataflowAnalyzer {
         return MAINTENANCE_SINKS_CACHE.getOrDefault(entityClass, List.of());
     }
 
+    /* 周期维护把某个单元整体重算自另一个单元时，前者只是后者的镜像：写镜像活不过一次维护，
+       而生死判定读的是权威。recomputeExpr 为维护期重算镜像所用的表达式，反解它即得权威应写的值。 */
+    public record MirrorLink(Source mirror, Source authority, Expr recomputeExpr) {}
+
+    private static final Map<Class<?>, Map<String, MirrorLink>> MAINTENANCE_MIRROR_CACHE = new ConcurrentHashMap<>();
+
+    /* 只读查询某落点是否为周期镜像；维护扫描未就绪时返回 null，调用方按未知处理而非按非镜像处理。 */
+    public static MirrorLink peekMirrorLink(Class<?> entityClass, Source sink) {
+        if (entityClass == null || sink == null) return null;
+        Map<String, MirrorLink> links = MAINTENANCE_MIRROR_CACHE.get(entityClass);
+        return links == null ? null : links.get(sink.canonicalKey());
+    }
+
+    /* 该类是否已知存在实体内的镜像权威。延迟回滚后据此在"实体内重定向"与"实体外找镜像"之间取舍。 */
+    public static boolean hasMirrorAuthority(Class<?> entityClass) {
+        Map<String, MirrorLink> links = entityClass == null ? null : MAINTENANCE_MIRROR_CACHE.get(entityClass);
+        return links != null && !links.isEmpty();
+    }
+
     public static boolean isMaintenancePlanResolved(Class<?> entityClass) {
         MaintenanceParts parts = entityClass == null ? null : MAINTENANCE_PARTS_CACHE.get(entityClass);
         return parts != null && parts.tickResolved && parts.authorityResolved;
@@ -222,6 +241,7 @@ public final class HealthDataflowAnalyzer {
         MAINTENANCE_PLAN_CACHE.clear();
         MAINTENANCE_PARTS_CACHE.clear();
         MAINTENANCE_SINKS_CACHE.clear();
+        MAINTENANCE_MIRROR_CACHE.clear();
         MAINTENANCE_SCAN_DIAG_DUMPED.clear();
     }
 
@@ -2293,6 +2313,7 @@ public final class HealthDataflowAnalyzer {
             MaintenancePlan plan = buildMaintenancePlan(semantic.observedAuthorities(), combined);
             MAINTENANCE_PLAN_CACHE.put(entityClass, plan);
             MAINTENANCE_SINKS_CACHE.put(entityClass, distinctSinks(combined));
+            MAINTENANCE_MIRROR_CACHE.put(entityClass, buildMirrorLinks(combined));
             if (parts.tickResolved && parts.authorityResolved && MAINTENANCE_SCAN_DIAG_DUMPED.add(entityClass)) {
                 List<String> methods = new ArrayList<>();
                 if (!parts.tickWrites.isEmpty()) methods.add("tickWrites");
@@ -2347,6 +2368,66 @@ public final class HealthDataflowAnalyzer {
                     entityClass.getName(), branch.authority().label, causal,
                     branch.transactionSources().stream().map(source -> source.label).toList());
         }
+        Map<String, MirrorLink> mirrors = MAINTENANCE_MIRROR_CACHE.getOrDefault(entityClass, Map.of());
+        if (!mirrors.isEmpty()) {
+            List<String> pairs = new ArrayList<>();
+            for (MirrorLink link : mirrors.values()) {
+                pairs.add(link.mirror().label + " <- " + link.authority().label);
+            }
+            EcaLogger.info("[ExternalScan]   mirror links entity={} count={} {}",
+                    entityClass.getName(), pairs.size(), pairs);
+        }
+    }
+
+    /* 维护写入里"整体重算自另一个单元"的落点即镜像：写它必被下一次维护覆盖，判定也不读它。
+       判据只看写值表达式的源集合——落点的每一次维护写入都恰好由同一个别的单元单独决定即成立，
+       任一次写入掺入常数以外的第二个源、或写入自身，都说明它承载独立状态而非镜像。
+       权威反过来依赖镜像时两者互为上下游，重定向会绕回原地，故此时不建链。 */
+    private static Map<String, MirrorLink> buildMirrorLinks(List<StoreWrite> writes) {
+        if (writes == null || writes.isEmpty()) return Map.of();
+        Map<String, List<StoreWrite>> bySink = new LinkedHashMap<>();
+        for (StoreWrite write : writes) {
+            if (write == null || write.sink() == null) continue;
+            if (isEcaHealthWrapperSource(write.sink())) continue;
+            bySink.computeIfAbsent(write.sink().canonicalKey(), ignored -> new ArrayList<>()).add(write);
+        }
+        Map<String, MirrorLink> links = new LinkedHashMap<>();
+        for (Map.Entry<String, List<StoreWrite>> entry : bySink.entrySet()) {
+            MirrorLink link = mirrorLinkOf(entry.getValue());
+            if (link == null) continue;
+            if (dependsOnMirror(bySink.get(link.authority().canonicalKey()), link.mirror())) continue;
+            links.put(entry.getKey(), link);
+        }
+        return links.isEmpty() ? Map.of() : Map.copyOf(links);
+    }
+
+    /* 同一落点的多处维护写入若重算式子形状不一，仍是镜像(写它一样留不住)，但无从判断哪一处最后生效，
+       此时 recomputeExpr 置空表示"已知镜像、不可重定向"，由调用方交出该落点的裁决权。 */
+    private static MirrorLink mirrorLinkOf(List<StoreWrite> sinkWrites) {
+        Source mirror = sinkWrites.get(0).sink();
+        Source authority = null;
+        Expr recompute = null;
+        boolean uniformShape = true;
+        for (StoreWrite write : sinkWrites) {
+            Set<Source> valueSources = collectSources(write.valueExpr());
+            if (valueSources.size() != 1) return null;
+            Source candidate = valueSources.iterator().next();
+            if (candidate.equals(mirror)) return null;
+            if (authority != null && !authority.equals(candidate)) return null;
+            authority = candidate;
+            if (recompute == null) recompute = write.valueExpr();
+            else if (!recompute.equals(write.valueExpr())) uniformShape = false;
+        }
+        if (authority == null) return null;
+        return new MirrorLink(mirror, authority, uniformShape ? recompute : null);
+    }
+
+    private static boolean dependsOnMirror(List<StoreWrite> authorityWrites, Source mirror) {
+        if (authorityWrites == null) return false;
+        for (StoreWrite write : authorityWrites) {
+            if (containsSink(write.valueExpr(), mirror)) return true;
+        }
+        return false;
     }
 
     private static List<StoreWrite> mergeMaintenanceWrites(List<StoreWrite> tickWrites,

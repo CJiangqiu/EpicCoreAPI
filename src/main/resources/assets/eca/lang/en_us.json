@@ -288,6 +288,8 @@
   "gui.eca.shader_generator.parameter.ring_thickness": "Ring Thickness",
   "gui.eca.shader_generator.parameter.max_radius": "Max Radius",
   "gui.eca.shader_generator.parameter.angle": "Angle",
+  "gui.eca.shader_generator.parameter.travel_distance": "Travel Distance",
+  "gui.eca.shader_generator.parameter.path_jitter": "Path Jitter",
   "gui.eca.shader_generator.parameter.trail_length": "Trail Length",
   "gui.eca.shader_generator.parameter.trail_width": "Trail Width",
   "gui.eca.shader_generator.parameter.head_size": "Head Size",

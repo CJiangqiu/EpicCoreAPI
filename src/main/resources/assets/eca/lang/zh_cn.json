@@ -288,6 +288,8 @@
   "gui.eca.shader_generator.parameter.ring_thickness": "环厚度",
   "gui.eca.shader_generator.parameter.max_radius": "最大半径",
   "gui.eca.shader_generator.parameter.angle": "角度",
+  "gui.eca.shader_generator.parameter.travel_distance": "飞行距离",
+  "gui.eca.shader_generator.parameter.path_jitter": "轨迹抖动",
   "gui.eca.shader_generator.parameter.trail_length": "拖尾长度",
   "gui.eca.shader_generator.parameter.trail_width": "拖尾宽度",
   "gui.eca.shader_generator.parameter.head_size": "头部大小",

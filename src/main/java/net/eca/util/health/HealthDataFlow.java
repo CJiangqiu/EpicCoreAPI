@@ -517,11 +517,20 @@ public final class HealthDataFlow {
                 continue;
             }
 
+            /* 该落点若是周期维护的镜像，写它活不过一次维护，且生死判定读的是它背后的权威。
+               同事务先把权威写成等效值，镜像仍照写以维持本 tick 的观测一致。 */
+            MirrorWrite mirrorWrite = prepareMirrorWrite(cls, sink, solved.value(), entity, ctx);
             Object snapshot = sink.read(entity);
             solvedWrites.add(new PreparedSourceWrite(sink, snapshot, solved.value()));
+            if (mirrorWrite != null) addSolvedWrite(solvedWrites, mirrorWrite.toPreparedWrite());
             float anchorBefore = EcaSetHealthManager.readHealthAnchor(entity);
+            if (mirrorWrite != null && !dispatchWrite(mirrorWrite.authority(), entity, mirrorWrite.value())) {
+                diag.add("    [" + sink.label + "] mirror authority=" + mirrorWrite.authority().label
+                        + " solved=" + mirrorWrite.value() + " write=FAIL");
+                mirrorWrite = null;
+            }
             if (!dispatchWrite(sink, entity, solved.value())) {
-                boolean restored = dispatchWrite(sink, entity, snapshot);
+                boolean restored = restoreSinkWithMirror(sink, snapshot, mirrorWrite, entity);
                 diag.add("    [" + sink.label + "] solved=" + solved.value()
                         + " write=FAIL restore=" + (restored ? "OK" : "FAIL"));
                 continue;
@@ -529,17 +538,26 @@ public final class HealthDataFlow {
             // 锚点若随本次写入位移到目标值，即为它反映真实存储的证据，据此补正弱取证的误判
             EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected);
             EcaSetHealthManager.AnchorVerdict verdict = verifier.verify(entity, expected, sink);
+            /* 未能回落到权威的镜像，其自回读恒真：值下一次维护即被重算覆盖，PASS 不构成生效证据。
+               既不能判成功也不能判失败，交出裁决权让后续通道继续。 */
+            if (verdict == EcaSetHealthManager.AnchorVerdict.PASS
+                    && mirrorWrite == null && isKnownMirror(cls, sink)) {
+                verdict = EcaSetHealthManager.AnchorVerdict.INDETERMINATE;
+            }
             if (verdict == EcaSetHealthManager.AnchorVerdict.INDETERMINATE) dumpIndeterminate(cls, sink.label);
             if (verdict == EcaSetHealthManager.AnchorVerdict.PASS) {
                 EcaSetHealthManager.recordObservedWrite(cls);
+                if (mirrorWrite != null) EcaSetHealthManager.recordMirrorRedirect(cls);
                 if (logSuccess) {
-                    EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}",
-                            cls.getName(), sink.label, solved.value(), expected);
+                    EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}{}",
+                            cls.getName(), sink.label, solved.value(), expected,
+                            mirrorWrite == null ? "" : " authority=" + mirrorWrite.authority().label
+                                    + " authorityValue=" + mirrorWrite.value());
                 }
                 return true;
             }
 
-            boolean restored = dispatchWrite(sink, entity, snapshot);
+            boolean restored = restoreSinkWithMirror(sink, snapshot, mirrorWrite, entity);
             // 写入成功但校验失败时，单独记录观测锚点与存储可能解耦
             EcaSetHealthManager.recordUnobservedWrite(cls, sink, sink.label);
             diag.add("    [" + sink.label + "] solved=" + solved.value()
@@ -559,6 +577,61 @@ public final class HealthDataFlow {
             for (String line : diag) EcaLogger.info("[{}] {}", diagnosticChannel, line);
         }
         return false;
+    }
+
+    /* 镜像落点背后的权威写入：镜像值下一次维护会被重算覆盖，故须与镜像同事务写入权威。 */
+    private record MirrorWrite(Source authority, Object snapshot, Object value) {
+        private PreparedSourceWrite toPreparedWrite() {
+            return new PreparedSourceWrite(authority, snapshot, value);
+        }
+    }
+
+    private static final Set<String> MIRROR_REDIRECT_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 落点是周期镜像时，把它的目标值沿重算表达式反解回权威。权威不可写、解不出或重算式子形状不唯一时
+       返回 null——此时该落点已知留不住值，但无从重定向，由调用方交出其裁决权。 */
+    private static MirrorWrite prepareMirrorWrite(Class<?> cls, Source sink, Object sinkValue,
+                                                  LivingEntity entity, EvalContext ctx) {
+        HealthDataflowAnalyzer.MirrorLink link = HealthDataflowAnalyzer.peekMirrorLink(cls, sink);
+        if (link == null || link.recomputeExpr() == null) return null;
+        Source authority = link.authority();
+        if (isSharedStaticScalar(authority) || !isAddressable(authority, entity)) return null;
+        HealthSolveResult solved =
+                HealthDataflowAnalyzer.buildWritePath(link.recomputeExpr(), authority, sinkValue, ctx);
+        if (!solved.solved() || solved.value() == null) return null;
+        if (MIRROR_REDIRECT_DUMPED.add(cls.getName() + "|" + sink.label)) {
+            EcaLogger.info("[HealthDataflow] mirror redirect entity={} mirror={} authority={} solved={}",
+                    cls.getName(), sink.label, authority.label, solved.value());
+        }
+        return new MirrorWrite(authority, authority.read(entity), solved.value());
+    }
+
+    /* 维护扫描已认定该落点是镜像(无论能否重定向)。扫描未就绪时返回 false，按未知处理走原有裁决。 */
+    private static boolean isKnownMirror(Class<?> cls, Source sink) {
+        return HealthDataflowAnalyzer.peekMirrorLink(cls, sink) != null;
+    }
+
+    private static boolean allKnownMirrors(Class<?> cls, List<PreparedSourceWrite> writes) {
+        for (PreparedSourceWrite write : writes) {
+            if (!isKnownMirror(cls, write.sink())) return false;
+        }
+        return true;
+    }
+
+    private static boolean restoreSinkWithMirror(Source sink, Object snapshot, MirrorWrite mirrorWrite,
+                                                 LivingEntity entity) {
+        boolean restored = dispatchWrite(sink, entity, snapshot);
+        if (mirrorWrite != null
+                && !dispatchWrite(mirrorWrite.authority(), entity, mirrorWrite.snapshot())) restored = false;
+        return restored;
+    }
+
+    /* 权威可能同时是候选落点，重复入列会在联合写入里对同一单元下两次不同的值。 */
+    private static void addSolvedWrite(List<PreparedSourceWrite> writes, PreparedSourceWrite candidate) {
+        for (PreparedSourceWrite existing : writes) {
+            if (existing.sink().equals(candidate.sink())) return;
+        }
+        writes.add(candidate);
     }
 
     private static final Set<String> INDETERMINATE_DUMPED = ConcurrentHashMap.newKeySet();
@@ -649,6 +722,11 @@ public final class HealthDataFlow {
         EcaSetHealthManager.AnchorVerdict verdict = wroteAll
                 ? verifier.verify(entity, expected, null)
                 : EcaSetHealthManager.AnchorVerdict.FAIL;
+        /* 写入全落在周期镜像上时，回读同样恒真而值留不到下一次维护，与单源路径同一判据。
+           只要其中有一个非镜像单元，锚点读数就不是纯粹的自证，按原判决处理。 */
+        if (verdict == EcaSetHealthManager.AnchorVerdict.PASS && allKnownMirrors(entity.getClass(), writes)) {
+            verdict = EcaSetHealthManager.AnchorVerdict.INDETERMINATE;
+        }
         if (verdict == EcaSetHealthManager.AnchorVerdict.INDETERMINATE)
             dumpIndeterminate(entity.getClass(), "all-sources");
         if (verdict == EcaSetHealthManager.AnchorVerdict.PASS) {

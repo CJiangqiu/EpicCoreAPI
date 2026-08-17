@@ -20,7 +20,7 @@ public final class ShaderAiModuleMetadata {
             case "elliptical_galaxy" -> "A smooth elliptical galaxy glow with configurable flattening.";
             case "supernova" -> "A bright stellar burst combining a core, radial rays, and a halo.";
             case "energy_ring" -> "An animated ring that expands outward and repeats.";
-            case "meteor" -> "A directional meteor head with a narrow luminous trail.";
+            case "meteor" -> "A meteor head flying along its angle, trailing a narrow luminous tail that fades toward the tail end and restarts each flight.";
             case "nebula_haze" -> "An FBM cloud field; higher density thresholds make the visible cloud sparser, not more opaque.";
             case "black_hole" -> "An opaque dark body that occludes a tilted rotating accretion disk and photon ring. Place it on a dedicated NORMAL layer so the event horizon can hide lower layers; ADD cannot create darkness.";
             case "lightning" -> "A segmented jagged lightning bolt with optional branch energy.";
@@ -137,6 +137,8 @@ public final class ShaderAiModuleMetadata {
             case "ring_thickness" -> "Width of the ring outline relative to its scale.";
             case "max_radius" -> "Maximum expansion radius before the ring animation repeats.";
             case "angle" -> "Travel or orientation angle in degrees.";
+            case "travel_distance" -> "Distance the head covers in one flight, relative to element size.";
+            case "path_jitter" -> "Lateral offset randomized per flight so successive passes do not repeat the same track.";
             case "trail_length" -> "Length of the trailing segment behind its head.";
             case "trail_width" -> "Width of the trailing segment.";
             case "head_size" -> "Radius of the bright leading head.";

@@ -1054,8 +1054,27 @@ public final class EcaSetHealthManager {
         /* 只销掉待确认登记，不动模型与锚点：值没留住说明防护把它改回去了，不说明存储定位错了。
            据此拉黑模型会把正确存储一并丢掉，正确应对是下方放行的实体外镜像。 */
         PENDING_EFFECTIVE_CONFIRM.remove(cls);
+        /* 维护扫描已在实体内找到镜像权威、且本类还没按它重定向过：值改回去的成因就在实体内，
+           下次改血走重定向即可，此时去世界存档按值吻合找镜像既定位不到，还有改坏其他模组数据的风险。
+           重定向试过仍被改回，才说明真实血量另有一份实体之外的镜像。 */
+        if (HealthDataflowAnalyzer.hasMirrorAuthority(cls) && !MIRROR_REDIRECTED.contains(cls)) {
+            if (MIRROR_PENDING_DUMPED.add(cls.getName())) {
+                EcaLogger.info("[HealthDataflow] delayed rollback deferred to mirror redirect entity={}",
+                        cls.getName());
+            }
+            return;
+        }
         // 下次改血时放行第三阶段，去实体之外找持有真实血量的镜像
         model.markDelayedRollbackObserved();
+    }
+
+    /* 已按镜像链把写入落到实体内权威的类。重定向后仍被改回，才轮到实体外镜像阶段。 */
+    private static final Set<Class<?>> MIRROR_REDIRECTED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> MIRROR_PENDING_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 由 HealthDataFlow 在镜像重定向随写入一并校验通过时登记。 */
+    static void recordMirrorRedirect(Class<?> cls) {
+        if (cls != null) MIRROR_REDIRECTED.add(cls);
     }
 
     /* 延迟复查确认值留住了：这是独立于模型表达式的证据，至此才认可该锚点。 */
@@ -1093,6 +1112,8 @@ public final class EcaSetHealthManager {
         ANCHOR_TRUST_DUMPED.clear();
         ANCHOR_OBSERVED.clear();
         PENDING_EFFECTIVE_CONFIRM.clear();
+        MIRROR_REDIRECTED.clear();
+        MIRROR_PENDING_DUMPED.clear();
         UNOBSERVED_WRITES.clear();
         UNOBSERVED_DUMPED.clear();
         JOIN_PREWARM_SUBMITTED.clear();

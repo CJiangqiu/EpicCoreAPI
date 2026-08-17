@@ -520,35 +520,63 @@ public final class ShaderModuleRegistry {
         ));
     }
 
-    /* 流星：dream_sakura.fsh / the_last_end.fsh，定向拖尾 + 头部光晕 */
+    /* 流星：dream_sakura.fsh / the_last_end.fsh，头部沿轨迹飞行，拖尾只存在于头部后方并向尾端收敛 */
     private static void registerMeteor() {
         register(fieldModule(
             "meteor",
             "gui.eca.shader_generator.module.meteor",
             List.of(
                 parameter("angle", "gui.eca.shader_generator.parameter.angle", 0.0F, 360.0F, 5.0F, 45.0F),
+                parameter("speed", "gui.eca.shader_generator.parameter.speed", 0.05F, 3.0F, 0.05F, 0.35F),
+                parameter("travel_distance", "gui.eca.shader_generator.parameter.travel_distance", 1.0F, 10.0F, 0.5F, 5.0F),
+                parameter("path_jitter", "gui.eca.shader_generator.parameter.path_jitter", 0.0F, 2.0F, 0.05F, 0.6F),
                 parameter("trail_length", "gui.eca.shader_generator.parameter.trail_length", 0.05F, 0.4F, 0.02F, 0.2F),
                 parameter("trail_width", "gui.eca.shader_generator.parameter.trail_width", 0.005F, 0.05F, 0.002F, 0.015F),
                 parameter("head_size", "gui.eca.shader_generator.parameter.head_size", 0.01F, 0.1F, 0.005F, 0.04F)
             ),
             (out, pointVar, maskVar, instanceSize, module, moduleIndex, instance) -> {
                 float angleRad = (float) Math.toRadians(module.value("angle"));
-                float trailLength = instanceSize * module.value("trail_length");
+                float seed = module.value("seed");
+                float travel = instanceSize * module.value("travel_distance");
+                float jitter = instanceSize * module.value("path_jitter");
+                float trailLength = Math.max(instanceSize * module.value("trail_length"), 0.0001F);
                 float trailWidth = instanceSize * module.value("trail_width");
                 float headSize = instanceSize * module.value("head_size");
                 out.append(String.format(Locale.ROOT,
-                    "        vec2 dir%d = vec2(%.6f, %.6f);\n"
-                        + "        float along%d = dot(%s, dir%d);\n"
-                        + "        float perp%d = abs(dot(%s, vec2(-dir%d.y, dir%d.x)));\n"
-                        + "        float trailMask%d = smoothstep(%.4f, 0.0, along%d) * smoothstep(%.4f, 0.0, perp%d);\n"
-                        + "        float headMask%d = smoothstep(%.4f, 0.0, length(%s));\n"
-                        + "        %s = max(trailMask%d, headMask%d * 1.2);\n",
+                    "        vec2 meteorDir%d = vec2(%.6f, %.6f);\n"
+                        + "        vec2 meteorSide%d = vec2(-meteorDir%d.y, meteorDir%d.x);\n"
+                        + "        float meteorTime%d = gameTime * 1200.0 * %.4f + %.4f;\n"
+                        + "        float meteorCycle%d = floor(meteorTime%d);\n"
+                        + "        float meteorRun%d = fract(meteorTime%d);\n"
+                        + "        vec2 meteorHead%d = meteorDir%d * ((meteorRun%d - 0.5) * %.4f)\n"
+                        + "            + meteorSide%d * ((ecaHash(vec2(meteorCycle%d + %.4f, meteorCycle%d * 1.73 + %.4f)) - 0.5) * %.4f);\n"
+                        + "        vec2 meteorVec%d = %s - meteorHead%d;\n"
+                        + "        float meteorAlong%d = dot(meteorVec%d, meteorDir%d);\n"
+                        + "        float meteorPerp%d = abs(dot(meteorVec%d, meteorSide%d));\n"
+                        + "        float meteorTail%d = clamp(-meteorAlong%d / %.6f, 0.0, 1.0);\n"
+                        + "        float meteorWidth%d = max(%.6f * (1.0 - 0.75 * meteorTail%d), 0.0002);\n"
+                        + "        float meteorTrail%d = (1.0 - smoothstep(0.0, meteorWidth%d, meteorPerp%d))\n"
+                        + "            * (1.0 - meteorTail%d) * (1.0 - smoothstep(0.0, %.6f, meteorAlong%d));\n"
+                        + "        float meteorHeadGlow%d = smoothstep(%.6f, 0.0, length(meteorVec%d));\n"
+                        + "        float meteorFade%d = smoothstep(0.0, 0.12, meteorRun%d) * (1.0 - smoothstep(0.72, 1.0, meteorRun%d));\n"
+                        + "        %s = max(meteorTrail%d, meteorHeadGlow%d * 1.2) * meteorFade%d;\n",
                     instance, Math.cos(angleRad), Math.sin(angleRad),
+                    instance, instance, instance,
+                    instance, module.value("speed"), unitRandom(seed, instance, 23.71F),
+                    instance, instance,
+                    instance, instance,
+                    instance, instance, instance, travel,
+                    instance, instance, seed + instance * 3.19F, instance, instance * 6.41F, jitter,
                     instance, pointVar, instance,
-                    instance, pointVar, instance, instance,
-                    instance, -trailLength, instance, trailWidth, instance,
-                    instance, headSize, pointVar,
-                    maskVar, instance, instance
+                    instance, instance, instance,
+                    instance, instance, instance,
+                    instance, instance, trailLength,
+                    instance, trailWidth, instance,
+                    instance, instance, instance,
+                    instance, Math.max(headSize * 0.6F, 0.0005F), instance,
+                    instance, Math.max(headSize, 0.0005F), instance,
+                    instance, instance, instance,
+                    maskVar, instance, instance, instance
                 ));
             }
         ));
