@@ -18,6 +18,7 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
     public static ForgeConfigSpec.ConfigValue<Boolean> ENABLE_CUSTOM_LOADING_BACKGROUND;
     public static ForgeConfigSpec.IntValue FORCE_LOADING_MAX_RENDER_DISTANCE;
+    public static ForgeConfigSpec.BooleanValue FORCE_LOADING_HIDE_OCCLUDING_CLOUDS;
     public static ForgeConfigSpec.IntValue BOSSSHOW_MAX_SUBTITLE_DURATION_TICKS;
     public static ForgeConfigSpec.IntValue BOSSSHOW_RANGE_SCAN_INTERVAL_TICKS;
     public static ForgeConfigSpec.IntValue BOSSSHOW_ENTITY_SELECTION_RANGE;
@@ -114,6 +115,11 @@ public class EcaConfiguration {
             .comment("Maximum render distance (in blocks) for force-loaded entities.",
                      "强制加载实体的最大渲染（方块）")
             .defineInRange("Force Loading Max Render Distance", 128, 2, Integer.MAX_VALUE);
+
+        FORCE_LOADING_HIDE_OCCLUDING_CLOUDS = BUILDER
+            .comment("Hide clouds while looking at a force-loaded entity.",
+                     "看向强加载实体时隐藏云层。")
+            .define("Hide Occluding Clouds", true);
 
         // BossShow Configuration | 演出系统配置
         BUILDER.push("BossShow");
@@ -284,6 +290,10 @@ public class EcaConfiguration {
 
     public static int getForceLoadingMaxRenderDistanceSafely() {
         return safeGet(FORCE_LOADING_MAX_RENDER_DISTANCE, 128);
+    }
+
+    public static boolean getForceLoadingHideOccludingCloudsSafely() {
+        return safeGet(FORCE_LOADING_HIDE_OCCLUDING_CLOUDS, true);
     }
 
     public static int getBossShowMaxSubtitleDurationTicksSafely() {
