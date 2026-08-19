@@ -15,6 +15,7 @@
     "EntityFactionGlowMixin",
     "EntityRenderDispatcherMixin",
     "FogRendererMixin",
+    "FrustumMixin",
     "GameRendererPostLevelMixin",
     "LevelRendererMixin",
     "LivingEntityRendererMixin",

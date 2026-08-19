@@ -384,6 +384,76 @@ public class EntityUtil {
         }
     }
 
+    /* 非阻塞的客户端容器查询：发出请求后立刻返回，回执由 completeClientContainerCheck 兑现。
+       同步版本会 future.get 等满一秒，放进毫秒级轮询的复活线程会把线程整条堵死；
+       调用方按自己的节奏读结果，并自行决定多久没回执算作"未知"。
+       回执迟到或永不到达时不能判成"客户端没有"——网络抖动会因此触发误重建。 */
+    public static CompletableFuture<Map<String, Boolean>> requestClientContainerCheckAsync(ServerPlayer requester, UUID entityUUID) {
+        if (requester == null || entityUUID == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        UUID requestId = UUID.randomUUID();
+        ContainerCheckKey key = new ContainerCheckKey(requestId, entityUUID);
+        CompletableFuture<Map<String, Boolean>> future = new CompletableFuture<>();
+        PENDING_CLIENT_CONTAINER_CHECKS.put(key, future);
+        future.whenComplete((response, error) -> PENDING_CLIENT_CONTAINER_CHECKS.remove(key));
+
+        try {
+            NetworkHandler.sendToPlayer(new EntityContainerCheckRequestPacket(requestId, entityUUID), requester);
+        } catch (Exception e) {
+            EcaLogger.info("[EntityUtil] Async client container check send failed, uuid={}, msg={}", entityUUID, e.getMessage());
+            future.complete(null);
+        }
+        return future;
+    }
+
+    /* 强制与某个玩家重新配对实体的客户端追踪。
+       客户端把实体丢了而服务端 seenBy 里仍留着该玩家时，原版认定"他已经看见了"，
+       ChunkMap 永远不会重发生成包（updatePlayer 只在 seenBy.add 成功时才 addPairing）。
+       先摘配对再按原版规则重配，生成包才会重新发出；玩家已走出范围时 updatePlayer 自己会拒绝。
+       必须在服务器主线程调用。 */
+    public static boolean repairClientPairing(ServerLevel level, Entity entity, ServerPlayer player) {
+        if (level == null || entity == null || player == null) {
+            return false;
+        }
+        try {
+            ChunkMap.TrackedEntity tracked = level.chunkSource.chunkMap.entityMap.get(entity.getId());
+            if (tracked == null) {
+                return false;
+            }
+            tracked.removePlayer(player);
+            tracked.updatePlayer(player);
+            return true;
+        } catch (Exception e) {
+            EcaLogger.info("[EntityUtil] repairClientPairing failed, uuid={}, msg={}", entity.getUUID(), e.getMessage());
+            return false;
+        }
+    }
+
+    // 取得当前正在追踪该实体的玩家快照（seenBy 的配对方）
+    public static List<ServerPlayer> getTrackingPlayers(ServerLevel level, Entity entity) {
+        if (level == null || entity == null) {
+            return Collections.emptyList();
+        }
+        try {
+            ChunkMap.TrackedEntity tracked = level.chunkSource.chunkMap.entityMap.get(entity.getId());
+            if (tracked == null || tracked.seenBy == null) {
+                return Collections.emptyList();
+            }
+            List<ServerPlayer> players = new ArrayList<>();
+            for (ServerPlayerConnection connection : new HashSet<>(tracked.seenBy)) {
+                ServerPlayer player = connection.getPlayer();
+                if (player != null) {
+                    players.add(player);
+                }
+            }
+            return players;
+        } catch (Exception e) {
+            return Collections.emptyList();
+        }
+    }
+
     public static void completeClientContainerCheck(UUID requestId, UUID entityUuid, Map<String, Boolean> result) {
         if (requestId == null || entityUuid == null) {
             return;
@@ -473,20 +543,40 @@ public class EntityUtil {
                 return before;
             }
 
-            if (!Boolean.TRUE.equals(before.get("EntitySectionStorage.sections"))
-                    || !Boolean.TRUE.equals(before.get("EntityLookup.byUuid"))
-                    || !Boolean.TRUE.equals(before.get("EntityLookup.byId"))) {
+            /* getEntity 带 tickList / chunkMap 等多路兜底，而这些容器正是本方法每轮补回的，
+               因此它只能证明"实体还在某处"，不能证明"实体仍注册在查找表上"。
+               各容器是否缺失一律以 before 快照为准，getEntity 的结果只用来区分实体是否已彻底脱离全部容器。 */
+            if (registeredEntity == null) {
                 try {
-                    if (registeredEntity == null) {
-                        entityManager.knownUuids.remove(entityUUID);
-                        entityManager.addNewEntity(entity);
-                    }
+                    entityManager.knownUuids.remove(entityUUID);
+                    entityManager.addNewEntity(entity);
                 } catch (Exception e) {
                     entityManager.knownUuids.add(entityUUID);
                     EcaLogger.info("[EntityUtil] addNewEntity failed, uuid={}, msg={}", entityUUID, e.getMessage());
                 }
-            } else if (!Boolean.TRUE.equals(before.get("PersistentEntitySectionManager.knownUuids"))) {
-                entityManager.knownUuids.add(entityUUID);
+            } else {
+                /* 实体仍挂在部分容器上，逐项补齐：此时走 addNewEntity 会在已存在的追踪条目上
+                   重复派发 onTrackingStart / onTickingStart，异常会中断后续注册。 */
+                if (!Boolean.TRUE.equals(before.get("EntitySectionStorage.sections"))) {
+                    try {
+                        reattachEntitySection(entityManager, entity);
+                    } catch (Exception e) {
+                        EcaLogger.info("[EntityUtil] reattach section failed, uuid={}, msg={}", entityUUID, e.getMessage());
+                    }
+                }
+
+                /* byUuid / byId 的唯一原版写入口在 startTracking 内，而补 ChunkMap 追踪时只调
+                   callbacks.onTrackingStart，绕开了那一行，因此必须在此直接补写。 */
+                if (!Boolean.TRUE.equals(before.get("EntityLookup.byUuid"))
+                        || !Boolean.TRUE.equals(before.get("EntityLookup.byId"))) {
+                    EntityLookup<Entity> visibleEntityStorage = entityManager.visibleEntityStorage;
+                    visibleEntityStorage.byUuid.put(entityUUID, entity);
+                    visibleEntityStorage.byId.put(entity.getId(), entity);
+                }
+
+                if (!Boolean.TRUE.equals(before.get("PersistentEntitySectionManager.knownUuids"))) {
+                    entityManager.knownUuids.add(entityUUID);
+                }
             }
 
             //补TickList
@@ -538,16 +628,24 @@ public class EntityUtil {
         }
 
         try {
-            long sectionKey = SectionPos.asLong(entity.blockPosition());
-            EntitySection<Entity> section = entityManager.sectionStorage.getOrCreateSection(sectionKey);
-            if (!section.getEntities().anyMatch(current -> current == entity)) {
-                section.add(entity);
-            }
-            EntityInLevelCallback callback = entityManager.new Callback(entity, sectionKey, section);
-            entity.setLevelCallback(callback);
+            reattachEntitySection(entityManager, entity);
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] rebuild levelCallback failed, uuid={}, msg={}", entity.getUUID(), e.getMessage());
         }
+    }
+
+    /* 把实体挂回当前坐标所属的 section，并让 levelCallback 指向该 section。
+       先清掉其它 section 里的残留：实体同时留在旧 section 会被重复迭代，且移动时原版
+       Callback.onMove 只摘除它记录的那一个。 */
+    static void reattachEntitySection(PersistentEntitySectionManager<Entity> entityManager, Entity entity) {
+        long sectionKey = SectionPos.asLong(entity.blockPosition());
+        EntitySection<Entity> section = entityManager.sectionStorage.getOrCreateSection(sectionKey);
+        if (!section.getEntities().anyMatch(current -> current == entity)) {
+            removeFromSectionStorage(entityManager.sectionStorage, entity);
+            section.add(entity);
+        }
+        EntityInLevelCallback callback = entityManager.new Callback(entity, sectionKey, section);
+        entity.setLevelCallback(callback);
     }
 
     //按UUID复活实体（清除死亡状态 + 容器修复）

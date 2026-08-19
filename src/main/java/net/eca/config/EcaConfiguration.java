@@ -17,6 +17,12 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_INVULNERABLE_UNTARGETABLE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
     public static ForgeConfigSpec.ConfigValue<Boolean> ENABLE_CUSTOM_LOADING_BACKGROUND;
+    /* 该值会被顶成透视矩阵的远平面（GameRendererPostLevelMixin）。近平面固定 0.05，
+       一旦 float 在远平面处的间距超过 2 倍近平面，(zFar+zNear)/(zNear-zFar) 会舍成精确的 -1，
+       抽取出的远平面法线归零，JOML 归一化时除以 0 得到 NaN，此后视锥对一切返回不可见：
+       剔除循环不收敛、地形整片消失。临界点在 zFar = 2^20，上限取在其内。 */
+    public static final int FORCE_LOADING_MAX_RENDER_DISTANCE_LIMIT = 1_000_000;
+
     public static ForgeConfigSpec.IntValue FORCE_LOADING_MAX_RENDER_DISTANCE;
     public static ForgeConfigSpec.BooleanValue FORCE_LOADING_HIDE_OCCLUDING_CLOUDS;
     public static ForgeConfigSpec.IntValue BOSSSHOW_MAX_SUBTITLE_DURATION_TICKS;
@@ -114,7 +120,7 @@ public class EcaConfiguration {
         FORCE_LOADING_MAX_RENDER_DISTANCE = BUILDER
             .comment("Maximum render distance (in blocks) for force-loaded entities.",
                      "强制加载实体的最大渲染（方块）")
-            .defineInRange("Force Loading Max Render Distance", 128, 2, Integer.MAX_VALUE);
+            .defineInRange("Force Loading Max Render Distance", 128, 2, FORCE_LOADING_MAX_RENDER_DISTANCE_LIMIT);
 
         FORCE_LOADING_HIDE_OCCLUDING_CLOUDS = BUILDER
             .comment("Hide clouds while looking at a force-loaded entity.",
@@ -289,7 +295,8 @@ public class EcaConfiguration {
     }
 
     public static int getForceLoadingMaxRenderDistanceSafely() {
-        return safeGet(FORCE_LOADING_MAX_RENDER_DISTANCE, 128);
+        // spec 的上界只在读写配置文件时生效，这里再截一次，挡住越界的旧配置与外部写入
+        return Math.min(safeGet(FORCE_LOADING_MAX_RENDER_DISTANCE, 128), FORCE_LOADING_MAX_RENDER_DISTANCE_LIMIT);
     }
 
     public static boolean getForceLoadingHideOccludingCloudsSafely() {

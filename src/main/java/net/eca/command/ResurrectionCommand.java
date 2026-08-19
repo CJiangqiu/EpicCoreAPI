@@ -32,7 +32,8 @@ import java.util.UUID;
  * /eca resurrection list               — list tracked entities with container status
  * /eca resurrection check <target>      — one-shot container check
  * /eca resurrection revive <target>     — manual force-revive
- * /eca resurrection interval <ms>       — set poll interval (100~10000)
+ * /eca resurrection interval <ms>       — set server poll interval (100~10000)
+ * /eca resurrection clientinterval <ms> — set client presence probe interval (100~60000)
  * </pre>
  */
 public class ResurrectionCommand {
@@ -61,7 +62,10 @@ public class ResurrectionCommand {
                     .executes(ResurrectionCommand::revive)))
             .then(Commands.literal("interval")
                 .then(Commands.argument("ms", IntegerArgumentType.integer(100, 10000))
-                    .executes(ResurrectionCommand::interval)));
+                    .executes(ResurrectionCommand::interval)))
+            .then(Commands.literal("clientinterval")
+                .then(Commands.argument("ms", IntegerArgumentType.integer(100, 60000))
+                    .executes(ResurrectionCommand::clientInterval)));
     }
 
     private static int start(CommandContext<CommandSourceStack> context) {
@@ -80,12 +84,12 @@ public class ResurrectionCommand {
     private static int stop(CommandContext<CommandSourceStack> context) {
         CommandSourceStack source = context.getSource();
 
-        long revived = ResurrectionManager.getTotalRevivedCount();
+        long repairs = ResurrectionManager.getTotalRevivedCount();
         long checks = ResurrectionManager.getTotalCheckCount();
         ResurrectionManager.stop();
 
         source.sendSuccess(() -> Component.literal(
-            String.format("§eResurrectionManager daemon stopped. totalRevived=%d totalChecks=%d", revived, checks)
+            String.format("§eResurrectionManager daemon stopped. totalRepairs=%d totalChecks=%d", repairs, checks)
         ), true);
         return 1;
     }
@@ -94,18 +98,26 @@ public class ResurrectionCommand {
         CommandSourceStack source = context.getSource();
 
         boolean running = ResurrectionManager.isRunning();
-        long revived = ResurrectionManager.getTotalRevivedCount();
         long checks = ResurrectionManager.getTotalCheckCount();
+        long snapshots = ResurrectionManager.getTotalSnapshotCount();
+        long serverRepairs = ResurrectionManager.getTotalServerRepairCount();
+        long rebuilds = ResurrectionManager.getTotalRebuildCount();
+        long clientRepairs = ResurrectionManager.getTotalClientRepairCount();
         long interval = ResurrectionManager.getPollIntervalMs();
+        long clientInterval = ResurrectionManager.getClientPollIntervalMs();
         int tracked = ResurrectionManager.getTrackedCount();
-        int inFlight = ResurrectionManager.getTrackedUUIDs().size(); // approximate
 
         String stateColor = running ? "§a" : "§c";
         String stateText = running ? "RUNNING" : "STOPPED";
 
         source.sendSuccess(() -> Component.literal(
-            String.format("%s[ResurrectionManager] state=%s§r%s poll=%dms tracked=%d totalRevived=%d totalChecks=%d",
-                "§6", stateColor, stateText, interval, tracked, revived, checks)
+            String.format("%s[ResurrectionManager] state=%s§r%s poll=%dms clientPoll=%dms tracked=%d",
+                "§6", stateColor, stateText, interval, clientInterval, tracked)
+        ), false);
+        // 分项计数：修复次数与检查次数分开才能看出坏没坏、坏在哪一层
+        source.sendSuccess(() -> Component.literal(
+            String.format("§6  checks=%d snapshots=%d serverRepairs=%d rebuilds=%d clientRepairs=%d",
+                checks, snapshots, serverRepairs, rebuilds, clientRepairs)
         ), false);
         return tracked;
     }
@@ -269,6 +281,18 @@ public class ResurrectionCommand {
 
         source.sendSuccess(() -> Component.literal(
             String.format("§aResurrectionManager poll interval set to %dms", ms)
+        ), true);
+        return ms;
+    }
+
+    private static int clientInterval(CommandContext<CommandSourceStack> context) {
+        CommandSourceStack source = context.getSource();
+
+        int ms = IntegerArgumentType.getInteger(context, "ms");
+        ResurrectionManager.setClientPollIntervalMs(ms);
+
+        source.sendSuccess(() -> Component.literal(
+            String.format("§aResurrectionManager client probe interval set to %dms", ms)
         ), true);
         return ms;
     }

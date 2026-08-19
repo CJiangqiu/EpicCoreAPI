@@ -69,6 +69,17 @@ public abstract class LevelRendererMixin {
         eca$cloudsOccludeForceLoaded = false;
     }
 
+    /* shouldRender 每次进入都会登记当前实体，isChunkCompiled 是它在同一个判断表达式里的读取方。
+       但 shouldRender 返回 false 时 isChunkCompiled 不会被求值，登记值没有配对的消费点，
+       只能由帧边界回收。ReceivingLevelScreen 在 tick 里也调 isChunkCompiled，
+       读到跨帧残留会让“正在加载地形”在地形就绪前提前关闭。 */
+    @Inject(method = "renderLevel", at = {@At("HEAD"), @At("RETURN")})
+    private void eca$clearForceLoadedRenderContext(PoseStack poseStack, float partialTick, long finishNanoTime,
+                                                   boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer,
+                                                   LightTexture lightTexture, Matrix4f projectionMatrix, CallbackInfo ci) {
+        ForceLoadingManager.clearCurrentRenderingEntity();
+    }
+
     @Inject(method = "renderClouds", at = @At("HEAD"), cancellable = true)
     private void eca$skipOccludingClouds(PoseStack poseStack, Matrix4f frustumMatrix, float partialTick,
                                          double camX, double camY, double camZ, CallbackInfo ci) {

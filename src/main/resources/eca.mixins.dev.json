@@ -13,6 +13,7 @@
     "DeathScreenMixin",
     "EntityRenderDispatcherMixin",
     "FogRendererMixin",
+    "FrustumMixin",
     "GameRendererPostLevelMixin",
     "LevelRendererMixin",
     "LivingEntityRendererMixin",

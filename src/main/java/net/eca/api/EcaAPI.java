@@ -1772,7 +1772,9 @@ public final class EcaAPI {
     // 将实体加入复活追踪
     /**
      * Add an entity to the resurrection tracking set.
-     * Tracked entities are automatically revived on death every poll cycle.
+     * Every poll cycle the daemon checks whether the entity is still present on the
+     * server and on the clients tracking it, snapshots its state while intact, and
+     * rebuilds whichever side lost it from that snapshot.
      * @param entity the entity to track
      */
     public static void addResurrectionTarget(Entity entity) {
@@ -1849,6 +1851,85 @@ public final class EcaAPI {
      */
     public static long getResurrectionTotalChecks() {
         return ResurrectionManager.getTotalCheckCount();
+    }
+
+    // 设置客户端在场探测间隔
+    /**
+     * Set the interval at which the daemon probes whether tracked entities still exist
+     * on the clients tracking them. The probe is a network round trip, so it runs on a
+     * far longer interval than the server-side poll.
+     * @param ms probe interval, clamped to 100-60000 (default 1000)
+     */
+    public static void setResurrectionClientPollInterval(long ms) {
+        ResurrectionManager.setClientPollIntervalMs(ms);
+    }
+
+    // 获取客户端在场探测间隔
+    /**
+     * Get the current client presence probe interval in milliseconds.
+     * @return probe interval in ms
+     */
+    public static long getResurrectionClientPollInterval() {
+        return ResurrectionManager.getClientPollIntervalMs();
+    }
+
+    // 设置状态快照间隔
+    /**
+     * Set the interval at which an intact entity has its state snapshotted into the
+     * record. Snapshotting serializes the full entity NBT, so it runs less often than
+     * the presence check that gates it.
+     * @param ms snapshot interval, clamped to 50-60000 (default 500)
+     */
+    public static void setResurrectionSnapshotInterval(long ms) {
+        ResurrectionManager.setSnapshotIntervalMs(ms);
+    }
+
+    // 获取状态快照间隔
+    /**
+     * Get the current state snapshot interval in milliseconds.
+     * @return snapshot interval in ms
+     */
+    public static long getResurrectionSnapshotInterval() {
+        return ResurrectionManager.getSnapshotIntervalMs();
+    }
+
+    // 获取累计服务端容器修复次数
+    /**
+     * Get the number of times the daemon repaired server-side containers for an entity
+     * whose instance was still usable.
+     * @return total server container repair count
+     */
+    public static long getResurrectionTotalServerRepairs() {
+        return ResurrectionManager.getTotalServerRepairCount();
+    }
+
+    // 获取累计实体重建次数
+    /**
+     * Get the number of times the daemon rebuilt an entity from its record because the
+     * live instance no longer existed.
+     * @return total rebuild count
+     */
+    public static long getResurrectionTotalRebuilds() {
+        return ResurrectionManager.getTotalRebuildCount();
+    }
+
+    // 获取累计客户端重新配对次数
+    /**
+     * Get the number of times the daemon re-paired an entity with a client that had
+     * dropped it while the server still considered the player paired.
+     * @return total client pairing repair count
+     */
+    public static long getResurrectionTotalClientRepairs() {
+        return ResurrectionManager.getTotalClientRepairCount();
+    }
+
+    // 获取累计状态快照次数
+    /**
+     * Get the number of state snapshots taken since start.
+     * @return total snapshot count
+     */
+    public static long getResurrectionTotalSnapshots() {
+        return ResurrectionManager.getTotalSnapshotCount();
     }
 
     // 对实体进行一次容器完整性检查
