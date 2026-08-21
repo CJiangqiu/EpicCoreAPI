@@ -36,15 +36,15 @@ public final class LivingEntityHook {
 
     // ==================== getHealth() hook ====================
 
-    // 处理 getHealth()：锁血 + 禁疗，NaN 表示放行
+    // 处理 getHealth() 入口：锁血直接裁决，禁疗留到真实返回值上限幅
     /**
      * Process getHealth() at method HEAD.
      * Returns a float value to short-circuit, or NaN to fall through to original method.
      *
-     * Priority: health lock → heal ban → passthrough
+     * Priority: provisional write → health lock → passthrough
      *
      * @param entity the living entity
-     * @return locked/banned health value, or NaN for passthrough
+     * @return provisional/locked health value, or NaN for passthrough
      */
     public static float processGetHealth(LivingEntity entity) {
         // 关联存储提交期间屏蔽可重入读取，避免完整性校验观察到只写了一半的状态。
@@ -62,14 +62,24 @@ public final class LivingEntityHook {
             return locked;
         }
 
-        // 禁疗：直接返回禁疗时记录的血量值
-        Float healBan = HealthLockManager.getHealBan(entity);
-        if (healBan != null) {
-            return healBan;
-        }
-
         // 放行：让原始方法体执行（常数覆盖已下沉至 CONSTANT 实体的 getHealth 方法体内）
         return Float.NaN;
+    }
+
+    // 禁疗是血量上限，真实掉血必须依然对外可见
+    public static float processGetHealthResult(LivingEntity entity, float health) {
+        if (entity == null || RAW_HEALTH_READ.get()) {
+            return health;
+        }
+        ProvisionalHealth provisional = PROVISIONAL_HEALTH.get();
+        if (provisional != null && provisional.entity == entity) {
+            return health;
+        }
+        if (HealthLockManager.getLock(entity) != null) {
+            return health;
+        }
+        Float healBan = HealthLockManager.getHealBan(entity);
+        return healBan == null ? health : Math.min(health, healBan);
     }
 
     private record ProvisionalHealth(LivingEntity entity, float health) {}

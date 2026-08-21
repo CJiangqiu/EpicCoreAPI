@@ -103,6 +103,7 @@ public class ResurrectionCommand {
         long serverRepairs = ResurrectionManager.getTotalServerRepairCount();
         long rebuilds = ResurrectionManager.getTotalRebuildCount();
         long clientRepairs = ResurrectionManager.getTotalClientRepairCount();
+        long displacementRestores = ResurrectionManager.getTotalDisplacementRestoreCount();
         long interval = ResurrectionManager.getPollIntervalMs();
         long clientInterval = ResurrectionManager.getClientPollIntervalMs();
         int tracked = ResurrectionManager.getTrackedCount();
@@ -116,8 +117,8 @@ public class ResurrectionCommand {
         ), false);
         // 分项计数：修复次数与检查次数分开才能看出坏没坏、坏在哪一层
         source.sendSuccess(() -> Component.literal(
-            String.format("§6  checks=%d snapshots=%d serverRepairs=%d rebuilds=%d clientRepairs=%d",
-                checks, snapshots, serverRepairs, rebuilds, clientRepairs)
+            String.format("§6  checks=%d snapshots=%d serverRepairs=%d rebuilds=%d clientRepairs=%d displacementRestores=%d",
+                checks, snapshots, serverRepairs, rebuilds, clientRepairs, displacementRestores)
         ), false);
         return tracked;
     }
@@ -311,6 +312,7 @@ public class ResurrectionCommand {
             "ServerLevel.entityTickList",
             "ChunkMap.entityMap",
             "ChunkMap.TrackedEntity.seenBy",
+            "ChunkMap.TrackedEntity.pairedPlayers",
             "Entity.levelCallback",
             "ServerLevel.players",
             "ServerLevel.navigatingMobs",

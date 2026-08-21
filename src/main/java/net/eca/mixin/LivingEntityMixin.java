@@ -45,9 +45,6 @@ LivingEntityMixin {
     private static final String NBT_MAX_HEALTH_LOCK_CHECK = EcaOwnedState.NBT_MAX_HEALTH_LOCK_CHECK;
     private static final String NBT_RESURRECTION_TRACKED = EcaOwnedState.NBT_RESURRECTION_TRACKED;
 
-    // 防止本钩子与其他 mod 的 setHealth 注入互相递归导致 StackOverflowError
-    private static final ThreadLocal<Boolean> ECA_IN_SET_HEALTH = ThreadLocal.withInitial(() -> false);
-
     private static int parseIntSafe(String s) {
         if (s == null || s.isEmpty()) return 0;
         try { return Integer.parseInt(s); }
@@ -191,7 +188,10 @@ LivingEntityMixin {
             }
         } else if (healBanValue != null) {
             float currentHealth = EntityUtil.getHealth(self);
-            if (currentHealth > healBanValue) {
+            if (currentHealth < healBanValue) {
+                // 真实掉血会收紧禁疗上限，不依赖特定伤害入口
+                HealthLockManager.setHealBan(self, currentHealth);
+            } else if (currentHealth > healBanValue) {
                 EntityUtil.setHealth(self, healBanValue);
             }
         }
@@ -252,7 +252,10 @@ LivingEntityMixin {
         Float lockedValue = HealthLockManager.getLock(self);
         Float healBanValue = HealthLockManager.getHealBan(self);
         if (healBanValue != null && lockedValue == null && cir.getReturnValue()) {
-            HealthLockManager.setHealBan(self, EntityUtil.getHealth(self));
+            float currentHealth = EntityUtil.getHealth(self);
+            if (currentHealth < healBanValue) {
+                HealthLockManager.setHealBan(self, currentHealth);
+            }
         }
     }
 
@@ -311,21 +314,6 @@ LivingEntityMixin {
         Float healBanValue = HealthLockManager.getHealBan(self);
         if (healBanValue != null) {
             ci.cancel();
-        }
-    }
-
-    @Inject(method = "setHealth", at = @At("HEAD"), cancellable = true)
-    private void onSetHealth(float health, CallbackInfo ci) {
-        if (ECA_IN_SET_HEALTH.get()) return;
-        ECA_IN_SET_HEALTH.set(true);
-        try {
-            LivingEntity self = (LivingEntity) (Object) this;
-            Float healBanValue = HealthLockManager.getHealBan(self);
-            if (healBanValue != null && health > EntityUtil.getHealth(self)) {
-                ci.cancel();
-            }
-        } finally {
-            ECA_IN_SET_HEALTH.set(false);
         }
     }
 

@@ -509,7 +509,8 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
         // ASM 转换（复用同一个 ClassReader）
         ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-        HookInjector injector = new HookInjector(cw, isLivingEntity, scanner.hookedMethods);
+        HookInjector injector = new HookInjector(cw, isLivingEntity, scanner.hookedMethods,
+                scanner.resultHookedMethods);
         cr.accept(injector, ClassReader.EXPAND_FRAMES);
 
         if (!injector.transformed) return null;
@@ -525,6 +526,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         final boolean isLivingEntity;
         final Set<String> targetMethods = ConcurrentHashMap.newKeySet();
         final Set<String> hookedMethods = ConcurrentHashMap.newKeySet();
+        final Set<String> resultHookedMethods = ConcurrentHashMap.newKeySet();
         boolean hasAnyTarget = false;
 
         MethodScanner(boolean isLivingEntity) {
@@ -548,6 +550,10 @@ public final class EcaClassTransformer implements ClassFileTransformer {
                             && expectedName.equals(methodName)) {
                         hookedMethods.add(key);
                     }
+                    if (opcode == Opcodes.INVOKESTATIC && LIVING_HOOK.equals(owner)
+                            && "processGetHealthResult".equals(methodName)) {
+                        resultHookedMethods.add(key);
+                    }
                 }
             };
         }
@@ -558,26 +564,40 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     private static class HookInjector extends ClassVisitor {
         final boolean isLivingEntity;
         final Set<String> hookedMethods;
+        final Set<String> resultHookedMethods;
         boolean transformed = false;
 
-        HookInjector(ClassWriter cw, boolean isLivingEntity, Set<String> hookedMethods) {
+        HookInjector(ClassWriter cw, boolean isLivingEntity, Set<String> hookedMethods,
+                     Set<String> resultHookedMethods) {
             super(Opcodes.ASM9, cw);
             this.isLivingEntity = isLivingEntity;
             this.hookedMethods = hookedMethods;
+            this.resultHookedMethods = resultHookedMethods;
         }
 
         @Override
         public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
             if ((access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) return mv;
-            if (hookedMethods.contains(methodKey(name, desc))) return mv;
+            String key = methodKey(name, desc);
 
             if (isLivingEntity) {
                 if (name.equals(GET_HEALTH) && desc.equals("()F")) {
-                    transformed = true;
-                    return new FloatHookVisitor(mv, LIVING_HOOK, "processGetHealth",
-                            "(Lnet/minecraft/world/entity/LivingEntity;)F", LIVING_ENTITY);
+                    MethodVisitor visitor = mv;
+                    if (!resultHookedMethods.contains(key)) {
+                        transformed = true;
+                        visitor = new FloatResultHookVisitor(visitor, LIVING_HOOK,
+                                "processGetHealthResult",
+                                "(Lnet/minecraft/world/entity/LivingEntity;F)F", LIVING_ENTITY);
+                    }
+                    if (!hookedMethods.contains(key)) {
+                        transformed = true;
+                        visitor = new FloatHookVisitor(visitor, LIVING_HOOK, "processGetHealth",
+                                "(Lnet/minecraft/world/entity/LivingEntity;)F", LIVING_ENTITY);
+                    }
+                    return visitor;
                 }
+                if (hookedMethods.contains(key)) return mv;
                 if (name.equals(GET_MAX_HEALTH) && desc.equals("()F")) {
                     transformed = true;
                     return new FloatHookVisitor(mv, LIVING_HOOK, "processGetMaxHealth",
@@ -595,6 +615,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
                 }
             }
 
+            if (hookedMethods.contains(key)) return mv;
             if (name.equals(IS_REMOVED) && desc.equals("()Z")) {
                 transformed = true;
                 return new BooleanHookVisitor(mv, ENTITY_HOOK, "processIsRemoved",
@@ -618,7 +639,10 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         boolean isLivingEntity = LIVING_ENTITY.equals(className) || KNOWN_LIVING_ENTITY_CLASSES.contains(className);
         MethodScanner scanner = new MethodScanner(isLivingEntity);
         new ClassReader(bytes).accept(scanner, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-        return scanner.hasAnyTarget && scanner.hookedMethods.containsAll(scanner.targetMethods);
+        if (!scanner.hasAnyTarget || !scanner.hookedMethods.containsAll(scanner.targetMethods)) return false;
+        String getHealthKey = methodKey(GET_HEALTH, "()F");
+        return !scanner.targetMethods.contains(getHealthKey)
+                || scanner.resultHookedMethods.contains(getHealthKey);
     }
 
     private static String expectedHookOwner(boolean isLivingEntity, String name, String desc) {
@@ -673,6 +697,31 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             mv.visitInsn(Opcodes.FRETURN);
             mv.visitLabel(passthrough);
             mv.visitInsn(Opcodes.POP);
+        }
+    }
+
+    // getHealth 真实结果出栈前施加禁疗上限，不隐藏向下改血
+    private static class FloatResultHookVisitor extends MethodVisitor {
+        private final String hookOwner, hookName, hookDesc, castType;
+
+        FloatResultHookVisitor(MethodVisitor mv, String hookOwner, String hookName,
+                               String hookDesc, String castType) {
+            super(Opcodes.ASM9, mv);
+            this.hookOwner = hookOwner;
+            this.hookName = hookName;
+            this.hookDesc = hookDesc;
+            this.castType = castType;
+        }
+
+        @Override
+        public void visitInsn(int opcode) {
+            if (opcode == Opcodes.FRETURN) {
+                mv.visitVarInsn(Opcodes.ALOAD, 0);
+                mv.visitTypeInsn(Opcodes.CHECKCAST, castType);
+                mv.visitInsn(Opcodes.SWAP);
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, hookOwner, hookName, hookDesc, false);
+            }
+            super.visitInsn(opcode);
         }
     }
 

@@ -249,6 +249,47 @@ public final class ClientEntityUtil {
         }
     }
 
+    /* 处理 ClientReviveContainersPacket：把客户端仍持有、但已被摘出查找表/section 的实体
+       整体重新挂回容器。
+       此时不能靠服务端重发生成包补救：客户端 byId 已经没有该实体，原版收到移除包时
+       ClientLevel.removeEntity 查不到对象、等于空转，随后的生成包会造出第二个实例，
+       旧的那具仍留在 tickingEntities 里继续 tick，变成重影。 */
+    public static void handleReviveContainers(UUID entityUuid) {
+        ClientLevel clientLevel = Minecraft.getInstance().level;
+        if (clientLevel == null || entityUuid == null) {
+            return;
+        }
+
+        Entity entity = getEntityByUuid(clientLevel, entityUuid);
+        if (entity == null) {
+            EcaLogger.info("[ClientReviveContainers] instance not present on client, uuid={}", entityUuid);
+            return;
+        }
+
+        try {
+            TransientEntitySectionManager<Entity> entityStorage = clientLevel.entityStorage;
+
+            /* 先清残留再整体重挂：addEntity 会无条件往 section 里塞，
+               旧 section 里若还留着同一实例，实体会被重复迭代。 */
+            EntityUtil.removeFromSectionStorage(entityStorage.sectionStorage, entity);
+            EntityUtil.removeFromEntityLookup(entityStorage.entityStorage, entity);
+            EntityUtil.removeFromEntityTickList(clientLevel.tickingEntities, entity);
+
+            entity.revive();
+            entity.setLevelCallback(EntityInLevelCallback.NULL);
+
+            /* 走原版收到生成包时的同一条路径：一次补齐 byUuid/byId、section、
+               levelCallback、players/partEntities 与 tickingEntities。 */
+            entityStorage.addEntity(entity);
+            entity.onAddedToWorld();
+
+            EcaLogger.info("[ClientReviveContainers] re-registered client entity uuid={} id={}",
+                    entityUuid, entity.getId());
+        } catch (Exception e) {
+            EcaLogger.info("[ClientReviveContainers] failed uuid={} msg={}", entityUuid, e.getMessage());
+        }
+    }
+
     // 处理 EntityContainerCheckRequestPacket 的客户端检查逻辑
     public static void handleContainerCheckRequest(UUID requestId, UUID entityUuid) {
         Map<String, Boolean> result = new LinkedHashMap<>();

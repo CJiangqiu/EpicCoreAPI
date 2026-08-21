@@ -2,6 +2,8 @@ package net.eca.util;
 
 import net.eca.api.EcaAPI;
 import net.eca.config.EcaConfiguration;
+import net.eca.network.ClientReviveContainersPacket;
+import net.eca.network.NetworkHandler;
 import net.eca.util.health.HealthLockManager;
 
 import net.minecraft.nbt.CompoundTag;
@@ -13,12 +15,14 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 
 import net.minecraftforge.server.ServerLifecycleHooks;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -56,8 +60,34 @@ public final class ResurrectionManager {
     private static final long REBUILD_COOLDOWN_MS = 1000L;
     /* 维度未知时要遍历所有世界做兜底查找，代价远高于常规巡检，不能跟着轮询走。 */
     private static final long LEVEL_SCAN_COOLDOWN_MS = 1000L;
+    /* 追踪配对若被每 tick 反复摘除，不设冷却就会变成按轮询频率发生成包。 */
+    private static final long PAIRING_REPAIR_COOLDOWN_MS = 500L;
+    private static final long PAIRING_REPORT_INTERVAL_MS = 5000L;
+    private static final long DISPLACEMENT_RESTORE_COOLDOWN_MS = 500L;
 
-    private static final String CLIENT_PRESENCE_KEY = "ClientLevel.getEntity(uuid)";
+    /* 实例在不在客户端，只有这一项能回答；它走的是多路兜底查找，命中任一容器即为真，
+       因此绝不能拿它判断"容器有没有缺"。 */
+    private static final String CLIENT_INSTANCE_KEY = "ClientLevel.getEntity(uuid)";
+    /* 服务端各容器的结构性判据。刻意不含 ServerLevel.getEntity(uuid)——那是带兜底的查找链，
+       也不含 seenBy / pairedPlayers——附近没玩家时它们本就该为假，拿来判残缺会每轮空修。 */
+    private static final List<String> SERVER_CONTAINER_KEYS = List.of(
+            "PersistentEntitySectionManager.knownUuids",
+            "EntitySectionStorage.sections",
+            "EntityLookup.byUuid",
+            "EntityLookup.byId",
+            "ServerLevel.entityTickList",
+            "ChunkMap.entityMap",
+            "Entity.levelCallback",
+            "ServerLevel.players",
+            "ServerLevel.navigatingMobs");
+    /* 客户端各容器的结构性判据。逐项直读，缺任何一项都说明实体在客户端已残缺。 */
+    private static final List<String> CLIENT_CONTAINER_KEYS = List.of(
+            "ClientEntityStorage.entityLookup.byUuid",
+            "ClientEntityStorage.entityLookup.byId",
+            "ClientEntityStorage.sectionStorage",
+            "ClientLevel.tickingEntities",
+            "ClientEntity.levelCallback",
+            "ClientLevel.players");
 
     private static final AtomicBoolean running = new AtomicBoolean(false);
     private static final AtomicLong totalChecks = new AtomicLong(0);
@@ -65,6 +95,7 @@ public final class ResurrectionManager {
     private static final AtomicLong totalServerRepairs = new AtomicLong(0);
     private static final AtomicLong totalRebuilds = new AtomicLong(0);
     private static final AtomicLong totalClientRepairs = new AtomicLong(0);
+    private static final AtomicLong totalDisplacementRestores = new AtomicLong(0);
 
     private static final Map<UUID, ResurrectionRecord> records = new ConcurrentHashMap<>();
     private static final Set<UUID> inProgress = ConcurrentHashMap.newKeySet();
@@ -115,9 +146,9 @@ public final class ResurrectionManager {
                 sleepOneCycle();
             }
 
-            EcaLogger.info("[ResurrectionManager] Stopped, checks={} snapshots={} serverRepairs={} rebuilds={} clientRepairs={}",
+            EcaLogger.info("[ResurrectionManager] Stopped, checks={} snapshots={} serverRepairs={} rebuilds={} clientRepairs={} displacementRestores={}",
                     totalChecks.get(), totalSnapshots.get(), totalServerRepairs.get(),
-                    totalRebuilds.get(), totalClientRepairs.get());
+                    totalRebuilds.get(), totalClientRepairs.get(), totalDisplacementRestores.get());
         }, "ECA-ResurrectionManager");
 
         workerThread.setDaemon(true);
@@ -147,6 +178,7 @@ public final class ResurrectionManager {
     public static long getTotalServerRepairCount() { return totalServerRepairs.get(); }
     public static long getTotalRebuildCount() { return totalRebuilds.get(); }
     public static long getTotalClientRepairCount() { return totalClientRepairs.get(); }
+    public static long getTotalDisplacementRestoreCount() { return totalDisplacementRestores.get(); }
 
     public static void setPollIntervalMs(long ms) {
         pollIntervalMs = Math.max(1L, Math.min(ms, 10000L));
@@ -193,15 +225,129 @@ public final class ResurrectionManager {
             scheduleSnapshot(server, level, entity, record);
         } else {
             if (!serverIntact && EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-                EntityUtil.reviveAllContainersDirect(level, entity);
+                Map<String, Boolean> after = EntityUtil.reviveAllContainersDirect(level, entity);
                 totalServerRepairs.incrementAndGet();
+                reportIncompleteRepair(record, containers, after);
             }
             if (!healthy) {
                 scheduleStateRestore(server, entity, record);
             }
         }
 
+        if (isDisplaced(entity, record)) {
+            scheduleDisplacementRestore(server, entity, record);
+            return;
+        }
+
+        repairViewerPairings(server, level, entity, record);
         probeClient(server, level, entity, record);
+    }
+
+    /* 配对缺失是服务端自己就能读出来的，不必等客户端回执，也就不受客户端探测间隔限制。
+       客户端探测保留作为第二道：配对还在、但客户端仍旧丢了实体的情形只有它能发现。 */
+    private static void repairViewerPairings(MinecraftServer server, ServerLevel level,
+                                             Entity entity, ResurrectionRecord record) {
+        long now = System.currentTimeMillis();
+        if (now - record.lastPairingRepairAt < PAIRING_REPAIR_COOLDOWN_MS) return;
+
+        List<ServerPlayer> unpaired = EntityUtil.getUnpairedViewers(level, entity);
+        if (unpaired.isEmpty()) return;
+        record.lastPairingRepairAt = now;
+
+        server.execute(() -> {
+            int refused = 0;
+            double nearestDistSq = Double.MAX_VALUE;
+            for (ServerPlayer player : unpaired) {
+                if (EntityUtil.repairClientPairing(level, entity, player)) {
+                    totalClientRepairs.incrementAndGet();
+                    EcaLogger.info("[ResurrectionManager] viewer pairing restored uuid={} player={}",
+                            record.uuid, player.getGameProfile().getName());
+                } else {
+                    refused++;
+                    nearestDistSq = Math.min(nearestDistSq, player.distanceToSqr(entity));
+                }
+            }
+            /* 未配对的远处玩家每轮都会被拒，逐条打会淹掉日志；合并成限流摘要，
+               nearestDistSq 足以看出是不是距离判定挡下的。 */
+            if (refused > 0 && System.currentTimeMillis() - record.lastPairingReportAt >= PAIRING_REPORT_INTERVAL_MS) {
+                record.lastPairingReportAt = System.currentTimeMillis();
+                /* 同时打出实体现位置、快照里最后一次健康位置与玩家位置：配对被拒既可能是
+                   配对被摘掉，也可能是实体本身被挪走了，只有三者对比能区分。 */
+                ServerPlayer nearest = unpaired.get(0);
+                EcaLogger.info("[ResurrectionManager] viewer pairing unresolved uuid={} refused={} nearestDistSq={} entityPos={} snapshotPos={} playerPos={} dim={}",
+                        record.uuid, refused, nearestDistSq, entity.position(), record.position,
+                        nearest.position(), level.dimension().location());
+            }
+        });
+    }
+
+    /* 被流放的实体在所有既有判据下都是"健康"的：没被移除、没死、血量满、容器齐全。
+       唯一能暴露它的是位置，所以在场检查之外还要比一次位移。 */
+    private static boolean isDisplaced(Entity entity, ResurrectionRecord record) {
+        Vec3 known = record.position;
+        if (known == null) return false;
+        double limit = EcaConfiguration.getResurrectionMaxDisplacementSafely();
+        return known.distanceToSqr(entity.position()) > limit * limit;
+    }
+
+    private static void scheduleDisplacementRestore(MinecraftServer server, Entity entity, ResurrectionRecord record) {
+        long now = System.currentTimeMillis();
+        if (now - record.lastDisplacementRestoreAt < DISPLACEMENT_RESTORE_COOLDOWN_MS) return;
+        record.lastDisplacementRestoreAt = now;
+
+        server.execute(() -> {
+            Vec3 target = record.position;
+            if (target == null) return;
+            Vec3 from = entity.position();
+
+            EntityUtil.teleport(entity, target.x, target.y, target.z);
+            entity.setDeltaMovement(Vec3.ZERO);
+            /* teleport 直写坐标字段，不经过 setPosRaw，也就不会触发 levelCallback.onMove，
+               实体会留在远处那个 section 里。补一次重挂让 section 与新坐标一致。 */
+            if (entity.level() instanceof ServerLevel serverLevel) {
+                EntityUtil.reattachEntitySection(serverLevel.entityManager, entity);
+                /* 与拉回同一次落地里把注册表补齐。位置对了但不在 entityTickList 就没有 AI，
+                   byId 缺失则交互包解析不到目标，隔一轮再修等于把这个空窗留给玩家。 */
+                if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
+                    EntityUtil.reviveAllContainersDirect(serverLevel, entity);
+                }
+            }
+
+            totalDisplacementRestores.incrementAndGet();
+            EcaLogger.info("[ResurrectionManager] displacement restored uuid={} from={} to={} limit={}",
+                    record.uuid, from, target, EcaConfiguration.getResurrectionMaxDisplacementSafely());
+
+            /* 拉回之后把实体状态与全部容器原样打一遍。位置对了不代表实体可用：
+               不在 entityTickList 就没有 AI，byId 缺失则交互包解析不到目标，
+               两者在画面上都表现为"模型在那儿但是个摆设"。 */
+            if (entity.level() instanceof ServerLevel dumpLevel) {
+                EcaLogger.info("[ResurrectionManager] post-restore state uuid={} removed={} reason={} noAi={} health={} containers={}",
+                        record.uuid, entity.isRemoved(), entity.getRemovalReason(),
+                        entity instanceof Mob mob && mob.isNoAi(),
+                        entity instanceof LivingEntity living ? EntityUtil.getHealth(living) : -1.0f,
+                        EntityUtil.checkEntityInServerContainers(dumpLevel, record.uuid));
+            }
+        });
+    }
+
+    /* 修复跑完仍有容器缺失，说明这一轮没修成而不是没触发，必须留痕。
+       限流是因为对方若每 tick 重复剥离，这条会按轮询频率刷屏。 */
+    private static void reportIncompleteRepair(ResurrectionRecord record,
+                                               Map<String, Boolean> before, Map<String, Boolean> after) {
+        if (after == null || after.isEmpty() || allTrue(after)) return;
+        long now = System.currentTimeMillis();
+        if (now - record.lastRepairReportAt < PAIRING_REPORT_INTERVAL_MS) return;
+        record.lastRepairReportAt = now;
+        EcaLogger.info("[ResurrectionManager] container repair incomplete uuid={} before={} after={}",
+                record.uuid, missingKeys(before), missingKeys(after));
+    }
+
+    private static List<String> missingKeys(Map<String, Boolean> containers) {
+        List<String> missing = new ArrayList<>();
+        for (String key : SERVER_CONTAINER_KEYS) {
+            if (!Boolean.TRUE.equals(containers.get(key))) missing.add(key);
+        }
+        return missing;
     }
 
     // 记录不持 ServerLevel 引用，每轮按维度键解析；维度未知时全维度找一次并记下来
@@ -242,10 +388,10 @@ public final class ResurrectionManager {
     }
 
     private static boolean allTrue(Map<String, Boolean> containers) {
-        for (Boolean present : containers.values()) {
-            if (!Boolean.TRUE.equals(present)) return false;
+        for (String key : SERVER_CONTAINER_KEYS) {
+            if (!Boolean.TRUE.equals(containers.get(key))) return false;
         }
-        return !containers.isEmpty();
+        return true;
     }
 
     private static boolean isHealthy(Entity entity) {
@@ -291,11 +437,10 @@ public final class ResurrectionManager {
             record.nbt = tag;
             record.typeId = typeId;
             record.dimension = level.dimension();
-            record.position = entity.position();
-            record.yRot = entity.getYRot();
-            record.xRot = entity.getXRot();
             record.lastNetworkId = entity.getId();
             record.instance = entity;
+
+            updateRecordedPosition(entity, record);
 
             if (entity instanceof LivingEntity living) {
                 record.health = EntityUtil.getHealth(living);
@@ -427,23 +572,67 @@ public final class ResurrectionManager {
         record.lastClientProbeAt = now;
 
         server.execute(() -> {
-            List<ServerPlayer> players = EntityUtil.getTrackingPlayers(level, entity);
+            /* 只问已配对的玩家：未配对的属于 repairViewerPairings 的职责，不必走网络往返。
+               这条探测回答的是它答不了的那半边——配对还在，客户端却已经把实体丢了。 */
+            List<ServerPlayer> players = EntityUtil.getPairedViewers(level, entity);
+            if (players.isEmpty()) return;
             for (ServerPlayer player : players) {
                 EntityUtil.requestClientContainerCheckAsync(player, record.uuid)
                         .orTimeout(CLIENT_ANSWER_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                         .whenComplete((response, error) -> {
-                            if (error != null || response == null) return;
-                            if (!Boolean.FALSE.equals(response.get(CLIENT_PRESENCE_KEY))) return;
-                            server.execute(() -> {
-                                if (EntityUtil.repairClientPairing(level, entity, player)) {
-                                    totalClientRepairs.incrementAndGet();
-                                    EcaLogger.info("[ResurrectionManager] client pairing repaired uuid={} player={}",
-                                            record.uuid, player.getGameProfile().getName());
-                                }
-                            });
+                            if (error != null || response == null) {
+                                EcaLogger.info("[ResurrectionManager] client probe unanswered uuid={} player={} err={}",
+                                        record.uuid, player.getGameProfile().getName(),
+                                        error == null ? "null response" : error.getClass().getSimpleName());
+                                return;
+                            }
+                            server.execute(() -> applyClientVerdict(level, entity, player, record, response));
                         });
             }
         });
+    }
+
+    /* 客户端的两种残缺要用两种修法，判错了会造重影：
+       实例还在、只是掉了容器 —— 让客户端把同一实例重新挂回去；
+       实例整个没了 —— 摘掉服务端的旧配对，让原版重新发生成包。 */
+    private static void applyClientVerdict(ServerLevel level, Entity entity, ServerPlayer player,
+                                           ResurrectionRecord record, Map<String, Boolean> response) {
+        Boolean instancePresent = response.get(CLIENT_INSTANCE_KEY);
+        if (instancePresent == null) return;
+
+        if (!instancePresent) {
+            if (EntityUtil.repairClientPairing(level, entity, player)) {
+                totalClientRepairs.incrementAndGet();
+                EcaLogger.info("[ResurrectionManager] client pairing repaired uuid={} player={}",
+                        record.uuid, player.getGameProfile().getName());
+            } else {
+                EcaLogger.info("[ResurrectionManager] client pairing refused uuid={} player={} distSq={}",
+                        record.uuid, player.getGameProfile().getName(), player.distanceToSqr(entity));
+            }
+            return;
+        }
+
+        if (!clientContainersIntact(response)) {
+            NetworkHandler.sendToPlayer(new ClientReviveContainersPacket(record.uuid), player);
+            totalClientRepairs.incrementAndGet();
+            EcaLogger.info("[ResurrectionManager] client containers repair sent uuid={} player={} missing={}",
+                    record.uuid, player.getGameProfile().getName(), missingClientContainers(response));
+        }
+    }
+
+    private static boolean clientContainersIntact(Map<String, Boolean> response) {
+        for (String key : CLIENT_CONTAINER_KEYS) {
+            if (Boolean.FALSE.equals(response.get(key))) return false;
+        }
+        return true;
+    }
+
+    private static List<String> missingClientContainers(Map<String, Boolean> response) {
+        List<String> missing = new ArrayList<>();
+        for (String key : CLIENT_CONTAINER_KEYS) {
+            if (Boolean.FALSE.equals(response.get(key))) missing.add(key);
+        }
+        return missing;
     }
 
     // ==================== 实体追踪 ====================
@@ -455,6 +644,11 @@ public final class ResurrectionManager {
         record.lastNetworkId = entity.getId();
         if (entity.level() instanceof ServerLevel serverLevel) {
             record.dimension = serverLevel.dimension();
+            if (record.position == null) {
+                record.position = entity.position();
+                record.yRot = entity.getYRot();
+                record.xRot = entity.getXRot();
+            }
             /* 实体尚未入世时不快照：本方法也在 readAdditionalSaveData 里被调用，
                而 saveWithoutId 会回调实体自身的 addAdditionalSaveData，
                半初始化状态下调它并不安全。首轮巡检会在主线程补上这份快照。 */
@@ -498,6 +692,13 @@ public final class ResurrectionManager {
 
         record.instance = entity;
         record.dimension = serverLevel.dimension();
+        updateRecordedPosition(entity, record);
+    }
+
+    /* 位置更新的唯一入口，带位移闸门：超出阈值的位置一律不记。
+       记录位置是"被强行挪走之前它在哪"的唯一依据，一旦跟着流放坐标走就再也拉不回来了。 */
+    private static void updateRecordedPosition(Entity entity, ResurrectionRecord record) {
+        if (isDisplaced(entity, record)) return;
         record.position = entity.position();
         record.yRot = entity.getYRot();
         record.xRot = entity.getXRot();

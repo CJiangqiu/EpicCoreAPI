@@ -48,8 +48,7 @@ public class EcaEventHandler {
     private static final Map<UUID, Long> NEXT_GLOW_SCAN = new HashMap<>();
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public void onLivingDeath(LivingDeathEvent event) {
-        if (EcaAPI.isInvulnerable(event.getEntity()) || EcaAPI.isHealthLocked(event.getEntity()) ||
-            (EcaAPI.isHealingBanned(event.getEntity()) && EcaAPI.getHealBanValue(event.getEntity()) > 0.0f)) {
+        if (EcaAPI.isInvulnerable(event.getEntity()) || EcaAPI.isHealthLocked(event.getEntity())) {
             event.setCanceled(true);
         }
     }

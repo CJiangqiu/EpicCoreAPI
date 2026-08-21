@@ -15,6 +15,7 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_ENABLE_RADICAL_LOGIC;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_INVULNERABLE_UNTARGETABLE;
+    public static ForgeConfigSpec.IntValue RESURRECTION_MAX_DISPLACEMENT;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTRIBUTE_UNLOCK_LIMITS;
     public static ForgeConfigSpec.ConfigValue<Boolean> ENABLE_CUSTOM_LOADING_BACKGROUND;
     /* 该值会被顶成透视矩阵的远平面（GameRendererPostLevelMixin）。近平面固定 0.05，
@@ -104,6 +105,13 @@ public class EcaConfiguration {
             .comment("Prevent mobs from targeting invulnerable entities via setTarget.",
                      "启用后无敌实体不可被其他实体通过 setTarget 锁定为目标。")
             .define("Invulnerable Entity Untargetable", true);
+
+        RESURRECTION_MAX_DISPLACEMENT = BUILDER
+            .comment("Maximum distance (in blocks) a resurrection-tracked entity may move between two polls.",
+                     "复活追踪实体在两次轮询之间允许移动的最大距离（方块）。",
+                     "Anything beyond this is treated as a forced displacement and the entity is pulled back to the recorded position.",
+                     "超出即视为被强行位移，实体会被拉回记录位置。")
+            .defineInRange("Resurrection Max Displacement", 1024, 16, 30_000_000);
 
         BUILDER.pop();
 
@@ -271,6 +279,10 @@ public class EcaConfiguration {
     public static boolean getAttackSetHealthEnableNumericInversionSafely() {
         if (!getAttackEnableRadicalLogicSafely()) return false;
         return safeGet(ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION, false);
+    }
+
+    public static int getResurrectionMaxDisplacementSafely() {
+        return safeGet(RESURRECTION_MAX_DISPLACEMENT, 1024);
     }
 
     public static boolean getDefenceEnableRadicalLogicSafely() {

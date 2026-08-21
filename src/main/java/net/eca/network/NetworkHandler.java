@@ -156,6 +156,13 @@ public class NetworkHandler {
                 .decoder(RaidBossBarSyncPacket::decode)
                 .consumerMainThread(RaidBossBarSyncPacket::handle)
                 .add();
+
+        // 新包一律追加在末尾，插在中间会让其后所有包的 ID 顺移
+        CHANNEL.messageBuilder(ClientReviveContainersPacket.class, id(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(ClientReviveContainersPacket::encode)
+                .decoder(ClientReviveContainersPacket::decode)
+                .consumerMainThread(ClientReviveContainersPacket::handle)
+                .add();
     }
 
     /**

@@ -333,6 +333,15 @@ public class EntityUtil {
         }
 
         try {
+            ChunkMap.TrackedEntity tracked = entity == null
+                    ? null : level.chunkSource.chunkMap.entityMap.get(entity.getId());
+            result.put("ChunkMap.TrackedEntity.pairedPlayers",
+                    tracked != null && tracked.seenBy != null && !tracked.seenBy.isEmpty());
+        } catch (Exception e) {
+            result.put("ChunkMap.TrackedEntity.pairedPlayers", false);
+        }
+
+        try {
             boolean inPlayers = !(entity instanceof ServerPlayer) || level.players.contains(entity);
             result.put("ServerLevel.players", inPlayers);
         } catch (Exception e) {
@@ -408,6 +417,32 @@ public class EntityUtil {
         return future;
     }
 
+    /* 取出应当看见该实体、但服务端追踪里并未与之配对的玩家。
+       这是纯服务端可读的结构性缺陷，不必等客户端回执：原版只在实体跨 section 时才会
+       重新配对（ChunkMap.tick 的 updatePlayers 被该条件门控），站着不动的实体一旦被
+       摘掉配对就永远不会自己恢复。 */
+    public static List<ServerPlayer> getUnpairedViewers(ServerLevel level, Entity entity) {
+        List<ServerPlayer> candidates = getViewerCandidates(level, entity);
+        if (candidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+        try {
+            ChunkMap.TrackedEntity tracked = level.chunkSource.chunkMap.entityMap.get(entity.getId());
+            if (tracked == null || tracked.seenBy == null) {
+                return candidates;
+            }
+            List<ServerPlayer> unpaired = new ArrayList<>();
+            for (ServerPlayer player : candidates) {
+                if (!tracked.seenBy.contains(player.connection)) {
+                    unpaired.add(player);
+                }
+            }
+            return unpaired;
+        } catch (Exception e) {
+            return Collections.emptyList();
+        }
+    }
+
     /* 强制与某个玩家重新配对实体的客户端追踪。
        客户端把实体丢了而服务端 seenBy 里仍留着该玩家时，原版认定"他已经看见了"，
        ChunkMap 永远不会重发生成包（updatePlayer 只在 seenBy.add 成功时才 addPairing）。
@@ -424,15 +459,35 @@ public class EntityUtil {
             }
             tracked.removePlayer(player);
             tracked.updatePlayer(player);
-            return true;
+            // updatePlayer 会按距离与 broadcastToPlayer 自行拒绝，配对没落地就不算修复
+            return tracked.seenBy != null && tracked.seenBy.contains(player.connection);
         } catch (Exception e) {
             EcaLogger.info("[EntityUtil] repairClientPairing failed, uuid={}, msg={}", entity.getUUID(), e.getMessage());
             return false;
         }
     }
 
-    // 取得当前正在追踪该实体的玩家快照（seenBy 的配对方）
-    public static List<ServerPlayer> getTrackingPlayers(ServerLevel level, Entity entity) {
+    /* 取得该实体所在世界的全部玩家，作为配对候选。
+       这里刻意不自己算追踪范围：有效范围由 TrackedEntity.getEffectiveRange 按实体类型、
+       服务器广播比例与玩家视距共同决定，在外面复算必然与原版不一致，滤错了就会把该修的
+       对象全部漏掉。范围裁决交给 updatePlayer，它拒绝时不发任何包，多问几个人没有代价。 */
+    public static List<ServerPlayer> getViewerCandidates(ServerLevel level, Entity entity) {
+        if (level == null || entity == null) {
+            return Collections.emptyList();
+        }
+        try {
+            List<ServerPlayer> players = new ArrayList<>();
+            for (ServerPlayer player : level.players()) {
+                if (player != entity) players.add(player);
+            }
+            return players;
+        } catch (Exception e) {
+            return Collections.emptyList();
+        }
+    }
+
+    // 取得服务端追踪里已与该实体配对的玩家（seenBy 的配对方）
+    public static List<ServerPlayer> getPairedViewers(ServerLevel level, Entity entity) {
         if (level == null || entity == null) {
             return Collections.emptyList();
         }
@@ -444,9 +499,7 @@ public class EntityUtil {
             List<ServerPlayer> players = new ArrayList<>();
             for (ServerPlayerConnection connection : new HashSet<>(tracked.seenBy)) {
                 ServerPlayer player = connection.getPlayer();
-                if (player != null) {
-                    players.add(player);
-                }
+                if (player != null) players.add(player);
             }
             return players;
         } catch (Exception e) {
@@ -549,10 +602,17 @@ public class EntityUtil {
             if (registeredEntity == null) {
                 try {
                     entityManager.knownUuids.remove(entityUUID);
-                    entityManager.addNewEntity(entity);
+                    /* 用不派发事件的入口：这里是把掉出注册表的实体挂回去，不是新实体入世，
+                       再派发一次 EntityJoinLevelEvent 语义就错了，而且该事件可被任意监听者取消，
+                       取消时 addNewEntity 只是返回 false，修复会静默失败。 */
+                    boolean added = entityManager.addNewEntityWithoutEvent(entity);
+                    if (!added) {
+                        entityManager.knownUuids.add(entityUUID);
+                        EcaLogger.info("[EntityUtil] re-register rejected, uuid={}, id={}", entityUUID, entity.getId());
+                    }
                 } catch (Exception e) {
                     entityManager.knownUuids.add(entityUUID);
-                    EcaLogger.info("[EntityUtil] addNewEntity failed, uuid={}, msg={}", entityUUID, e.getMessage());
+                    EcaLogger.info("[EntityUtil] re-register failed, uuid={}, msg={}", entityUUID, e.getMessage());
                 }
             } else {
                 /* 实体仍挂在部分容器上，逐项补齐：此时走 addNewEntity 会在已存在的追踪条目上

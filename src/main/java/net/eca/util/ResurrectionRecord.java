@@ -42,6 +42,10 @@ public final class ResurrectionRecord {
     volatile long lastSnapshotAt;
     volatile long lastClientProbeAt;
     volatile long lastRebuildAt;
+    volatile long lastPairingRepairAt;
+    volatile long lastPairingReportAt;
+    volatile long lastDisplacementRestoreAt;
+    volatile long lastRepairReportAt;
     volatile long lastLevelScanAt;
 
     ResurrectionRecord(UUID uuid) {

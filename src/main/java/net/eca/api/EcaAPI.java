@@ -1923,6 +1923,16 @@ public final class EcaAPI {
         return ResurrectionManager.getTotalClientRepairCount();
     }
 
+    // 获取累计位置流放恢复次数
+    /**
+     * Get the number of times the daemon pulled a tracked entity back after it was
+     * displaced to a position no legitimate movement could reach.
+     * @return total displacement restore count
+     */
+    public static long getResurrectionTotalDisplacementRestores() {
+        return ResurrectionManager.getTotalDisplacementRestoreCount();
+    }
+
     // 获取累计状态快照次数
     /**
      * Get the number of state snapshots taken since start.
