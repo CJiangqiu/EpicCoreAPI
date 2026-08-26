@@ -190,7 +190,6 @@ public final class EcaAPI {
             return;
         }
         try {
-            setHealth(entity, value);
             HealthLockManager.setHealBan(entity, value);
         } catch (Exception e) {
             EcaLogger.info("[EcaAPI] banHealing failed entity={} value={} msg={}",
