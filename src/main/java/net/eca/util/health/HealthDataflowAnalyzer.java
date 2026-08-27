@@ -3289,15 +3289,16 @@ public final class HealthDataflowAnalyzer {
                 if (rejected.contains(candidate.canonicalKey())) continue;
                 // 表达式即存储本身时两者同向，由原通道处理，无需模型
                 if (sameSource(expr, candidate) || !containsSink(expr, candidate)) continue;
-                if (!hasIndependentBound(expr, candidate)) {
+                Expr refined = normalizeEffectiveChoices(expr, candidate);
+                if (refined == null || !hasIndependentBound(refined, candidate)) {
                     rejectedForLiteralBound++;
                     continue;
                 }
                 matched++;
-                int score = effectiveModelScore(expr);
+                int score = effectiveModelScore(refined);
                 if (score > bestScore) {
                     bestScore = score;
-                    best = new EffectiveHealthModel(expr, candidate, fact.predicate(), fact.threshold());
+                    best = new EffectiveHealthModel(refined, candidate, fact.predicate(), fact.threshold());
                 }
             }
         }
@@ -3332,6 +3333,59 @@ public final class HealthDataflowAnalyzer {
         if (expr instanceof Call call) {
             List<Expr> args = new ArrayList<>(call.args().size());
             for (Expr arg : call.args()) args.add(pruneChoicesTo(arg, storage));
+            return new Call(call.owner(), call.name(), call.desc(), List.copyOf(args));
+        }
+        return expr;
+    }
+
+    /* 有效血量模型不能让一个分支中的实体上限为另一个分支的字面量兜底。
+       分析期的 Choice 丢失了控制条件，因此只能按每个分支自身的上限来源裁决：
+       明确引用 getMaxHealth() 的分支优先；没有该分支时才保留其他独立实体状态来源。
+       若同一层仍有多个不同的同级权威，继续猜测会让求解与校验各取一条路径，必须交给上层拒绝。 */
+    static Expr normalizeEffectiveChoices(Expr expr, Source storage) {
+        if (expr == null || storage == null) return expr;
+        if (expr instanceof Choice choice) {
+            List<Expr> alternatives = new ArrayList<>();
+            for (Expr alternative : choice.alternatives()) {
+                Expr normalized = normalizeEffectiveChoices(alternative, storage);
+                if (normalized == null) return null;
+                if (!alternatives.contains(normalized)) alternatives.add(normalized);
+            }
+            if (alternatives.isEmpty()) return expr;
+
+            List<Expr> maxHealthAlternatives = new ArrayList<>();
+            for (Expr alternative : alternatives) {
+                if (referencesMaxHealth(alternative)) maxHealthAlternatives.add(alternative);
+            }
+            if (!maxHealthAlternatives.isEmpty()) {
+                return maxHealthAlternatives.size() == 1 ? maxHealthAlternatives.get(0) : null;
+            }
+
+            List<Expr> independentAlternatives = new ArrayList<>();
+            for (Expr alternative : alternatives) {
+                if (referencesSourceOtherThan(alternative, storage)) independentAlternatives.add(alternative);
+            }
+            if (!independentAlternatives.isEmpty()) {
+                return independentAlternatives.size() == 1 ? independentAlternatives.get(0) : null;
+            }
+            return new Choice(List.copyOf(alternatives));
+        }
+        if (expr instanceof Op op) {
+            List<Expr> args = new ArrayList<>(op.args().size());
+            for (Expr arg : op.args()) {
+                Expr normalized = normalizeEffectiveChoices(arg, storage);
+                if (normalized == null) return null;
+                args.add(normalized);
+            }
+            return new Op(op.opcode(), List.copyOf(args));
+        }
+        if (expr instanceof Call call) {
+            List<Expr> args = new ArrayList<>(call.args().size());
+            for (Expr arg : call.args()) {
+                Expr normalized = normalizeEffectiveChoices(arg, storage);
+                if (normalized == null) return null;
+                args.add(normalized);
+            }
             return new Call(call.owner(), call.name(), call.desc(), List.copyOf(args));
         }
         return expr;

@@ -1,7 +1,9 @@
 package net.eca.util.bossshow;
 
 import net.eca.util.bossshow.BossShowDefinition.Frame;
+import net.eca.util.bossshow.BossShowDefinition.EventCue;
 import net.eca.util.bossshow.BossShowDefinition.Keyframe;
+import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 
@@ -64,6 +66,46 @@ public final class BossShowNetCodec {
                 kf = new Keyframe(eid, sub, curve);
             }
             out.add(new Frame(dx, dy, dz, yaw, pitch, kf));
+        }
+        return out;
+    }
+
+    public static void writeEventCues(FriendlyByteBuf buf, List<EventCue> cues) {
+        buf.writeVarInt(cues.size());
+        for (EventCue cue : cues) {
+            buf.writeVarInt(cue.tick());
+            buf.writeBoolean(cue.eventId() != null);
+            if (cue.eventId() != null) buf.writeUtf(cue.eventId());
+        }
+    }
+
+    public static List<EventCue> readEventCues(FriendlyByteBuf buf) {
+        int n = buf.readVarInt();
+        List<EventCue> out = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            int tick = buf.readVarInt();
+            String eventId = buf.readBoolean() ? buf.readUtf(256) : null;
+            out.add(new EventCue(tick, eventId));
+        }
+        return out;
+    }
+
+    public static void writeSubtitleCues(FriendlyByteBuf buf, List<SubtitleCue> cues) {
+        buf.writeVarInt(cues.size());
+        for (SubtitleCue cue : cues) {
+            buf.writeVarInt(cue.tick());
+            buf.writeBoolean(cue.text() != null);
+            if (cue.text() != null) buf.writeUtf(cue.text());
+        }
+    }
+
+    public static List<SubtitleCue> readSubtitleCues(FriendlyByteBuf buf) {
+        int n = buf.readVarInt();
+        List<SubtitleCue> out = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            int tick = buf.readVarInt();
+            String text = buf.readBoolean() ? buf.readUtf(512) : null;
+            out.add(new SubtitleCue(tick, text));
         }
         return out;
     }

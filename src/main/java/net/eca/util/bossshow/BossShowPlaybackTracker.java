@@ -7,7 +7,8 @@ import net.eca.network.BossShowSubtitlePacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EcaLogger;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
-import net.eca.util.bossshow.BossShowDefinition.Keyframe;
+import net.eca.util.bossshow.BossShowDefinition.EventCue;
+import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -137,20 +138,20 @@ public final class BossShowPlaybackTracker {
         int total = session.definition.totalDurationTicks();
         session.ticksElapsed++;
 
-        //逐帧推进派发指针，遇到关键帧才触发事件/字幕
+        //逐帧推进派发指针，按独立内容轨道触发事件/字幕
         //条件 nextDispatchIndex < ticksElapsed 保证帧 i 在第 i+1 tick 时派发
         List<Frame> frames = session.definition.frames();
         while (session.nextDispatchIndex < frames.size()
             && session.nextDispatchIndex < session.ticksElapsed) {
-            Frame f = frames.get(session.nextDispatchIndex);
-            if (f.keyframe() != null) {
-                Keyframe kf = f.keyframe();
-                //字幕与事件完全独立：可同时触发、只有其一、都没有
-                if (kf.subtitleText() != null) {
-                    dispatchSubtitle(session, kf.subtitleText());
+            int tick = session.nextDispatchIndex;
+            for (SubtitleCue cue : session.definition.subtitleCues()) {
+                if (cue.tick() == tick && cue.text() != null) {
+                    dispatchSubtitle(session, cue.text());
                 }
-                if (kf.eventId() != null) {
-                    dispatchKeyframeEvent(session, kf.eventId());
+            }
+            for (EventCue cue : session.definition.eventCues()) {
+                if (cue.tick() == tick && cue.eventId() != null) {
+                    dispatchKeyframeEvent(session, cue.eventId());
                 }
             }
             session.nextDispatchIndex++;

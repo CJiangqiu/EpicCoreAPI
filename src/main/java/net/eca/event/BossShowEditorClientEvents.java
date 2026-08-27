@@ -57,10 +57,35 @@ public final class BossShowEditorClientEvents {
         toastUntilMillis = System.currentTimeMillis() + durationMs;
     }
 
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    public static void onLocalPlayerTick(TickEvent.PlayerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END
+            || !(event.player instanceof LocalPlayer localPlayer)
+            || !BossShowEditorState.isActivelyRecording()
+            || EcaConfiguration.getBossShowRecordingFlightInertiaSafely()
+            || !localPlayer.getAbilities().flying
+            || localPlayer.isPassenger()) {
+            return;
+        }
+        boolean noMovementInput = localPlayer.input.forwardImpulse == 0.0F
+            && localPlayer.input.leftImpulse == 0.0F
+            && !localPlayer.input.jumping
+            && !localPlayer.input.shiftKeyDown;
+        //只清除松键后的残余速度，避免压低正常飞行速度。
+        if (noMovementInput) {
+            localPlayer.setDeltaMovement(Vec3.ZERO);
+        }
+    }
+
     @SubscribeEvent
     public static void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
         Minecraft mc = Minecraft.getInstance();
+
+        if (mc.screen instanceof BossShowEditorScreen editor && BossShowEditorState.isPreviewPlaying()) {
+            BossShowEditorState.tickPreviewPlayback();
+            editor.syncFromState();
+        }
 
         //=== 录制相关快捷键（无 screen 时）===
         if (mc.screen == null && BossShowEditorState.isActive() && BossShowEditorState.hasAnchor()) {
@@ -78,20 +103,10 @@ public final class BossShowEditorClientEvents {
                     showToast(Component.translatable("gui.eca.bossshow.recording.paused"), 1000L);
                 }
             }
-            //K = 将当前帧标记为关键帧（录制和暂停都可）
-            while (BossShowKeyBindings.MARK_KEYFRAME.consumeClick()) {
-                if (BossShowEditorState.isRecordingMode()) {
-                    int t = BossShowEditorState.markCurrentFrameAsKeyframe();
-                    if (t >= 0) {
-                        showToast(Component.translatable("gui.eca.bossshow.recording.keyframe_added", t), 1000L);
-                    }
-                }
-            }
         } else {
             //drain 掉避免延后误触发
             while (BossShowKeyBindings.REC_START.consumeClick()) {}
             while (BossShowKeyBindings.REC_PAUSE.consumeClick()) {}
-            while (BossShowKeyBindings.MARK_KEYFRAME.consumeClick()) {}
         }
 
         //=== 每 tick 采样（仅 RECORDING 状态）===
@@ -129,9 +144,29 @@ public final class BossShowEditorClientEvents {
     //ENTER 完成录制（保存）
     @SubscribeEvent
     public static void onKeyInput(InputEvent.Key event) {
-        if (!BossShowEditorState.isRecordingMode()) return;
         if (event.getAction() != GLFW.GLFW_PRESS) return;
         Minecraft mc = Minecraft.getInstance();
+
+        if (BossShowEditorState.isPoseCaptureArmed()) {
+            if (mc.screen != null) return;
+            if (event.getKey() == GLFW.GLFW_KEY_ESCAPE) {
+                BossShowEditorState.cancelPoseCapture();
+                mc.setScreen(new BossShowEditorScreen());
+                return;
+            }
+            if (event.getKey() == GLFW.GLFW_KEY_ENTER || event.getKey() == GLFW.GLFW_KEY_KP_ENTER) {
+                if (mc.gameRenderer != null) {
+                    Camera cam = mc.gameRenderer.getMainCamera();
+                    BossShowEditorState.commitPoseCapture(
+                        cam.getPosition().x, cam.getPosition().y, cam.getPosition().z,
+                        cam.getYRot(), cam.getXRot());
+                }
+                mc.setScreen(new BossShowEditorScreen());
+            }
+            return;
+        }
+
+        if (!BossShowEditorState.isRecordingMode()) return;
         if (mc.screen != null) return;
         if (event.getKey() == GLFW.GLFW_KEY_ENTER || event.getKey() == GLFW.GLFW_KEY_KP_ENTER) {
             finishRecording(true);
@@ -250,6 +285,13 @@ public final class BossShowEditorClientEvents {
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onScreenOpening(ScreenEvent.Opening event) {
         if (!(event.getNewScreen() instanceof PauseScreen)) return;
+
+        if (BossShowEditorState.isPoseCaptureArmed()) {
+            event.setCanceled(true);
+            BossShowEditorState.cancelPoseCapture();
+            Minecraft.getInstance().setScreen(new BossShowEditorScreen());
+            return;
+        }
 
         if (BossShowEditorState.isRecordingMode()) {
             event.setCanceled(true);

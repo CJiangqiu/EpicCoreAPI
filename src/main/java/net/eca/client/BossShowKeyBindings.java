@@ -26,14 +26,6 @@ public final class BossShowKeyBindings {
         CATEGORY
     );
 
-    //K = 标记关键帧
-    public static final KeyMapping MARK_KEYFRAME = new KeyMapping(
-        "key.eca.bossshow.mark_keyframe",
-        KeyConflictContext.UNIVERSAL,
-        InputConstants.Type.KEYSYM.getOrCreate(GLFW.GLFW_KEY_K),
-        CATEGORY
-    );
-
     //I = 暂停录制
     public static final KeyMapping REC_PAUSE = new KeyMapping(
         "key.eca.bossshow.rec_pause",
@@ -47,7 +39,6 @@ public final class BossShowKeyBindings {
     @SubscribeEvent
     public static void onRegisterKeys(RegisterKeyMappingsEvent event) {
         event.register(REC_START);
-        event.register(MARK_KEYFRAME);
         event.register(REC_PAUSE);
     }
 }

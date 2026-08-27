@@ -29,6 +29,7 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.IntValue BOSSSHOW_MAX_SUBTITLE_DURATION_TICKS;
     public static ForgeConfigSpec.IntValue BOSSSHOW_RANGE_SCAN_INTERVAL_TICKS;
     public static ForgeConfigSpec.IntValue BOSSSHOW_ENTITY_SELECTION_RANGE;
+    public static ForgeConfigSpec.BooleanValue BOSSSHOW_RECORDING_FLIGHT_INERTIA;
 
     // Faction Configuration | 阵营系统配置
     public static ForgeConfigSpec.BooleanValue FACTION_ACTION_BAR_MESSAGES;
@@ -152,6 +153,11 @@ public class EcaConfiguration {
             .comment("Reach distance (in blocks) for the entity-bind raytrace during recording selection mode. Default 64.",
                      "录制选择模式下实体绑定射线追踪的触及距离（方块）。默认 64。")
             .defineInRange("Entity Selection Range", 64, 4, 256);
+
+        BOSSSHOW_RECORDING_FLIGHT_INERTIA = BUILDER
+            .comment("Keep vanilla flight inertia while recording a BossShow. When disabled, old velocity is cleared before each recording tick.",
+                     "BossShow 录制期间是否保留原版飞行惯性。关闭时会在每个录制 tick 前清除上一 tick 的速度。")
+            .define("Enable Recording Flight Inertia", false);
 
         BUILDER.pop();
 
@@ -325,6 +331,10 @@ public class EcaConfiguration {
 
     public static int getBossShowEntitySelectionRangeSafely() {
         return safeGet(BOSSSHOW_ENTITY_SELECTION_RANGE, 64);
+    }
+
+    public static boolean getBossShowRecordingFlightInertiaSafely() {
+        return safeGet(BOSSSHOW_RECORDING_FLIGHT_INERTIA, false);
     }
 
     // Faction Configuration Safe Access Methods | 阵营系统安全访问方法

@@ -8,7 +8,9 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.eca.util.EcaLogger;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
+import net.eca.util.bossshow.BossShowDefinition.EventCue;
 import net.eca.util.bossshow.BossShowDefinition.Keyframe;
+import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EntityType;
@@ -16,8 +18,8 @@ import net.minecraft.world.entity.EntityType;
 import java.util.ArrayList;
 import java.util.List;
 
-/* JSON 编解码，新帧模型：frames[] 每帧一个 JSON 对象，关键帧帧内含 keyframe 子对象。
- * 不兼容旧版 samples/markers 格式，旧字段被完全忽略。 */
+/* JSON 编解码：format_version=2 使用 frames[]、events[] 和 subtitles[] 三条轨道。
+ * 读取旧文件时从帧内 keyframe 子对象派生内容轨道。 */
 public final class BossShowJsonCodec {
 
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
@@ -77,7 +79,18 @@ public final class BossShowJsonCodec {
                 }
             }
 
-            return new BossShowDefinition(id, targetType, trigger, cinematic, allowRepeat, frames, source, anchorYawDeg);
+            boolean hasEventTrack = root.has("events") && root.get("events").isJsonArray();
+            boolean hasSubtitleTrack = root.has("subtitles") && root.get("subtitles").isJsonArray();
+            List<EventCue> eventCues = hasEventTrack ? parseEventCues(root.getAsJsonArray("events")) : null;
+            List<SubtitleCue> subtitleCues = hasSubtitleTrack ? parseSubtitleCues(root.getAsJsonArray("subtitles")) : null;
+            if (!hasEventTrack && !hasSubtitleTrack) {
+                return new BossShowDefinition(id, targetType, trigger, cinematic, allowRepeat,
+                    frames, source, anchorYawDeg);
+            }
+            if (eventCues == null) eventCues = deriveEventCues(frames);
+            if (subtitleCues == null) subtitleCues = deriveSubtitleCues(frames);
+            return new BossShowDefinition(id, targetType, trigger, cinematic, allowRepeat,
+                frames, source, anchorYawDeg, eventCues, subtitleCues);
         } catch (Throwable t) {
             EcaLogger.error("BossShow {} JSON parse failed: {}", id, t.getMessage());
             return null;
@@ -91,6 +104,50 @@ public final class BossShowJsonCodec {
             ? obj.get("subtitle").getAsString() : null;
         Curve curve = obj.has("curve") ? Curve.fromKey(obj.get("curve").getAsString()) : Curve.NONE;
         return new Keyframe(evt, sub, curve);
+    }
+
+    private static List<EventCue> parseEventCues(JsonArray array) {
+        List<EventCue> result = new ArrayList<>();
+        for (JsonElement element : array) {
+            if (!element.isJsonObject()) continue;
+            JsonObject object = element.getAsJsonObject();
+            if (!object.has("tick") || !object.has("event_id")) continue;
+            result.add(new EventCue(object.get("tick").getAsInt(), object.get("event_id").getAsString()));
+        }
+        return result;
+    }
+
+    private static List<SubtitleCue> parseSubtitleCues(JsonArray array) {
+        List<SubtitleCue> result = new ArrayList<>();
+        for (JsonElement element : array) {
+            if (!element.isJsonObject()) continue;
+            JsonObject object = element.getAsJsonObject();
+            if (!object.has("tick") || !object.has("text")) continue;
+            result.add(new SubtitleCue(object.get("tick").getAsInt(), object.get("text").getAsString()));
+        }
+        return result;
+    }
+
+    private static List<EventCue> deriveEventCues(List<Frame> frames) {
+        List<EventCue> result = new ArrayList<>();
+        for (int i = 0; i < frames.size(); i++) {
+            Keyframe keyframe = frames.get(i).keyframe();
+            if (keyframe != null && keyframe.eventId() != null) {
+                result.add(new EventCue(i, keyframe.eventId()));
+            }
+        }
+        return result;
+    }
+
+    private static List<SubtitleCue> deriveSubtitleCues(List<Frame> frames) {
+        List<SubtitleCue> result = new ArrayList<>();
+        for (int i = 0; i < frames.size(); i++) {
+            Keyframe keyframe = frames.get(i).keyframe();
+            if (keyframe != null && keyframe.subtitleText() != null) {
+                result.add(new SubtitleCue(i, keyframe.subtitleText()));
+            }
+        }
+        return result;
     }
 
     private static Trigger parseTrigger(JsonObject obj, ResourceLocation id) {
@@ -111,6 +168,7 @@ public final class BossShowJsonCodec {
 
     public static String serialize(BossShowDefinition def) {
         JsonObject root = new JsonObject();
+        root.addProperty("format_version", 2);
         ResourceLocation typeKey = def.targetType() != null
             ? BuiltInRegistries.ENTITY_TYPE.getKey(def.targetType())
             : null;
@@ -148,6 +206,24 @@ public final class BossShowJsonCodec {
             fArr.add(fObj);
         }
         root.add("frames", fArr);
+
+        JsonArray eventArr = new JsonArray();
+        for (EventCue cue : def.eventCues()) {
+            JsonObject cueObj = new JsonObject();
+            cueObj.addProperty("tick", cue.tick());
+            if (cue.eventId() != null) cueObj.addProperty("event_id", cue.eventId());
+            eventArr.add(cueObj);
+        }
+        root.add("events", eventArr);
+
+        JsonArray subtitleArr = new JsonArray();
+        for (SubtitleCue cue : def.subtitleCues()) {
+            JsonObject cueObj = new JsonObject();
+            cueObj.addProperty("tick", cue.tick());
+            if (cue.text() != null) cueObj.addProperty("text", cue.text());
+            subtitleArr.add(cueObj);
+        }
+        root.add("subtitles", subtitleArr);
 
         return GSON.toJson(root);
     }

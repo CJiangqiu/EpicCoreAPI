@@ -223,11 +223,11 @@ public class BossShowEditorHomeScreen extends Screen {
                                int mouseX, int mouseY, boolean isHovering, float partialTick) {
                 ResourceLocation typeId = BuiltInRegistries.ENTITY_TYPE.getKey(def.targetType());
                 String idLine = def.id().toString();
-                int kfCount = 0;
-                for (BossShowDefinition.Frame f : def.frames()) { if (f.keyframe() != null) kfCount++; }
+                int contentCount = 0;
+                for (BossShowDefinition.Frame f : def.frames()) { if (f.keyframe() != null) contentCount++; }
                 String meta = (typeId != null ? typeId.toString() : "?")
                     + "    " + def.frames().size() + " frames    "
-                    + kfCount + " keyframes    " + def.trigger().type();
+                    + contentCount + " content ticks    " + def.trigger().type();
                 g.drawString(Minecraft.getInstance().font, idLine, left + 4, top + 2, 0xFFFFFF, false);
                 g.drawString(Minecraft.getInstance().font, meta, left + 4, top + 12, 0xAAAAAA, false);
 

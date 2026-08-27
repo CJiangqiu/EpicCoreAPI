@@ -3,6 +3,8 @@ package net.eca.network;
 import net.eca.util.bossshow.BossShowClientState;
 import net.eca.util.bossshow.BossShowDefinition;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
+import net.eca.util.bossshow.BossShowDefinition.EventCue;
+import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
 import net.eca.util.bossshow.BossShowNetCodec;
 import net.eca.util.bossshow.Trigger;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -29,6 +31,8 @@ public class BossShowStartPacket {
     private final double triggerRadius;
     private final boolean cinematic;
     private final List<Frame> frames;
+    private final List<EventCue> eventCues;
+    private final List<SubtitleCue> subtitleCues;
 
     public BossShowStartPacket(BossShowDefinition def, UUID targetUuid, double anchorX, double anchorY, double anchorZ, float anchorYaw) {
         this.cutsceneId = def.id();
@@ -44,12 +48,14 @@ public class BossShowStartPacket {
         this.triggerRadius = def.trigger() instanceof Trigger.Range r ? r.effectRadius() : 0.0;
         this.cinematic = def.cinematic();
         this.frames = def.frames();
+        this.eventCues = def.eventCues();
+        this.subtitleCues = def.subtitleCues();
     }
 
     private BossShowStartPacket(ResourceLocation cutsceneId, ResourceLocation targetTypeId, UUID targetUuid,
                                 double anchorX, double anchorY, double anchorZ, float anchorYaw,
                                 String triggerType, double triggerRadius, boolean cinematic,
-                                List<Frame> frames) {
+                                List<Frame> frames, List<EventCue> eventCues, List<SubtitleCue> subtitleCues) {
         this.cutsceneId = cutsceneId;
         this.targetTypeId = targetTypeId;
         this.targetUuid = targetUuid;
@@ -61,6 +67,8 @@ public class BossShowStartPacket {
         this.triggerRadius = triggerRadius;
         this.cinematic = cinematic;
         this.frames = frames;
+        this.eventCues = eventCues;
+        this.subtitleCues = subtitleCues;
     }
 
     public static void encode(BossShowStartPacket msg, FriendlyByteBuf buf) {
@@ -75,6 +83,8 @@ public class BossShowStartPacket {
         buf.writeDouble(msg.triggerRadius);
         buf.writeBoolean(msg.cinematic);
         BossShowNetCodec.writeFrames(buf, msg.frames);
+        BossShowNetCodec.writeEventCues(buf, msg.eventCues);
+        BossShowNetCodec.writeSubtitleCues(buf, msg.subtitleCues);
     }
 
     public static BossShowStartPacket decode(FriendlyByteBuf buf) {
@@ -89,7 +99,10 @@ public class BossShowStartPacket {
         double trigRadius = buf.readDouble();
         boolean cine = buf.readBoolean();
         List<Frame> frames = BossShowNetCodec.readFrames(buf);
-        return new BossShowStartPacket(cutsceneId, typeId, uuid, ax, ay, az, yaw, trigType, trigRadius, cine, frames);
+        List<EventCue> eventCues = BossShowNetCodec.readEventCues(buf);
+        List<SubtitleCue> subtitleCues = BossShowNetCodec.readSubtitleCues(buf);
+        return new BossShowStartPacket(cutsceneId, typeId, uuid, ax, ay, az, yaw, trigType, trigRadius,
+            cine, frames, eventCues, subtitleCues);
     }
 
     public static void handle(BossShowStartPacket msg, Supplier<NetworkEvent.Context> ctxSup) {
@@ -109,6 +122,8 @@ public class BossShowStartPacket {
     public double triggerRadius() { return triggerRadius; }
     public boolean cinematic() { return cinematic; }
     public List<Frame> frames() { return Collections.unmodifiableList(frames); }
+    public List<EventCue> eventCues() { return Collections.unmodifiableList(eventCues); }
+    public List<SubtitleCue> subtitleCues() { return Collections.unmodifiableList(subtitleCues); }
 
     private static final class ClientHandlerRef {
         static void onStart(BossShowStartPacket msg) {
