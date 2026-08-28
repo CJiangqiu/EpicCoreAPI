@@ -855,7 +855,7 @@ public final class HealthDataflowAnalyzer {
     }
 
     /* 以探针值验证 decode(encode(p)) == p。数值明文按容差比较，文本明文按内容比较。
-       文本探针取浮点字面形态：这类编解码在血量场景中总是垫在 parseFloat 之下。 */
+       文本探针覆盖零和多个正数；血量存储可以合法拒绝负数，不能把有符号域当作必要条件。 */
     private static boolean validCodecPair(Method decoder, Method encoder, boolean numericPlain) {
         try {
             if (numericPlain) {
@@ -868,7 +868,7 @@ public final class HealthDataflowAnalyzer {
                 }
                 return true;
             }
-            for (String probe : new String[]{"1.25", "-73.75", "20.0"}) {
+            for (String probe : new String[]{"0.0", "1.25", "73.75"}) {
                 Object input = coerceForType(probe, encoder.getParameterTypes()[0]);
                 if (input == null) return false;
                 Object encoded = encoder.invoke(null, input);
