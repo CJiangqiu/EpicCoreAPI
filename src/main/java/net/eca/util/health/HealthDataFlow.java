@@ -897,7 +897,7 @@ public final class HealthDataFlow {
             return true;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            Class<?> owner = HealthDataflowAnalyzer.loadClass(last.ownerInternal());
+            Class<?> owner = HealthDataflowAnalyzer.resolveRuntimeOwner(last.ownerInternal(), container);
             if (owner == null) return false;
             Field f = HealthDataflowAnalyzer.findFieldInHierarchy(owner, last.name());
             if (f == null) return false;
@@ -1089,8 +1089,6 @@ public final class HealthDataFlow {
 
     private static boolean writeMethodCall(MethodCallSource s, LivingEntity entity, Object value) {
         try {
-            Class<?> owner = HealthDataflowAnalyzer.loadClass(s.ownerInternal);
-            if (owner == null) return false;
             Type[] argTypes = Type.getArgumentTypes(s.desc);
             boolean isStatic = s.args.size() == argTypes.length;
             int start = isStatic ? 0 : 1;
@@ -1100,6 +1098,8 @@ public final class HealthDataFlow {
                 receiver = HealthDataflowAnalyzer.evaluate(s.args.get(0), ctx);
                 if (receiver == null) return false;
             }
+            Class<?> owner = HealthDataflowAnalyzer.resolveRuntimeOwner(s.ownerInternal, receiver);
+            if (owner == null && isStatic) return false;
             Object[] values = new Object[argTypes.length];
             Class<?>[] paramTypes = new Class<?>[argTypes.length];
             for (int i = 0; i < argTypes.length; i++) {
@@ -1109,7 +1109,9 @@ public final class HealthDataFlow {
                 values[i] = HealthDataflowAnalyzer.coerceArgPublic(argValue, paramTypes[i]);
             }
             Method method = HealthDataflowAnalyzer.findMethod(isStatic ? owner : receiver.getClass(), s.name, paramTypes, values);
-            if (method == null && !isStatic) method = HealthDataflowAnalyzer.findMethod(owner, s.name, paramTypes, values);
+            if (method == null && !isStatic && owner != null) {
+                method = HealthDataflowAnalyzer.findMethod(owner, s.name, paramTypes, values);
+            }
             if (method == null) return false;
             method.setAccessible(true);
             method.invoke(receiver, values);
@@ -1240,7 +1242,7 @@ public final class HealthDataFlow {
         Field f;
         Class<?> ft;
         try {
-            Class<?> owner = HealthDataflowAnalyzer.loadClass(step.ownerInternal());
+            Class<?> owner = HealthDataflowAnalyzer.resolveRuntimeOwner(step.ownerInternal(), target);
             if (owner == null) return false;
             f = HealthDataflowAnalyzer.findFieldInHierarchy(owner, step.name());
             if (f == null) return false;

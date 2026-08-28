@@ -22,8 +22,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /*
  * 外部扫描第三阶段：实体自身的存储写对了、当场校验也过了，却在下一 tick 被改回去——
  * 说明真实血量另有一份实体之外的镜像，防护逻辑每 tick 拿它覆盖实体存储。
- * 本阶段在世界存档与全局静态字段中按"值与当前血量吻合"定位这类镜像并联写。
- * 判据只能是值吻合：镜像对血量的作用延迟一个 tick，微扰当场测不出斜率，数值反演那套定位不到它。
+ * 本阶段在世界存档与全局状态中定位同时满足实体身份关联与旧值吻合的镜像并联写。
+ * 延迟镜像无法当场测斜率，但单独的数值吻合不足以证明归属，不能作为提交依据。
  * 写入的是会存盘的世界级数据，因此逐单元记账并快照，成败交由下一 tick 的延迟复查裁定。
  */
 public final class ExternalMirrorWriter {
@@ -146,10 +146,12 @@ public final class ExternalMirrorWriter {
                 strongestAssociation = Math.max(strongestAssociation,
                         candidate.cell().associationScore(entity));
             }
-            if (strongestAssociation > 0) {
-                int requiredScore = strongestAssociation;
-                matched.removeIf(candidate -> candidate.cell().associationScore(entity) < requiredScore);
+            if (strongestAssociation <= 0) {
+                diag(cls, "value-matched cells have no entity identity association");
+                return List.of();
             }
+            int requiredScore = strongestAssociation;
+            matched.removeIf(candidate -> candidate.cell().associationScore(entity) < requiredScore);
             if (matched.size() <= MAX_WRITE_CELLS) return matched;
             // 更宽的容差只会命中更多，无需再试
             diag(cls, "value " + before + " too common in world data ("

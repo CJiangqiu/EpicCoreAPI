@@ -68,6 +68,10 @@ final class ObjectGraphSnapshot {
         }
     }
 
+    boolean isComplete() {
+        return complete;
+    }
+
     private void captureEntityFields(LivingEntity entity) {
         if (entity == null) return;
         if (!visited.add(entity)) return;
@@ -87,7 +91,7 @@ final class ObjectGraphSnapshot {
                     addSlot(new FieldSlot(entity, field, field.get(entity)));
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
-                    diag("probe field capture failed: " + c.getName() + "." + field.getName());
+                    markIncomplete("probe field capture failed: " + c.getName() + "." + field.getName());
                 }
             }
         }
@@ -106,7 +110,7 @@ final class ObjectGraphSnapshot {
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("probe SynchedEntityData capture failed: " + t.getClass().getSimpleName());
+            markIncomplete("probe SynchedEntityData capture failed: " + t.getClass().getSimpleName());
         }
     }
 
@@ -121,7 +125,7 @@ final class ObjectGraphSnapshot {
                     walk(value);
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
-                    diag("static field capture failed: " + c.getName() + "." + field.getName());
+                    markIncomplete("static field capture failed: " + c.getName() + "." + field.getName());
                 }
             }
         }
@@ -136,7 +140,7 @@ final class ObjectGraphSnapshot {
                     addSlot(new FieldSlot(null, field, field.get(null)));
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
-                    diag("probe static field capture failed: " + c.getName() + "." + field.getName());
+                    markIncomplete("probe static field capture failed: " + c.getName() + "." + field.getName());
                 }
             }
         }
@@ -164,7 +168,7 @@ final class ObjectGraphSnapshot {
                 addSlot(new FieldSlot(owner, field, field.get(owner)));
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                diag("probe root field capture failed: " + cls.getName() + "." + field.getName());
+                markIncomplete("probe root field capture failed: " + cls.getName() + "." + field.getName());
             }
         }
     }
@@ -181,7 +185,7 @@ final class ObjectGraphSnapshot {
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("probe root array capture failed");
+            markIncomplete("probe root array capture failed");
         }
     }
 
@@ -196,7 +200,7 @@ final class ObjectGraphSnapshot {
             addSlot(new MapSlot(map, copy));
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("probe root map capture failed: " + map.getClass().getName());
+            markIncomplete("probe root map capture failed: " + map.getClass().getName());
         }
     }
 
@@ -209,7 +213,7 @@ final class ObjectGraphSnapshot {
             addSlot(new CollectionSlot(collection, new ArrayList<>(collection)));
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("probe root collection capture failed: " + collection.getClass().getName());
+            markIncomplete("probe root collection capture failed: " + collection.getClass().getName());
         }
     }
 
@@ -248,7 +252,7 @@ final class ObjectGraphSnapshot {
                 walk(value);
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                diag("field capture failed: " + cls.getName() + "." + field.getName());
+                markIncomplete("field capture failed: " + cls.getName() + "." + field.getName());
             }
         }
     }
@@ -259,7 +263,7 @@ final class ObjectGraphSnapshot {
             length = Array.getLength(array);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("array capture failed");
+            markIncomplete("array capture failed");
             return;
         }
         for (int i = 0; i < length; i++) {
@@ -270,7 +274,7 @@ final class ObjectGraphSnapshot {
                 walk(value);
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                diag("array slot capture failed");
+                markIncomplete("array slot capture failed");
             }
         }
     }
@@ -288,7 +292,7 @@ final class ObjectGraphSnapshot {
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("map capture failed: " + map.getClass().getName());
+            markIncomplete("map capture failed: " + map.getClass().getName());
         }
     }
 
@@ -300,7 +304,7 @@ final class ObjectGraphSnapshot {
             for (Object value : copy) walk(value);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("collection capture failed: " + collection.getClass().getName());
+            markIncomplete("collection capture failed: " + collection.getClass().getName());
         }
     }
 
@@ -342,6 +346,11 @@ final class ObjectGraphSnapshot {
 
     private void diag(String reason) {
         if (DIAG_DUMPED.add(reason)) EcaLogger.info("[ObjectGraphSnapshot] {}", reason);
+    }
+
+    private void markIncomplete(String reason) {
+        complete = false;
+        diag(reason);
     }
 
     private interface Slot {

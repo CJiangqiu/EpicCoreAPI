@@ -5,6 +5,7 @@ import org.objectweb.asm.ClassReader;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -95,6 +96,12 @@ public final class RuntimeBytecodeProvider {
     // 协议分析只能读取 ECA 注入前的视图，避免把健康锁等自身状态识别成实体协议。
     public static byte[] getAnalysis(Class<?> clazz) {
         return get(ANALYSIS_BYTES, clazz);
+    }
+
+    // 返回当前运行期字节码指纹；尚未捕获时返回 0
+    public static int fingerprint(Class<?> clazz) {
+        byte[] bytes = get(clazz);
+        return bytes == null ? 0 : Arrays.hashCode(bytes);
     }
 
     private static byte[] get(Map<String, byte[]> source, Class<?> clazz) {

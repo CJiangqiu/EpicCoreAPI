@@ -141,16 +141,33 @@ public final class MethodProbe {
 
     public enum AuxiliaryKind { FIELD_VALUE, ARRAY_LENGTH, COLLECTION_SIZE, MAP_SIZE, TEXT_LENGTH }
 
+    public enum FunctionalArgumentKind { TARGET, FUNCTION_SELF, ENTITY, ENTITY_FIELD, STATIC_FIELD, CONSTANT }
+
     public record AuxiliaryArgument(String declaringInternal, String fieldName, String fieldDesc,
                                     AuxiliaryKind kind) {}
+
+    public record FunctionalArgument(int index, FunctionalArgumentKind kind, String declaringInternal,
+                                     String fieldName, String fieldDesc, Object constant) {}
+
+    public record FunctionalArgumentPlan(int arity, List<FunctionalArgument> arguments) {
+        public FunctionalArgumentPlan {
+            arguments = List.copyOf(arguments);
+        }
+    }
 
     /* DirectCall 候选：METHOD=实体自身 1 参数数值方法；FUNCTIONAL_FIELD=持数值或变长 SAM 的函数式字段。
        此处仅记录静态签名，是否有效由运行期行为探测判定。 */
     public record DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc,
-                                  String fieldDesc, boolean fieldStatic, AuxiliaryArgument auxiliary) {
+                                  String fieldDesc, boolean fieldStatic, AuxiliaryArgument auxiliary,
+                                  FunctionalArgumentPlan argumentPlan) {
         public DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc,
                                String fieldDesc, boolean fieldStatic) {
-            this(kind, declaringInternal, memberName, inputDesc, fieldDesc, fieldStatic, null);
+            this(kind, declaringInternal, memberName, inputDesc, fieldDesc, fieldStatic, null, null);
+        }
+
+        public DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc,
+                               String fieldDesc, boolean fieldStatic, AuxiliaryArgument auxiliary) {
+            this(kind, declaringInternal, memberName, inputDesc, fieldDesc, fieldStatic, auxiliary, null);
         }
     }
 
@@ -455,6 +472,15 @@ public final class MethodProbe {
         }
         if (samInput != Object[].class) return;
 
+        for (FunctionalArgumentPlan plan : findFunctionalArgumentPlans(functionalField.getDeclaringClass(),
+                functionalField.getName(), Type.getDescriptor(functionalField.getType()))) {
+            String key = baseKey + ":P:" + plan;
+            if (!seen.add(key)) continue;
+            out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, functionalField.getName(),
+                    Type.getDescriptor(samInput), Type.getDescriptor(functionalField.getType()), false,
+                    null, plan));
+        }
+
         int plans = 0;
         List<Class<?>> sourceClasses = new ArrayList<>();
         sourceClasses.add(functionalField.getDeclaringClass());
@@ -541,12 +567,261 @@ public final class MethodProbe {
                 out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, field.name,
                         Type.getDescriptor(input), field.desc, false));
                 if (input == Object[].class) {
+                    for (FunctionalArgumentPlan plan : findFunctionalArgumentPlans(node, field)) {
+                        String key = "F:" + ownerInternal + ":" + field.name + ":P:" + plan;
+                        if (!seen.add(key)) continue;
+                        out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, field.name,
+                                Type.getDescriptor(input), field.desc, false, null, plan));
+                    }
                     addBytecodeAuxiliaryCandidates(entityClass, owner, ownerInternal, field, input, out, seen);
                 }
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
         }
+    }
+
+    /* 从实体自身已经存在的函数调用中恢复变长参数协议。调用点是协议的事实来源，
+       因而参数换位或增加身份参数时无需扩充固定排列。 */
+    static List<FunctionalArgumentPlan> findFunctionalArgumentPlans(Class<?> owner, String fieldName,
+                                                                     String fieldDesc) {
+        byte[] bytes = owner == null ? null : bytesProvider.get(owner);
+        if (bytes == null) return List.of();
+        try {
+            ClassNode node = new ClassNode();
+            new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
+            FieldNode field = new FieldNode(Opcodes.ASM9, 0, fieldName, fieldDesc, null, null);
+            return findFunctionalArgumentPlans(node, field);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return List.of();
+        }
+    }
+
+    static List<FunctionalArgumentPlan> findFunctionalArgumentPlans(ClassNode owner, FieldNode functionalField) {
+        if (owner == null || functionalField == null) return List.of();
+        Type interfaceType = Type.getType(functionalField.desc);
+        if (interfaceType.getSort() != Type.OBJECT) return List.of();
+        List<FunctionalArgumentPlan> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (MethodNode method : owner.methods) {
+            if (method.instructions == null) continue;
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (!(insn instanceof MethodInsnNode call)
+                        || call.getOpcode() != Opcodes.INVOKEINTERFACE
+                        || !call.owner.equals(interfaceType.getInternalName())) continue;
+                Type[] callArguments = Type.getArgumentTypes(call.desc);
+                if (callArguments.length != 1 || !callArguments[0].equals(Type.getType(Object[].class))) continue;
+                TypeInsnNode array = findArgumentArray(call, owner.name, functionalField);
+                if (array == null) continue;
+                Integer arity = integerConstant(previousMeaningful(array));
+                if (arity == null || arity <= 0 || arity > 32) continue;
+                List<FunctionalArgument> arguments = parseArgumentArray(
+                        array, call, arity, owner.name, functionalField);
+                int targets = 0;
+                for (FunctionalArgument argument : arguments) {
+                    if (argument.kind() == FunctionalArgumentKind.TARGET) targets++;
+                }
+                if (targets != 1 || arguments.size() != arity) continue;
+                FunctionalArgumentPlan plan = new FunctionalArgumentPlan(arity, arguments);
+                if (seen.add(plan.toString())) result.add(plan);
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private static TypeInsnNode findArgumentArray(MethodInsnNode call, String ownerInternal,
+                                                   FieldNode functionalField) {
+        TypeInsnNode array = null;
+        boolean receiverObserved = false;
+        int steps = 0;
+        for (AbstractInsnNode current = previousMeaningful(call); current != null && steps++ < 192;
+             current = previousMeaningful(current)) {
+            if (current instanceof TypeInsnNode typeInsn && typeInsn.getOpcode() == Opcodes.ANEWARRAY
+                    && typeInsn.desc.equals("java/lang/Object") && array == null) {
+                array = typeInsn;
+            }
+            if (current instanceof FieldInsnNode field && field.getOpcode() == Opcodes.GETFIELD
+                    && field.owner.equals(ownerInternal) && field.name.equals(functionalField.name)
+                    && field.desc.equals(functionalField.desc)) {
+                receiverObserved = true;
+                if (array != null) break;
+            }
+        }
+        return receiverObserved ? array : null;
+    }
+
+    private static List<FunctionalArgument> parseArgumentArray(TypeInsnNode array, MethodInsnNode call, int arity,
+                                                                String ownerInternal, FieldNode functionalField) {
+        Map<Integer, FunctionalArgument> byIndex = new LinkedHashMap<>();
+        AbstractInsnNode current = nextMeaningful(array);
+        while (current != null && current != call) {
+            if (current.getOpcode() != Opcodes.DUP) {
+                current = nextMeaningful(current);
+                continue;
+            }
+            AbstractInsnNode indexInsn = nextMeaningful(current);
+            Integer index = integerConstant(indexInsn);
+            if (index == null || index < 0 || index >= arity) {
+                current = nextMeaningful(current);
+                continue;
+            }
+            AbstractInsnNode valueStart = nextMeaningful(indexInsn);
+            AbstractInsnNode store = valueStart;
+            while (store != null && store != call && store.getOpcode() != Opcodes.AASTORE) {
+                store = nextMeaningful(store);
+            }
+            if (store == null || store == call) break;
+            FunctionalArgument argument = classifyFunctionalArgument(index, valueStart, store,
+                    ownerInternal, functionalField);
+            if (argument == null) return List.of();
+            byIndex.put(index, argument);
+            current = nextMeaningful(store);
+        }
+        if (byIndex.size() != arity) return List.of();
+        List<FunctionalArgument> ordered = new ArrayList<>(arity);
+        for (int index = 0; index < arity; index++) {
+            FunctionalArgument argument = byIndex.get(index);
+            if (argument == null) return List.of();
+            ordered.add(argument);
+        }
+        return ordered;
+    }
+
+    private static FunctionalArgument classifyFunctionalArgument(int index, AbstractInsnNode start,
+                                                                  AbstractInsnNode end,
+                                                                  String ownerInternal,
+                                                                  FieldNode functionalField) {
+        FieldInsnNode lastField = null;
+        MethodInsnNode lastCall = null;
+        VarInsnNode lastVariable = null;
+        AbstractInsnNode lastValue = null;
+        for (AbstractInsnNode current = start; current != null && current != end;
+             current = nextMeaningful(current)) {
+            lastValue = current;
+            if (current instanceof FieldInsnNode field
+                    && (field.getOpcode() == Opcodes.GETFIELD || field.getOpcode() == Opcodes.GETSTATIC)) {
+                lastField = field;
+            }
+            if (current instanceof MethodInsnNode method) lastCall = method;
+            if (current instanceof VarInsnNode variable) lastVariable = variable;
+        }
+        if (lastField != null && lastField.owner.equals(ownerInternal)
+                && lastField.name.equals(functionalField.name)
+                && lastField.desc.equals(functionalField.desc)) {
+            return new FunctionalArgument(index, FunctionalArgumentKind.FUNCTION_SELF,
+                    null, null, null, null);
+        }
+        if (lastCall != null && isNumericBox(lastCall)) {
+            if (lastField != null) {
+                FunctionalArgumentKind kind = lastField.getOpcode() == Opcodes.GETSTATIC
+                        ? FunctionalArgumentKind.STATIC_FIELD : FunctionalArgumentKind.ENTITY_FIELD;
+                return new FunctionalArgument(index, kind,
+                        lastField.owner, lastField.name, lastField.desc, null);
+            }
+            Object constant = constantBefore(lastCall, start);
+            if (constant != null) {
+                return new FunctionalArgument(index, FunctionalArgumentKind.CONSTANT,
+                        null, null, null, constant);
+            }
+            return new FunctionalArgument(index, FunctionalArgumentKind.TARGET,
+                    null, null, Type.getReturnType(lastCall.desc).getDescriptor(), null);
+        }
+        if (lastField != null) {
+            FunctionalArgumentKind kind = lastField.getOpcode() == Opcodes.GETSTATIC
+                    ? FunctionalArgumentKind.STATIC_FIELD : FunctionalArgumentKind.ENTITY_FIELD;
+            return new FunctionalArgument(index, kind,
+                    lastField.owner, lastField.name, lastField.desc, null);
+        }
+        Object constant = constantValue(lastValue);
+        if (constant != null || lastValue != null && lastValue.getOpcode() == Opcodes.ACONST_NULL) {
+            return new FunctionalArgument(index, FunctionalArgumentKind.CONSTANT,
+                    null, null, null, constant);
+        }
+        if (lastVariable != null && lastVariable.getOpcode() == Opcodes.ALOAD && lastVariable.var == 0) {
+            return new FunctionalArgument(index, FunctionalArgumentKind.ENTITY,
+                    null, null, null, null);
+        }
+        if (lastVariable != null && (lastVariable.getOpcode() == Opcodes.ALOAD
+                || lastVariable.getOpcode() == Opcodes.ILOAD || lastVariable.getOpcode() == Opcodes.LLOAD
+                || lastVariable.getOpcode() == Opcodes.FLOAD || lastVariable.getOpcode() == Opcodes.DLOAD)) {
+            String targetDesc = switch (lastVariable.getOpcode()) {
+                case Opcodes.ILOAD -> "I";
+                case Opcodes.LLOAD -> "J";
+                case Opcodes.DLOAD -> "D";
+                case Opcodes.FLOAD -> "F";
+                default -> null;
+            };
+            return new FunctionalArgument(index, FunctionalArgumentKind.TARGET,
+                    null, null, targetDesc, null);
+        }
+        return null;
+    }
+
+    private static boolean isNumericBox(MethodInsnNode call) {
+        if (call.getOpcode() != Opcodes.INVOKESTATIC || !call.name.equals("valueOf")) return false;
+        Type[] arguments = Type.getArgumentTypes(call.desc);
+        if (arguments.length != 1 || !isNumericType(arguments[0])) return false;
+        Type result = Type.getReturnType(call.desc);
+        if (result.getSort() != Type.OBJECT) return false;
+        String owner = result.getInternalName();
+        return owner.equals("java/lang/Float") || owner.equals("java/lang/Double")
+                || owner.equals("java/lang/Integer") || owner.equals("java/lang/Long")
+                || owner.equals("java/lang/Short") || owner.equals("java/lang/Byte");
+    }
+
+    private static boolean isNumericType(Type type) {
+        int sort = type.getSort();
+        return sort == Type.BYTE || sort == Type.SHORT || sort == Type.INT || sort == Type.LONG
+                || sort == Type.FLOAT || sort == Type.DOUBLE;
+    }
+
+    private static Object constantBefore(AbstractInsnNode end, AbstractInsnNode lowerBound) {
+        AbstractInsnNode current = previousMeaningful(end);
+        AbstractInsnNode stop = previousMeaningful(lowerBound);
+        while (current != null && current != stop) {
+            Object value = constantValue(current);
+            if (value != null) return value;
+            if (current instanceof VarInsnNode || current instanceof FieldInsnNode
+                    || current instanceof MethodInsnNode) return null;
+            current = previousMeaningful(current);
+        }
+        return null;
+    }
+
+    private static Object constantValue(AbstractInsnNode instruction) {
+        if (instruction instanceof LdcInsnNode ldc) return ldc.cst;
+        return switch (instruction == null ? -1 : instruction.getOpcode()) {
+            case Opcodes.ICONST_M1 -> Integer.valueOf(-1);
+            case Opcodes.ICONST_0 -> Integer.valueOf(0);
+            case Opcodes.ICONST_1 -> Integer.valueOf(1);
+            case Opcodes.ICONST_2 -> Integer.valueOf(2);
+            case Opcodes.ICONST_3 -> Integer.valueOf(3);
+            case Opcodes.ICONST_4 -> Integer.valueOf(4);
+            case Opcodes.ICONST_5 -> Integer.valueOf(5);
+            case Opcodes.FCONST_0 -> Float.valueOf(0.0f);
+            case Opcodes.FCONST_1 -> Float.valueOf(1.0f);
+            case Opcodes.FCONST_2 -> Float.valueOf(2.0f);
+            case Opcodes.DCONST_0 -> Double.valueOf(0.0d);
+            case Opcodes.DCONST_1 -> Double.valueOf(1.0d);
+            case Opcodes.LCONST_0 -> Long.valueOf(0L);
+            case Opcodes.LCONST_1 -> Long.valueOf(1L);
+            default -> null;
+        };
+    }
+
+    private static Integer integerConstant(AbstractInsnNode instruction) {
+        Object value = constantValue(instruction);
+        return value instanceof Integer integer ? integer : null;
+    }
+
+    private static AbstractInsnNode nextMeaningful(AbstractInsnNode insn) {
+        AbstractInsnNode current = insn == null ? null : insn.getNext();
+        while (current != null && (current.getType() == AbstractInsnNode.LABEL
+                || current.getType() == AbstractInsnNode.LINE || current.getType() == AbstractInsnNode.FRAME)) {
+            current = current.getNext();
+        }
+        return current;
     }
 
     private static void addBytecodeAuxiliaryCandidates(Class<?> entityClass, Class<?> owner, String ownerInternal,
@@ -732,6 +1007,21 @@ public final class MethodProbe {
     private static final Map<Class<?>, Object> EXTERNAL_PROTOCOL_RECEIVERS = new ConcurrentHashMap<>();
     private static final Set<Class<?>> EXTERNAL_PROTOCOL_RECEIVER_FAILED = ConcurrentHashMap.newKeySet();
     private static final int TRUSTED_BRIDGE_DEPTH = 8;
+
+    static void clearAnalysisCaches() {
+        SPECS.clear();
+        PROTOCOL_SPECS.clear();
+        READY_PROTOCOL_SPECS.clear();
+        TRANSFORMED_PROTOCOL_SPECS.clear();
+        TRUSTED_BRIDGES.clear();
+        TRUSTED_BRIDGE_FAILED.clear();
+        METHOD_HANDLE_DIAGNOSTICS.clear();
+        PROTOCOL_BRIDGE_DIAGNOSTICS.clear();
+        AGENT_RUNTIME_FAILED_OWNERS.clear();
+        EXTERNAL_PROTOCOL_CACHE.clear();
+        EXTERNAL_PROTOCOL_RECEIVERS.clear();
+        EXTERNAL_PROTOCOL_RECEIVER_FAILED.clear();
+    }
 
     public static void registerSite(BridgeSpec spec) {
         if (spec == null || spec.ownerInternal() == null) return;
@@ -948,8 +1238,8 @@ public final class MethodProbe {
     }
 
     /* 登记桥接站点，并经当前生效的转换后端烤入。 */
-    public static void installBridge(Class<?> entityClass) {
-        if (entityClass == null) return;
+    public static boolean installBridge(Class<?> entityClass) {
+        if (entityClass == null || bytesProvider.get(entityClass) == null) return false;
         BridgeSpec spec = findBridgeSpec(entityClass);
         String lookupInternal = Type.getInternalName(entityClass);
         Set<Class<?>> owners = new HashSet<>();
@@ -972,6 +1262,8 @@ public final class MethodProbe {
                 protocolOwners.computeIfAbsent(owner, ignored -> new ArrayList<>()).add(protocolSpec);
             }
         }
+        boolean complete = spec == null || !owners.isEmpty();
+        if (!allProtocolSpecs.isEmpty() && protocolOwners.isEmpty()) complete = false;
         for (Class<?> owner : owners) {
             List<ProtocolBridgeSpec> requested = protocolOwners.get(owner);
             if (requested != null) {
@@ -994,6 +1286,7 @@ public final class MethodProbe {
                         }
                     }
                 } else {
+                    complete = false;
                     String diagnosticKey = owner.getName() + "|transform-confirmation";
                     if (PROTOCOL_BRIDGE_DIAGNOSTICS.add(diagnosticKey)) {
                         EcaLogger.info("[MethodProbe] bridge transform not confirmed owner={} backend={}",
@@ -1002,10 +1295,12 @@ public final class MethodProbe {
                 }
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
+                complete = false;
                 if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed())
                     EcaLogger.info("[MethodProbe] bridge retransform failed owner={} msg={}", owner.getName(), t.toString());
             }
         }
+        return complete;
     }
 
     /* getCommonSuperClass 回退 Object，避免 COMPUTE_FRAMES 时加载未就绪的 token/writer 属主类。 */
@@ -1108,6 +1403,7 @@ public final class MethodProbe {
                     writer.describe(), baseline, probeA, probeB, target);
             if (writer.hasAssociatedWrites()) {
                 ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+                if (!snapshot.isComplete()) return null;
                 if (testAssociatedWriter(entity, writer, baseline, probeA, probeB, target, diagnostic)) {
                     snapshot.restore();
                     writer.preferAssociatedWrites();
@@ -1118,6 +1414,7 @@ public final class MethodProbe {
                 snapshot.restore();
             }
             ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+            if (!snapshot.isComplete()) return null;
             if (testWriter(entity, writer, baseline, probeA, probeB, target, diagnostic)) {
                 snapshot.restore();
                 EcaLogger.info("[MethodProbe] direct writer hit entity={} writer={}",
@@ -1205,7 +1502,7 @@ public final class MethodProbe {
     }
 
     private static DirectWriter bind(DirectCandidate candidate, LivingEntity entity) {
-        Class<?> owner = HealthDataflowAnalyzer.loadClass(candidate.declaringInternal());
+        Class<?> owner = HealthDataflowAnalyzer.resolveRuntimeOwner(candidate.declaringInternal(), entity);
         if (owner == null) return null;
         try {
             if (candidate.kind() == WriterKind.FIELD_COMMIT) {
@@ -1245,27 +1542,32 @@ public final class MethodProbe {
                 Class<?> fieldType = HealthDataflowAnalyzer.descriptorToClass(candidate.fieldDesc());
                 VarHandle handle = findVarHandle(owner, candidate, fieldType);
                 Method sam = singleAbstract(fieldType);
-                BoundAuxiliary auxiliary = bindAuxiliary(candidate.auxiliary());
+                BoundAuxiliary auxiliary = bindAuxiliary(candidate.auxiliary(), entity);
+                BoundFunctionalArgumentPlan argumentPlan = bindArgumentPlan(candidate.argumentPlan(), entity);
                 if (candidate.auxiliary() != null && auxiliary == null) return null;
+                if (candidate.argumentPlan() != null && argumentPlan == null) return null;
                 return handle == null || sam == null ? null
-                        : new VarHandleFunctionalWriter(handle, candidate.fieldStatic(), sam, inputType, auxiliary);
+                        : new VarHandleFunctionalWriter(handle, candidate.fieldStatic(), sam, inputType,
+                        auxiliary, argumentPlan);
             }
             Method sam = singleAbstract(field.getType());
             if (sam == null) return null;
             field.setAccessible(true);
             sam.setAccessible(true);
-            BoundAuxiliary auxiliary = bindAuxiliary(candidate.auxiliary());
+            BoundAuxiliary auxiliary = bindAuxiliary(candidate.auxiliary(), entity);
+            BoundFunctionalArgumentPlan argumentPlan = bindArgumentPlan(candidate.argumentPlan(), entity);
             if (candidate.auxiliary() != null && auxiliary == null) return null;
-            return new FunctionalWriter(field, sam, inputType, auxiliary);
+            if (candidate.argumentPlan() != null && argumentPlan == null) return null;
+            return new FunctionalWriter(field, sam, inputType, auxiliary, argumentPlan);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             return null;
         }
     }
 
-    private static BoundAuxiliary bindAuxiliary(AuxiliaryArgument argument) {
+    private static BoundAuxiliary bindAuxiliary(AuxiliaryArgument argument, LivingEntity entity) {
         if (argument == null) return null;
-        Class<?> owner = HealthDataflowAnalyzer.loadClass(argument.declaringInternal());
+        Class<?> owner = HealthDataflowAnalyzer.resolveRuntimeOwner(argument.declaringInternal(), entity);
         if (owner == null) return null;
         Class<?> fieldType = HealthDataflowAnalyzer.descriptorToClass(argument.fieldDesc());
         if (fieldType == null) return null;
@@ -1371,6 +1673,7 @@ public final class MethodProbe {
             return false;
         }
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+        if (!snapshot.isComplete()) return false;
         float baseline = EcaSetHealthManager.readHealthAnchor(entity);
         try {
             BridgeActivation activation = new BridgeActivation(entity);
@@ -1390,6 +1693,7 @@ public final class MethodProbe {
                                 : EcaTransformerManager.retransformHealthClass(owner, true);
                 if (!reinstall.confirmed()) return false;
                 snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+                if (!snapshot.isComplete()) return false;
                 activation = new BridgeActivation(entity);
                 ACTIVE_ENTITY.set(activation);
                 CallBridgeManager.callAuthorizedThrowing(entity, () -> {
@@ -1406,6 +1710,7 @@ public final class MethodProbe {
                     reinstall = EcaTransformerManager.retransformHealthClassWithJvmTi(bridgeOwner);
                     if (!reinstall.confirmed()) return false;
                     snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+                    if (!snapshot.isComplete()) return false;
                     activation = new BridgeActivation(entity);
                     ACTIVE_ENTITY.set(activation);
                     CallBridgeManager.callAuthorizedThrowing(entity, () -> {
@@ -1487,6 +1792,7 @@ public final class MethodProbe {
                 continue;
             }
             ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+            if (!snapshot.isComplete()) return false;
             try {
                 ProtocolActivation activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
                 ACTIVE_PROTOCOL.set(activation);
@@ -1498,6 +1804,7 @@ public final class MethodProbe {
                     if (CallBridgeManager.forceJvmTi(entity)) {
                         jvmTiRetried = true;
                         snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+                        if (!snapshot.isComplete()) return false;
                         activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
                         ACTIVE_PROTOCOL.set(activation);
                         invocation = invokeProtocolMethod(entity, spec);
@@ -1519,6 +1826,7 @@ public final class MethodProbe {
                                     : EcaTransformerManager.retransformHealthClass(owner, true);
                     if (reinstall.confirmed()) {
                         snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+                        if (!snapshot.isComplete()) return false;
                         activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
                         ACTIVE_PROTOCOL.set(activation);
                         invocation = invokeProtocolMethod(entity, spec);
@@ -1534,6 +1842,7 @@ public final class MethodProbe {
                         reinstall = jvmTiInstall;
                         if (jvmTiInstall.confirmed()) {
                             snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+                            if (!snapshot.isComplete()) return false;
                             activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
                             ACTIVE_PROTOCOL.set(activation);
                             invocation = invokeProtocolMethod(entity, spec);
@@ -1621,6 +1930,7 @@ public final class MethodProbe {
             for (ProtocolBridgeSpec writer : writers) {
                 if (++attempts > MAX_PROTOCOL_COMBINATIONS) return false;
                 ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
+                if (!snapshot.isComplete()) return false;
                 boolean committed = false;
                 try {
                     ProtocolActivation controlActivation = new ProtocolActivation(entity, target);
@@ -1944,19 +2254,22 @@ public final class MethodProbe {
         private final Method sam;
         private final Class<?> inputType;
         private final BoundAuxiliary auxiliary;
+        private final BoundFunctionalArgumentPlan argumentPlan;
 
-        private FunctionalWriter(Field field, Method sam, Class<?> inputType, BoundAuxiliary auxiliary) {
+        private FunctionalWriter(Field field, Method sam, Class<?> inputType, BoundAuxiliary auxiliary,
+                                 BoundFunctionalArgumentPlan argumentPlan) {
             this.field = field;
             this.sam = sam;
             this.inputType = inputType;
             this.auxiliary = auxiliary;
+            this.argumentPlan = argumentPlan;
         }
 
         @Override public boolean write(LivingEntity entity, float value) {
             try {
                 Object function = field.get(entity);
                 if (function == null) return false;
-                sam.invoke(function, samArgument(entity, value, inputType, auxiliary));
+                sam.invoke(function, samArgument(entity, function, value, inputType, auxiliary, argumentPlan));
                 return true;
             } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
         }
@@ -1974,21 +2287,23 @@ public final class MethodProbe {
         private final Method sam;
         private final Class<?> inputType;
         private final BoundAuxiliary auxiliary;
+        private final BoundFunctionalArgumentPlan argumentPlan;
 
         private VarHandleFunctionalWriter(VarHandle field, boolean isStatic, Method sam, Class<?> inputType,
-                                          BoundAuxiliary auxiliary) {
+                                          BoundAuxiliary auxiliary, BoundFunctionalArgumentPlan argumentPlan) {
             this.field = field;
             this.isStatic = isStatic;
             this.sam = sam;
             this.inputType = inputType;
             this.auxiliary = auxiliary;
+            this.argumentPlan = argumentPlan;
         }
 
         @Override public boolean write(LivingEntity entity, float value) {
             try {
                 Object function = isStatic ? field.get() : field.get(entity);
                 if (function == null) return false;
-                sam.invoke(function, samArgument(entity, value, inputType, auxiliary));
+                sam.invoke(function, samArgument(entity, function, value, inputType, auxiliary, argumentPlan));
                 return true;
             } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
         }
@@ -2180,11 +2495,62 @@ public final class MethodProbe {
         }
     }
 
+    private record BoundFunctionalArgument(int index, FunctionalArgumentKind kind, Field field,
+                                           Class<?> targetType, Object constant) {}
+
+    private record BoundFunctionalArgumentPlan(int arity, List<BoundFunctionalArgument> arguments) {}
+
+    private static BoundFunctionalArgumentPlan bindArgumentPlan(FunctionalArgumentPlan plan,
+                                                                 LivingEntity entity) {
+        if (plan == null) return null;
+        List<BoundFunctionalArgument> bound = new ArrayList<>(plan.arguments().size());
+        for (FunctionalArgument argument : plan.arguments()) {
+            Field field = null;
+            Class<?> targetType = Float.class;
+            if (argument.kind() == FunctionalArgumentKind.TARGET && argument.fieldDesc() != null) {
+                targetType = HealthDataflowAnalyzer.descriptorToClass(argument.fieldDesc());
+                if (targetType == null) return null;
+            }
+            if (argument.kind() == FunctionalArgumentKind.ENTITY_FIELD
+                    || argument.kind() == FunctionalArgumentKind.STATIC_FIELD) {
+                Class<?> owner = HealthDataflowAnalyzer.resolveRuntimeOwner(
+                        argument.declaringInternal(), entity);
+                if (owner == null) return null;
+                field = HealthDataflowAnalyzer.findFieldInHierarchy(owner, argument.fieldName());
+                if (field == null) return null;
+                try {
+                    field.setAccessible(true);
+                } catch (Throwable t) {
+                    if (t instanceof VirtualMachineError e) throw e;
+                    return null;
+                }
+            }
+            bound.add(new BoundFunctionalArgument(argument.index(), argument.kind(), field, targetType,
+                    argument.constant()));
+        }
+        return new BoundFunctionalArgumentPlan(plan.arity(), List.copyOf(bound));
+    }
+
     /* 变长 SAM 的实参必须自行装成数组：其形参本身就是 Object[]，直接传数值会按零参调用命中读取分支。
        返回类型保持 Object，确保 Method.invoke 把它当作单个形参而非实参列表展开。 */
-    private static Object samArgument(LivingEntity entity, float value, Class<?> inputType,
-                                      BoundAuxiliary auxiliary) throws IllegalAccessException {
+    private static Object samArgument(LivingEntity entity, Object function, float value, Class<?> inputType,
+                                      BoundAuxiliary auxiliary, BoundFunctionalArgumentPlan argumentPlan)
+            throws IllegalAccessException {
         if (inputType == Object[].class) {
+            if (argumentPlan != null) {
+                Object[] arguments = new Object[argumentPlan.arity()];
+                for (BoundFunctionalArgument argument : argumentPlan.arguments()) {
+                    arguments[argument.index()] = switch (argument.kind()) {
+                        case TARGET -> coerce(value, argument.targetType());
+                        case FUNCTION_SELF -> function;
+                        case ENTITY -> entity;
+                        case ENTITY_FIELD -> argument.field().get(entity);
+                        case STATIC_FIELD -> argument.field().get(null);
+                        case CONSTANT -> argument.constant();
+                    };
+                }
+                return arguments;
+            }
             if (auxiliary != null) return new Object[]{Float.valueOf(value), auxiliary.read(entity)};
             return new Object[]{Float.valueOf(value)};
         }

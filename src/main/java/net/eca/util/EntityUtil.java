@@ -11,6 +11,7 @@ import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.health.HealthLockManager;
+import net.eca.util.health.HealthWriteTransaction;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.Entity;
@@ -865,6 +866,7 @@ public class EntityUtil {
 
     public static boolean setHealth(LivingEntity entity, float expectedHealth) {
         if (entity == null) return false;
+        HealthWriteTransaction transaction = null;
         try {
             boolean client = entity.level() != null && entity.level().isClientSide;
             //客户端仅允许被同步包驱动改血(否则客户端会与服务端各自为政)
@@ -872,6 +874,11 @@ public class EntityUtil {
             //锚点可信度探测自身要写原版血量，必须先于所有通道完成，否则会污染通道的回滚快照
             EcaSetHealthManager.warmAnchorTrust(entity);
             float beforeHealth = EcaSetHealthManager.safeGetHealth(entity);
+            transaction = HealthWriteTransaction.capture(entity);
+            if (!transaction.isComplete()) {
+                transaction.rollback();
+                return false;
+            }
 
             //第一步：写原版 DATA_HEALTH_ID。若目标 getHealth 就是读这里(原版实体多数如此)，验证已通过则直接成功，
             //  避免每次都触发数据流逆向分析。Player 跳过(原版自带保护)，非 Player 走完整链。
@@ -891,6 +898,9 @@ public class EntityUtil {
                 ok = EcaSetHealthManager.applyNumericInversion(entity, expectedHealth); //数值反演(死角对象图扰动)
             }
 
+            if (ok) transaction.commit();
+            else transaction.rollback();
+
             //服务端改血成功 → 广播给追踪客户端，令自定义存储型实体客户端显示同步(客户端重跑同一条链)
             if (ok && !client) {
                 syncHealthToClients(entity, expectedHealth, beforeHealth);
@@ -904,6 +914,7 @@ public class EntityUtil {
             }
             return ok;
         } catch (Exception e) {
+            if (transaction != null) transaction.rollback();
             EcaLogger.info("setHealth threw exception entity={} expected={} msg={}",
                 entity.getClass().getName(), expectedHealth, e.getMessage());
             return false;

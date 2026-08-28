@@ -3,6 +3,7 @@ package net.eca.util.health;
 import net.eca.config.EcaConfiguration;
 import net.eca.coremod.EcaTransformerManager;
 import net.eca.coremod.LivingEntityHook;
+import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.util.EcaLogger;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.LivingEntity;
@@ -15,8 +16,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /*
@@ -29,9 +32,13 @@ public final class EcaSetHealthManager {
 
     /* ==================== 数据流主表 ==================== */
 
-    /* 数据流主表：实体类 → 2 态。成功 = 可写结构 AnalysisResult；失败 = AnalysisResult.DATA_FLOW_ANALYZER_FAILED 哨兵。
-       warmup 后台预填，setHealth 时查询；未命中现场分析并写回，失败标记后续不再重复分析。 */
+    /* 数据流主表：成功结果长期复用，失败结果只在冷却期内复用。运行期字节码捕获、类重转换和
+       延迟加载都可能令先前失败失效，故负结果不能成为整个进程期的永久结论。 */
     private static final Map<Class<?>, HealthDataflowAnalyzer.AnalysisResult> DATAFLOW_TABLE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Long> DATAFLOW_FAILURE_RETRY = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Object> DATAFLOW_ANALYSIS_LOCKS = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Integer> BYTECODE_FINGERPRINTS = new ConcurrentHashMap<>();
+    private static final long DATAFLOW_FAILURE_COOLDOWN_NANOS = 5_000_000_000L;
 
     /* 预热专用后台执行器：常驻单守护线程，承接 LoadComplete 的全量预热。
        纯分析只读，离开主线程安全。 */
@@ -70,6 +77,9 @@ public final class EcaSetHealthManager {
 
     /* 外部扫描异步分析去重：同类并发首改只提交一次后台分析任务 */
     private static final Set<Class<?>> EXTERNAL_SCAN_PENDING = ConcurrentHashMap.newKeySet();
+    private static final Map<Class<?>, CompletableFuture<HealthDataflowAnalyzer.AnalysisResult>>
+            EXTERNAL_SCAN_TASKS = new ConcurrentHashMap<>();
+    private static final long FIRST_EXTERNAL_SCAN_WAIT_MILLIS = 100L;
     private static final Set<Class<?>> TICK_SCAN_PENDING = ConcurrentHashMap.newKeySet();
     private static final Set<Class<?>> WRITER_SCAN_PENDING = ConcurrentHashMap.newKeySet();
     private static final Set<String> MAINTENANCE_SCAN_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
@@ -116,6 +126,7 @@ public final class EcaSetHealthManager {
         if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) return false;
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
+        if (!snapshot.isComplete()) return false;
         boolean success = HealthDataFlow.write(tree, target, targetHealth);
         if (!success) snapshot.restore();
         /* dataflow 写实体存储成功后，追加写实体外的 SavedData 真实权威。
@@ -175,14 +186,16 @@ public final class EcaSetHealthManager {
         Class<?> cls = target.getClass();
         HealthDataflowAnalyzer.AnalysisResult tree = HealthDataflowAnalyzer.peekExternalScanResult(cls);
         if (tree == null) {
-            submitExternalScanAnalysis(cls);
+            CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> task = submitExternalScanAnalysis(cls);
             /* 比较表达式扫描不依赖证据，与外部扫描并行预跑。两者串行时总等待是各自耗时之和，
                并行后证据到手时表达式往往已就绪，可当场建模。 */
             submitComparisonPrescan(cls);
-            return false;
+            tree = awaitFirstExternalScan(task);
+            if (tree == null) return false;
         }
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
+        if (!snapshot.isComplete()) return false;
         boolean success = HealthDataFlow.writeExternal(tree, target, targetHealth);
         if (success) return true;
         snapshot.restore();
@@ -229,6 +242,7 @@ public final class EcaSetHealthManager {
        由 applyExternalScan 在其写入失败后调用，门控与之共用。 */
     private static boolean applyEffectiveHealth(LivingEntity target, float targetHealth) {
         Class<?> cls = target.getClass();
+        if (!HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) submitMaintenanceAnalysis(cls);
         // 校验成功会清空解耦证据，故已装锚点的类必须继续放行，否则一旦成功就再也走不进本通道
         if (!hasHealthAnchor(cls) && !isHealthReadDecoupled(cls)) return false;
         HealthDataflowAnalyzer.EffectiveHealthModel model =
@@ -289,6 +303,7 @@ public final class EcaSetHealthManager {
         });
         List<Object> rollbackRoots = collectRollbackRoots(target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
+        if (!snapshot.isComplete()) return false;
         boolean success = HealthDataFlow.writeEffective(oriented, target, targetHealth);
         if (success) {
             /* 写入后的校验读的是模型自身表达式，选对选错都恒真，不能据此确认锚点。
@@ -411,6 +426,9 @@ public final class EcaSetHealthManager {
             MODEL_ANALYSIS_EXECUTOR.submit(() -> {
                 try {
                     HealthDataflowAnalyzer.resolveEffectiveHealthModel(cls, candidates);
+                    if (HealthDataflowAnalyzer.hasPartialComparison(cls)) {
+                        EFFECTIVE_MODEL_SUBMITTED.remove(cls, signature);
+                    }
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
                     EcaLogger.info("[EffectiveHealth] model analysis threw entity={} type={} msg={}",
@@ -442,8 +460,15 @@ public final class EcaSetHealthManager {
 
     /* 外部扫描在后台去重执行，完成后写入分析缓存。任务异常必须记录，
        以便区分配置关闭、分析进行中和分析失败。 */
-    private static void submitExternalScanAnalysis(Class<?> cls) {
-        if (!EXTERNAL_SCAN_PENDING.add(cls)) return;
+    private static CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> submitExternalScanAnalysis(Class<?> cls) {
+        HealthDataflowAnalyzer.AnalysisResult cached = HealthDataflowAnalyzer.peekExternalScanResult(cls);
+        if (cached != null) return CompletableFuture.completedFuture(cached);
+        CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> existing = EXTERNAL_SCAN_TASKS.get(cls);
+        if (existing != null) return existing;
+        CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> task = new CompletableFuture<>();
+        existing = EXTERNAL_SCAN_TASKS.putIfAbsent(cls, task);
+        if (existing != null) return existing;
+        EXTERNAL_SCAN_PENDING.add(cls);
         if (EXTERNAL_SCAN_SUBMIT_DUMPED.add(cls.getName())) {
             EcaLogger.info("[ExternalScan] analysis submitted entity={}", cls.getName());
         }
@@ -454,20 +479,43 @@ public final class EcaSetHealthManager {
                     if (EXTERNAL_SCAN_START_DUMPED.add(cls.getName())) {
                         EcaLogger.info("[ExternalScan] analysis started entity={}", cls.getName());
                     }
-                    HealthDataflowAnalyzer.resolveExternalScanResult(cls);
+                    HealthDataflowAnalyzer.AnalysisResult result =
+                            HealthDataflowAnalyzer.resolveExternalScanResult(cls);
+                    task.complete(result);
                     submitMaintenanceAnalysis(cls);
                 } catch (Throwable t) {
                     dumpExternalScanFailure(cls, t);
+                    task.completeExceptionally(t);
                     if (t instanceof VirtualMachineError e) throw e;
                 } finally {
                     EXTERNAL_SCAN_PENDING.remove(cls);
+                    EXTERNAL_SCAN_TASKS.remove(cls, task);
                 }
             });
         } catch (Throwable t) {
             // 提交被拒时必须让出占位，否则该类此后永远跳过外部扫描
             EXTERNAL_SCAN_PENDING.remove(cls);
+            EXTERNAL_SCAN_TASKS.remove(cls, task);
+            task.completeExceptionally(t);
             EcaLogger.info("[ExternalScan] analysis submit rejected entity={} type={} msg={}",
                     cls.getName(), t.getClass().getName(), t.getMessage());
+        }
+        return task;
+    }
+
+    /* 语义入口通常远小于维护扫描。首次调用只为这一段提供严格上限的等待窗口，
+       使“尚在分析”不再必然表现为失败，同时不让大型类阻塞服务器线程。 */
+    private static HealthDataflowAnalyzer.AnalysisResult awaitFirstExternalScan(
+            CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> task) {
+        if (task == null) return null;
+        try {
+            return task.get(FIRST_EXTERNAL_SCAN_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
         }
     }
 
@@ -596,6 +644,7 @@ public final class EcaSetHealthManager {
         }
         if (writer == null) return false;
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
+        if (!snapshot.isComplete()) return false;
         // 带死亡语义：target≤0 是斩杀意图，writer 会把血量 clamp 到≥0(实际写成 0)，故实读≤0 即成功，
         // 不能拿负 target 做容差匹配(实读被 clamp 到 0，与负目标的差恒超容差，斩杀永远误判失败)。
         // 快速改血时存储写入/读值可能瞬时偏差，重试几次再判失败，避免一次偏差就丢缓存进冷却。
@@ -634,11 +683,13 @@ public final class EcaSetHealthManager {
         if (EcaConfiguration.getForceCompatibilityModeSafely()
                 || !EcaConfiguration.getAttackEnableRadicalLogicSafely()
                 || !EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) return;
-        if (METHOD_BRIDGE_INSTALLED.add(cls)) MethodProbe.installBridge(cls);
+        if (METHOD_BRIDGE_INSTALLED.add(cls) && !MethodProbe.installBridge(cls)) {
+            METHOD_BRIDGE_INSTALLED.remove(cls);
+        }
     }
 
-    /* 前置通道无法处理不可逆解码时，从无法反演的运行期对象继续搜索可写数值单元。
-       激进逻辑或数值反演关闭，以及没有可用对象根时，直接返回 false。 */
+    /* 前置通道无法处理不可逆解码时，从数据流死端与实体运行时对象图继续搜索可写数值单元。
+       静态分析失败正是本通道需要承接的情况，不能再作为跳过条件。 */
     public static boolean applyNumericInversion(LivingEntity target, float targetHealth) {
         if (target == null) return false;
         Class<?> cls = target.getClass();
@@ -649,16 +700,12 @@ public final class EcaSetHealthManager {
             return false;
         }
         HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(cls);
-        if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
-            dumpNumericInversionSkip(cls, "dataflow tree unavailable (no writable structure to frame dead-ends)");
-            return false;
+        List<Object> roots = new ArrayList<>();
+        if (tree != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
+            roots.addAll(HealthDataflowAnalyzer.collectDeadEndRoots(
+                    tree.returnExpr, HealthDataflowAnalyzer.newContext(target)));
         }
-        List<Object> roots = HealthDataflowAnalyzer.collectDeadEndRoots(
-                tree.returnExpr, HealthDataflowAnalyzer.newContext(target));
-        if (roots.isEmpty()) {
-            dumpNumericInversionSkip(cls, "no dead-end roots (nothing non-invertible to descend into)");
-            return false;
-        }
+        if (!roots.contains(target)) roots.add(target);
         // 进入搜索：命中/失败结局由 NumericInverter 自身记录
         return NumericInverter.search(target, targetHealth, roots);
     }
@@ -686,7 +733,33 @@ public final class EcaSetHealthManager {
     }
 
     private static HealthDataflowAnalyzer.AnalysisResult resolveTree(Class<?> cls) {
-        return DATAFLOW_TABLE.computeIfAbsent(cls, EcaSetHealthManager::analyzeForTable);
+        HealthDataflowAnalyzer.AnalysisResult cached = DATAFLOW_TABLE.get(cls);
+        if (cached != null && cached != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
+            return cached;
+        }
+        long now = System.nanoTime();
+        Long retryAt = DATAFLOW_FAILURE_RETRY.get(cls);
+        if (cached == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
+                && retryAt != null && now - retryAt < 0L) return cached;
+        Object lock = DATAFLOW_ANALYSIS_LOCKS.computeIfAbsent(cls, ignored -> new Object());
+        synchronized (lock) {
+            cached = DATAFLOW_TABLE.get(cls);
+            retryAt = DATAFLOW_FAILURE_RETRY.get(cls);
+            now = System.nanoTime();
+            if (cached != null && cached != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
+                return cached;
+            }
+            if (cached == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
+                    && retryAt != null && now - retryAt < 0L) return cached;
+            HealthDataflowAnalyzer.AnalysisResult analyzed = analyzeForTable(cls);
+            DATAFLOW_TABLE.put(cls, analyzed);
+            if (analyzed == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
+                DATAFLOW_FAILURE_RETRY.put(cls, now + DATAFLOW_FAILURE_COOLDOWN_NANOS);
+            } else {
+                DATAFLOW_FAILURE_RETRY.remove(cls);
+            }
+            return analyzed;
+        }
     }
 
     /* 分析并归一化为 2 态：可写结构(REAL_HEALTH 或 NOT_REAL_HEALTH 带可写源) / DATA_FLOW_ANALYZER_FAILED。
@@ -907,7 +980,47 @@ public final class EcaSetHealthManager {
 
     /* 探测本身要写原版血量，混在通道事务里会污染快照，故须在任何写入之前先把结论预热进缓存。 */
     public static void warmAnchorTrust(LivingEntity target) {
-        if (target != null) isAnchorTrustworthy(target);
+        if (target == null) return;
+        ensureFreshClassState(target.getClass());
+        isAnchorTrustworthy(target);
+    }
+
+    /* 捕获器晚于实体加载或类被重新转换时，清除此前基于旧字节码形成的正负结论。 */
+    private static void ensureFreshClassState(Class<?> cls) {
+        int fingerprint = RuntimeBytecodeProvider.fingerprint(cls);
+        Integer previous = BYTECODE_FINGERPRINTS.putIfAbsent(cls, fingerprint);
+        if (previous == null || previous == fingerprint) return;
+        BYTECODE_FINGERPRINTS.put(cls, fingerprint);
+        invalidateClassState(cls);
+        EcaLogger.info("[HealthDataflow] bytecode changed entity={} old={} new={} caches invalidated",
+                cls.getName(), previous, fingerprint);
+    }
+
+    private static void invalidateClassState(Class<?> cls) {
+        DATAFLOW_TABLE.remove(cls);
+        DATAFLOW_FAILURE_RETRY.remove(cls);
+        DATAFLOW_ANALYSIS_LOCKS.remove(cls);
+        CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> task = EXTERNAL_SCAN_TASKS.remove(cls);
+        if (task != null) task.cancel(false);
+        EXTERNAL_SCAN_PENDING.remove(cls);
+        TICK_SCAN_PENDING.remove(cls);
+        WRITER_SCAN_PENDING.remove(cls);
+        METHOD_BRIDGE_INSTALLED.remove(cls);
+        DIRECT_PROBE_RETRY_LEGACY.remove(cls);
+        DIRECT_WRITER_LEGACY.remove(cls);
+        DIRECT_PROBE_RETRY_EXTENDED.remove(cls);
+        DIRECT_WRITER_EXTENDED.remove(cls);
+        ANCHOR_REFLECTS_WRITES.remove(cls);
+        ANCHOR_OBSERVED.remove(cls);
+        PENDING_EFFECTIVE_CONFIRM.remove(cls);
+        MIRROR_REDIRECTED.remove(cls);
+        UNOBSERVED_WRITES.remove(cls);
+        JOIN_PREWARM_SUBMITTED.remove(cls);
+        COMPARISON_PRESCAN_SUBMITTED.remove(cls);
+        EFFECTIVE_MODEL_SUBMITTED.remove(cls);
+        EXTERNAL_AUTHORITY_WRITTEN.remove(cls);
+        HealthDataflowAnalyzer.invalidateClass(cls);
+        MethodProbe.clearAnalysisCaches();
     }
 
     /* 观测到锚点随两个不同写入分别读回对应值时提升为可信。这比原版字段探测强：
@@ -1093,11 +1206,15 @@ public final class EcaSetHealthManager {
     /* 服务器停止时清除所有缓存与状态，确保热重载后从干净状态开始。 */
     public static void clear() {
         DATAFLOW_TABLE.clear();
+        DATAFLOW_FAILURE_RETRY.clear();
+        DATAFLOW_ANALYSIS_LOCKS.clear();
+        BYTECODE_FINGERPRINTS.clear();
         EXTERNAL_SCAN_PENDING.clear();
+        EXTERNAL_SCAN_TASKS.clear();
         TICK_SCAN_PENDING.clear();
         WRITER_SCAN_PENDING.clear();
         MAINTENANCE_SCAN_FAILURE_DUMPED.clear();
-        HealthDataflowAnalyzer.clearMaintenancePlans();
+        HealthDataflowAnalyzer.clearAnalysisCaches();
         EXTERNAL_SCAN_SUBMIT_DUMPED.clear();
         EXTERNAL_SCAN_START_DUMPED.clear();
         EXTERNAL_SCAN_FAILURE_DUMPED.clear();
@@ -1124,5 +1241,6 @@ public final class EcaSetHealthManager {
         EXTERNAL_AUTHORITY_WRITTEN.clear();
         EXTERNAL_MIRROR_SUPPRESSED_DUMPED.clear();
         ExternalMirrorWriter.clear();
+        MethodProbe.clearAnalysisCaches();
     }
 }

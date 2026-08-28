@@ -24,6 +24,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandleInfo;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.lang.ref.WeakReference;
 import java.lang.ref.SoftReference;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
@@ -31,6 +32,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -84,6 +86,7 @@ public final class HealthDataflowAnalyzer {
     private static final Set<Class<?>> MAINTENANCE_SCAN_DIAG_DUMPED = ConcurrentHashMap.newKeySet();
     /* 单个扫描入口抛出的诊断去重(每类每入口一次) */
     private static final Set<String> EXTERNAL_ENTRY_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
+    private static final Map<String, WeakReference<Class<?>>> RUNTIME_TYPES = new ConcurrentHashMap<>();
 
     private HealthDataflowAnalyzer() {}
 
@@ -243,6 +246,58 @@ public final class HealthDataflowAnalyzer {
         MAINTENANCE_SINKS_CACHE.clear();
         MAINTENANCE_MIRROR_CACHE.clear();
         MAINTENANCE_SCAN_DIAG_DUMPED.clear();
+    }
+
+    /* 字节码版本变化后使该类派生结论失效。方法级缓存可能内联该类，故清空全局方法判据；
+       ClassNode 使用 epoch 令所有分析线程在下一次访问时自行丢弃线程私有旧节点。 */
+    static void invalidateClass(Class<?> entityClass) {
+        if (entityClass == null) return;
+        EXTERNAL_SCAN_CACHE.remove(entityClass);
+        MAINTENANCE_PLAN_CACHE.remove(entityClass);
+        MAINTENANCE_PARTS_CACHE.remove(entityClass);
+        MAINTENANCE_SINKS_CACHE.remove(entityClass);
+        MAINTENANCE_MIRROR_CACHE.remove(entityClass);
+        EXTERNAL_SCAN_DIAG_DUMPED.remove(entityClass);
+        MAINTENANCE_SCAN_DIAG_DUMPED.remove(entityClass);
+        DEATH_GATE_CACHE.remove(entityClass);
+        EFFECTIVE_MODEL_CACHE.remove(entityClass);
+        PROTOCOL_TARGET_MODEL_CACHE.remove(entityClass);
+        EFFECTIVE_MODEL_MISSES.remove(entityClass);
+        EFFECTIVE_MODEL_REJECTED.remove(entityClass);
+        PRIORITY_COMPARISON_CACHE.remove(entityClass);
+        FULL_COMPARISON_CACHE.remove(entityClass);
+        PRIORITY_COMPARISON_PARTIAL.remove(entityClass);
+        FULL_COMPARISON_PARTIAL.remove(entityClass);
+        AUTHORITY_WRITER_SITES.clear();
+        MAY_WRITE_STATE_CACHE.clear();
+        DISCOVERED_CODEC_INVERTERS.clear();
+        CODEC_DISCOVERY_FAILED.clear();
+        CLASS_NODE_CACHE_EPOCH.incrementAndGet();
+    }
+
+    /* 生命周期清理覆盖所有按类或字节码派生的状态，避免集成服务器重启后复用旧结论。 */
+    static void clearAnalysisCaches() {
+        EXTERNAL_SCAN_CACHE.clear();
+        clearMaintenancePlans();
+        EXTERNAL_SCAN_DIAG_DUMPED.clear();
+        EXTERNAL_ENTRY_FAILURE_DUMPED.clear();
+        EXTERNAL_EVAL_DIAG.clear();
+        MapEntrySource.DUCK_ACCESSORS.clear();
+        DISCOVERED_CODEC_INVERTERS.clear();
+        CODEC_DISCOVERY_FAILED.clear();
+        AUTHORITY_WRITER_SITES.clear();
+        DEATH_GATE_CACHE.clear();
+        EFFECTIVE_MODEL_CACHE.clear();
+        PROTOCOL_TARGET_MODEL_CACHE.clear();
+        EFFECTIVE_MODEL_MISSES.clear();
+        EFFECTIVE_MODEL_REJECTED.clear();
+        PRIORITY_COMPARISON_CACHE.clear();
+        FULL_COMPARISON_CACHE.clear();
+        PRIORITY_COMPARISON_PARTIAL.clear();
+        FULL_COMPARISON_PARTIAL.clear();
+        MAY_WRITE_STATE_CACHE.clear();
+        RUNTIME_TYPES.clear();
+        CLASS_NODE_CACHE_EPOCH.incrementAndGet();
     }
 
     public static boolean verifyExternalDataflow(Expr root, LivingEntity entity, float expected, Source sink) {
@@ -2302,12 +2357,12 @@ public final class HealthDataflowAnalyzer {
                 parts.tickWrites = result.writes();
                 parts.tickCost = cost;
                 parts.tickRunning = false;
-                parts.tickResolved = true;
+                parts.tickResolved = !result.timedOut();
             } else {
                 parts.authorityWrites = result.writes();
                 parts.authorityCost = cost;
                 parts.authorityRunning = false;
-                parts.authorityResolved = true;
+                parts.authorityResolved = !result.timedOut();
             }
             List<StoreWrite> combined = mergeMaintenanceWrites(parts.tickWrites, parts.authorityWrites);
             MaintenancePlan plan = buildMaintenancePlan(semantic.observedAuthorities(), combined);
@@ -3130,7 +3185,7 @@ public final class HealthDataflowAnalyzer {
     /* 比较指令事实：跳转成立的条件为 operand <predicate> threshold。
        predicate 取 IFEQ..IFLE 形式的操作码，0 表示方向不可判定(比较后未紧跟条件跳转，或阈值非常数)。
        只保留操作数会丢失阈值与方向，而血量的正负极性正是由"与零比较"这一事实支撑的。 */
-    public record ComparisonFact(Expr operand, int predicate, float threshold) {}
+    public record ComparisonFact(Expr operand, int predicate, float threshold, boolean mortalityEntry) {}
 
     /* readExpr 为含 storage 的有效血量表达式；storage 是其中真正可写的存储源。
        predicate/threshold 承自 readExpr 所在的比较指令，用于判定血量的正负极性。 */
@@ -3213,7 +3268,7 @@ public final class HealthDataflowAnalyzer {
             EcaLogger.info("[EffectiveHealth] model entity={} storage={} readExpr={}",
                     entityClass.getName(), model.storage().label,
                     HealthDataFlow.expressionSummary(model.readExpr()));
-        } else if (!cachedOnly) {
+        } else if (!cachedOnly && !hasPartialComparison(entityClass)) {
             EFFECTIVE_MODEL_MISSES.put(entityClass, signature);
             EcaLogger.info("[EffectiveHealth] no model entity={} candidates={} signature={}",
                     entityClass.getName(), candidates.size(), signature);
@@ -3241,14 +3296,22 @@ public final class HealthDataflowAnalyzer {
        扫描是本流程中最慢的部分，缓存后运行期只需重新匹配证据。 */
     private static final Map<Class<?>, List<ComparisonFact>> PRIORITY_COMPARISON_CACHE = new ConcurrentHashMap<>();
     private static final Map<Class<?>, List<ComparisonFact>> FULL_COMPARISON_CACHE = new ConcurrentHashMap<>();
+    private static final Set<Class<?>> PRIORITY_COMPARISON_PARTIAL = ConcurrentHashMap.newKeySet();
+    private static final Set<Class<?>> FULL_COMPARISON_PARTIAL = ConcurrentHashMap.newKeySet();
 
     private static List<ComparisonFact> comparisonsOf(Class<?> entityClass, boolean priorityOnly) {
         Map<Class<?>, List<ComparisonFact>> cache = priorityOnly ? PRIORITY_COMPARISON_CACHE : FULL_COMPARISON_CACHE;
         List<ComparisonFact> cached = cache.get(entityClass);
         if (cached != null) return cached;
         List<ComparisonFact> scanned = collectClassComparisons(entityClass, priorityOnly);
-        cache.put(entityClass, scanned);
+        Set<Class<?>> partial = priorityOnly ? PRIORITY_COMPARISON_PARTIAL : FULL_COMPARISON_PARTIAL;
+        if (!partial.contains(entityClass)) cache.put(entityClass, scanned);
         return scanned;
+    }
+
+    static boolean hasPartialComparison(Class<?> entityClass) {
+        return entityClass != null && (PRIORITY_COMPARISON_PARTIAL.contains(entityClass)
+                || FULL_COMPARISON_PARTIAL.contains(entityClass));
     }
 
     /* 预热期只填充优先段比较表达式缓存。此时没有写入记录，无法确立模型，
@@ -3281,7 +3344,7 @@ public final class HealthDataflowAnalyzer {
             Expr expr = fact.operand();
             /* 候选由外部记录和表达式内提取的存储源共同组成。
                直接提取可使模型分析不依赖其他通道的完成时间。 */
-            if (!isHealthShapedExpr(expr)) continue;
+            if (!isFloatingPointExpr(expr)) continue;
             /* 候选只取有写入记录的存储。校验读的就是本模型的表达式，若存储也从同一表达式中提取，
                写入与校验会构成闭环而必然通过；写入记录来自实际写入尝试，与表达式无关，可打破该闭环。 */
             for (Source candidate : evidence) {
@@ -3290,7 +3353,11 @@ public final class HealthDataflowAnalyzer {
                 // 表达式即存储本身时两者同向，由原通道处理，无需模型
                 if (sameSource(expr, candidate) || !containsSink(expr, candidate)) continue;
                 Expr refined = normalizeEffectiveChoices(expr, candidate);
-                if (refined == null || !hasIndependentBound(refined, candidate)) {
+                boolean directDecodedHealth = fact.mortalityEntry()
+                        && Float.floatToRawIntBits(fact.threshold()) == Float.floatToRawIntBits(0.0f)
+                        && isDirectDecodedHealth(refined, candidate);
+                if (refined == null || (!containsArithmeticOp(refined) && !directDecodedHealth)
+                        || (!hasIndependentBound(refined, candidate) && !directDecodedHealth)) {
                     rejectedForLiteralBound++;
                     continue;
                 }
@@ -3431,12 +3498,6 @@ public final class HealthDataflowAnalyzer {
         return (referencesMaxHealth(expr) ? 100 : 0) - exprNodeCount(expr);
     }
 
-    /* 血量由存储经算术运算得出，因此表达式须为浮点算术运算的结果。
-       布尔判定、整数取值、集合判空等表达式虽然也含存储，但不表示血量。 */
-    private static boolean isHealthShapedExpr(Expr expr) {
-        return isFloatingPointExpr(expr) && containsArithmeticOp(expr);
-    }
-
     private static boolean isFloatingPointExpr(Expr expr) {
         if (expr instanceof Op op) return isFloatingPointOpcode(op.opcode());
         if (expr instanceof Call call) {
@@ -3538,6 +3599,16 @@ public final class HealthDataflowAnalyzer {
         return referencesMaxHealth(expr) || referencesSourceOtherThan(expr, storage);
     }
 
+    /* 标准生死入口直接把 decode(storage) 与零比较时，解码结果本身就是剩余血量，
+       不需要人为制造“上限减计数”结构；只允许单一存储依赖，避免放宽到配额组合式。 */
+    private static boolean isDirectDecodedHealth(Expr expr, Source storage) {
+        if (!(expr instanceof Call call) || dependsOnDamageInput(expr)) return false;
+        int sort = Type.getReturnType(call.desc()).getSort();
+        if (sort != Type.FLOAT && sort != Type.DOUBLE) return false;
+        Set<Source> sources = collectSources(expr);
+        return sources.size() == 1 && sameSource(sources.iterator().next(), storage);
+    }
+
     private static boolean referencesSourceOtherThan(Expr expr, Source storage) {
         for (Source source : collectSources(expr)) {
             if (!sameSource(source, storage)) return true;
@@ -3629,9 +3700,10 @@ public final class HealthDataflowAnalyzer {
                     TaintValue[] seed = seedMethodInputs(method.desc, false);
                     TaintInterpreter interpreter = new TaintInterpreter(ctx, 0, ownerInternal, method, seed);
                     Frame<TaintValue>[] frames = new Analyzer<>(interpreter).analyze(ownerInternal, method);
+                    boolean mortalityEntry = isMortalityEntry(method);
                     int index = 0;
                     for (AbstractInsnNode insn : method.instructions) {
-                        collectComparisonFacts(out, frames[index++], insn, dropped);
+                        collectComparisonFacts(out, frames[index++], insn, dropped, mortalityEntry);
                     }
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
@@ -3670,7 +3742,22 @@ public final class HealthDataflowAnalyzer {
             EcaLogger.info("[EffectiveHealth]   dropped unknown operands entity={} stage={} {}",
                     entityClass.getName(), priorityOnly ? "priority" : "full", dropped);
         }
+        Set<Class<?>> partial = priorityOnly ? PRIORITY_COMPARISON_PARTIAL : FULL_COMPARISON_PARTIAL;
+        if (timedOut) partial.add(entityClass);
+        else partial.remove(entityClass);
         return out;
+    }
+
+    private static boolean isMortalityEntry(MethodNode method) {
+        if (method == null) return false;
+        return method.desc.equals(IS_ALIVE.desc())
+                && (method.name.equals(IS_ALIVE.srg()) || method.name.equals(IS_ALIVE.mcp()))
+                || method.desc.equals(IS_DEAD_OR_DYING.desc())
+                && (method.name.equals(IS_DEAD_OR_DYING.srg()) || method.name.equals(IS_DEAD_OR_DYING.mcp()))
+                || method.desc.equals(HURT.desc())
+                && (method.name.equals(HURT.srg()) || method.name.equals(HURT.mcp()))
+                || method.desc.equals(ACTUALLY_HURT.desc())
+                && (method.name.equals(ACTUALLY_HURT.srg()) || method.name.equals(ACTUALLY_HURT.mcp()));
     }
 
     private static final int COMPARISON_FAILURE_LIMIT = 8;
@@ -4392,13 +4479,14 @@ public final class HealthDataflowAnalyzer {
 
     private static void collectComparisonFacts(List<ComparisonFact> facts, Frame<TaintValue> frame,
                                                AbstractInsnNode insn) {
-        collectComparisonFacts(facts, frame, insn, null);
+        collectComparisonFacts(facts, frame, insn, null, false);
     }
 
     /* dropped 非空时统计被丢弃的 Unknown 操作数来源：坍缩原因决定该调哪个预算，
        "有多少比较事实丢了"和"为什么丢"是两件事，只有后者能指导修改。 */
     private static void collectComparisonFacts(List<ComparisonFact> facts, Frame<TaintValue> frame,
-                                               AbstractInsnNode insn, Map<String, Integer> dropped) {
+                                               AbstractInsnNode insn, Map<String, Integer> dropped,
+                                               boolean mortalityEntry) {
         if (frame == null || insn == null) return;
         int opcode = insn.getOpcode();
         boolean numericCompare = opcode == Opcodes.FCMPL || opcode == Opcodes.FCMPG
@@ -4409,12 +4497,13 @@ public final class HealthDataflowAnalyzer {
             int predicate = numericCompare ? predicateAfterCompare(insn) : directPredicate(opcode);
             Expr left = frame.getStack(frame.getStackSize() - 2).expr;
             Expr right = frame.getStack(frame.getStackSize() - 1).expr;
-            addComparisonFact(facts, left, right, predicate, dropped);
-            addComparisonFact(facts, right, left, mirrorPredicate(predicate), dropped);
+            addComparisonFact(facts, left, right, predicate, dropped, mortalityEntry);
+            addComparisonFact(facts, right, left, mirrorPredicate(predicate), dropped, mortalityEntry);
             return;
         }
         if (opcode >= Opcodes.IFEQ && opcode <= Opcodes.IFLE && frame.getStackSize() >= 1) {
-            addComparisonFact(facts, frame.getStack(frame.getStackSize() - 1).expr, null, opcode, dropped);
+            addComparisonFact(facts, frame.getStack(frame.getStackSize() - 1).expr, null, opcode,
+                    dropped, mortalityEntry);
         }
     }
 
@@ -4450,7 +4539,8 @@ public final class HealthDataflowAnalyzer {
     /* 只有与常数比较的操作数才是候选：阈值未知时无法判定血量极性，此时记录事实但不带方向。
        counterpart 为 null 表示单操作数条件跳转，阈值即 0。 */
     private static void addComparisonFact(List<ComparisonFact> facts, Expr candidate, Expr counterpart,
-                                          int predicate, Map<String, Integer> dropped) {
+                                           int predicate, Map<String, Integer> dropped,
+                                           boolean mortalityEntry) {
         if (candidate instanceof UnknownExpr unknown) {
             if (dropped != null) dropped.merge(unknown.provenance(), 1, Integer::sum);
             return;
@@ -4471,7 +4561,7 @@ public final class HealthDataflowAnalyzer {
                在结构上与宿主自定义存储无法区分。含自有状态的事实整条丢弃，而非只剥离该源——
                剥离会留下一个缺了操作数的算式，求值必得 NaN。 */
             if (containsEcaOwnedSource(expr)) continue;
-            ComparisonFact fact = new ComparisonFact(expr, resolved, threshold);
+            ComparisonFact fact = new ComparisonFact(expr, resolved, threshold, mortalityEntry);
             if (!facts.contains(fact)) facts.add(fact);
         }
     }
@@ -4803,17 +4893,35 @@ public final class HealthDataflowAnalyzer {
        值用软引用并限量淘汰，避免常驻分析线程持续累积展开后的 ClassNode。
        只服务于只读分析路径；ConstOverride 与 HeadBridge 注入会改指令，必须各自重新解析。 */
     private static final int CLASS_NODE_CACHE_LIMIT = 128;
-    private static final ThreadLocal<LinkedHashMap<Class<?>, SoftReference<ClassNode>>> CLASS_NODE_CACHE =
-            ThreadLocal.withInitial(() -> new LinkedHashMap<>(32, 0.75f, true) {
-                @Override protected boolean removeEldestEntry(Map.Entry<Class<?>, SoftReference<ClassNode>> eldest) {
-                    return size() > CLASS_NODE_CACHE_LIMIT;
-                }
-            });
+    private static final AtomicLong CLASS_NODE_CACHE_EPOCH = new AtomicLong();
+
+    private static final class ClassNodeCache {
+        private long epoch = CLASS_NODE_CACHE_EPOCH.get();
+        private final LinkedHashMap<Class<?>, SoftReference<ClassNode>> nodes =
+                new LinkedHashMap<>(32, 0.75f, true) {
+                    @Override protected boolean removeEldestEntry(
+                            Map.Entry<Class<?>, SoftReference<ClassNode>> eldest) {
+                        return size() > CLASS_NODE_CACHE_LIMIT;
+                    }
+                };
+
+        private LinkedHashMap<Class<?>, SoftReference<ClassNode>> current() {
+            long currentEpoch = CLASS_NODE_CACHE_EPOCH.get();
+            if (epoch != currentEpoch) {
+                nodes.clear();
+                epoch = currentEpoch;
+            }
+            return nodes;
+        }
+    }
+
+    private static final ThreadLocal<ClassNodeCache> CLASS_NODE_CACHE =
+            ThreadLocal.withInitial(ClassNodeCache::new);
 
     /* 取该类以 EXPAND_FRAMES 解析出的 ClassNode；调用方只读，不得修改返回的节点。 */
     private static ClassNode classNode(Class<?> clazz) {
         if (clazz == null) return null;
-        LinkedHashMap<Class<?>, SoftReference<ClassNode>> cache = CLASS_NODE_CACHE.get();
+        LinkedHashMap<Class<?>, SoftReference<ClassNode>> cache = CLASS_NODE_CACHE.get().current();
         SoftReference<ClassNode> cached = cache.get(clazz);
         ClassNode node = cached == null ? null : cached.get();
         if (node != null) return node;
@@ -4839,17 +4947,20 @@ public final class HealthDataflowAnalyzer {
     private static String internalName(Class<?> clazz) {
         String n = clazz.getName().replace('.', '/');
         int hidden = n.indexOf("/0x");
-        if (hidden < 0) return n;
-        String stripped = n.substring(0, hidden);
-        if (stripped.indexOf('/') < 0) {                 // 丢了包路径，用超类包补全
-            Class<?> sup = clazz.getSuperclass();
-            if (sup != null) {
-                String supInternal = sup.getName().replace('.', '/');
-                int lastSlash = supInternal.lastIndexOf('/');
-                if (lastSlash > 0) stripped = supInternal.substring(0, lastSlash + 1) + stripped;
+        String resolved = n;
+        if (hidden >= 0) {
+            resolved = n.substring(0, hidden);
+            if (resolved.indexOf('/') < 0) {                 // 丢了包路径，用超类包补全
+                Class<?> sup = clazz.getSuperclass();
+                if (sup != null) {
+                    String supInternal = sup.getName().replace('.', '/');
+                    int lastSlash = supInternal.lastIndexOf('/');
+                    if (lastSlash > 0) resolved = supInternal.substring(0, lastSlash + 1) + resolved;
+                }
             }
         }
-        return stripped;
+        RUNTIME_TYPES.put(resolved, new WeakReference<>(clazz));
+        return resolved;
     }
 
     private static final class AnalysisCtx {
@@ -5939,6 +6050,12 @@ public final class HealthDataflowAnalyzer {
 
     //从内部名加载类：依次尝试上下文类加载器、系统类加载器、本类加载器，确保模组类能被定位
     static Class<?> loadClass(String internalName) {
+        WeakReference<Class<?>> runtimeReference = RUNTIME_TYPES.get(internalName);
+        if (runtimeReference != null) {
+            Class<?> runtimeType = runtimeReference.get();
+            if (runtimeType != null) return runtimeType;
+            RUNTIME_TYPES.remove(internalName, runtimeReference);
+        }
         String className = internalName.replace('/', '.');
         Throwable last = null;
         for (ClassLoader cl : new ClassLoader[]{
@@ -5955,6 +6072,32 @@ public final class HealthDataflowAnalyzer {
         //终极回退：不指定类加载器(使用调用类的加载器)
         try { return Class.forName(className); }
         catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; }
+        return null;
+    }
+
+    /* 字节码 owner 与运行时 receiver 分开解析。隐藏类共享模板内部名，但反射必须绑定真实 Class；
+       普通类同样优先沿 receiver 层次定位，避免同名类加载器分裂。 */
+    static Class<?> resolveRuntimeOwner(String ownerInternal, Object receiver) {
+        if (ownerInternal == null) return null;
+        if (receiver != null) {
+            for (Class<?> current = receiver.getClass(); current != null && current != Object.class;
+                 current = current.getSuperclass()) {
+                if (internalName(current).equals(ownerInternal)) return current;
+                for (Class<?> interfaceType : current.getInterfaces()) {
+                    Class<?> matched = resolveRuntimeInterface(ownerInternal, interfaceType);
+                    if (matched != null) return matched;
+                }
+            }
+        }
+        return loadClass(ownerInternal);
+    }
+
+    private static Class<?> resolveRuntimeInterface(String ownerInternal, Class<?> interfaceType) {
+        if (internalName(interfaceType).equals(ownerInternal)) return interfaceType;
+        for (Class<?> parent : interfaceType.getInterfaces()) {
+            Class<?> matched = resolveRuntimeInterface(ownerInternal, parent);
+            if (matched != null) return matched;
+        }
         return null;
     }
 

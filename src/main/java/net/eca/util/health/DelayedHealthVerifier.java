@@ -97,13 +97,14 @@ public final class DelayedHealthVerifier {
     }
 
     /* 复查一条到期记录，并据结论裁定第三阶段本次的外部联写：留住则提交，仍被回滚则撤销。
-       无从判断时一律提交——记录必须销掉，否则快照会一直挂着。 */
+       无从判断时撤销推测性外部写入，但不据此否定已经完成的实体内写入。 */
     private static void check(int entityId, Pending pending) {
         LivingEntity entity = pending.entity().get();
         Ticket ticket = pending.ticket();
-        // 已卸载或已移除的实体无从复查；目标为死亡时实体消失本身就是写入生效
+        // 目标为死亡时实体消失本身就是写入生效；正血目标无法据移除确认
         if (entity == null || entity.isRemoved()) {
-            ExternalMirrorWriter.commit(ticket);
+            if (pending.target() <= 0.0f) ExternalMirrorWriter.commit(ticket);
+            else ExternalMirrorWriter.revert(ticket);
             return;
         }
         if (entity.getId() != entityId || !entity.getUUID().equals(ticket.entityUuid())) {
@@ -113,12 +114,12 @@ public final class DelayedHealthVerifier {
         /* 锚点已被证明与真实存储解耦时，它读回什么都不构成"被改回去了"的证据。
            此处据它判失败会把诱饵型目标上的每次成功都揭成假成功，并误启外部镜像。 */
         if (EcaSetHealthManager.isAnchorUntrusted(entity)) {
-            ExternalMirrorWriter.commit(ticket);
+            ExternalMirrorWriter.revert(ticket);
             return;
         }
         float actual = EcaSetHealthManager.readHealthAnchor(entity);
         if (!Float.isFinite(actual)) {
-            ExternalMirrorWriter.commit(ticket);
+            ExternalMirrorWriter.revert(ticket);
             return;
         }
         /* 只认向上偏离：血量自行回升是回滚与强制回血的特征。向下偏离可能只是这一 tick 内的
