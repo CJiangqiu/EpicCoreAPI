@@ -156,20 +156,31 @@ public final class BossShowEditorScreen extends Screen {
             }
             case MENU_EDIT -> {
                 x = menuPositions[MENU_EDIT];
-                dropdownOption(x, y, 142, "gui.eca.bossshow.editor.menu.undo", this::undo);
-                dropdownOption(x, y + MENU_HEIGHT, 142, "gui.eca.bossshow.editor.menu.redo", this::redo);
-                dropdownOption(x, y + MENU_HEIGHT * 2, 142, "gui.eca.bossshow.editor.menu.set_in", this::setIn);
-                dropdownOption(x, y + MENU_HEIGHT * 3, 142, "gui.eca.bossshow.editor.menu.set_out", this::setOut);
-                dropdownOption(x, y + MENU_HEIGHT * 4, 142, "gui.eca.bossshow.editor.menu.cut", () -> {
-                    if (BossShowEditorState.cutRange()) syncFromState(); closeDropdown();
-                });
-                dropdownOption(x, y + MENU_HEIGHT * 5, 142, "gui.eca.bossshow.editor.menu.copy", () -> {
+                dropdownOption(x, y, 160, "gui.eca.bossshow.editor.menu.undo", this::undo);
+                dropdownOption(x, y + MENU_HEIGHT, 160, "gui.eca.bossshow.editor.menu.redo", this::redo);
+                dropdownOption(x, y + MENU_HEIGHT * 2, 160, "gui.eca.bossshow.editor.menu.set_in", this::setIn);
+                dropdownOption(x, y + MENU_HEIGHT * 3, 160, "gui.eca.bossshow.editor.menu.set_out", this::setOut);
+                dropdownOption(x, y + MENU_HEIGHT * 4, 160, "gui.eca.bossshow.editor.menu.copy",
+                    BossShowEditorState.hasValidRange(), () -> {
                     BossShowEditorState.copyRange(); closeDropdown();
                 });
-                dropdownOption(x, y + MENU_HEIGHT * 6, 142, "gui.eca.bossshow.editor.menu.paste", () -> {
+                dropdownOption(x, y + MENU_HEIGHT * 5, 160, "gui.eca.bossshow.editor.menu.cut",
+                    BossShowEditorState.hasValidRange(), () -> {
+                    if (BossShowEditorState.cutRange()) syncFromState(); closeDropdown();
+                });
+                dropdownOption(x, y + MENU_HEIGHT * 6, 160, "gui.eca.bossshow.editor.menu.paste",
+                    BossShowEditorState.hasClipboard(), () -> {
                     if (BossShowEditorState.pasteAtPlayhead()) syncFromState(); closeDropdown();
                 });
-                dropdownOption(x, y + MENU_HEIGHT * 7, 142, "gui.eca.bossshow.editor.menu.shortcuts", this::openShortcutHelp);
+                dropdownOption(x, y + MENU_HEIGHT * 7, 160, "gui.eca.bossshow.editor.menu.delete_range",
+                    BossShowEditorState.hasValidRange(), this::deleteRange);
+                dropdownOption(x, y + MENU_HEIGHT * 8, 160, "gui.eca.bossshow.editor.menu.range",
+                    BossShowEditorState.hasValidRange(), this::openRangeTransform);
+                dropdownOption(x, y + MENU_HEIGHT * 9, 160, "gui.eca.bossshow.editor.context.clear_range",
+                    BossShowEditorState.getInPoint() >= 0 || BossShowEditorState.getOutPoint() >= 0, () -> {
+                    BossShowEditorState.clearRange(); closeDropdown(); syncFromState();
+                });
+                dropdownOption(x, y + MENU_HEIGHT * 10, 160, "gui.eca.bossshow.editor.menu.shortcuts", this::openShortcutHelp);
             }
             case MENU_SHOW -> {
                 x = menuPositions[MENU_SHOW];
@@ -185,8 +196,8 @@ public final class BossShowEditorScreen extends Screen {
                 x = menuPositions[MENU_TRACK];
                 dropdownOption(x, y, 160, "gui.eca.bossshow.editor.menu.add_content", this::addContent);
                 dropdownOption(x, y + MENU_HEIGHT, 160, "gui.eca.bossshow.editor.menu.remove_content", this::removeContent);
-                dropdownOption(x, y + MENU_HEIGHT * 2, 160, "gui.eca.bossshow.editor.menu.range", this::openRangeTransform);
-                dropdownOption(x, y + MENU_HEIGHT * 3, 160, "gui.eca.bossshow.editor.menu.delete_range", this::deleteRange);
+                dropdownOption(x, y + MENU_HEIGHT * 2, 160, "gui.eca.bossshow.editor.menu.generate_path",
+                    BossShowEditorState.frameCount() > 0, this::openPathGenerator);
             }
             case MENU_PREVIEW -> {
                 x = menuPositions[MENU_PREVIEW];
@@ -201,8 +212,14 @@ public final class BossShowEditorScreen extends Screen {
     }
 
     private void dropdownOption(int x, int y, int width, String key, Runnable action) {
-        this.addRenderableWidget(Button.builder(Component.translatable(key), b -> action.run())
-            .bounds(x, y, width, MENU_HEIGHT).build());
+        dropdownOption(x, y, width, key, true, action);
+    }
+
+    private void dropdownOption(int x, int y, int width, String key, boolean enabled, Runnable action) {
+        Button option = Button.builder(Component.translatable(key), b -> action.run())
+            .bounds(x, y, width, MENU_HEIGHT).build();
+        option.active = enabled;
+        this.addRenderableWidget(option);
     }
 
     private void addInspectorWidgets() {
@@ -378,6 +395,7 @@ public final class BossShowEditorScreen extends Screen {
 
     private void openSettings() { closeDropdown(); this.minecraft.setScreen(new BossShowEditorSettingsScreen()); }
     private void openRangeTransform() { closeDropdown(); if (BossShowEditorState.hasValidRange()) this.minecraft.setScreen(new BossShowRangeTransformScreen()); }
+    private void openPathGenerator() { closeDropdown(); if (BossShowEditorState.frameCount() > 0) this.minecraft.setScreen(new BossShowPathGeneratorScreen()); }
     private void setIn() { BossShowEditorState.setInPoint(BossShowEditorState.getPlayhead()); closeDropdown(); syncFromState(); }
     private void setOut() { BossShowEditorState.setOutPoint(BossShowEditorState.getPlayhead()); closeDropdown(); syncFromState(); }
     private void openShortcutHelp() { closeDropdown(); this.minecraft.setScreen(new BossShowShortcutHelpScreen()); }
@@ -627,6 +645,8 @@ public final class BossShowEditorScreen extends Screen {
             entries.add(contextAction("gui.eca.bossshow.editor.context.copy_pose", true, this::copyCurrentPose));
             entries.add(contextAction("gui.eca.bossshow.editor.context.paste_pose", copiedPose != null, this::pasteCopiedPose));
             entries.add(contextAction("gui.eca.bossshow.editor.context.capture_pose", true, this::armFreeCamera));
+            entries.add(contextAction("gui.eca.bossshow.editor.menu.generate_path",
+                BossShowEditorState.frameCount() > 0, this::openPathGenerator));
             List<ContextEntry> curves = new ArrayList<>();
             for (Curve curve : Curve.values()) {
                 curves.add(new ContextEntry(Component.translatable(curve.translationKey()), true,

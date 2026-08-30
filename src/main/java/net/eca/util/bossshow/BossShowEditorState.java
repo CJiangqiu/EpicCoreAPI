@@ -486,6 +486,107 @@ public final class BossShowEditorState {
 
     public static int frameCount() { return workingFrames.size(); }
 
+    //路径生成以选区入点为起点；未选择区间时使用播放头。
+    public static int getPathGenerationStart() {
+        if (workingFrames.isEmpty()) return -1;
+        return hasValidRange() ? inPoint : Math.max(0, Math.min(playhead, workingFrames.size() - 1));
+    }
+
+    //返回路径生成起点的当前位姿。
+    public static Frame getPathGenerationStartFrame() {
+        int start = getPathGenerationStart();
+        return start >= 0 ? workingFrames.get(start) : null;
+    }
+
+    //使用起始镜头局部坐标生成平滑路径，并替换当前选区或播放头帧。
+    public static boolean generateCameraPath(int durationTicks,
+                                             double forwardDistance, double rightDistance, double upDistance,
+                                             float yawChange, float pitchChange, Curve easing) {
+        if (recState != RecState.IDLE || workingFrames.isEmpty() || durationTicks < 2) return false;
+        int start = getPathGenerationStart();
+        int end = hasValidRange() ? outPoint : start;
+        Frame first = workingFrames.get(start);
+        List<Keyframe> preserved = remapPathKeyframes(start, end, durationTicks);
+
+        double pitchRad = Math.toRadians(first.pitch());
+        double worldYawRad = Math.toRadians(first.yaw() + anchorYawDeg);
+        double cosYaw = Math.cos(worldYawRad);
+        double sinYaw = Math.sin(worldYawRad);
+        double cosPitch = Math.cos(pitchRad);
+        double sinPitch = Math.sin(pitchRad);
+        double worldForwardX = -sinYaw * cosPitch;
+        double forwardY = -sinPitch;
+        double worldForwardZ = cosYaw * cosPitch;
+        double worldRightX = -cosYaw;
+        double worldRightZ = -sinYaw;
+        double worldUpX = -sinYaw * sinPitch;
+        double upY = cosPitch;
+        double worldUpZ = cosYaw * sinPitch;
+
+        //位置帧使用 anchor-local 坐标，方向必须先按世界镜头求出再逆旋转到该坐标系。
+        double anchorRad = Math.toRadians(anchorYawDeg);
+        double anchorCos = Math.cos(anchorRad);
+        double anchorSin = Math.sin(anchorRad);
+        double forwardX = worldForwardX * anchorCos - worldForwardZ * anchorSin;
+        double forwardZ = worldForwardX * anchorSin + worldForwardZ * anchorCos;
+        double rightX = worldRightX * anchorCos - worldRightZ * anchorSin;
+        double rightZ = worldRightX * anchorSin + worldRightZ * anchorCos;
+        double upX = worldUpX * anchorCos - worldUpZ * anchorSin;
+        double upZ = worldUpX * anchorSin + worldUpZ * anchorCos;
+
+        double endX = first.dx() + forwardX * forwardDistance + rightX * rightDistance + upX * upDistance;
+        double endY = first.dy() + forwardY * forwardDistance + upY * upDistance;
+        double endZ = first.dz() + forwardZ * forwardDistance + rightZ * rightDistance + upZ * upDistance;
+        Curve motionCurve = easing != null ? easing : Curve.NONE;
+
+        ArrayList<Frame> generated = new ArrayList<>(durationTicks);
+        for (int i = 0; i < durationTicks; i++) {
+            double linearProgress = i / (double) (durationTicks - 1);
+            double progress = motionCurve.apply(linearProgress);
+            Keyframe keyframe = preserved.get(i);
+            if ((i == 0 || i == durationTicks - 1) && keyframe == null) {
+                keyframe = new Keyframe(null, null, Curve.NONE);
+            }
+            generated.add(new Frame(
+                lerp(first.dx(), endX, progress),
+                lerp(first.dy(), endY, progress),
+                lerp(first.dz(), endZ, progress),
+                first.yaw() + (float) (yawChange * progress),
+                first.pitch() + (float) (pitchChange * progress),
+                keyframe));
+        }
+
+        pushUndoSnapshot();
+        workingFrames.subList(start, end + 1).clear();
+        workingFrames.addAll(start, generated);
+        rebuildContentCuesFromFrames();
+        inPoint = start;
+        outPoint = start + durationTicks - 1;
+        playhead = start;
+        selectedKeyframeFrameIndex = start;
+        dirty = true;
+        return true;
+    }
+
+    //时长改变时按相对时间保留原区间的事件与字幕，曲线由生成器烘焙后归零。
+    private static List<Keyframe> remapPathKeyframes(int start, int end, int durationTicks) {
+        ArrayList<Keyframe> result = new ArrayList<>(Collections.nCopies(durationTicks, null));
+        int sourceSpan = end - start;
+        for (int i = start; i <= end; i++) {
+            Keyframe keyframe = workingFrames.get(i).keyframe();
+            if (keyframe == null) continue;
+            int target = sourceSpan == 0 ? 0
+                : (int) Math.round((i - start) * (durationTicks - 1.0) / sourceSpan);
+            Keyframe existing = result.get(target);
+            String eventId = keyframe.eventId() != null ? keyframe.eventId()
+                : existing != null ? existing.eventId() : null;
+            String subtitle = keyframe.subtitleText() != null ? keyframe.subtitleText()
+                : existing != null ? existing.subtitleText() : null;
+            result.set(target, new Keyframe(eventId, subtitle, Curve.NONE));
+        }
+        return result;
+    }
+
     //把播放头移动到边界内的相邻 tick。
     public static void movePlayheadBy(int delta) {
         if (workingFrames.isEmpty()) {
