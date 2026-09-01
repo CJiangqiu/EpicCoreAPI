@@ -5,16 +5,22 @@ import net.eca.coremod.EcaTransformerManager;
 import net.eca.coremod.LivingEntityHook;
 import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.util.EcaLogger;
+import net.eca.util.EntityUtil;
+import net.eca.util.health.HealthDataflowAnalyzer.ConstOverrideSource;
+import net.eca.util.health.HealthDataflowAnalyzer.Source;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -84,6 +90,15 @@ public final class EcaSetHealthManager {
     private static final Set<Class<?>> WRITER_SCAN_PENDING = ConcurrentHashMap.newKeySet();
     private static final Set<String> MAINTENANCE_SCAN_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
 
+    /* 一次性改血可能早于后台候选到达。弱引用避免分析期间延长实体寿命；请求在模型成立后
+       原子取走，重试线程标记阻止失败请求再次登记形成循环。 */
+    private record DeferredHealthWrite(WeakReference<LivingEntity> entity, MinecraftServer server,
+                                       float targetHealth, long expiresAtNanos) {}
+    private static final Map<Class<?>, Map<UUID, DeferredHealthWrite>> DEFERRED_HEALTH_WRITES =
+            new ConcurrentHashMap<>();
+    private static final ThreadLocal<Boolean> DEFERRED_HEALTH_RETRY = ThreadLocal.withInitial(() -> false);
+    private static final long DEFERRED_HEALTH_TTL_NANOS = TimeUnit.SECONDS.toNanos(120L);
+
     /* 外部扫描诊断去重(每类一次)：提交、开始执行、失败三个节点各自记一次。
        提交后没有开始记录表示任务仍在队列中。 */
     private static final Set<String> EXTERNAL_SCAN_SUBMIT_DUMPED = ConcurrentHashMap.newKeySet();
@@ -128,13 +143,16 @@ public final class EcaSetHealthManager {
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
         if (!snapshot.isComplete()) return false;
         boolean success = HealthDataFlow.write(tree, target, targetHealth);
-        if (!success) snapshot.restore();
+        if (!success) {
+            snapshot.restore();
+            return false;
+        }
         /* dataflow 写实体存储成功后，追加写实体外的 SavedData 真实权威。
            dataflow 可能只覆盖实体内同步单元镜像，当场 verify 通过，但真实血量
            (SavedData) 未写，下一 tick 被钳制回。ExternalScan(tick 收集)能定位 SavedData 写源，
            追加写入使真实权威与实体镜像一致。外部扫描关闭或未就绪时不阻塞 dataflow 的成功结果。 */
         tryExternalScanCoWrite(target, targetHealth);
-        return success;
+        return true;
     }
 
     /* 仅当 ExternalScan 结果已缓存且含实体外写源时追加写实体外权威；未就绪则触发后台分析并放弃本次追加。
@@ -191,7 +209,13 @@ public final class EcaSetHealthManager {
                并行后证据到手时表达式往往已就绪，可当场建模。 */
             submitComparisonPrescan(cls);
             tree = awaitFirstExternalScan(task);
-            if (tree == null) return false;
+            /* 语义扫描可能被其他大型实体长期占住。数据流已经产生未观测候选时，死亡入口足以
+               独立完成结构建模，不应让一次性改血依赖后台队列何时轮到当前类。 */
+            if (tree == null) {
+                boolean success = applyEffectiveHealth(target, targetHealth);
+                if (!success) deferHealthWrite(target, targetHealth);
+                return success;
+            }
         }
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
@@ -201,7 +225,9 @@ public final class EcaSetHealthManager {
         snapshot.restore();
         /* 外部扫描按存储即血量处理，存储经换算才得到血量时写入值方向不对，且校验读 getHealth 也不反映。
            此处承接同一批存储，改用有效血量表达式求逆与校验；证据正是上面写入尝试刚记录下来的。 */
-        return applyEffectiveHealth(target, targetHealth);
+        boolean effectiveSuccess = applyEffectiveHealth(target, targetHealth);
+        if (!effectiveSuccess) deferHealthWrite(target, targetHealth);
+        return effectiveSuccess;
     }
 
     /* 外部扫描第三阶段：实体存储写对了、当场校验也过了，却在下一 tick 被改回——
@@ -243,16 +269,23 @@ public final class EcaSetHealthManager {
     private static boolean applyEffectiveHealth(LivingEntity target, float targetHealth) {
         Class<?> cls = target.getClass();
         if (!HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) submitMaintenanceAnalysis(cls);
-        // 校验成功会清空解耦证据，故已装锚点的类必须继续放行，否则一旦成功就再也走不进本通道
-        if (!hasHealthAnchor(cls) && !isHealthReadDecoupled(cls)) return false;
         HealthDataflowAnalyzer.EffectiveHealthModel model =
                 HealthDataflowAnalyzer.peekEffectiveHealthModel(cls);
+        /* 校验成功会清空解耦证据，故已装锚点的类必须继续放行。后台维护扫描独立确立的模型
+           同样可以启动本通道，否则续接重试仍会被早期门控挡回。 */
+        if (model == null && !hasHealthAnchor(cls) && !isHealthReadDecoupled(cls)) return false;
         if (model == null) {
+            List<HealthDataflowAnalyzer.Source> candidates = effectiveModelCandidates(cls);
             /* 比较表达式已缓存时建模只剩遍历与打分，当场完成即可，省去一次改血往返；
                未缓存则需扫描字节码，耗时较长，仍转后台并跳过本次。 */
             if (HealthDataflowAnalyzer.hasComparisonCache(cls)) {
                 // 候选集合必须与后台建模一致，否则同步兜底会因少喂候选而漏掉后台能选中的存储
-                model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, effectiveModelCandidates(cls));
+                model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, candidates);
+            }
+            /* 全类比较缓存尚未就绪时只分析两个死亡入口。候选仍来自实际写入或维护扫描，
+               模型仍经过独立上限判据，因此这里只消除排队依赖，不降低可信度。 */
+            if (model == null) {
+                model = HealthDataflowAnalyzer.resolveMortalityEffectiveHealthModel(cls, candidates);
             }
             if (model == null) {
                 submitEffectiveModelAnalysis(cls);
@@ -402,6 +435,7 @@ public final class EcaSetHealthManager {
             MODEL_ANALYSIS_EXECUTOR.submit(() -> {
                 try {
                     HealthDataflowAnalyzer.prewarmClassComparisons(cls);
+                    resumeDeferredHealthWrites(cls);
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
                     EcaLogger.info("[EffectiveHealth] comparison prescan threw entity={} type={} msg={}",
@@ -425,7 +459,9 @@ public final class EcaSetHealthManager {
         try {
             MODEL_ANALYSIS_EXECUTOR.submit(() -> {
                 try {
-                    HealthDataflowAnalyzer.resolveEffectiveHealthModel(cls, candidates);
+                    HealthDataflowAnalyzer.EffectiveHealthModel model =
+                            HealthDataflowAnalyzer.resolveEffectiveHealthModel(cls, candidates);
+                    if (model != null) resumeDeferredHealthWrites(cls);
                     if (HealthDataflowAnalyzer.hasPartialComparison(cls)) {
                         EFFECTIVE_MODEL_SUBMITTED.remove(cls, signature);
                     }
@@ -450,10 +486,10 @@ public final class EcaSetHealthManager {
     private static List<HealthDataflowAnalyzer.Source> effectiveModelCandidates(Class<?> cls) {
         Map<String, HealthDataflowAnalyzer.Source> byKey = new LinkedHashMap<>();
         for (HealthDataflowAnalyzer.Source sink : unobservedSinks(cls)) {
-            byKey.putIfAbsent(sink.label, sink);
+            byKey.putIfAbsent(sink.identityKey(), sink);
         }
         for (HealthDataflowAnalyzer.Source sink : HealthDataflowAnalyzer.maintenanceSinks(cls)) {
-            byKey.putIfAbsent(sink.label, sink);
+            byKey.putIfAbsent(sink.identityKey(), sink);
         }
         return List.copyOf(byKey.values());
     }
@@ -539,6 +575,7 @@ public final class EcaSetHealthManager {
                     if (t instanceof VirtualMachineError e) throw e;
                 } finally {
                     TICK_SCAN_PENDING.remove(cls);
+                    resumeDeferredHealthWrites(cls);
                 }
             });
         } catch (Throwable t) {
@@ -562,6 +599,7 @@ public final class EcaSetHealthManager {
                     if (t instanceof VirtualMachineError e) throw e;
                 } finally {
                     WRITER_SCAN_PENDING.remove(cls);
+                    resumeDeferredHealthWrites(cls);
                 }
             });
         } catch (Throwable t) {
@@ -586,6 +624,71 @@ public final class EcaSetHealthManager {
         Throwable cause = t.getCause();
         if (cause != null) {
             EcaLogger.info("[ExternalScan]   caused by {} msg={}", cause.getClass().getName(), cause.getMessage());
+        }
+    }
+
+    private static void deferHealthWrite(LivingEntity target, float targetHealth) {
+        if (target == null || DEFERRED_HEALTH_RETRY.get() || target.level().isClientSide
+                || target.level().getServer() == null) return;
+        MinecraftServer server = target.level().getServer();
+        long expiresAt = System.nanoTime() + DEFERRED_HEALTH_TTL_NANOS;
+        DEFERRED_HEALTH_WRITES.computeIfAbsent(target.getClass(), ignored -> new ConcurrentHashMap<>())
+                .put(target.getUUID(), new DeferredHealthWrite(
+                        new WeakReference<>(target), server, targetHealth, expiresAt));
+        EcaLogger.info("[EffectiveHealth] deferred write queued entity={} target={}",
+                target.getClass().getName(), targetHealth);
+    }
+
+    /* 任一正常通道先成功时撤销旧请求，避免后台完成后重复写入。 */
+    public static void cancelDeferredHealthWrite(LivingEntity target) {
+        if (target == null) return;
+        Map<UUID, DeferredHealthWrite> requests = DEFERRED_HEALTH_WRITES.get(target.getClass());
+        if (requests == null) return;
+        requests.remove(target.getUUID());
+        if (requests.isEmpty()) DEFERRED_HEALTH_WRITES.remove(target.getClass(), requests);
+    }
+
+    /* 后台线程只建立模型；实体写入投递回服务器线程，并且每份请求至多续接一次。 */
+    private static void resumeDeferredHealthWrites(Class<?> cls) {
+        Map<UUID, DeferredHealthWrite> pending = DEFERRED_HEALTH_WRITES.get(cls);
+        if (pending == null || pending.isEmpty()) return;
+        long now = System.nanoTime();
+        pending.entrySet().removeIf(entry -> {
+            LivingEntity entity = entry.getValue().entity().get();
+            return entry.getValue().expiresAtNanos() < now || entity == null;
+        });
+        if (pending.isEmpty()) {
+            DEFERRED_HEALTH_WRITES.remove(cls, pending);
+            return;
+        }
+        HealthDataflowAnalyzer.EffectiveHealthModel model =
+                HealthDataflowAnalyzer.peekEffectiveHealthModel(cls);
+        if (model == null && HealthDataflowAnalyzer.hasComparisonCache(cls)) {
+            model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, effectiveModelCandidates(cls));
+        }
+        if (model == null) return;
+        if (!DEFERRED_HEALTH_WRITES.remove(cls, pending)) return;
+        for (DeferredHealthWrite request : pending.values()) {
+            LivingEntity entity = request.entity().get();
+            if (entity == null || request.expiresAtNanos() < System.nanoTime()) continue;
+            MinecraftServer server = request.server();
+            try {
+                server.execute(() -> {
+                    if (entity.isRemoved() || entity.level().getServer() != server) return;
+                    DEFERRED_HEALTH_RETRY.set(true);
+                    try {
+                        boolean success = EntityUtil.setHealth(entity, request.targetHealth());
+                        EcaLogger.info("[EffectiveHealth] deferred write entity={} target={} success={}",
+                                entity.getClass().getName(), request.targetHealth(), success);
+                    } finally {
+                        DEFERRED_HEALTH_RETRY.remove();
+                    }
+                });
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+                EcaLogger.info("[EffectiveHealth] deferred write scheduling failed entity={} type={} msg={}",
+                        cls.getName(), t.getClass().getName(), t.getMessage());
+            }
         }
     }
 
@@ -1032,7 +1135,13 @@ public final class EcaSetHealthManager {
     /* 单次写入的取证形式：锚点读数从 before 位移到 expected，即证明它反映本次写入。
        两者本就相近时取不到位移，不作判定——没有证据不等于反证。 */
     public static void noteAnchorResponse(LivingEntity target, float before, float expected) {
+        noteAnchorResponse(target, before, expected, null);
+    }
+
+    /* 观测覆写只改变读数，不能凭自身造成的联动取得真实存储信任。 */
+    static void noteAnchorResponse(LivingEntity target, float before, float expected, Source source) {
         if (target == null || !Float.isFinite(before) || !Float.isFinite(expected)) return;
+        if (source instanceof ConstOverrideSource) return;
         if (HealthValueSemantics.matches(before, expected)) return;
         float actual = readHealthAnchor(target);
         if (HealthValueSemantics.matches(actual, expected)) {
@@ -1133,7 +1242,8 @@ public final class EcaSetHealthManager {
     static void recordUnobservedWrite(Class<?> cls, HealthDataflowAnalyzer.Source sink, String sinkLabel) {
         if (cls == null || sinkLabel == null || ANCHOR_OBSERVED.contains(cls)) return;
         if (sink != null) {
-            UNOBSERVED_WRITES.computeIfAbsent(cls, k -> new ConcurrentHashMap<>()).putIfAbsent(sinkLabel, sink);
+            UNOBSERVED_WRITES.computeIfAbsent(cls, k -> new ConcurrentHashMap<>())
+                    .putIfAbsent(sink.identityKey(), sink);
         }
         if (!isWarmupDiagnosticsSuppressed() && UNOBSERVED_DUMPED.add(cls.getName() + "|" + sinkLabel)) {
             EcaLogger.info("[HealthAnchor] write not observed entity={} sink={} anchor={}",
@@ -1236,11 +1346,14 @@ public final class EcaSetHealthManager {
         JOIN_PREWARM_SUBMITTED.clear();
         COMPARISON_PRESCAN_SUBMITTED.clear();
         EFFECTIVE_MODEL_SUBMITTED.clear();
+        DEFERRED_HEALTH_WRITES.clear();
         EFFECTIVE_MODEL_REJECT_DUMPED.clear();
         EFFECTIVE_POLARITY_DUMPED.clear();
         EXTERNAL_AUTHORITY_WRITTEN.clear();
         EXTERNAL_MIRROR_SUPPRESSED_DUMPED.clear();
         ExternalMirrorWriter.clear();
+        ConstOverride.clear();
+        HealthModel.clear();
         MethodProbe.clearAnalysisCaches();
     }
 }

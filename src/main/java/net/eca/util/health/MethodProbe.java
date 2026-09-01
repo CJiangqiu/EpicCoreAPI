@@ -11,6 +11,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -19,6 +20,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
@@ -627,7 +629,120 @@ public final class MethodProbe {
                 if (seen.add(plan.toString())) result.add(plan);
             }
         }
+        for (FunctionalArgumentPlan plan : findGuardedImplementationPlans(owner)) {
+            if (seen.add(plan.toString())) result.add(plan);
+            if (result.size() >= MAX_FUNCTIONAL_ARGUMENT_PLANS) break;
+        }
         return List.copyOf(result);
+    }
+
+    /* 函数实现体中的数组下标、类型门控与常量身份门控共同描述了真实调用协议。
+       从这些约束恢复参数布局，避免依赖某个现存调用点恰好传入了正确凭据。 */
+    private static List<FunctionalArgumentPlan> findGuardedImplementationPlans(ClassNode owner) {
+        List<FunctionalArgumentPlan> plans = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        for (MethodNode method : owner.methods) {
+            if (method.instructions == null) continue;
+            for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null;
+                 instruction = instruction.getNext()) {
+                if (!(instruction instanceof InvokeDynamicInsnNode dynamic)) continue;
+                for (Object bootstrapArgument : dynamic.bsmArgs) {
+                    if (!(bootstrapArgument instanceof Handle implementation)
+                            || !implementation.getOwner().equals(owner.name)) continue;
+                    String key = implementation.getName() + implementation.getDesc();
+                    if (!visited.add(key)) continue;
+                    MethodNode body = findMethodNode(owner, implementation.getName(), implementation.getDesc());
+                    FunctionalArgumentPlan plan = recoverGuardedArrayPlan(body);
+                    if (plan != null) plans.add(plan);
+                }
+            }
+        }
+        return plans;
+    }
+
+    static FunctionalArgumentPlan recoverGuardedArrayPlan(MethodNode method) {
+        if (method == null || method.instructions == null) return null;
+        int arrayLocal = objectArrayLocal(method);
+        if (arrayLocal < 0) return null;
+        Map<Integer, FunctionalArgument> arguments = new LinkedHashMap<>();
+        int targetIndex = -1;
+        for (AbstractInsnNode instruction = method.instructions.getFirst(); instruction != null;
+             instruction = instruction.getNext()) {
+            if (instruction.getOpcode() != Opcodes.AALOAD) continue;
+            Integer index = arrayElementIndex(instruction, arrayLocal);
+            if (index == null || index < 0 || index > 31) continue;
+            if (hasNumericTypeGuard(instruction)) {
+                if (targetIndex >= 0 && targetIndex != index) return null;
+                targetIndex = index;
+                arguments.put(index, new FunctionalArgument(index, FunctionalArgumentKind.TARGET,
+                        null, null, "F", null));
+                continue;
+            }
+            Object constant = identityGuardConstant(instruction);
+            if (constant != null) {
+                arguments.put(index, new FunctionalArgument(index, FunctionalArgumentKind.CONSTANT,
+                        null, null, null, constant));
+            }
+        }
+        if (targetIndex < 0 || arguments.isEmpty()) return null;
+        int arity = arguments.keySet().stream().mapToInt(Integer::intValue).max().orElse(-1) + 1;
+        if (arity <= 0 || arguments.size() != arity) return null;
+        List<FunctionalArgument> ordered = new ArrayList<>(arity);
+        for (int index = 0; index < arity; index++) {
+            FunctionalArgument argument = arguments.get(index);
+            if (argument == null) return null;
+            ordered.add(argument);
+        }
+        return new FunctionalArgumentPlan(arity, ordered);
+    }
+
+    private static int objectArrayLocal(MethodNode method) {
+        int local = (method.access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+        for (Type argument : Type.getArgumentTypes(method.desc)) {
+            if (argument.equals(Type.getType(Object[].class))) return local;
+            local += argument.getSize();
+        }
+        return -1;
+    }
+
+    private static Integer arrayElementIndex(AbstractInsnNode arrayLoad, int arrayLocal) {
+        AbstractInsnNode indexInstruction = previousMeaningful(arrayLoad);
+        Integer index = integerConstant(indexInstruction);
+        AbstractInsnNode arrayInstruction = previousMeaningful(indexInstruction);
+        if (index == null || !(arrayInstruction instanceof VarInsnNode variable)
+                || variable.getOpcode() != Opcodes.ALOAD || variable.var != arrayLocal) return null;
+        return index;
+    }
+
+    private static boolean hasNumericTypeGuard(AbstractInsnNode arrayLoad) {
+        int steps = 0;
+        for (AbstractInsnNode current = nextMeaningful(arrayLoad); current != null && steps++ < 6;
+             current = nextMeaningful(current)) {
+            if (current instanceof TypeInsnNode type && type.getOpcode() == Opcodes.INSTANCEOF) {
+                return isNumericWrapper(type.desc);
+            }
+            if (current instanceof JumpInsnNode || current.getOpcode() == Opcodes.ARETURN
+                    || current.getOpcode() == Opcodes.AASTORE) break;
+        }
+        return false;
+    }
+
+    private static boolean isNumericWrapper(String internalName) {
+        return internalName.equals("java/lang/Float") || internalName.equals("java/lang/Double")
+                || internalName.equals("java/lang/Integer") || internalName.equals("java/lang/Long")
+                || internalName.equals("java/lang/Short") || internalName.equals("java/lang/Byte");
+    }
+
+    private static Object identityGuardConstant(AbstractInsnNode arrayLoad) {
+        AbstractInsnNode constantInstruction = nextMeaningful(arrayLoad);
+        Object constant = constantValue(constantInstruction);
+        if (constant == null && constantInstruction instanceof LdcInsnNode ldc && ldc.cst instanceof Type type) {
+            constant = type;
+        }
+        AbstractInsnNode jumpInstruction = nextMeaningful(constantInstruction);
+        if (!(jumpInstruction instanceof JumpInsnNode jump)
+                || (jump.getOpcode() != Opcodes.IF_ACMPEQ && jump.getOpcode() != Opcodes.IF_ACMPNE)) return null;
+        return constant;
     }
 
     private static TypeInsnNode findArgumentArray(MethodInsnNode call, String ownerInternal,
@@ -2507,6 +2622,7 @@ public final class MethodProbe {
         for (FunctionalArgument argument : plan.arguments()) {
             Field field = null;
             Class<?> targetType = Float.class;
+            Object constant = argument.constant();
             if (argument.kind() == FunctionalArgumentKind.TARGET && argument.fieldDesc() != null) {
                 targetType = HealthDataflowAnalyzer.descriptorToClass(argument.fieldDesc());
                 if (targetType == null) return null;
@@ -2525,8 +2641,13 @@ public final class MethodProbe {
                     return null;
                 }
             }
+            if (argument.kind() == FunctionalArgumentKind.CONSTANT && constant instanceof Type type) {
+                if (type.getSort() != Type.OBJECT) return null;
+                constant = HealthDataflowAnalyzer.loadClass(type.getInternalName());
+                if (constant == null) return null;
+            }
             bound.add(new BoundFunctionalArgument(argument.index(), argument.kind(), field, targetType,
-                    argument.constant()));
+                    constant));
         }
         return new BoundFunctionalArgumentPlan(plan.arity(), List.copyOf(bound));
     }

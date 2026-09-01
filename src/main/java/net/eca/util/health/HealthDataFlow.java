@@ -387,7 +387,10 @@ public final class HealthDataFlow {
         }
         List<Object> afterWrite = new ArrayList<>(writes.size());
         for (PreparedSourceWrite write : writes) afterWrite.add(write.sink().read(entity));
-        if (wroteAll) EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, target);
+        if (wroteAll) {
+            EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, target,
+                    observationOverrideSource(writes));
+        }
         boolean verified = wroteAll && EcaSetHealthManager.verify(entity, target);
         List<AssociatedWriteState> states = new ArrayList<>(writes.size());
         for (int i = 0; i < writes.size(); i++) {
@@ -536,7 +539,7 @@ public final class HealthDataFlow {
                 continue;
             }
             // 锚点若随本次写入位移到目标值，即为它反映真实存储的证据，据此补正弱取证的误判
-            EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected);
+            EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected, sink);
             EcaSetHealthManager.AnchorVerdict verdict = verifier.verify(entity, expected, sink);
             /* 未能回落到权威的镜像，其自回读恒真：值下一次维护即被重算覆盖，PASS 不构成生效证据。
                既不能判成功也不能判失败，交出裁决权让后续通道继续。 */
@@ -718,7 +721,10 @@ public final class HealthDataFlow {
             }
         }
         // 单源逐个写时锚点不动、多源同时写才生效的存储，取证只能在联合写之后进行
-        if (wroteAll) EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected);
+        if (wroteAll) {
+            EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected,
+                    observationOverrideSource(writes));
+        }
         EcaSetHealthManager.AnchorVerdict verdict = wroteAll
                 ? verifier.verify(entity, expected, null)
                 : EcaSetHealthManager.AnchorVerdict.FAIL;
@@ -748,6 +754,13 @@ public final class HealthDataFlow {
         diag.add("    [all sources] write=" + (wroteAll ? "OK" : "FAIL")
                 + " verify=FAIL restore=" + (restoredAll ? "OK" : "FAIL"));
         return false;
+    }
+
+    private static Source observationOverrideSource(List<PreparedSourceWrite> writes) {
+        for (PreparedSourceWrite write : writes) {
+            if (write.sink() instanceof ConstOverrideSource) return write.sink();
+        }
+        return null;
     }
 
     /* 多态 getHealth 的分支可能来自其他模组对 LivingEntity 的注入，对当前实体运行期根本不会走到，
@@ -1026,46 +1039,14 @@ public final class HealthDataFlow {
     }
 
     private static boolean writeMapEntry(MapEntrySource s, LivingEntity entity, Object value) {
-        boolean any = false;
-        Set<Object> writtenMaps = Collections.newSetFromMap(new IdentityHashMap<>());
-
         try {
-            Object obj = HealthDataflowAnalyzer.evaluate(s.containerExpr, HealthDataflowAnalyzer.newContext(entity));
-            if (obj instanceof Map<?, ?> map && writtenMaps.add(map)) {
-                Object key = matchKey(map, entity, s.keyKind);
-                if (key != null && unsafeModifyMapEntry(map, key, value)) any = true;
-            }
+            EvalContext context = HealthDataflowAnalyzer.newContext(entity);
+            Object obj = HealthDataflowAnalyzer.evaluate(s.containerExpr, context);
+            Object key = HealthDataflowAnalyzer.evaluate(s.keyExpr, context);
+            if (!(obj instanceof Map<?, ?> map) || key == null || !map.containsKey(key)) return false;
+            return unsafeModifyMapEntry(map, key, value);
         } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
-
-    // 同时更新 owner 类及其嵌套类的静态 Map，保持相关记录表一致
-        if (s.ownerClassInternal != null) {
-            Class<?> ownerClass = HealthDataflowAnalyzer.loadClass(s.ownerClassInternal);
-            if (ownerClass != null && writeSiblingMaps(ownerClass, entity, s, value, writtenMaps)) any = true;
-        }
-        return any;
-    }
-
-    /* 写入 cls 及其嵌套类中已经包含本实体键的静态 Map 字段，保持多表一致。
-       仅改动 matchKey 命中(以本实体为键)的 Map，故对无关静态表安全；writtenMaps 身份集防重复写。 */
-    private static boolean writeSiblingMaps(Class<?> cls, LivingEntity entity, MapEntrySource s, Object value, Set<Object> writtenMaps) {
-        boolean any = false;
-        for (Field f : cls.getDeclaredFields()) {
-            if (!Modifier.isStatic(f.getModifiers())) continue;
-            if (!Map.class.isAssignableFrom(f.getType())) continue;
-            try {
-                f.setAccessible(true);
-                Object obj = f.get(null);
-                if (!(obj instanceof Map<?, ?> map)) continue;
-                if (!writtenMaps.add(map)) continue;
-                Object key = matchKey(map, entity, s.keyKind);
-                if (key == null) continue;
-                if (unsafeModifyMapEntry(map, key, value)) any = true;
-            } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
-        }
-        for (Class<?> nested : cls.getDeclaredClasses()) {
-            if (writeSiblingMaps(nested, entity, s, value, writtenMaps)) any = true;
-        }
-        return any;
+        return false;
     }
 
     private static boolean writeArrayElement(ArrayElementSource s, LivingEntity entity, Object value) {
@@ -1125,19 +1106,6 @@ public final class HealthDataFlow {
     /* ==================== Map 写入：兄弟表 + entrySet 遍历 + Unsafe ==================== */
 
     private static final Map<Class<?>, Long> ENTRY_VALUE_OFFSET_CACHE = new ConcurrentHashMap<>();
-
-    private static Object matchKey(Map<?, ?> map, LivingEntity entity, MapEntrySource.KeyKind kind) {
-        Object primary = switch (kind) {
-            case ENTITY -> entity;
-            case ENTITY_UUID -> entity.getUUID();
-            case ENTITY_ID -> entity.getId();
-            case UNKNOWN -> entity;
-        };
-        if (primary != null && map.containsKey(primary)) return primary;
-        Object[] fb = {entity, entity.getUUID(), entity.getId()};
-        for (Object k : fb) if (k != null && map.containsKey(k)) return k;
-        return null;
-    }
 
     /* 遍历 entrySet 写所有 key 匹配的 entry(WeakHashMap 多 entry 同 key 的坑),
      * 用 Entry.setValue 绕过 Map.put(常见 mixin 拦截点),失败走 Unsafe 写字段偏移

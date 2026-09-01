@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Locale;
 
 //BossShow 视频编辑工作台：顶部菜单、实时预览、上下文检查器和多轨时间线。
-public final class BossShowEditorScreen extends Screen {
+public final class BossShowEditorScreen extends Screen implements BossShowEditorSessionScreen {
 
     private static final int TOP_HEIGHT = 24;
     private static final int INSPECTOR_HEIGHT = 66;

@@ -12,7 +12,7 @@ import net.minecraft.network.chat.Component;
 import java.util.Locale;
 
 //用起始镜头局部坐标生成不受录制噪声影响的运镜路径。
-final class BossShowPathGeneratorScreen extends Screen {
+final class BossShowPathGeneratorScreen extends Screen implements BossShowEditorSessionScreen {
 
     private static final int MAX_DURATION_TICKS = 72000;
     private static final Curve[] MOTION_CURVES = {

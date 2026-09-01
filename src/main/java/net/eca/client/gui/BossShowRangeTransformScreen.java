@@ -8,7 +8,7 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 //BossShow 时间轴范围位姿偏移面板。
-public final class BossShowRangeTransformScreen extends Screen {
+public final class BossShowRangeTransformScreen extends Screen implements BossShowEditorSessionScreen {
 
     private final EditBox[] fields = new EditBox[5];
     private final EditBox[] endFields = new EditBox[5];

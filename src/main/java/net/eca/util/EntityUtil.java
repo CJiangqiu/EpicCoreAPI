@@ -898,7 +898,10 @@ public class EntityUtil {
                 ok = EcaSetHealthManager.applyNumericInversion(entity, expectedHealth); //数值反演(死角对象图扰动)
             }
 
-            if (ok) transaction.commit();
+            if (ok) {
+                EcaSetHealthManager.cancelDeferredHealthWrite(entity);
+                transaction.commit();
+            }
             else transaction.rollback();
 
             //服务端改血成功 → 广播给追踪客户端，令自定义存储型实体客户端显示同步(客户端重跑同一条链)
@@ -907,7 +910,8 @@ public class EntityUtil {
                 /* 当场校验只能证明这一刻写进去了，tick 内的防护会把值改回去，故登记延迟复查。
                    已知会被改回的类再追加联写实体之外的血量镜像(外部扫描第三阶段)——
                    须登记成功才写，那批世界数据的提交与撤销全靠这次复查裁定。 */
-                DelayedHealthVerifier.Ticket ticket = DelayedHealthVerifier.schedule(entity, expectedHealth);
+                DelayedHealthVerifier.Ticket ticket =
+                        DelayedHealthVerifier.schedule(entity, beforeHealth, expectedHealth);
                 if (ticket != null) {
                     EcaSetHealthManager.applyExternalMirror(entity, beforeHealth, expectedHealth, ticket);
                 }

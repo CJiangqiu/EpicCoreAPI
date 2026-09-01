@@ -9,19 +9,18 @@ import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.eca.network.BossShowOpenEditorHomePacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.bossshow.BossShowDefinition;
+import net.eca.util.bossshow.BossShowEditorSessionManager;
 import net.eca.util.bossshow.BossShowHistory;
 import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.bossshow.BossShowPlaybackTracker;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
-import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.level.GameType;
 import net.minecraft.world.phys.AABB;
 
 import java.util.List;
@@ -32,10 +31,6 @@ import java.util.concurrent.CompletableFuture;
 public class BossShowCommand {
 
     private static final SuggestionProvider<CommandSourceStack> ID_SUGGESTIONS = BossShowCommand::suggestIds;
-
-    //存储进入编辑器前 gamemode 的 NBT 键
-    private static final String NBT_ROOT = "eca_bossshow_editor";
-    private static final String NBT_PREV_GAMEMODE = "prev_gamemode";
 
     //编辑器范围扫描半径（格）
     private static final double EDITOR_SCAN_RADIUS = 64.0;
@@ -155,24 +150,18 @@ public class BossShowCommand {
         try {
             ServerPlayer player = source.getPlayerOrException();
 
-            //64 格内必须存在至少一个 LivingEntity（不含玩家自身）
-            AABB box = AABB.ofSize(player.position(), EDITOR_SCAN_RADIUS * 2, EDITOR_SCAN_RADIUS * 2, EDITOR_SCAN_RADIUS * 2);
-            List<LivingEntity> nearby = player.serverLevel().getEntitiesOfClass(
-                LivingEntity.class, box, e -> e != null && e != player && e.isAlive());
-            if (nearby.isEmpty()) {
-                source.sendFailure(Component.literal("§cNo LivingEntity within " + (int) EDITOR_SCAN_RADIUS + " blocks. Editor needs at least one nearby entity."));
-                return 0;
+            if (!BossShowEditorSessionManager.isActive(player)) {
+                //首次进入才校验锚点候选，重复打开不应破坏既有会话。
+                AABB box = AABB.ofSize(player.position(), EDITOR_SCAN_RADIUS * 2, EDITOR_SCAN_RADIUS * 2, EDITOR_SCAN_RADIUS * 2);
+                List<LivingEntity> nearby = player.serverLevel().getEntitiesOfClass(
+                    LivingEntity.class, box, e -> e != null && e != player && e.isAlive());
+                if (nearby.isEmpty()) {
+                    source.sendFailure(Component.literal("§cNo LivingEntity within " + (int) EDITOR_SCAN_RADIUS + " blocks. Editor needs at least one nearby entity."));
+                    return 0;
+                }
             }
 
-            //保存当前 gamemode 到 NBT，强制 SPECTATOR
-            GameType prev = player.gameMode.getGameModeForPlayer();
-            CompoundTag persistent = player.getPersistentData();
-            CompoundTag root = persistent.getCompound(NBT_ROOT);
-            root.putString(NBT_PREV_GAMEMODE, prev.getName());
-            persistent.put(NBT_ROOT, root);
-            if (prev != GameType.SPECTATOR) {
-                player.setGameMode(GameType.SPECTATOR);
-            }
+            BossShowEditorSessionManager.begin(player);
 
             //发包打开 Home 界面，携带当前所有定义
             NetworkHandler.sendToPlayer(new BossShowOpenEditorHomePacket(BossShowManager.getAllDefinitions().values()), player);
@@ -202,18 +191,9 @@ public class BossShowCommand {
         }
     }
 
-    //供 BossShowExitEditorPacket 复用：从 NBT 还原 gamemode 并清理 root
+    //供命令与退出数据包共用服务端会话终止逻辑。
     public static boolean restorePreviousGameMode(ServerPlayer player) {
-        CompoundTag persistent = player.getPersistentData();
-        if (!persistent.contains(NBT_ROOT)) return false;
-        CompoundTag root = persistent.getCompound(NBT_ROOT);
-        String prevName = root.getString(NBT_PREV_GAMEMODE);
-        GameType prev = GameType.byName(prevName, GameType.SURVIVAL);
-        if (player.gameMode.getGameModeForPlayer() != prev) {
-            player.setGameMode(prev);
-        }
-        persistent.remove(NBT_ROOT);
-        return true;
+        return BossShowEditorSessionManager.end(player);
     }
 
     private static int clearHistory(CommandContext<CommandSourceStack> ctx) {

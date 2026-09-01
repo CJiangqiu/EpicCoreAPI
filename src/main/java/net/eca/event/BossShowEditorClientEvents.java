@@ -5,7 +5,9 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.eca.client.BossShowKeyBindings;
 import net.eca.client.gui.BossShowEditorHomeScreen;
 import net.eca.client.gui.BossShowEditorScreen;
+import net.eca.client.gui.BossShowEditorSessionScreen;
 import net.eca.config.EcaConfiguration;
+import net.eca.network.BossShowEditorHeartbeatPacket;
 import net.eca.network.BossShowPlaySelectionPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.bossshow.BossShowDefinition;
@@ -13,6 +15,7 @@ import net.eca.util.bossshow.BossShowEditorState;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.renderer.LevelRenderer;
@@ -28,6 +31,7 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.client.event.InputEvent;
 import net.minecraftforge.client.event.RenderGuiEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
@@ -45,6 +49,7 @@ import java.util.UUID;
 public final class BossShowEditorClientEvents {
 
     private static Entity cachedHovered = null;
+    private static int sessionHeartbeatTicks = 0;
 
     //通用 toast（recording 提示共用）
     private static long toastUntilMillis = 0L;
@@ -61,7 +66,7 @@ public final class BossShowEditorClientEvents {
     public static void onLocalPlayerTick(TickEvent.PlayerTickEvent event) {
         if (event.phase != TickEvent.Phase.END
             || !(event.player instanceof LocalPlayer localPlayer)
-            || !BossShowEditorState.isActivelyRecording()
+            || !BossShowEditorState.isActive()
             || EcaConfiguration.getBossShowRecordingFlightInertiaSafely()
             || !localPlayer.getAbilities().flying
             || localPlayer.isPassenger()) {
@@ -81,6 +86,7 @@ public final class BossShowEditorClientEvents {
     public static void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
         Minecraft mc = Minecraft.getInstance();
+        tickEditorSessionHeartbeat(mc);
 
         if (mc.screen instanceof BossShowEditorScreen editor && BossShowEditorState.isPreviewPlaying()) {
             BossShowEditorState.tickPreviewPlayback();
@@ -139,6 +145,33 @@ public final class BossShowEditorClientEvents {
             BossShowEditorState.setHoveredEntityUuid(null);
             cachedHovered = null;
         }
+    }
+
+    private static void tickEditorSessionHeartbeat(Minecraft minecraft) {
+        if (!BossShowEditorState.isActive()) {
+            sessionHeartbeatTicks = 0;
+            return;
+        }
+        boolean worldOperation = BossShowEditorState.isRecordingMode()
+            || BossShowEditorState.isAnySelectionMode()
+            || BossShowEditorState.isPoseCaptureArmed();
+        boolean validContext = minecraft.screen instanceof BossShowEditorSessionScreen
+            || minecraft.screen instanceof ConfirmScreen
+            || worldOperation && (minecraft.screen == null || minecraft.screen instanceof PauseScreen);
+        if (!validContext || minecraft.getConnection() == null) return;
+
+        sessionHeartbeatTicks++;
+        if (sessionHeartbeatTicks >= 20) {
+            NetworkHandler.sendToServer(new BossShowEditorHeartbeatPacket());
+            sessionHeartbeatTicks = 0;
+        }
+    }
+
+    @SubscribeEvent
+    public static void onClientLogout(ClientPlayerNetworkEvent.LoggingOut event) {
+        BossShowEditorState.exit();
+        sessionHeartbeatTicks = 0;
+        cachedHovered = null;
     }
 
     //ENTER 完成录制（保存）

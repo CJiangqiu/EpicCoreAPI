@@ -11,7 +11,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 
 //BossShow 全局演出设置面板，避免把固定属性挤进时间线工作区。
-final class BossShowEditorSettingsScreen extends Screen {
+final class BossShowEditorSettingsScreen extends Screen implements BossShowEditorSessionScreen {
 
     private EditBox targetTypeBox;
     private EditBox radiusBox;

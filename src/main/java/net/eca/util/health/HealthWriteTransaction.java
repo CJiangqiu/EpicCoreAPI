@@ -1,5 +1,6 @@
 package net.eca.util.health;
 
+import net.eca.util.EcaLogger;
 import net.minecraft.world.entity.LivingEntity;
 
 import java.util.List;
@@ -25,9 +26,11 @@ public final class HealthWriteTransaction {
         return snapshot.isComplete();
     }
 
-    public void rollback() {
-        if (finished) return;
-        snapshot.restore();
+    public boolean rollback() {
+        if (finished) return true;
+        boolean restored = snapshot.restore();
         finished = true;
+        if (!restored) EcaLogger.info("[HealthTransaction] rollback incomplete");
+        return restored;
     }
 }

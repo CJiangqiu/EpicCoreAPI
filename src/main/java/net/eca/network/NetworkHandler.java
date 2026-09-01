@@ -163,6 +163,12 @@ public class NetworkHandler {
                 .decoder(ClientReviveContainersPacket::decode)
                 .consumerMainThread(ClientReviveContainersPacket::handle)
                 .add();
+
+        CHANNEL.messageBuilder(BossShowEditorHeartbeatPacket.class, id(), NetworkDirection.PLAY_TO_SERVER)
+                .encoder(BossShowEditorHeartbeatPacket::encode)
+                .decoder(BossShowEditorHeartbeatPacket::decode)
+                .consumerMainThread(BossShowEditorHeartbeatPacket::handle)
+                .add();
     }
 
     /**

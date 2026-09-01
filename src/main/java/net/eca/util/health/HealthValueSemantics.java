@@ -25,9 +25,12 @@ public final class HealthValueSemantics {
         return target <= 0.0f ? actual <= 0.0f : matches(actual, target);
     }
 
-    public static boolean retainedAfterDelay(float actual, float target) {
-        return Float.isFinite(actual)
-                && Float.isFinite(target)
-                && actual <= target + tolerance(target);
+    public static boolean retainedAfterDelay(float actual, float before, float target) {
+        if (!Float.isFinite(actual) || !Float.isFinite(before) || !Float.isFinite(target)) return false;
+        if (target <= 0.0f) return actual <= 0.0f;
+        float tolerance = tolerance(target);
+        if (target > before + tolerance) return actual >= target - tolerance;
+        if (target < before - tolerance) return actual <= target + tolerance;
+        return matches(actual, target);
     }
 }

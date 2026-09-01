@@ -9,7 +9,7 @@ import org.lwjgl.glfw.GLFW;
 import java.util.List;
 
 //快捷键说明独立显示，避免持续占用编辑工作区。
-final class BossShowShortcutHelpScreen extends Screen {
+final class BossShowShortcutHelpScreen extends Screen implements BossShowEditorSessionScreen {
 
     private static final List<String> SHORTCUT_KEYS = List.of(
         "space", "arrows", "home_end", "in_out", "clipboard", "undo", "delete", "context", "input"

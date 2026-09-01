@@ -21,7 +21,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 
 //BossShow 编辑器 Home 界面：选择已有定义或进入实体选择模式新建
-public class BossShowEditorHomeScreen extends Screen {
+public class BossShowEditorHomeScreen extends Screen implements BossShowEditorSessionScreen {
 
     private DefList defList;
     private Button createBtn;

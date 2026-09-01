@@ -9,6 +9,7 @@ import net.eca.util.EntityLocationManager;
 import net.eca.util.EntityRemovalQuarantine;
 import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
+import net.eca.util.bossshow.BossShowEditorSessionManager;
 import net.eca.util.bossshow.BossShowPlaybackTracker;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
@@ -84,6 +85,7 @@ public class EcaEventHandler {
     @SubscribeEvent
     public void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
+            BossShowEditorSessionManager.recoverStaleSession(player);
             EntityExtensionManager.syncActiveType(player);
             GlobalEffectOverrideManager.syncToPlayer(player);
             if (!EcaConfiguration.getForceCompatibilityModeSafely()) {
@@ -98,6 +100,7 @@ public class EcaEventHandler {
     @SubscribeEvent
     public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
+            BossShowEditorSessionManager.end(player);
             BossShowPlaybackTracker.onPlayerLogout(player);
         }
     }
@@ -152,6 +155,7 @@ public class EcaEventHandler {
     public void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
         BossShowPlaybackTracker.onServerTick(event.getServer());
+        BossShowEditorSessionManager.onServerTick(event.getServer());
         //END 相位在实体 tick 之后，此处复查才能看到防护逻辑对改血的回滚
         DelayedHealthVerifier.onServerTick(event.getServer());
         EntityRemovalQuarantine.onServerTick(event.getServer());
@@ -253,6 +257,7 @@ public class EcaEventHandler {
         //实体 id 重启后重排，残留复查条目会拿旧目标值比对新实体，必须清空
         DelayedHealthVerifier.clear();
         EntityRemovalQuarantine.clear();
+        BossShowEditorSessionManager.clear();
         NEXT_GLOW_SCAN.clear();
     }
 }

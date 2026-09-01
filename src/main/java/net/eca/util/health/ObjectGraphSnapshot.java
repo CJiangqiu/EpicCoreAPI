@@ -57,15 +57,18 @@ final class ObjectGraphSnapshot {
         return snapshot;
     }
 
-    void restore() {
+    boolean restore() {
+        boolean restored = true;
         for (int i = slots.size() - 1; i >= 0; i--) {
             try {
                 slots.get(i).restore();
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
+                restored = false;
                 diag("restore failed: " + t.getClass().getSimpleName());
             }
         }
+        return restored;
     }
 
     boolean isComplete() {

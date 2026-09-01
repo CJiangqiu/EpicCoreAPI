@@ -30,8 +30,8 @@ public final class DelayedHealthVerifier {
     /* 待复查上限。逐 tick 改血的调用方按实体去重后只占一条，正常规模远达不到此数。 */
     private static final int MAX_PENDING = 1024;
 
-    private record Pending(WeakReference<LivingEntity> entity, Class<?> entityClass, float target, int dueTick,
-                           Ticket ticket) {}
+    private record Pending(WeakReference<LivingEntity> entity, Class<?> entityClass, float before, float target,
+                           int dueTick, Ticket ticket) {}
 
     public record Ticket(int entityId, UUID entityUuid, long revision) {}
 
@@ -45,9 +45,9 @@ public final class DelayedHealthVerifier {
 
     /* 登记一次成功写入，待实体 tick 过后复查。返回是否登记成功——第三阶段的外部联写
        须由本复查裁定提交或撤销，登记不上就不该动世界数据，否则那批快照无人销账。 */
-    public static Ticket schedule(LivingEntity entity, float target) {
+    public static Ticket schedule(LivingEntity entity, float before, float target) {
         if (entity == null || entity instanceof Player) return null;
-        if (!Float.isFinite(target)) return null;
+        if (!Float.isFinite(before) || !Float.isFinite(target)) return null;
         if (entity.level() == null || entity.level().isClientSide) return null;
         MinecraftServer server = entity.level().getServer();
         if (server == null) return null;
@@ -63,7 +63,7 @@ public final class DelayedHealthVerifier {
         }
         Ticket ticket = new Ticket(
                 id, entity.getUUID(), NEXT_REVISION.incrementAndGet());
-        Pending next = new Pending(new WeakReference<>(entity), entity.getClass(), target,
+        Pending next = new Pending(new WeakReference<>(entity), entity.getClass(), before, target,
                 server.getTickCount() + VERIFY_DELAY_TICKS, ticket);
         Pending previous = PENDING.put(id, next);
         if (previous != null) {
@@ -122,9 +122,8 @@ public final class DelayedHealthVerifier {
             ExternalMirrorWriter.revert(ticket);
             return;
         }
-        /* 只认向上偏离：血量自行回升是回滚与强制回血的特征。向下偏离可能只是这一 tick 内的
-           正常受伤，据此判失败会把大量真成功误杀。 */
-        if (HealthValueSemantics.retainedAfterDelay(actual, pending.target())) {
+        /* 沿本次写入方向检查留存：降血允许后续正常受伤，升血则不能把回落到旧值误认为成功。 */
+        if (HealthValueSemantics.retainedAfterDelay(actual, pending.before(), pending.target())) {
             EcaSetHealthManager.onDelayedRetained(pending.entityClass());
             ExternalMirrorWriter.commit(ticket);
             return;
@@ -132,8 +131,8 @@ public final class DelayedHealthVerifier {
 
         Class<?> cls = pending.entityClass();
         if (ROLLBACK_DUMPED.add(cls.getName())) {
-            EcaLogger.info("[DelayedVerify] write rolled back entity={} target={} actual={} delay={}tick",
-                    cls.getName(), pending.target(), actual, VERIFY_DELAY_TICKS);
+            EcaLogger.info("[DelayedVerify] write rolled back entity={} before={} target={} actual={} delay={}tick",
+                    cls.getName(), pending.before(), pending.target(), actual, VERIFY_DELAY_TICKS);
         }
         ExternalMirrorWriter.revert(ticket);
         EcaSetHealthManager.onDelayedRollback(cls);
