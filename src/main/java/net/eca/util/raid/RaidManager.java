@@ -242,13 +242,14 @@ public class RaidManager {
         List<RaidWave> waves = def.getWaves();
         if (waves == null) return true;
         for (int i = 0; i < waves.size(); i++) {
-            for (String drawId : waves.get(i).getFactionCounts().keySet()) {
+            for (RaidFactionSpawnEntry entry : waves.get(i).getFactionEntries()) {
+                String drawId = entry.getFactionId();
                 if (!FactionManager.isFactionRegistered(drawId)) {
                     EcaLogger.error("[Raid] Raid '{}' wave {} draws from unregistered faction '{}' — "
                             + "that group will be skipped", def.getId(), i, drawId);
-                } else if (FactionManager.getMemberEntityTypes(drawId).isEmpty()) {
-                    EcaLogger.error("[Raid] Raid '{}' wave {} draws from faction '{}' which declares no "
-                            + "member entity types — that group will be skipped", def.getId(), i, drawId);
+                } else if (!entry.hasUsableWeights()) {
+                    EcaLogger.error("[Raid] Raid '{}' wave {} draws from faction '{}' with no positive "
+                            + "entity weights — that group will be skipped", def.getId(), i, drawId);
                 }
             }
         }

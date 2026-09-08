@@ -20,6 +20,7 @@ public final class CallBridgeManager {
     private static final long PREPARATION_RETRY_NANOS = 30_000_000_000L;
     private static final ThreadLocal<Authorization> AUTHORIZATION = new ThreadLocal<>();
     private static final Set<String> INSTALLED_SOURCES = ConcurrentHashMap.newKeySet();
+    private static final Set<String> NO_WATCHDOG_SOURCES = ConcurrentHashMap.newKeySet();
     private static final Set<String> INSTALLING_SOURCES = ConcurrentHashMap.newKeySet();
     private static final Set<String> RUNTIME_CONFIRMED_SOURCES = ConcurrentHashMap.newKeySet();
     private static final Set<String> JVMTI_INSTALLED_SOURCES = ConcurrentHashMap.newKeySet();
@@ -112,6 +113,7 @@ public final class CallBridgeManager {
         Class<?> targetClass = targetClass(target);
         String sourceKey = sourceKey(targetClass);
         if (targetClass == null || sourceKey == null) return false;
+        if (NO_WATCHDOG_SOURCES.contains(sourceKey)) return false;
         Map<String, Class<?>> watchdogs = WATCHDOGS_BY_SOURCE.get(sourceKey);
         if (watchdogs == null || watchdogs.isEmpty()) {
             CodeSource source = codeSource(targetClass);
@@ -138,7 +140,8 @@ public final class CallBridgeManager {
         CodeSource source = codeSource(targetClass);
         if (source == null || source.getLocation() == null) return;
         String sourceKey = loaderIdentity(targetClass.getClassLoader()) + "|" + source.getLocation();
-        if (INSTALLED_SOURCES.contains(sourceKey) || !INSTALLING_SOURCES.add(sourceKey)) return;
+        if (INSTALLED_SOURCES.contains(sourceKey) || NO_WATCHDOG_SOURCES.contains(sourceKey)
+                || !INSTALLING_SOURCES.add(sourceKey)) return;
         try {
             Long retryAfter = PREPARATION_RETRY.get(sourceKey);
             if (retryAfter != null && System.nanoTime() - retryAfter < 0L) return;
@@ -146,7 +149,8 @@ public final class CallBridgeManager {
             Map<String, Class<?>> watchdogs = WATCHDOGS_BY_SOURCE.get(sourceKey);
             if (watchdogs == null) watchdogs = scanWatchdogs(targetClass, source);
             if (watchdogs.isEmpty()) {
-                PREPARATION_RETRY.put(sourceKey, System.nanoTime() + PREPARATION_RETRY_NANOS);
+                NO_WATCHDOG_SOURCES.add(sourceKey);
+                PREPARATION_RETRY.remove(sourceKey);
                 return;
             }
             registerWatchdogs(sourceKey, watchdogs);
@@ -180,9 +184,21 @@ public final class CallBridgeManager {
     }
 
     private static void registerWatchdogs(String sourceKey, Map<String, Class<?>> watchdogs) {
+        NO_WATCHDOG_SOURCES.remove(sourceKey);
         WATCHDOGS_BY_SOURCE.put(sourceKey, Map.copyOf(watchdogs));
         for (String watchdog : watchdogs.keySet()) CallWatchdogTransformer.register(watchdog);
         PREPARATION_RETRY.remove(sourceKey);
+    }
+
+    /* 生命周期或运行期字节码变化后清除可失效负缓存；已安装桥保持有效。 */
+    public static void clearNegativeCache() {
+        NO_WATCHDOG_SOURCES.clear();
+    }
+
+    /* 单一代码来源的运行期字节码变化只使该来源的负结论失效。 */
+    public static void invalidateNegativeCache(Object target) {
+        String sourceKey = sourceKey(target);
+        if (sourceKey != null) NO_WATCHDOG_SOURCES.remove(sourceKey);
     }
 
     private static void markRuntimeConfirmed(Object target) {

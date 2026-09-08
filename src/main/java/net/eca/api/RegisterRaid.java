@@ -37,7 +37,10 @@ import java.lang.annotation.Target;
  *     @Override public List<RaidWave> getWaves() {
  *         return List.of(
  *             new RaidWave().addEntry(EntityType.ZOMBIE, 6),
- *             new RaidWave().addFaction("undead_legion", 10)
+ *             new RaidWave().addFaction("undead_legion", 10, Map.of(
+ *                 EntityType.ZOMBIE, 8,
+ *                 EntityType.SKELETON, 2
+ *             ))
  *         );
  *     }
  *

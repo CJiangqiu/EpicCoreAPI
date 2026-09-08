@@ -244,8 +244,6 @@ side="BOTH"
 - `canHarm(source, target)` - Check whether ECA faction relations allow source to harm the target
 - `canTarget(source, target)` - Check whether complete faction and protection rules allow source to deliberately target the target
 - `alertFactionMembers(factionId, attacker, victim, level)` - Make nearby untargeted allies retaliate against an attacker
-- `getFactionMemberTypes(factionId)` - Get the entity type pool a faction declares, mapped to spawn weights
-- `rollFactionMemberType(factionId, random)` - Pick one entity type from a faction's pool by weight
 - `joinFaction(uuid, typeId, isPlayer, factionId, level)` - Bind an entity to a faction by UUID, without requiring it to be loaded
 - `leaveFaction(uuid, level)` - Remove a member from its faction by UUID, without requiring it to be loaded
 - `getEntityFaction(uuid)` - Get the faction bound to a UUID (pure index lookup; no pet inheritance, which needs a live entity)
@@ -428,6 +426,8 @@ EcaAPI.endRaid(serverLevel, raid, true);                                       /
 
 This mod also provides a customizable entity type extension feature for adding special visual effects to your entities. You need to create a subclass extending `EntityExtension` and annotate it with `@RegisterEntityExtension` to register the extension. Here is a quick start example:
 
+For the custom boss bar, use `enableBossBar()`, `shouldShowBossBar(LivingEntity)` and `bossBarExtension()`. Inside `BossBarExtension`, `showValueText()` enables centered `current/max` text. Override `getDisplayCurrentValue(LivingEntity)` and `getDisplayMaxValue(LivingEntity)` to return custom display values; by default they use the entity's health and maximum health.
+
 ```java
 @RegisterEntityExtension
 public class MyBossExtension extends EntityExtension {
@@ -504,6 +504,9 @@ public class MyBossExtension extends EntityExtension {
             @Override public int getFillOffsetY() { return 0; }  // fill Y offset
             @Override public float getFrameAlpha() { return 1.0f; }  // frame opacity, 0.0~1.0 (default 1.0)
             @Override public float getFillAlpha() { return 1.0f; }  // fill opacity, 0.0~1.0 (default 1.0)
+            @Override public boolean showValueText() { return true; }  // draw current/max values centered on the bar
+            @Override public Number getDisplayCurrentValue(LivingEntity entity) { return entity.getHealth(); }  // optional custom current-value source
+            @Override public Number getDisplayMaxValue(LivingEntity entity) { return entity.getMaxHealth(); }  // optional custom maximum-value source
         };
     }
 
@@ -1039,7 +1042,7 @@ A binding is dropped when the entity is permanently removed; chunk unloads and d
 
 Tamed animals inherit their owner's faction automatically, so a pet is protected by its owner's allies and can answer nearby faction alerts. Inheritance is resolved at lookup time rather than stored: an inherited pet is not included in the persistent member table, offline queries, counts or table-wide leader propagation. It follows its owner across faction changes and never creates a binding of its own — calling `leaveFaction` on such a pet therefore does nothing. Bind a pet explicitly if it must belong elsewhere or participate in member-table operations; an explicit binding always takes precedence over inheritance.
 
-A faction may optionally declare which entity types it consists of through `getMemberEntityTypes()`, mapping types to spawn weights. This lets other systems spawn "some members of this faction" without naming concrete types — the raid system uses it for faction-drawn waves.
+A faction only owns membership, relations and leadership. Entity composition and spawn weights belong to the system that performs the spawning, so the same faction can be used by different systems without sharing spawn rules.
 
 ```java
 @RegisterFaction
@@ -1064,15 +1067,6 @@ public class UndeadLegionFaction extends FactionDefinition {
         return null;
     }
 
-    // optional: entity type pool with spawn weights, used by faction-drawn raid waves
-    @Override
-    public Map<EntityType<?>, Integer> getMemberEntityTypes() {
-        return Map.of(
-            EntityType.ZOMBIE, 5,
-            EntityType.SKELETON, 3,
-            EntityType.WITHER_SKELETON, 1
-        );
-    }
 }
 ```
 
@@ -1118,7 +1112,7 @@ Raids are registered by extending `RaidDefinition` and annotating with `@Registe
 
 **Targeting:** Override `getTargetStructure()` for a single structure, or `getTargetStructureTag()` to match any structure carrying a tag so one raid applies to several structure types. Anchoring drives the default defeat condition: the raid is lost when the target structure no longer covers the raid center. Declaring neither runs the raid unanchored, in which case it can only end by victory, timeout, or an explicit end call.
 
-**Waves:** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws that pull from a faction's `getMemberEntityTypes()` pool by weight.
+**Waves:** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws whose entity types and weights are configured directly on that wave. Different waves can use different compositions for the same faction.
 
 **Raiders:** Spawned raiders are bound to `getRaiderFactionId()`. Spawned `Mob` instances also receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight an already acquired hostile-faction target and otherwise advance. Any entity type can be spawned and no interface is required, but non-`Mob` entities receive neither faction target acquisition, the navigation goal, nor mob callbacks. Override `getRaiderGoalPriority()` or return a negative value to change or disable goal injection.
 
@@ -1126,7 +1120,7 @@ Raids are registered by extending `RaidDefinition` and annotating with `@Registe
 
 Note that propagation walks the entire faction member table, not just this raid's participants. If the raider faction has other members elsewhere in the world, they answer too. Use a raid-specific faction if you want the response confined to the raid.
 
-**Validation:** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction refuses the start outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
+**Validation:** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction refuses the start outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from an unregistered faction or with no positive entity weights logs an error and skips that group, but the raid still starts.
 
 **Progression:** `shouldAdvanceWave`, `checkVictory` and `checkDefeat` are all overridable. The defaults reproduce vanilla semantics: the next wave spawns once the previous one is dead, and the defenders win when every wave has spawned and every raider is gone.
 
@@ -1154,12 +1148,12 @@ public class UndeadSiege extends RaidDefinition {
         return List.of(
             // explicit entity types
             new RaidWave().addEntry(EntityType.ZOMBIE, 6),
-            // drawn from the faction's member pool by weight
-            new RaidWave().addFaction("undead_legion", 10),
+            // drawn using this wave's own weights
+            new RaidWave().addFaction("undead_legion", 10, Map.of(EntityType.ZOMBIE, 8, EntityType.SKELETON, 2)),
             // both sources mixed, with a per-mob post-spawn callback
             new RaidWave()
                 .addEntry(EntityType.WITHER_SKELETON, 4, mob -> mob.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.NETHERITE_SWORD)))
-                .addFaction("undead_legion", 8)
+                .addFaction("undead_legion", 8, Map.of(EntityType.ZOMBIE, 1, EntityType.WITHER_SKELETON, 4))
                 .setLeader(EntityType.WITHER, mob -> mob.setCustomName(Component.literal("Undead Warlord")))
                 .spawnRadius(32.0)
         );
@@ -1347,7 +1341,7 @@ side="BOTH"
 - `isHealingBanned(entity)` - 检查是否被禁疗
 - `getHealth(entity)` - 读取实体当前生命协议观测到的血量：先取分析器确定的血量锚点，锚点无法解析时回退原版 `DATA_HEALTH_ID`（实体为 null 返回 0.0f）
 - `getRealHealth(entity)` - 同一份权威观测值，实体为 null 时返回 NaN 而非 0.0f
-- `setHealth(entity, health)` - 带校验的改血事务，仅在上一通道校验失败时逐级升级：原版直写（直接写 `DATA_HEALTH_ID`）→ 数据流逆向（ASM 数据流分析 `getHealth()` 定位真实存储并反演其读取表达式）→ 外部扫描（逆向 `isAlive` / `isDeadOrDying` / `hurt` / `actuallyHurt` 定位存储，含需要换算的有效血量模型）→ 方法探针（借实体自身的 writer：反射 setter、函数式字段、注入桥接）→ 数值反演（存储不可反演时在对象图中搜索可写数值单元）。每次尝试都以回读血量锚点、落在 `max(0.5, abs(目标) * 2%)` 容差内为判据；写入前先对受影响状态快照，校验失败整体回滚。服务端写入成功后广播给追踪客户端并登记延迟复查；血量会在下一 tick 被改回的类，还会追加写入实体之外的血量镜像。玩家只执行原版直写。原版直写之后的每条通道都需要激进攻击逻辑，外加 `Attack → setHealth` 下各自的开关（Const Override / External Scan / Method Probe / Numeric Inversion），这四个默认全部关闭。
+- `setHealth(entity, health)` - 带校验的改血事务，仅在上一通道校验失败时逐级升级：原版直写（直接写 `DATA_HEALTH_ID`）→ 数据流逆向（ASM 数据流分析 `getHealth()` 定位真实存储并反演其读取表达式）→ 外部扫描（逆向 `isAlive` / `isDeadOrDying` / `hurt` / `actuallyHurt` 定位存储，含需要换算的有效血量模型）→ 方法探针（借实体自身的 writer：反射 setter、函数式字段、注入桥接）。每次尝试都以回读血量锚点、落在 `max(0.5, abs(目标) * 2%)` 容差内为判据；三态裁决下诱饵读数不构成反证，常量诱饵读出口改用存储回读、编码往返或生死谓词双值因果证据放行。写入前先对受影响状态快照，校验失败整体回滚；默认写与必需伴随源（影子表/速率基准）同一事务联写，任一失败整体回滚。服务端写入成功后向追踪客户端发送提交后的权威读值，新开始追踪的玩家获得定向补发。玩家只执行原版直写。原版直写之后的每条通道都需要激进攻击逻辑，外加 `Attack → setHealth` 下各自的开关（Dataflow / External Scan / Method Probe），默认全部关闭。
 - `setMaxHealth(entity, maxHealth)` - 通过反算属性基础值设置最大生命值
 - `lockMaxHealth(entity, value)` - 锁定实体最大生命值（每 tick 强制维持）
 - `unlockMaxHealth(entity)` - 解锁最大生命值
@@ -1471,8 +1465,6 @@ side="BOTH"
 - `canHarm(source, target)` - 判断阵营规则是否允许 source 攻击 target
 - `canTarget(source, target)` - 判断完整阵营与保护规则是否允许 source 主动锁定 target
 - `alertFactionMembers(factionId, attacker, victim, level)` - 让附近无目标的同阵营盟友反击攻击者
-- `getFactionMemberTypes(factionId)` - 获取阵营声明的成员实体类型池（类型 → 权重）
-- `rollFactionMemberType(factionId, random)` - 按权重从阵营成员类型池抽取一个实体类型
 - `joinFaction(uuid, typeId, isPlayer, factionId, level)` - 按 UUID 将实体加入阵营，无需实体在线或已加载
 - `leaveFaction(uuid, level)` - 按 UUID 将实体移出所属阵营，无需实体在线
 - `getEntityFaction(uuid)` - 按 UUID 查询所属阵营（纯索引查询；不含需要实体才能解析的宠物继承）
@@ -1655,6 +1647,8 @@ EcaAPI.endRaid(serverLevel, raid, true);                                       /
 
 本 Mod 还提供了一个可自定义的实体类型扩展功能，用于为你的实体增加一些特殊的视觉效果。你需要创建继承 `EntityExtension` 的子类，并在类上标注 `@RegisterEntityExtension` 进行注册扩展。以下是一个快速上手的示例：
 
+自定义 Boss 血条可使用 `enableBossBar()`、`shouldShowBossBar(LivingEntity)` 和 `bossBarExtension()`。在 `BossBarExtension` 中，`showValueText()` 用于开启居中的“当前值/最大值”文本；覆写 `getDisplayCurrentValue(LivingEntity)` 与 `getDisplayMaxValue(LivingEntity)` 可以返回自定义显示数值，默认分别使用实体当前生命值和最大生命值。
+
 ```java
 @RegisterEntityExtension
 public class MyBossExtension extends EntityExtension {
@@ -1731,6 +1725,9 @@ public class MyBossExtension extends EntityExtension {
             @Override public int getFillOffsetY() { return 0; }  // 填充 Y 偏移
             @Override public float getFrameAlpha() { return 1.0f; }  // 外框不透明度，0.0~1.0（默认 1.0）
             @Override public float getFillAlpha() { return 1.0f; }  // 填充不透明度，0.0~1.0（默认 1.0）
+            @Override public boolean showValueText() { return true; }  // 在血条中央显示当前值/最大值
+            @Override public Number getDisplayCurrentValue(LivingEntity entity) { return entity.getHealth(); }  // 可覆写为自定义当前值来源
+            @Override public Number getDisplayMaxValue(LivingEntity entity) { return entity.getMaxHealth(); }  // 可覆写为自定义最大值来源
         };
     }
 
@@ -2270,7 +2267,7 @@ EcaAPI.isBossShowPlaying(viewer); // 检查是否在演出中
 
 驯服动物会自动继承主人的阵营，因此宠物同样受主人盟友保护，并可响应附近的阵营求援。继承在查询时解析而非落库：继承阵营的宠物不会出现在持久化成员表、离线查询、成员计数或遍历成员表的首领传导中。宠物会始终跟随主人换营且自身不会产生绑定——对这类宠物调用 `leaveFaction` 不会有任何效果。若希望宠物归属其他阵营或参与成员表操作，需要显式绑定；显式绑定始终优先于继承。
 
-阵营还可以通过 `getMemberEntityTypes()` 声明自己由哪些实体类型构成（类型 → 权重）。这使得其他系统无需指定具体类型即可生成"该阵营的一些成员"——袭击系统的按阵营抽取波次正是基于此。
+阵营系统只负责成员归属、关系和首领。`FactionDefinition` 不提供实体组成或生成权重 API；这些内容由实际执行生成的系统自行管理，因此同一阵营可以被不同系统使用而不共享生成规则。
 
 ```java
 @RegisterFaction
@@ -2295,15 +2292,6 @@ public class UndeadLegionFaction extends FactionDefinition {
         return null;
     }
 
-    // 可选：成员实体类型池（类型 → 权重），供按阵营抽取的袭击波次使用
-    @Override
-    public Map<EntityType<?>, Integer> getMemberEntityTypes() {
-        return Map.of(
-            EntityType.ZOMBIE, 5,
-            EntityType.SKELETON, 3,
-            EntityType.WITHER_SKELETON, 1
-        );
-    }
 }
 ```
 
@@ -2349,7 +2337,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 **目标锚定**：覆写 `getTargetStructure()` 指向单一结构，或覆写 `getTargetStructureTag()` 匹配带有某个标签的任意结构，使一个袭击适用于多种结构。锚定决定了默认的失败条件：当目标结构不再覆盖袭击中心时判定防守失败。两者都不声明则袭击不锚定结构，此时只能通过胜利、超时或主动结束来终止。
 
-**波次**：每个 `RaidWave` 可自由混用两种生成源——显式指定实体类型，以及按权重从阵营的 `getMemberEntityTypes()` 池中抽取。
+**波次**：每个 `RaidWave` 可自由混用两种生成源——显式指定实体类型，以及通过 `addFaction(String factionId, int count, Map<EntityType<?>, Integer> typeWeights)` 在本波内部配置实体类型和权重的阵营抽取。同一阵营在不同波次可以使用完全不同的生成组合和权重，例如：`new RaidWave().addFaction("undead_legion", 10, Map.of(EntityType.ZOMBIE, 8, EntityType.SKELETON, 2))`。
 
 **袭击者**：生成的袭击者会被绑定到 `getRaiderFactionId()`；其中 `Mob` 实例还会被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先处理已经取得的敌对阵营目标，否则向中心推进。任意实体类型均可生成且不要求实现接口，但非 `Mob` 实体不会获得阵营索敌、导航 Goal 或生物回调。可覆写 `getRaiderGoalPriority()` 调整优先级，返回负数则禁用注入。
 
@@ -2357,7 +2345,7 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 需要注意传导遍历的是整张阵营成员表，而非仅本场袭击的参与者。若该袭击者阵营在世界其他地方还有成员，它们同样会响应。希望响应范围限定在本场袭击内，请为袭击使用专属阵营。
 
-**启动校验**：发起袭击时会校验其引用的阵营。非空但未注册的袭击者阵营会直接拒绝启动，因为所请求的友伤和求援规则无法应用。主动返回 `null` 则是允许的，此时每个生成实体完全由自身 AI 控制。波次抽取的阵营若未注册或未声明成员池，则记录错误并跳过该组，袭击仍会启动。
+**启动校验**：发起袭击时会校验其引用的阵营。非空但未注册的袭击者阵营会直接拒绝启动，因为所请求的友伤和求援规则无法应用。主动返回 `null` 则是允许的，此时每个生成实体完全由自身 AI 控制。波次抽取的阵营若未注册或本波没有正权重实体类型，则记录错误并跳过该组，袭击仍会启动。
 
 **流程控制**：`shouldAdvanceWave`、`checkVictory` 和 `checkDefeat` 均可覆写。默认实现复现原版语义：上一波清空后生成下一波，全部波次生成完毕且袭击者全灭时防守方获胜。
 
@@ -2385,12 +2373,12 @@ public class UndeadSiege extends RaidDefinition {
         return List.of(
             // 显式指定实体类型
             new RaidWave().addEntry(EntityType.ZOMBIE, 6),
-            // 按权重从阵营成员池抽取
-            new RaidWave().addFaction("undead_legion", 10),
+            // 使用本波自己的权重从阵营中抽取
+            new RaidWave().addFaction("undead_legion", 10, Map.of(EntityType.ZOMBIE, 8, EntityType.SKELETON, 2)),
             // 两种来源混用，并对每个生成的实体做后处理
             new RaidWave()
                 .addEntry(EntityType.WITHER_SKELETON, 4, mob -> mob.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.NETHERITE_SWORD)))
-                .addFaction("undead_legion", 8)
+                .addFaction("undead_legion", 8, Map.of(EntityType.ZOMBIE, 1, EntityType.WITHER_SKELETON, 4))
                 .setLeader(EntityType.WITHER, mob -> mob.setCustomName(Component.literal("Undead Warlord")))
                 .spawnRadius(32.0)
         );

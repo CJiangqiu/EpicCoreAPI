@@ -244,8 +244,6 @@ side="BOTH"
 - `canHarm(source, target)` - Check whether ECA faction relations allow source to harm the target
 - `canTarget(source, target)` - Check whether complete faction and protection rules allow source to deliberately target the target
 - `alertFactionMembers(factionId, attacker, victim, level)` - Make nearby untargeted allies retaliate against an attacker
-- `getFactionMemberTypes(factionId)` - Get the entity type pool a faction declares, mapped to spawn weights
-- `rollFactionMemberType(factionId, random)` - Pick one entity type from a faction's pool by weight
 - `joinFaction(uuid, typeId, isPlayer, factionId, level)` - Bind an entity to a faction by UUID, without requiring it to be loaded
 - `leaveFaction(uuid, level)` - Remove a member from its faction by UUID, without requiring it to be loaded
 - `getEntityFaction(uuid)` - Get the faction bound to a UUID (pure index lookup; no pet inheritance, which needs a live entity)
@@ -274,6 +272,8 @@ side="BOTH"
 ### Entity Extensions
 
 This mod also provides a customizable entity type extension feature for adding special visual effects to your entities. You need to create a subclass extending `EntityExtension` and annotate it with `@RegisterEntityExtension` to register the extension.
+
+Entity extensions can opt into a custom boss bar through `enableBossBar()`, control visibility with `shouldShowBossBar(LivingEntity)`, and provide the client-side appearance through `bossBarExtension()`. `BossBarExtension.showValueText()` enables centered `current/max` text; override `getDisplayCurrentValue(LivingEntity)` and `getDisplayMaxValue(LivingEntity)` to provide custom display values. The default value sources are the entity's health and maximum health.
 
 Entity, item, and block shader overlays share the same `ShaderMaskPass` pipeline. Every pass supplies a RenderType, an optional UV-aligned mask texture, a target RGB color (black by default), a near-color tolerance, and opacity. An extension may return multiple passes so different colors in one mask use different shaders. Passes render in list order, and later passes draw over earlier passes where selected regions overlap. Transparent and non-matching mask pixels are discarded.
 
@@ -518,7 +518,7 @@ A binding is dropped when the entity is permanently removed; chunk unloads and d
 
 Tamed animals inherit their owner's faction automatically, so a pet is protected by its owner's allies and can answer nearby faction alerts. Inheritance is resolved at lookup time rather than stored: an inherited pet is not included in the persistent member table, offline queries, counts or table-wide leader propagation. It follows its owner across faction changes and never creates a binding of its own — calling `leaveFaction` on such a pet therefore does nothing. Bind a pet explicitly if it must belong elsewhere or participate in member-table operations; an explicit binding always takes precedence over inheritance.
 
-A faction may optionally declare which entity types it consists of through `getMemberEntityTypes()`, mapping types to spawn weights. This lets other systems spawn "some members of this faction" without naming concrete types — the raid system uses it for faction-drawn waves.
+A faction only owns membership, relations and leadership. `FactionDefinition` does not provide entity composition or spawn-weight APIs; those values belong to the system that performs the spawning, so different systems can use the same faction without sharing spawn rules.
 
 **Leaders:** A faction may designate one member as its leader. Setting a leader adds it to the faction automatically if it was not a member — a leader outside its own faction would be a contradictory state. Leaving the faction also vacates the post, and a leader that is permanently removed is cleared automatically.
 
@@ -562,7 +562,7 @@ Raids are registered by extending `RaidDefinition` and annotating with `@Registe
 
 **Targeting:** Override `getTargetStructure()` for a single structure, or `getTargetStructureTag()` to match any structure carrying a tag so one raid applies to several structure types. Anchoring drives the default defeat condition: the raid is lost when the target structure no longer covers the raid center. Declaring neither runs the raid unanchored, in which case it can only end by victory, timeout, or an explicit end call.
 
-**Waves:** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and faction draws that pull from a faction's `getMemberEntityTypes()` pool by weight.
+**Waves:** Each `RaidWave` mixes two spawn sources freely — explicit entity entries, and `addFaction(String factionId, int count, Map<EntityType<?>, Integer> typeWeights)` draws whose entity types and weights are configured directly on that wave. Different waves can use different compositions and weights for the same faction.
 
 **Raiders:** Spawned raiders are bound to `getRaiderFactionId()`. Spawned `Mob` instances also receive an injected goal that paths them to the raid center. The goal sits at priority 3 by default, matching vanilla's `PathfindToRaidGoal` — below the usual melee attack goal, so raiders fight an already acquired hostile-faction target and otherwise advance. Any entity type can be spawned and no interface is required, but non-`Mob` entities receive neither faction target acquisition, the navigation goal, nor mob callbacks. Override `getRaiderGoalPriority()` or return a negative value to change or disable goal injection.
 
@@ -570,7 +570,7 @@ Raids are registered by extending `RaidDefinition` and annotating with `@Registe
 
 Note that propagation walks the entire faction member table, not just this raid's participants. If the raider faction has other members elsewhere in the world, they answer too. Use a raid-specific faction if you want the response confined to the raid.
 
-**Validation:** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction refuses the start outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from a faction that is unregistered or declares no member pool logs an error and skips that group, but the raid still starts.
+**Validation:** Starting a raid verifies the factions it references. A non-empty but unregistered raider faction refuses the start outright because the requested friendly-fire and alert rules could not be applied. Returning `null` intentionally is allowed and leaves each spawned entity governed by its own AI. A wave drawing from an unregistered faction or with no positive entity weights logs an error and skips that group, but the raid still starts.
 
 **Progression:** `shouldAdvanceWave`, `checkVictory` and `checkDefeat` are all overridable. The defaults reproduce vanilla semantics: the next wave spawns once the previous one is dead, and the defenders win when every wave has spawned and every raider is gone.
 

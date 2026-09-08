@@ -195,7 +195,12 @@ public final class EcaTransformerManager {
             return false;
         }
         try {
-            inst.retransformClasses(clazz);
+            RuntimeBytecodeProvider.beginSelfRetransform();
+            try {
+                inst.retransformClasses(clazz);
+            } finally {
+                RuntimeBytecodeProvider.endSelfRetransform();
+            }
             AgentLogWriter.info("[EcaTransformerManager] Requested JVM TI hook for loaded class "
                     + clazz.getName());
             return true;
@@ -325,7 +330,12 @@ public final class EcaTransformerManager {
             activateJvmTiIfNeeded();
             if (!JvmTiChannel.isAvailable()) return false;
             EcaClassTransformer.ensureWhitelistLoaded();
-            return JvmTiChannel.retransformLoadedClasses(EcaClassTransformer::isJvmTiLoadCompleteTarget);
+            RuntimeBytecodeProvider.beginSelfRetransform();
+            try {
+                return JvmTiChannel.retransformLoadedClasses(EcaClassTransformer::isJvmTiLoadCompleteTarget);
+            } finally {
+                RuntimeBytecodeProvider.endSelfRetransform();
+            }
         } catch (Throwable t) {
             AgentLogWriter.info("[EcaTransformerManager] JVMTI load-complete transform failed: " + t.getMessage());
             return false;
@@ -337,7 +347,12 @@ public final class EcaTransformerManager {
         if (inst == null || clazz == null) return false;
         try {
             if (!inst.isModifiableClass(clazz)) return false;
-            inst.retransformClasses(clazz);
+            RuntimeBytecodeProvider.beginSelfRetransform();
+            try {
+                inst.retransformClasses(clazz);
+            } finally {
+                RuntimeBytecodeProvider.endSelfRetransform();
+            }
             return true;
         } catch (Throwable t) {
             AgentLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
@@ -423,23 +438,28 @@ public final class EcaTransformerManager {
         if (inst == null || classes == null || classes.isEmpty()) return false;
         int successCount = 0;
         int batchSize = 32;
-        for (int start = 0; start < classes.size(); start += batchSize) {
-            int end = Math.min(start + batchSize, classes.size());
-            Class<?>[] batch = classes.subList(start, end).toArray(new Class<?>[0]);
-            try {
-                inst.retransformClasses(batch);
-                successCount += batch.length;
-            } catch (Throwable batchFailure) {
-                for (Class<?> clazz : batch) {
-                    try {
-                        inst.retransformClasses(clazz);
-                        successCount++;
-                    } catch (Throwable classFailure) {
-                        AgentLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
-                                + clazz.getName() + ": " + classFailure.getMessage());
+        RuntimeBytecodeProvider.beginSelfRetransform();
+        try {
+            for (int start = 0; start < classes.size(); start += batchSize) {
+                int end = Math.min(start + batchSize, classes.size());
+                Class<?>[] batch = classes.subList(start, end).toArray(new Class<?>[0]);
+                try {
+                    inst.retransformClasses(batch);
+                    successCount += batch.length;
+                } catch (Throwable batchFailure) {
+                    for (Class<?> clazz : batch) {
+                        try {
+                            inst.retransformClasses(clazz);
+                            successCount++;
+                        } catch (Throwable classFailure) {
+                            AgentLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
+                                    + clazz.getName() + ": " + classFailure.getMessage());
+                        }
                     }
                 }
             }
+        } finally {
+            RuntimeBytecodeProvider.endSelfRetransform();
         }
         if (successCount > 0) {
             AgentLogWriter.info("[EcaTransformerManager] Retransformed " + successCount
@@ -453,7 +473,12 @@ public final class EcaTransformerManager {
             activateJvmTiIfNeeded();
             if (!JvmTiChannel.isAvailable()) return false;
             EcaClassTransformer.ensureWhitelistLoaded();
-            return JvmTiChannel.retransformInternalName(internalName);
+            RuntimeBytecodeProvider.beginSelfRetransform();
+            try {
+                return JvmTiChannel.retransformInternalName(internalName);
+            } finally {
+                RuntimeBytecodeProvider.endSelfRetransform();
+            }
         } catch (Throwable t) {
             AgentLogWriter.info("[EcaTransformerManager] JVMTI retransform failed for "
                     + internalName + ": " + t.getMessage());
@@ -466,8 +491,13 @@ public final class EcaTransformerManager {
             activateJvmTiIfNeeded();
             if (!JvmTiChannel.isAvailable()) return false;
             EcaClassTransformer.ensureWhitelistLoaded();
-            return JvmTiChannel.retransformLoadedClasses(
-                    info -> internalNames.contains(info.internalName()));
+            RuntimeBytecodeProvider.beginSelfRetransform();
+            try {
+                return JvmTiChannel.retransformLoadedClasses(
+                        info -> internalNames.contains(info.internalName()));
+            } finally {
+                RuntimeBytecodeProvider.endSelfRetransform();
+            }
         } catch (Throwable t) {
             AgentLogWriter.info("[EcaTransformerManager] JVMTI selected-mod retransform failed: "
                     + t.getMessage());

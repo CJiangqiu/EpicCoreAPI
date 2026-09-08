@@ -27,6 +27,17 @@ public final class RuntimeBytecodeProvider {
     private static volatile boolean captureRegistered = false;
     private static volatile boolean jvmTiRegistered = false;
 
+    /* ECA 自发 retransform 期间进入 transform 的字节码已含自身 hook，不得作为分析输入 */
+    private static volatile int selfRetransformDepth = 0;
+
+    public static void beginSelfRetransform() {
+        selfRetransformDepth++;
+    }
+
+    public static void endSelfRetransform() {
+        selfRetransformDepth = Math.max(0, selfRetransformDepth - 1);
+    }
+
     // 注册永久捕获器：截获主转换器之后的运行期字节码，并使该类旧健康变换回执失效
     public static void registerPermanentCapture(Instrumentation inst) {
         if (captureRegistered) return;
@@ -55,9 +66,11 @@ public final class RuntimeBytecodeProvider {
         return null;   // 只读不改
     }
 
-    /* ECA 转换器入口已经包含先于 ECA 执行的外部转换，且尚未混入 ECA 自己的 hook。 */
+    /* ECA 转换器入口已经包含先于 ECA 执行的外部转换，且尚未混入 ECA 自己的 hook。
+       每次转换代际都覆盖旧视图：外部 retransform 后重新分析不再读到过期字节码。 */
     public static void captureAnalysisInput(String className, byte[] bytes) {
-        capture(ANALYSIS_BYTES, className, bytes, false);
+        if (selfRetransformDepth > 0) return;
+        capture(ANALYSIS_BYTES, className, bytes, true);
     }
 
     /* 隐藏类的 JVM TI 名称可为空；以 classfile 内部名建立稳定别名，供 /0x... 运行时类名回查。 */
@@ -98,9 +111,16 @@ public final class RuntimeBytecodeProvider {
         return get(ANALYSIS_BYTES, clazz);
     }
 
-    // 返回当前运行期字节码指纹；尚未捕获时返回 0
+    /* 分析回退链：ECA 注入前视图缺失时回退运行期捕获缓存。运行期生成的隐藏类
+       （类置换实体的空壳子类）不经过 ECA 转换器，只存在于永久捕获缓存中。 */
+    public static byte[] getAnalysisOrRuntime(Class<?> clazz) {
+        byte[] bytes = getAnalysis(clazz);
+        return bytes != null ? bytes : get(clazz);
+    }
+
+    // 返回分析所用同一字节码视图的指纹；禁止把早期分析体与末端运行体拼成一个代际
     public static int fingerprint(Class<?> clazz) {
-        byte[] bytes = get(clazz);
+        byte[] bytes = getAnalysisOrRuntime(clazz);
         return bytes == null ? 0 : Arrays.hashCode(bytes);
     }
 

@@ -40,6 +40,42 @@ public final class EntityExtensionSafeAccess {
         }
     }
 
+    public static boolean showValueText(BossBarExtension extension) {
+        if (extension == null) {
+            return false;
+        }
+        try {
+            return extension.showValueText();
+        } catch (Throwable t) {
+            logOnce(extension, "showValueText", t);
+            return false;
+        }
+    }
+
+    public static Number displayCurrentValue(BossBarExtension extension, LivingEntity entity) {
+        if (extension == null) {
+            return entity == null ? null : entity.getHealth();
+        }
+        try {
+            return extension.getDisplayCurrentValue(entity);
+        } catch (Throwable t) {
+            logOnce(extension, "getDisplayCurrentValue", t);
+            return entity == null ? null : entity.getHealth();
+        }
+    }
+
+    public static Number displayMaxValue(BossBarExtension extension, LivingEntity entity) {
+        if (extension == null) {
+            return entity == null ? null : entity.getMaxHealth();
+        }
+        try {
+            return extension.getDisplayMaxValue(entity);
+        } catch (Throwable t) {
+            logOnce(extension, "getDisplayMaxValue", t);
+            return entity == null ? null : entity.getMaxHealth();
+        }
+    }
+
     public static EntityLayerExtension entityLayerExtension(EntityExtension ext, LivingEntity entity) {
         if (ext == null) {
             return null;
@@ -153,10 +189,10 @@ public final class EntityExtensionSafeAccess {
         }
     }
 
-    private static void logOnce(EntityExtension ext, String method, Throwable t) {
-        String key = ext.getClass().getName() + "#" + method;
+    private static void logOnce(Object extension, String method, Throwable t) {
+        String key = extension.getClass().getName() + "#" + method;
         if (LOGGED.add(key)) {
-            EcaLogger.error("EntityExtension " + ext.getClass().getName()
+            EcaLogger.error("Extension " + extension.getClass().getName()
                 + " threw in " + method + ", falling back to safe default", t);
         }
     }

@@ -180,7 +180,12 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         }
         if (!ensureRegistered(inst)) return false;
         int before = transformCount;
-        retransformLoadedClasses(inst);
+        RuntimeBytecodeProvider.beginSelfRetransform();
+        try {
+            retransformLoadedClasses(inst);
+        } finally {
+            RuntimeBytecodeProvider.endSelfRetransform();
+        }
         return transformCount > before;
     }
 

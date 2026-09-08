@@ -25,11 +25,13 @@ import net.minecraft.world.entity.MobSpawnType;
 import net.minecraft.world.entity.SpawnPlacements;
 import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.structure.Structure;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -46,8 +48,8 @@ import java.util.function.Consumer;
  *   - 袭击者用 UUID 集合跟踪，不要求实现任何接口，敌我判定交给阵营系统
  *   - 波次推进与胜负判定全部委托给 RaidDefinition，本类只负责驱动
  *
- * 减员判定由事件驱动（RaidManager 在实体永久移除时回调 onRaiderRemoved），
- * 轮询只清理"能解析到且已死亡"的条目——解析不到的可能只是区块未加载，不能算减员。
+ * 减员状态以服务端维度 tick 为最终收敛点，实体移除事件只负责尽快更新。
+ * 实例保留实体引用和最后区块位置，用于区分区块卸载与绕过事件的底层清除。
  */
 public class RaidInstance {
 
@@ -80,6 +82,8 @@ public class RaidInstance {
     private int currentWaveTotal = 1;
     private boolean started = false;
     private final Set<UUID> raiderUuids = new LinkedHashSet<>();
+    private final Map<UUID, Entity> raiderEntities = new HashMap<>();
+    private final Map<UUID, ChunkPos> raiderLastChunks = new HashMap<>();
 
     private List<RaidWave> cachedWaves;
     private ServerBossEvent bossEvent;
@@ -247,6 +251,8 @@ public class RaidInstance {
 
         ticksActive++;
 
+        reconcileRaiders(level);
+
         int maxDuration = def.getMaxDurationTicks();
         if (maxDuration > 0 && ticksActive >= maxDuration) {
             EcaLogger.info("[Raid] Raid {} ('{}') timed out after {} ticks", id, definitionId, ticksActive);
@@ -341,12 +347,11 @@ public class RaidInstance {
             }
         }
 
-        for (Map.Entry<String, Integer> factionEntry : wave.getFactionCounts().entrySet()) {
-            String factionId = factionEntry.getKey();
-            for (int i = 0; i < factionEntry.getValue(); i++) {
-                EntityType<?> type = FactionManager.rollMemberType(factionId, random);
+        for (RaidFactionSpawnEntry factionEntry : wave.getFactionEntries()) {
+            for (int i = 0; i < factionEntry.getCount(); i++) {
+                EntityType<?> type = factionEntry.rollType(random);
                 if (type == null) {
-                    // 类型池不可用，跳过该阵营在本波的剩余数量（rollMemberType 已记录原因）
+                    // 本波没有可用权重，跳过该组剩余数量
                     break;
                 }
                 if (spawnRaider(level, def, type, wave, random, null) != null) {
@@ -429,7 +434,10 @@ public class RaidInstance {
 
     // 将实体登记为本场袭击的袭击者：跟踪、入营、注入寻路 Goal
     private void registerRaider(Entity entity, RaidDefinition def) {
-        raiderUuids.add(entity.getUUID());
+        UUID uuid = entity.getUUID();
+        raiderUuids.add(uuid);
+        raiderEntities.put(uuid, entity);
+        raiderLastChunks.put(uuid, copyChunkPos(entity.chunkPosition()));
 
         String factionId = def.getRaiderFactionId();
         if (factionId != null && !factionId.isEmpty()
@@ -480,15 +488,60 @@ public class RaidInstance {
      * @return true if the UUID belonged to this raid
      */
     public boolean onRaiderRemoved(UUID uuid) {
-        return raiderUuids.remove(uuid);
+        if (!raiderUuids.remove(uuid)) return false;
+        raiderEntities.remove(uuid);
+        raiderLastChunks.remove(uuid);
+        return true;
     }
 
-    // 清理已确认死亡的袭击者；解析不到的实体可能只是区块未加载，予以保留
+    // 服务端 tick 收敛袭击者状态，覆盖不触发实体离开事件的底层清除
+    private void reconcileRaiders(ServerLevel level) {
+        for (UUID uuid : new ArrayList<>(raiderUuids)) {
+            Entity current = level.getEntity(uuid);
+            Entity tracked = current != null ? current : raiderEntities.get(uuid);
+
+            if (current != null) {
+                raiderEntities.put(uuid, current);
+                raiderLastChunks.put(uuid, copyChunkPos(current.chunkPosition()));
+                if (current.isRemoved() && current.getRemovalReason() != null
+                        && current.getRemovalReason().shouldDestroy()) {
+                    onRaiderRemoved(uuid);
+                }
+                continue;
+            }
+
+            if (tracked == null) {
+                // 存档恢复的袭击者没有运行时对象，未知状态不能按减员处理。
+                continue;
+            }
+            Entity.RemovalReason reason = tracked.getRemovalReason();
+            if (reason != null) {
+                if (reason.shouldDestroy()) {
+                    onRaiderRemoved(uuid);
+                }
+                continue;
+            }
+
+            ChunkPos lastChunk = raiderLastChunks.get(uuid);
+            if (lastChunk != null && level.getChunkSource().hasChunk(lastChunk.x, lastChunk.z)) {
+                // 原区块仍加载但实体已不在 EntityLookup，说明发生了绕过事件的底层清除。
+                onRaiderRemoved(uuid);
+            }
+        }
+    }
+
+    private static ChunkPos copyChunkPos(ChunkPos chunkPos) {
+        return new ChunkPos(chunkPos.x, chunkPos.z);
+    }
+
+    // 清理已确认死亡的袭击者；解析不到的实体交给 reconcileRaiders 判断
     private void pruneResolvedDeadRaiders(ServerLevel level) {
-        raiderUuids.removeIf(uuid -> {
+        for (UUID uuid : new ArrayList<>(raiderUuids)) {
             Entity entity = level.getEntity(uuid);
-            return entity != null && !entity.isAlive();
-        });
+            if (entity != null && !entity.isAlive()) {
+                onRaiderRemoved(uuid);
+            }
+        }
     }
 
     // ==================== 结束 ====================
@@ -519,12 +572,17 @@ public class RaidInstance {
     private void clearRaiders(ServerLevel level) {
         for (UUID uuid : new ArrayList<>(raiderUuids)) {
             Entity entity = level.getEntity(uuid);
+            if (entity == null) {
+                entity = raiderEntities.get(uuid);
+            }
             if (entity != null) {
                 // discard 的 RemovalReason 会让阵营系统一并清掉持久化绑定
                 entity.discard();
             }
         }
         raiderUuids.clear();
+        raiderEntities.clear();
+        raiderLastChunks.clear();
     }
 
     private void setVictory(ServerLevel level, RaidDefinition def) {

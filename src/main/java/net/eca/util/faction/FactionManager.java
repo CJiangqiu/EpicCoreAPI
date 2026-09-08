@@ -5,9 +5,7 @@ import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.TamableAnimal;
@@ -317,61 +315,6 @@ public class FactionManager {
     public static FactionDefinition getFactionDefinition(String factionId) {
         if (factionId == null) return null;
         return FACTION_DEFINITIONS.get(factionId);
-    }
-
-    // ==================== 成员实体类型池 ====================
-
-    // 获取阵营的成员实体类型池（类型 → 权重）
-    /**
-     * Get the entity type pool declared by a faction's {@link FactionDefinition}.
-     * Only factions registered through {@link RegisterFaction} can declare a pool.
-     *
-     * @param factionId the faction id
-     * @return read-only entity type → weight map, empty if the faction declares no pool
-     */
-    public static Map<EntityType<?>, Integer> getMemberEntityTypes(String factionId) {
-        FactionDefinition def = getFactionDefinition(factionId);
-        if (def == null) return Collections.emptyMap();
-        Map<EntityType<?>, Integer> pool = def.getMemberEntityTypes();
-        return pool == null ? Collections.emptyMap() : Collections.unmodifiableMap(pool);
-    }
-
-    // 按权重从阵营成员类型池随机抽取一个实体类型
-    /**
-     * Randomly pick one entity type from a faction's member pool, weighted by the
-     * values declared in {@link FactionDefinition#getMemberEntityTypes()}.
-     *
-     * @param factionId the faction to draw from
-     * @param random    the random source to use
-     * @return a weighted-random entity type, or null if the faction declares no usable pool
-     */
-    public static EntityType<?> rollMemberType(String factionId, RandomSource random) {
-        if (factionId == null || random == null) return null;
-        Map<EntityType<?>, Integer> pool = getMemberEntityTypes(factionId);
-        if (pool.isEmpty()) {
-            EcaLogger.info("[Faction] Faction '{}' declares no member entity types — cannot roll a type", factionId);
-            return null;
-        }
-
-        int totalWeight = 0;
-        for (Integer weight : pool.values()) {
-            if (weight != null && weight > 0) {
-                totalWeight += weight;
-            }
-        }
-        if (totalWeight <= 0) {
-            EcaLogger.info("[Faction] Faction '{}' member pool has no positive weights — cannot roll a type", factionId);
-            return null;
-        }
-
-        int roll = random.nextInt(totalWeight);
-        for (Map.Entry<EntityType<?>, Integer> entry : pool.entrySet()) {
-            Integer weight = entry.getValue();
-            if (weight == null || weight <= 0) continue;
-            roll -= weight;
-            if (roll < 0) return entry.getKey();
-        }
-        return null;
     }
 
     // ==================== 注解扫描 ====================

@@ -24,8 +24,8 @@ import java.util.List;
  * or an explicit call to end it.</p>
  *
  * <p><b>Waves.</b> Each {@link RaidWave} mixes explicit entity entries with faction-drawn
- * groups. Faction draws require the faction to declare
- * {@link net.eca.util.faction.FactionDefinition#getMemberEntityTypes()}.</p>
+ * groups. A faction-drawn group declares its own entity weights, so every wave can use a
+ * different composition without adding spawn configuration to the faction system.</p>
  *
  * <p><b>Example</b></p>
  * <pre>{@code
@@ -43,8 +43,11 @@ import java.util.List;
  *     @Override public List<RaidWave> getWaves() {
  *         return List.of(
  *             new RaidWave().addEntry(EntityType.ZOMBIE, 6),
- *             new RaidWave().addFaction("undead_legion", 10),
- *             new RaidWave().addEntry(EntityType.WITHER_SKELETON, 4).addFaction("undead_legion", 8)
+ *             new RaidWave().addFaction("undead_legion", 10,
+ *                     Map.of(EntityType.ZOMBIE, 8, EntityType.SKELETON, 2)),
+ *             new RaidWave().addEntry(EntityType.WITHER_SKELETON, 4)
+ *                     .addFaction("undead_legion", 8,
+ *                             Map.of(EntityType.ZOMBIE, 1, EntityType.WITHER_SKELETON, 4))
  *         );
  *     }
  * }

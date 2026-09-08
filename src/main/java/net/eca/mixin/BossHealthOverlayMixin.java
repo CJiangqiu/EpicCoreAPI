@@ -95,6 +95,12 @@ public class BossHealthOverlayMixin {
         appearance.frameAlpha = bossBar.getFrameAlpha();
         appearance.fillAlpha = bossBar.getFillAlpha();
 
+        if (EntityExtensionSafeAccess.showValueText(bossBar)) {
+            Number currentValue = EntityExtensionSafeAccess.displayCurrentValue(bossBar, bossEntity);
+            Number maxValue = EntityExtensionSafeAccess.displayMaxValue(bossBar, bossEntity);
+            appearance.valueText = EcaBossBarRenderer.formatValueText(currentValue, maxValue);
+        }
+
         // 启用了 bossBarExtension 但未设置任何自定义渲染 → 隐藏原版 bar，不渲染任何内容
         if (appearance.isEmpty()) {
             return true;

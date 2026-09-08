@@ -17,6 +17,35 @@ public class BossBarExtension {
         return true;
     }
 
+    /**
+     * Returns whether the current and maximum values should be drawn over the custom bar.
+     *
+     * @return true when the value text should be rendered
+     */
+    public boolean showValueText() {
+        return false;
+    }
+
+    /**
+     * Returns the current value used by the optional value text.
+     *
+     * @param entity the entity represented by this bar
+     * @return the display current value, or the entity health when not overridden
+     */
+    public Number getDisplayCurrentValue(LivingEntity entity) {
+        return entity == null ? null : entity.getHealth();
+    }
+
+    /**
+     * Returns the maximum value used by the optional value text.
+     *
+     * @param entity the entity represented by this bar
+     * @return the display maximum value, or the entity maximum health when not overridden
+     */
+    public Number getDisplayMaxValue(LivingEntity entity) {
+        return entity == null ? null : entity.getMaxHealth();
+    }
+
     public ResourceLocation getFrameTexture() {
         return null;
     }

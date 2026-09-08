@@ -63,6 +63,16 @@ LivingEntityMixin {
         EntityUtil.MAX_HEALTH_LOCK_VALUE = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.STRING);
         EntityUtil.MAX_HEALTH_LOCK_KEY   = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.STRING);
         EntityUtil.MAX_HEALTH_LOCK_CHECK = SynchedEntityData.defineId(LivingEntity.class, EntityDataSerializers.STRING);
+        // 定义期立即登记：改血分析在任何实体进入世界前即可排除 ECA 自有同步单元
+        EcaOwnedState.registerSynchedDataId(EntityUtil.HEALTH_LOCK_VALUE.getId());
+        EcaOwnedState.registerSynchedDataId(EntityUtil.HEALTH_LOCK_KEY.getId());
+        EcaOwnedState.registerSynchedDataId(EntityUtil.HEALTH_LOCK_CHECK.getId());
+        EcaOwnedState.registerSynchedDataId(EntityUtil.HEAL_BAN_VALUE.getId());
+        EcaOwnedState.registerSynchedDataId(EntityUtil.INVULNERABLE.getId());
+        EcaOwnedState.registerSynchedDataId(EntityUtil.RESURRECTION_TRACKED.getId());
+        EcaOwnedState.registerSynchedDataId(EntityUtil.MAX_HEALTH_LOCK_VALUE.getId());
+        EcaOwnedState.registerSynchedDataId(EntityUtil.MAX_HEALTH_LOCK_KEY.getId());
+        EcaOwnedState.registerSynchedDataId(EntityUtil.MAX_HEALTH_LOCK_CHECK.getId());
     }
 
     //注册实体数据（在每个实例的defineSynchedData 中调用）

@@ -48,7 +48,6 @@ import net.minecraftforge.forgespi.language.ModFileScanData;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.util.RandomSource;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
@@ -2249,32 +2248,6 @@ public final class EcaAPI {
     public static void alertFactionMembers(String factionId, Entity attacker, Entity victim,
                                            Level level) {
         FactionManager.alertFactionMembers(factionId, attacker, victim, level);
-    }
-
-    // 查询阵营声明的成员实体类型池
-    /**
-     * Get the entity type pool a faction declares, mapped to spawn weights.
-     * Only factions registered through {@code @RegisterFaction} can declare one.
-     * 查询阵营声明的成员实体类型池（类型 → 权重）。
-     *
-     * @param factionId the faction id
-     * @return read-only entity type → weight map, empty if none declared
-     */
-    public static Map<EntityType<?>, Integer> getFactionMemberTypes(String factionId) {
-        return FactionManager.getMemberEntityTypes(factionId);
-    }
-
-    // 按权重从阵营成员类型池抽取一个实体类型
-    /**
-     * Pick one entity type from a faction's member pool, weighted by its declared values.
-     * 按权重从阵营的成员类型池中随机抽取一个实体类型。
-     *
-     * @param factionId the faction to draw from
-     * @param random    the random source to use
-     * @return a weighted-random entity type, or null if the faction declares no usable pool
-     */
-    public static EntityType<?> rollFactionMemberType(String factionId, RandomSource random) {
-        return FactionManager.rollMemberType(factionId, random);
     }
 
     // ==================== 阵营成员（UUID 级，无需实体在线） ====================

@@ -10,14 +10,18 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.eca.client.render.shader.EcaShaderInstance;
 import net.eca.util.EcaLogger;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import org.joml.Matrix4f;
+
+import java.math.BigDecimal;
 
 /*
  * ECA 自定义 Boss 血条绘制器 —— 实体扩展与袭击系统共用。
@@ -55,6 +59,7 @@ public final class EcaBossBarRenderer {
         public int fillOffsetY;
         public float frameAlpha = 1.0f;
         public float fillAlpha = 1.0f;
+        public Component valueText;
 
         // 是否未设置任何可绘制内容
         public boolean isEmpty() {
@@ -157,8 +162,33 @@ public final class EcaBossBarRenderer {
                     fillWidth, fillTextureHeight, fillTextureWidth, fillTextureHeight, appearance.fillAlpha);
         }
 
+        if (appearance.valueText != null) {
+            graphics.flush();
+            int textY = (barHeight - Minecraft.getInstance().font.lineHeight) / 2;
+            graphics.drawCenteredString(Minecraft.getInstance().font, appearance.valueText,
+                    layoutWidth / 2, textY, 0xFFFFFFFF);
+        }
+
         graphics.pose().popPose();
         return true;
+    }
+
+    public static Component formatValueText(Number currentValue, Number maxValue) {
+        if (currentValue == null || maxValue == null) {
+            return null;
+        }
+
+        double current = currentValue.doubleValue();
+        double maximum = maxValue.doubleValue();
+        if (!Double.isFinite(current) || !Double.isFinite(maximum)) {
+            return null;
+        }
+
+        return Component.literal(formatNumber(current) + "/" + formatNumber(maximum));
+    }
+
+    private static String formatNumber(double value) {
+        return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString();
     }
 
     private static void renderLayer(GuiGraphics graphics, ResourceLocation texture, RenderType renderType,

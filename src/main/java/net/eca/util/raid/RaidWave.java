@@ -5,7 +5,6 @@ import net.minecraft.world.entity.Mob;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -15,14 +14,14 @@ import java.util.function.Consumer;
  *
  * 两种生成源可在同一波内混用：
  *   - 显式条目：直接指定 EntityType 与数量
- *   - 阵营抽取：指定阵营 ID 与总数，按 FactionDefinition.getMemberEntityTypes() 的权重抽取
+ *   - 阵营抽取：指定阵营 ID、总数和本波专属的实体类型权重
  *
- * 阵营抽取要求该阵营通过 @RegisterFaction 注册并声明了成员类型池，否则该条目在生成时被跳过并记日志。
+ * 阵营抽取只要求目标阵营已注册；实体类型和权重完全由本波配置。
  */
 public class RaidWave {
 
     private final List<RaidSpawnEntry> entries = new ArrayList<>();
-    private final Map<String, Integer> factionCounts = new LinkedHashMap<>();
+    private final List<RaidFactionSpawnEntry> factionEntries = new ArrayList<>();
     private RaidSpawnEntry leaderEntry;
     private int spawnDelayTicks = 0;
     private double spawnRadius = 24.0;
@@ -55,19 +54,20 @@ public class RaidWave {
         return this;
     }
 
-    // 添加阵营抽取条目：从该阵营的成员类型池按权重抽取指定数量
+    // 添加阵营抽取条目：使用本波独立的类型权重
     /**
-     * Add a faction-drawn group to this wave. Instead of naming entity types, the wave
-     * draws {@code count} entities from the faction's member pool by weight.
-     * Repeated calls for the same faction accumulate.
+     * Add a faction-drawn group to this wave. The entity weights belong to this wave and
+     * are independent from the faction definition and from every other wave.
      *
-     * @param factionId the faction to draw from (must declare a member entity type pool)
-     * @param count     how many entities to draw
+     * @param factionId   the faction to bind spawned entities to
+     * @param count       how many entities to draw
+     * @param typeWeights entity type to relative weight map for this wave
      * @return this wave, for chaining
      */
-    public RaidWave addFaction(String factionId, int count) {
+    public RaidWave addFaction(String factionId, int count,
+                               Map<EntityType<?>, Integer> typeWeights) {
         if (factionId != null && !factionId.isEmpty() && count > 0) {
-            factionCounts.merge(factionId, count, Integer::sum);
+            factionEntries.add(new RaidFactionSpawnEntry(factionId, count, typeWeights));
         }
         return this;
     }
@@ -139,9 +139,12 @@ public class RaidWave {
         return Collections.unmodifiableList(entries);
     }
 
-    // 获取全部阵营抽取条目（阵营 ID → 数量，只读）
-    public Map<String, Integer> getFactionCounts() {
-        return Collections.unmodifiableMap(factionCounts);
+    // 获取全部阵营抽取条目（只读）
+    /**
+     * @return immutable faction-drawn spawn groups declared by this wave
+     */
+    public List<RaidFactionSpawnEntry> getFactionEntries() {
+        return Collections.unmodifiableList(factionEntries);
     }
 
     // 获取本波额外生成延迟
@@ -165,8 +168,8 @@ public class RaidWave {
         for (RaidSpawnEntry entry : entries) {
             total += entry.getCount();
         }
-        for (Integer count : factionCounts.values()) {
-            total += count;
+        for (RaidFactionSpawnEntry entry : factionEntries) {
+            total += entry.getCount();
         }
         return total;
     }

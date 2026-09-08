@@ -95,6 +95,8 @@ public final class ObfuscationMapping {
         // LivingEntity
         methods.put("LivingEntity.dropAllDeathLoot", "m_6668_");
         methods.put("LivingEntity.getRecordMaxHp", "m_21233_");
+        methods.put("LivingEntity.getHealth", "m_21223_");
+        methods.put("LivingEntity.getMaxHealth", "m_21233_");
         methods.put("LivingEntity.actuallyHurt", "m_6475_");
         methods.put("LivingEntity.hurt", "m_6469_");
         methods.put("LivingEntity.setHealth", "m_21153_");
@@ -103,6 +105,8 @@ public final class ObfuscationMapping {
         methods.put("LivingEntity.aiStep", "m_8107_");
 
         // Entity
+        methods.put("Entity.getId", "m_19879_");
+        methods.put("Entity.getUUID", "m_20148_");
         methods.put("Entity.setRemoved", "m_142467_");
         methods.put("Entity.tick", "m_8119_");
         methods.put("Entity.baseTick", "m_6075_");
@@ -124,6 +128,11 @@ public final class ObfuscationMapping {
         methods.put("CompoundTag.putFloat", "m_128350_");
         methods.put("CompoundTag.putDouble", "m_128347_");
         methods.put("CompoundTag.putString", "m_128359_");
+
+        // Mth
+        methods.put("Mth.clampInt", "m_14045_");
+        methods.put("Mth.clampFloat", "m_14036_");
+        methods.put("Mth.clampDouble", "m_14008_");
 
         METHOD_MAPPINGS.put(CURRENT_VERSION, methods);
     }
