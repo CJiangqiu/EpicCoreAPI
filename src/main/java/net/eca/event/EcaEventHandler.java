@@ -18,7 +18,7 @@ import net.eca.util.faction.FactionManager;
 import net.eca.util.faction.FactionRelation;
 import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaSetHealthManager;
-import net.eca.util.health.HealthLockManager;
+import net.eca.util.health.health_lock.HealthLockManager;
 import net.eca.util.raid.RaidManager;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;

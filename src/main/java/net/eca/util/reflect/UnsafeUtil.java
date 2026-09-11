@@ -356,6 +356,9 @@ public class UnsafeUtil {
                 lwjglPutByte(target, offset, value instanceof Number n ? n.byteValue() : (byte) 0);
             } else if (type == boolean.class) {
                 lwjglPutBoolean(target, offset, value instanceof Boolean b ? b : false);
+            } else if (type == char.class) {
+                char character = value instanceof Character c ? c : (char) 0;
+                lwjglPutShort(target, offset, (short) character);
             } else {
                 lwjglPutObject(target, offset, value);
             }

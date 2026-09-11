@@ -10,7 +10,7 @@ import java.util.function.Supplier;
 
 /*
  * 服务端改血成功后 → 追踪客户端对本地实体重跑 ECA 改血。
- * 自定义存储型实体(RuneBank/ICU/私有字段等)客户端也有独立一份存储，服务端改动不会自动同步；
+ * 自定义存储型实体客户端也有独立一份存储，服务端改动不会自动同步；
  * 客户端重跑同一条逆向链打穿本地存储，使其血条/显示随之刷新。
  */
 public final class SetHealthClientSyncPacket {

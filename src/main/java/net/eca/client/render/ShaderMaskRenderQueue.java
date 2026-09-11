@@ -96,12 +96,9 @@ public final class ShaderMaskRenderQueue {
 
     private static void draw(ShaderMaskPass pass, BufferBuilder.RenderedBuffer renderedBuffer,
                              MaskUvTransform uvTransform) {
-        MaskUvTransform appliedUv = pass.maskSource() == ShaderMaskSource.TEXTURE
-            ? uvTransform : MaskUvTransform.IDENTITY;
-        EcaShaderInstance.setShaderMask(pass.maskSource(), pass.maskTexture(),
-            pass.maskColor(), pass.maskTolerance());
-        EcaShaderInstance.setLocalUvBounds(appliedUv.minU(), appliedUv.minV(),
-            appliedUv.scaleU(), appliedUv.scaleV());
+        applyMask(pass);
+        EcaShaderInstance.setLocalUvBounds(uvTransform.minU(), uvTransform.minV(),
+            uvTransform.scaleU(), uvTransform.scaleV());
         EcaShaderInstance.setOpacity(pass.alpha());
         boolean stateActive = false;
         try {
@@ -112,10 +109,28 @@ public final class ShaderMaskRenderQueue {
             if (stateActive) {
                 pass.renderType().clearRenderState();
             }
+            EcaShaderInstance.clearColorKey();
             EcaShaderInstance.clearShaderMask();
             EcaShaderInstance.clearLocalUvBounds();
             EcaShaderInstance.clearOpacity();
         }
+    }
+
+    private static void applyMask(ShaderMaskPass pass) {
+        if (pass.maskSource() == ShaderMaskSource.BASE_TEXTURE) {
+            int color = pass.maskColor();
+            EcaShaderInstance.setColorKey(
+                (color >> 16 & 0xFF) / 255.0f,
+                (color >> 8 & 0xFF) / 255.0f,
+                (color & 0xFF) / 255.0f,
+                pass.maskTolerance()
+            );
+            EcaShaderInstance.clearShaderMask();
+            return;
+        }
+        EcaShaderInstance.clearColorKey();
+        EcaShaderInstance.setShaderMask(pass.maskSource(), pass.maskTexture(),
+            pass.maskColor(), pass.maskTolerance());
     }
 
     private static void recycle(BufferBuilder builder) {

@@ -1,7 +1,8 @@
-package net.eca.util.health;
+package net.eca.util.health.health_lock;
 
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
+import net.eca.util.health.EcaOwnedState;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.syncher.EntityDataAccessor;

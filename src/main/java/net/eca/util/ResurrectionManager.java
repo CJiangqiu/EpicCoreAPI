@@ -4,7 +4,7 @@ import net.eca.api.EcaAPI;
 import net.eca.config.EcaConfiguration;
 import net.eca.network.ClientReviveContainersPacket;
 import net.eca.network.NetworkHandler;
-import net.eca.util.health.HealthLockManager;
+import net.eca.util.health.health_lock.HealthLockManager;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceKey;

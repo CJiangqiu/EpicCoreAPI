@@ -2,7 +2,7 @@ package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
-import net.eca.util.health.HealthLockManager;
+import net.eca.util.health.health_lock.HealthLockManager;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.damagesource.DamageSource;

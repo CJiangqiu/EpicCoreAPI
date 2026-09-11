@@ -11,7 +11,7 @@ import net.eca.util.InvulnerableEntityManager;
 import net.eca.util.ResurrectionManager;
 import net.eca.util.call_bridge.CallBridgeManager;
 import net.eca.util.health.EcaOwnedState;
-import net.eca.util.health.HealthLockManager;
+import net.eca.util.health.health_lock.HealthLockManager;
 import net.eca.util.reflect.UnsafeUtil;
 
 import java.util.Set;

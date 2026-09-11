@@ -35,7 +35,8 @@ public final class EcaOwnedState {
     /* 注入 getHealth 取值链的 ECA 类；其嵌套类由分析器按 '$' 前缀一并归属。 */
     private static final Set<String> HOOK_OWNERS = Set.of(
             "net/eca/coremod/LivingEntityHook",
-            "net/eca/util/health/HealthLockManager");
+            "net/eca/util/health/HealthLockManager",
+            "net/eca/util/health/health_lock/HealthLockManager");
 
     /* ECA 的 EntityDataAccessor 静态字段会被建模成静态字段源，按 label 前缀剥离。 */
     private static final Set<String> STATIC_FIELD_LABELS = Set.of(

@@ -2,7 +2,7 @@ package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
 import net.eca.util.EntityUtil;
-import net.eca.util.health.HealthLockManager;
+import net.eca.util.health.health_lock.HealthLockManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.DeathScreen;

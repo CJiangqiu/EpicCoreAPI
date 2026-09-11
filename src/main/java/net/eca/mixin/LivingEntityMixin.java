@@ -9,7 +9,7 @@ import net.eca.util.faction.FactionManager;
 import net.eca.util.faction.FactionRelation;
 import net.eca.util.faction.FactionUtil;
 import net.eca.util.health.EcaOwnedState;
-import net.eca.util.health.HealthLockManager;
+import net.eca.util.health.health_lock.HealthLockManager;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.effect.MobEffectCategory;
 import net.minecraft.world.effect.MobEffectInstance;

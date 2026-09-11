@@ -103,13 +103,16 @@ public final class ObfuscationMapping {
         methods.put("LivingEntity.isDeadOrDying", "m_21224_");
         methods.put("LivingEntity.isAlive", "m_6084_");
         methods.put("LivingEntity.aiStep", "m_8107_");
+        methods.put("LivingEntity.tickDeath", "m_6153_");
 
         // Entity
         methods.put("Entity.getId", "m_19879_");
         methods.put("Entity.getUUID", "m_20148_");
+        methods.put("Entity.level", "m_9236_");
         methods.put("Entity.setRemoved", "m_142467_");
         methods.put("Entity.tick", "m_8119_");
         methods.put("Entity.baseTick", "m_6075_");
+        methods.put("Entity.onSyncedDataUpdated", "m_7350_");
 
         // CompoundTag
         methods.put("CompoundTag.getBoolean", "m_128471_");
