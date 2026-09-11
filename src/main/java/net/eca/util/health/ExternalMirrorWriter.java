@@ -124,6 +124,19 @@ public final class ExternalMirrorWriter {
         if (written != null) PENDING.merge(next, written, ExternalMirrorWriter::append);
     }
 
+    /* 新请求继承旧票据的推测单元时只重定向已记账单元，不重新扩大扫描范围或覆盖原始快照。 */
+    static void retarget(DelayedHealthVerifier.Ticket ticket, float target) {
+        Written written = ticket == null ? null : PENDING.get(ticket);
+        if (written == null) return;
+        for (NumericInverter.Cell cell : written.cells()) {
+            try {
+                cell.write(target);
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+            }
+        }
+    }
+
     static void clear() {
         for (Written written : PENDING.values()) restore(written.cells(), written.snapshot());
         PENDING.clear();

@@ -10,6 +10,8 @@ import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.EcaSetHealthManager;
+import net.eca.util.health.HealthDataFlow;
+import net.eca.util.health.HealthDataflowAnalyzer.Source;
 import net.eca.util.health.health_lock.HealthLockManager;
 import net.eca.util.health.HealthWriteTransaction;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -48,6 +50,7 @@ import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
@@ -865,18 +868,31 @@ public class EntityUtil {
     private static final ThreadLocal<Boolean> IS_FROM_SYNC = ThreadLocal.withInitial(() -> false);
 
     public static boolean setHealth(LivingEntity entity, float expectedHealth) {
-        if (entity == null) return false;
+        return setHealth(entity, expectedHealth, null);
+    }
+
+    public static boolean setHealth(LivingEntity entity, float expectedHealth,
+                                    Consumer<DelayedHealthVerifier.Outcome> outcomeListener) {
+        if (entity == null) {
+            DelayedHealthVerifier.notifyOutcome(outcomeListener, DelayedHealthVerifier.Outcome.ROLLED_BACK);
+            return false;
+        }
         HealthWriteTransaction transaction = null;
+        HealthDataFlow.beginWriteRequest();
         try {
             boolean client = entity.level() != null && entity.level().isClientSide;
             //客户端仅允许被同步包驱动改血(否则客户端会与服务端各自为政)
-            if (client && !IS_FROM_SYNC.get()) return false;
+            if (client && !IS_FROM_SYNC.get()) {
+                DelayedHealthVerifier.notifyOutcome(outcomeListener, DelayedHealthVerifier.Outcome.ROLLED_BACK);
+                return false;
+            }
             //锚点可信度探测自身要写原版血量，必须先于所有通道完成，否则会污染通道的回滚快照
             EcaSetHealthManager.warmAnchorTrust(entity);
             float beforeHealth = EcaSetHealthManager.safeGetHealth(entity);
             transaction = HealthWriteTransaction.capture(entity);
             if (!transaction.isComplete()) {
                 transaction.rollback();
+                DelayedHealthVerifier.notifyOutcome(outcomeListener, DelayedHealthVerifier.Outcome.ROLLED_BACK);
                 return false;
             }
 
@@ -901,27 +917,42 @@ public class EntityUtil {
             if (ok) {
                 EcaSetHealthManager.cancelDeferredHealthWrite(entity);
                 transaction.commit();
+            } else {
+                transaction.rollback();
+                DelayedHealthVerifier.notifyOutcome(outcomeListener, DelayedHealthVerifier.Outcome.ROLLED_BACK);
             }
-            else transaction.rollback();
 
             //服务端改血成功 → 广播给追踪客户端，令自定义存储型实体客户端显示同步(客户端重跑同一条链)
             if (ok && !client) {
+                List<Source> successfulAuthorities = HealthDataFlow.successfulAuthorities();
+                EcaSetHealthManager.ExternalCoWriteCoverage coverage =
+                        EcaSetHealthManager.tryExternalScanCoWrite(
+                                entity, expectedHealth, successfulAuthorities);
                 syncHealthToClients(entity, expectedHealth, beforeHealth);
                 /* 当场校验只能证明这一刻写进去了，tick 内的防护会把值改回去，故登记延迟复查。
                    已知会被改回的类再追加联写实体之外的血量镜像(外部扫描第三阶段)——
                    须登记成功才写，那批世界数据的提交与撤销全靠这次复查裁定。 */
                 DelayedHealthVerifier.Ticket ticket =
-                        DelayedHealthVerifier.schedule(entity, beforeHealth, expectedHealth);
+                        DelayedHealthVerifier.schedule(entity, beforeHealth, expectedHealth, coverage,
+                                EcaSetHealthManager.currentDeferredRetryAttempt(), outcomeListener);
                 if (ticket != null) {
                     EcaSetHealthManager.applyExternalMirror(entity, beforeHealth, expectedHealth, ticket);
+                } else {
+                    DelayedHealthVerifier.notifyOutcome(outcomeListener,
+                            DelayedHealthVerifier.Outcome.INDETERMINATE);
                 }
+            } else if (ok) {
+                DelayedHealthVerifier.notifyOutcome(outcomeListener, DelayedHealthVerifier.Outcome.PERSISTED);
             }
             return ok;
         } catch (Exception e) {
             if (transaction != null) transaction.rollback();
             EcaLogger.info("setHealth threw exception entity={} expected={} msg={}",
                 entity.getClass().getName(), expectedHealth, e.getMessage());
+            DelayedHealthVerifier.notifyOutcome(outcomeListener, DelayedHealthVerifier.Outcome.ROLLED_BACK);
             return false;
+        } finally {
+            HealthDataFlow.endWriteRequest();
         }
     }
 
