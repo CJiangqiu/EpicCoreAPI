@@ -3,33 +3,21 @@ package net.eca.util.health;
 import net.eca.config.EcaConfiguration;
 import net.eca.coremod.EcaTransformerManager;
 import net.eca.coremod.LivingEntityHook;
-import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.util.EcaLogger;
-import net.eca.util.EntityUtil;
-import net.eca.util.health.HealthDataflowAnalyzer.ConstOverrideSource;
-import net.eca.util.health.HealthDataflowAnalyzer.Source;
-import net.minecraft.server.MinecraftServer;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 
-import java.lang.ref.WeakReference;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 
 /*
  * 改血总管理器：持有数据流分析表 + 调度 + 校验。
@@ -41,13 +29,9 @@ public final class EcaSetHealthManager {
 
     /* ==================== 数据流主表 ==================== */
 
-    /* 数据流主表：成功结果长期复用，失败结果只在冷却期内复用。运行期字节码捕获、类重转换和
-       延迟加载都可能令先前失败失效，故负结果不能成为整个进程期的永久结论。 */
+    /* 数据流主表：实体类 → 2 态。成功 = 可写结构 AnalysisResult；失败 = AnalysisResult.DATA_FLOW_ANALYZER_FAILED 哨兵。
+       warmup 后台预填，setHealth 时查询；未命中现场分析并写回，失败标记后续不再重复分析。 */
     private static final Map<Class<?>, HealthDataflowAnalyzer.AnalysisResult> DATAFLOW_TABLE = new ConcurrentHashMap<>();
-    private static final Map<Class<?>, Long> DATAFLOW_FAILURE_RETRY = new ConcurrentHashMap<>();
-    private static final Map<Class<?>, Object> DATAFLOW_ANALYSIS_LOCKS = new ConcurrentHashMap<>();
-    private static final Map<Class<?>, Integer> BYTECODE_FINGERPRINTS = new ConcurrentHashMap<>();
-    private static final long DATAFLOW_FAILURE_COOLDOWN_NANOS = 5_000_000_000L;
 
     /* 预热专用后台执行器：常驻单守护线程，承接 LoadComplete 的全量预热。
        纯分析只读，离开主线程安全。 */
@@ -86,24 +70,9 @@ public final class EcaSetHealthManager {
 
     /* 外部扫描异步分析去重：同类并发首改只提交一次后台分析任务 */
     private static final Set<Class<?>> EXTERNAL_SCAN_PENDING = ConcurrentHashMap.newKeySet();
-    private static final Map<Class<?>, CompletableFuture<HealthDataflowAnalyzer.AnalysisResult>>
-            EXTERNAL_SCAN_TASKS = new ConcurrentHashMap<>();
-    private static final long FIRST_EXTERNAL_SCAN_WAIT_MILLIS = 100L;
     private static final Set<Class<?>> TICK_SCAN_PENDING = ConcurrentHashMap.newKeySet();
     private static final Set<Class<?>> WRITER_SCAN_PENDING = ConcurrentHashMap.newKeySet();
     private static final Set<String> MAINTENANCE_SCAN_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
-
-    /* 一次性改血可能早于后台候选到达。弱引用避免分析期间延长实体寿命；请求在模型成立后
-       原子取走，重试线程标记阻止失败请求再次登记形成循环。 */
-    private record DeferredHealthWrite(WeakReference<LivingEntity> entity, MinecraftServer server,
-                                       float targetHealth, long expiresAtNanos, AtomicBoolean scheduled,
-                                       int retryAttempt, Consumer<DelayedHealthVerifier.Outcome> listener) {}
-    private static final Map<Class<?>, Map<UUID, DeferredHealthWrite>> DEFERRED_HEALTH_WRITES =
-            new ConcurrentHashMap<>();
-    private static final ThreadLocal<Boolean> DEFERRED_HEALTH_RETRY = ThreadLocal.withInitial(() -> false);
-    private static final ThreadLocal<Integer> CURRENT_DEFERRED_RETRY_ATTEMPT = ThreadLocal.withInitial(() -> 0);
-    private static final long DEFERRED_HEALTH_TTL_NANOS = TimeUnit.SECONDS.toNanos(120L);
-    private static final int MAX_DELAYED_RETRIES = 2;
 
     /* 外部扫描诊断去重(每类一次)：提交、开始执行、失败三个节点各自记一次。
        提交后没有开始记录表示任务仍在队列中。 */
@@ -147,66 +116,52 @@ public final class EcaSetHealthManager {
         if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) return false;
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
-        if (!snapshot.isComplete()) return false;
         boolean success = HealthDataFlow.write(tree, target, targetHealth);
-        if (!success) {
-            snapshot.restore();
-            return false;
-        }
-        return true;
+        if (!success) snapshot.restore();
+        /* dataflow 写实体存储成功后，追加写实体外的 SavedData 真实权威。
+           dataflow 可能只覆盖实体内同步单元镜像，当场 verify 通过，但真实血量
+           (SavedData) 未写，下一 tick 被钳制回。ExternalScan(tick 收集)能定位 SavedData 写源，
+           追加写入使真实权威与实体镜像一致。外部扫描关闭或未就绪时不阻塞 dataflow 的成功结果。 */
+        tryExternalScanCoWrite(target, targetHealth);
+        return success;
     }
 
-    public enum ExternalCoWriteCoverage { NONE, KNOWN_INCOMPLETE, KNOWN_COMPLETE }
-
-    /* 每次即时改血成功后评估本请求的结构化联写完整性；分析不完整时只保留请求，不写部分源。 */
-    public static ExternalCoWriteCoverage tryExternalScanCoWrite(LivingEntity target, float targetHealth,
-                                                                 Collection<Source> successfulAuthorities) {
-        if (target == null) return ExternalCoWriteCoverage.NONE;
-        if (successfulAuthorities == null || successfulAuthorities.isEmpty()) {
-            return ExternalCoWriteCoverage.NONE;
-        }
+    /* 仅当 ExternalScan 结果已缓存且含实体外写源时追加写实体外权威；未就绪则触发后台分析并放弃本次追加。
+       只对 dataflow 覆盖实体镜像、真实血量在实体外(SavedData 等)的类追加，普通实体(ExternalScan 结果全是
+       实体内源)跳过，避免每个改血都拖进外部扫描/有效血量建模。
+       不改变 dataflow 的返回值——它是主通道，SavedData 追加是补写，失败不影响已成功的实体写入。
+       applyExternalScan 内部已自带快照/回滚，此处不再嵌套捕获。 */
+    private static void tryExternalScanCoWrite(LivingEntity target, float targetHealth) {
+        if (target == null) return;
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
-                || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) {
-            return ExternalCoWriteCoverage.NONE;
-        }
+                || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return;
         Class<?> cls = target.getClass();
         HealthDataflowAnalyzer.AnalysisResult external = HealthDataflowAnalyzer.peekExternalScanResult(cls);
         if (external == null) {
             submitExternalScanAnalysis(cls);
             submitComparisonPrescan(cls);
-            submitMaintenanceAnalysis(cls);
-            return HealthDataFlow.requiresMaintenanceDiscovery(successfulAuthorities)
-                    ? ExternalCoWriteCoverage.KNOWN_INCOMPLETE : ExternalCoWriteCoverage.NONE;
+            return;
         }
         HealthDataflowAnalyzer.MaintenancePlan maintenance =
                 HealthDataflowAnalyzer.peekMaintenancePlan(cls);
-        if (!HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) {
+        if (!maintenance.hasExternalTransactionSource()
+                && !HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) {
             submitMaintenanceAnalysis(cls);
-            return HealthDataFlow.requiresMaintenanceDiscovery(successfulAuthorities)
-                    ? ExternalCoWriteCoverage.KNOWN_INCOMPLETE : ExternalCoWriteCoverage.NONE;
+            return;
         }
-        if (!maintenance.hasExternalTransactionSource()) {
-            return HealthDataFlow.requiresMaintenanceDiscovery(successfulAuthorities)
-                    ? ExternalCoWriteCoverage.KNOWN_INCOMPLETE : ExternalCoWriteCoverage.NONE;
-        }
+        if (!maintenance.hasExternalTransactionSource()) return;
         try {
-            HealthDataFlow.ExternalCoWriteResult result =
-                    HealthDataFlow.coWriteExternalAuthorities(
-                            maintenance, target, targetHealth, successfulAuthorities);
-            EcaLogger.info("[ExternalScan] co-write coverage entity={} related={} required={} written={} complete={}",
-                    cls.getName(), result.structuralSourcesKnown(), result.requiredCount(),
-                    result.writtenCount(), result.complete());
-            if (result.complete()) return ExternalCoWriteCoverage.KNOWN_COMPLETE;
-            if (result.structuralSourcesKnown()
-                    || HealthDataFlow.requiresMaintenanceDiscovery(successfulAuthorities)) {
-                return ExternalCoWriteCoverage.KNOWN_INCOMPLETE;
+            /* 只补写实体外权威(SavedData 等)：dataflow 已把实体内存储写成目标值，此处必须让
+               tick 权威同 tick 也等于目标值，否则 tick 侧的高水位钳制会把实体存储改回。
+               逐个全写并回读自证，不能借用 applyExternalScan——它首个校验通过的 sink(常是实体内
+               镜像)就返回，永远碰不到实体外那个真正的 tick 权威。 */
+            if (HealthDataFlow.coWriteExternalAuthorities(maintenance, target, targetHealth)) {
+                markExternalAuthorityWritten(cls);
             }
-            return ExternalCoWriteCoverage.NONE;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             EcaLogger.info("[ExternalScan] co-write threw entity={} type={} msg={}",
                     cls.getName(), t.getClass().getName(), t.getMessage());
-            return ExternalCoWriteCoverage.KNOWN_INCOMPLETE;
         }
     }
 
@@ -220,30 +175,20 @@ public final class EcaSetHealthManager {
         Class<?> cls = target.getClass();
         HealthDataflowAnalyzer.AnalysisResult tree = HealthDataflowAnalyzer.peekExternalScanResult(cls);
         if (tree == null) {
-            CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> task = submitExternalScanAnalysis(cls);
+            submitExternalScanAnalysis(cls);
             /* 比较表达式扫描不依赖证据，与外部扫描并行预跑。两者串行时总等待是各自耗时之和，
                并行后证据到手时表达式往往已就绪，可当场建模。 */
             submitComparisonPrescan(cls);
-            tree = awaitFirstExternalScan(task);
-            /* 语义扫描可能被其他大型实体长期占住。数据流已经产生未观测候选时，死亡入口足以
-               独立完成结构建模，不应让一次性改血依赖后台队列何时轮到当前类。 */
-            if (tree == null) {
-                boolean success = applyEffectiveHealth(target, targetHealth);
-                if (!success) deferHealthWrite(target, targetHealth);
-                return success;
-            }
+            return false;
         }
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
-        if (!snapshot.isComplete()) return false;
         boolean success = HealthDataFlow.writeExternal(tree, target, targetHealth);
         if (success) return true;
         snapshot.restore();
         /* 外部扫描按存储即血量处理，存储经换算才得到血量时写入值方向不对，且校验读 getHealth 也不反映。
            此处承接同一批存储，改用有效血量表达式求逆与校验；证据正是上面写入尝试刚记录下来的。 */
-        boolean effectiveSuccess = applyEffectiveHealth(target, targetHealth);
-        if (!effectiveSuccess) deferHealthWrite(target, targetHealth);
-        return effectiveSuccess;
+        return applyEffectiveHealth(target, targetHealth);
     }
 
     /* 外部扫描第三阶段：实体存储写对了、当场校验也过了，却在下一 tick 被改回——
@@ -257,44 +202,43 @@ public final class EcaSetHealthManager {
                 || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return false;
         HealthModel model = HealthModel.forClass(target.getClass());
         if (model == null || !model.delayedRollbackObserved()) return false;
-        ExternalCoWriteCoverage coverage = ticket.externalCoverage();
-        if (coverage != ExternalCoWriteCoverage.NONE) {
-            String key = target.getClass().getName() + "|" + coverage;
-            if (EXTERNAL_MIRROR_SUPPRESSED_DUMPED.add(key)) {
-                EcaLogger.info("[ExternalMirror] structural scan suppressed entity={} coverage={}",
-                        target.getClass().getName(), coverage);
+        /* co-write 已成功写入实体外权威后仍未留住，是模组地板/钳制所致，不是未知镜像回滚。
+           此时再按"值吻合"破坏性扫描世界存档既定位不到真镜像，又有改坏其他模组世界数据的风险，
+           直接抑制。 */
+        if (EXTERNAL_AUTHORITY_WRITTEN.contains(target.getClass())) {
+            if (EXTERNAL_MIRROR_SUPPRESSED_DUMPED.add(target.getClass().getName())) {
+                EcaLogger.info("[ExternalMirror] suppressed entity={} reason=external authority already co-written (mod floor/clamp, not a hidden mirror)",
+                        target.getClass().getName());
             }
             return false;
         }
         return ExternalMirrorWriter.write(target, beforeHealth, targetHealth, ticket);
     }
 
+    /* co-write 成功写入实体外权威的类：其外部权威已被 ECA 直接写入，镜像阶段无需再介入。 */
+    private static final Set<Class<?>> EXTERNAL_AUTHORITY_WRITTEN = ConcurrentHashMap.newKeySet();
     private static final Set<String> EXTERNAL_MIRROR_SUPPRESSED_DUMPED = ConcurrentHashMap.newKeySet();
+
+    /* 由 tryExternalScanCoWrite 在 co-write 至少写成功一个外部权威时登记。 */
+    static void markExternalAuthorityWritten(Class<?> cls) {
+        if (cls != null) EXTERNAL_AUTHORITY_WRITTEN.add(cls);
+    }
 
     /* getHealth 与实际存储解耦时，使用实体生死判定所读取的有效血量表达式作为观测锚点，
        并通过表达式反演计算存储值。仅对已有解耦记录的类启用。
        由 applyExternalScan 在其写入失败后调用，门控与之共用。 */
     private static boolean applyEffectiveHealth(LivingEntity target, float targetHealth) {
         Class<?> cls = target.getClass();
-        if (hasMatchingDeferredHealthWrite(target, targetHealth)) return false;
-        if (!HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) submitMaintenanceAnalysis(cls);
+        // 校验成功会清空解耦证据，故已装锚点的类必须继续放行，否则一旦成功就再也走不进本通道
+        if (!hasHealthAnchor(cls) && !isHealthReadDecoupled(cls)) return false;
         HealthDataflowAnalyzer.EffectiveHealthModel model =
                 HealthDataflowAnalyzer.peekEffectiveHealthModel(cls);
-        /* 校验成功会清空解耦证据，故已装锚点的类必须继续放行。后台维护扫描独立确立的模型
-           同样可以启动本通道，否则续接重试仍会被早期门控挡回。 */
-        if (model == null && !hasHealthAnchor(cls) && !isHealthReadDecoupled(cls)) return false;
         if (model == null) {
-            List<HealthDataflowAnalyzer.Source> candidates = effectiveModelCandidates(cls);
             /* 比较表达式已缓存时建模只剩遍历与打分，当场完成即可，省去一次改血往返；
                未缓存则需扫描字节码，耗时较长，仍转后台并跳过本次。 */
             if (HealthDataflowAnalyzer.hasComparisonCache(cls)) {
                 // 候选集合必须与后台建模一致，否则同步兜底会因少喂候选而漏掉后台能选中的存储
-                model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, candidates);
-            }
-            /* 全类比较缓存尚未就绪时只分析两个死亡入口。候选仍来自实际写入或维护扫描，
-               模型仍经过独立上限判据，因此这里只消除排队依赖，不降低可信度。 */
-            if (model == null) {
-                model = HealthDataflowAnalyzer.resolveMortalityEffectiveHealthModel(cls, candidates);
+                model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, effectiveModelCandidates(cls));
             }
             if (model == null) {
                 submitEffectiveModelAnalysis(cls);
@@ -345,7 +289,6 @@ public final class EcaSetHealthManager {
         });
         List<Object> rollbackRoots = collectRollbackRoots(target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
-        if (!snapshot.isComplete()) return false;
         boolean success = HealthDataFlow.writeEffective(oriented, target, targetHealth);
         if (success) {
             /* 写入后的校验读的是模型自身表达式，选对选错都恒真，不能据此确认锚点。
@@ -444,7 +387,6 @@ public final class EcaSetHealthManager {
             MODEL_ANALYSIS_EXECUTOR.submit(() -> {
                 try {
                     HealthDataflowAnalyzer.prewarmClassComparisons(cls);
-                    resumeDeferredHealthWrites(cls);
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
                     EcaLogger.info("[EffectiveHealth] comparison prescan threw entity={} type={} msg={}",
@@ -468,12 +410,7 @@ public final class EcaSetHealthManager {
         try {
             MODEL_ANALYSIS_EXECUTOR.submit(() -> {
                 try {
-                    HealthDataflowAnalyzer.EffectiveHealthModel model =
-                            HealthDataflowAnalyzer.resolveEffectiveHealthModel(cls, candidates);
-                    if (model != null) resumeDeferredHealthWrites(cls);
-                    if (HealthDataflowAnalyzer.hasPartialComparison(cls)) {
-                        EFFECTIVE_MODEL_SUBMITTED.remove(cls, signature);
-                    }
+                    HealthDataflowAnalyzer.resolveEffectiveHealthModel(cls, candidates);
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
                     EcaLogger.info("[EffectiveHealth] model analysis threw entity={} type={} msg={}",
@@ -488,34 +425,25 @@ public final class EcaSetHealthManager {
         }
     }
 
-    /* 有效血量模型的候选存储来自实际未观测写入、伤害语义 StoreWrite 与周期维护写入。
+    /* 有效血量模型的候选存储有两个来源：
+       改血通道写过但锚点没反应的存储(unobservedSinks)，以及维护扫描抓到的周期写入落点。
        只用前者会死锁——真实存储从未被提名就不会被写，没有写入记录又当不上候选。
-       后两者由字节码写入扫描独立得出，与比较表达式无关，故不会构成写入与回读互为逆运算的闭环。 */
+       后者由字节码写入扫描独立得出，与比较表达式无关，故不会构成写入与回读互为逆运算的闭环。 */
     private static List<HealthDataflowAnalyzer.Source> effectiveModelCandidates(Class<?> cls) {
         Map<String, HealthDataflowAnalyzer.Source> byKey = new LinkedHashMap<>();
         for (HealthDataflowAnalyzer.Source sink : unobservedSinks(cls)) {
-            byKey.putIfAbsent(sink.identityKey(), sink);
-        }
-        for (HealthDataflowAnalyzer.Source sink : HealthDataflowAnalyzer.semanticWriteSinks(cls)) {
-            byKey.putIfAbsent(sink.identityKey(), sink);
+            byKey.putIfAbsent(sink.label, sink);
         }
         for (HealthDataflowAnalyzer.Source sink : HealthDataflowAnalyzer.maintenanceSinks(cls)) {
-            byKey.putIfAbsent(sink.identityKey(), sink);
+            byKey.putIfAbsent(sink.label, sink);
         }
         return List.copyOf(byKey.values());
     }
 
     /* 外部扫描在后台去重执行，完成后写入分析缓存。任务异常必须记录，
        以便区分配置关闭、分析进行中和分析失败。 */
-    private static CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> submitExternalScanAnalysis(Class<?> cls) {
-        HealthDataflowAnalyzer.AnalysisResult cached = HealthDataflowAnalyzer.peekExternalScanResult(cls);
-        if (cached != null) return CompletableFuture.completedFuture(cached);
-        CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> existing = EXTERNAL_SCAN_TASKS.get(cls);
-        if (existing != null) return existing;
-        CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> task = new CompletableFuture<>();
-        existing = EXTERNAL_SCAN_TASKS.putIfAbsent(cls, task);
-        if (existing != null) return existing;
-        EXTERNAL_SCAN_PENDING.add(cls);
+    private static void submitExternalScanAnalysis(Class<?> cls) {
+        if (!EXTERNAL_SCAN_PENDING.add(cls)) return;
         if (EXTERNAL_SCAN_SUBMIT_DUMPED.add(cls.getName())) {
             EcaLogger.info("[ExternalScan] analysis submitted entity={}", cls.getName());
         }
@@ -526,43 +454,20 @@ public final class EcaSetHealthManager {
                     if (EXTERNAL_SCAN_START_DUMPED.add(cls.getName())) {
                         EcaLogger.info("[ExternalScan] analysis started entity={}", cls.getName());
                     }
-                    HealthDataflowAnalyzer.AnalysisResult result =
-                            HealthDataflowAnalyzer.resolveExternalScanResult(cls);
-                    task.complete(result);
+                    HealthDataflowAnalyzer.resolveExternalScanResult(cls);
                     submitMaintenanceAnalysis(cls);
                 } catch (Throwable t) {
                     dumpExternalScanFailure(cls, t);
-                    task.completeExceptionally(t);
                     if (t instanceof VirtualMachineError e) throw e;
                 } finally {
                     EXTERNAL_SCAN_PENDING.remove(cls);
-                    EXTERNAL_SCAN_TASKS.remove(cls, task);
                 }
             });
         } catch (Throwable t) {
             // 提交被拒时必须让出占位，否则该类此后永远跳过外部扫描
             EXTERNAL_SCAN_PENDING.remove(cls);
-            EXTERNAL_SCAN_TASKS.remove(cls, task);
-            task.completeExceptionally(t);
             EcaLogger.info("[ExternalScan] analysis submit rejected entity={} type={} msg={}",
                     cls.getName(), t.getClass().getName(), t.getMessage());
-        }
-        return task;
-    }
-
-    /* 语义入口通常远小于维护扫描。首次调用只为这一段提供严格上限的等待窗口，
-       使“尚在分析”不再必然表现为失败，同时不让大型类阻塞服务器线程。 */
-    private static HealthDataflowAnalyzer.AnalysisResult awaitFirstExternalScan(
-            CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> task) {
-        if (task == null) return null;
-        try {
-            return task.get(FIRST_EXTERNAL_SCAN_WAIT_MILLIS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return null;
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            return null;
         }
     }
 
@@ -586,7 +491,6 @@ public final class EcaSetHealthManager {
                     if (t instanceof VirtualMachineError e) throw e;
                 } finally {
                     TICK_SCAN_PENDING.remove(cls);
-                    resumeDeferredHealthWrites(cls);
                 }
             });
         } catch (Throwable t) {
@@ -610,7 +514,6 @@ public final class EcaSetHealthManager {
                     if (t instanceof VirtualMachineError e) throw e;
                 } finally {
                     WRITER_SCAN_PENDING.remove(cls);
-                    resumeDeferredHealthWrites(cls);
                 }
             });
         } catch (Throwable t) {
@@ -635,138 +538,6 @@ public final class EcaSetHealthManager {
         Throwable cause = t.getCause();
         if (cause != null) {
             EcaLogger.info("[ExternalScan]   caused by {} msg={}", cause.getClass().getName(), cause.getMessage());
-        }
-    }
-
-    private static boolean deferHealthWrite(LivingEntity target, float targetHealth) {
-        return deferHealthWrite(target, targetHealth, 0, null);
-    }
-
-    private static boolean deferHealthWrite(LivingEntity target, float targetHealth, int retryAttempt,
-                                             Consumer<DelayedHealthVerifier.Outcome> listener) {
-        if (target == null || DEFERRED_HEALTH_RETRY.get() || target.level().isClientSide
-                || target.level().getServer() == null) return false;
-        MinecraftServer server = target.level().getServer();
-        long now = System.nanoTime();
-        AtomicBoolean queued = new AtomicBoolean();
-        Map<UUID, DeferredHealthWrite> requests =
-                DEFERRED_HEALTH_WRITES.computeIfAbsent(target.getClass(), ignored -> new ConcurrentHashMap<>());
-        requests.compute(target.getUUID(), (uuid, current) -> {
-            if (matchesDeferredRequest(current, target, server, targetHealth, now)
-                    && current.retryAttempt() >= retryAttempt && current.listener() == listener) return current;
-            if (current != null && current.listener() != listener) {
-                DelayedHealthVerifier.notifyOutcome(current.listener(), DelayedHealthVerifier.Outcome.SUPERSEDED);
-            }
-            queued.set(true);
-            return new DeferredHealthWrite(new WeakReference<>(target), server, targetHealth,
-                    now + DEFERRED_HEALTH_TTL_NANOS, new AtomicBoolean(), retryAttempt, listener);
-        });
-        if (queued.get()) {
-            EcaLogger.info("[EffectiveHealth] deferred write queued entity={} target={}",
-                    target.getClass().getName(), targetHealth);
-        }
-        return true;
-    }
-
-    private static boolean hasMatchingDeferredHealthWrite(LivingEntity target, float targetHealth) {
-        if (target == null) return false;
-        Map<UUID, DeferredHealthWrite> requests = DEFERRED_HEALTH_WRITES.get(target.getClass());
-        if (requests == null) return false;
-        return matchesDeferredRequest(requests.get(target.getUUID()), target, target.level().getServer(),
-                targetHealth, System.nanoTime());
-    }
-
-    private static boolean matchesDeferredRequest(DeferredHealthWrite request, LivingEntity target,
-                                                   MinecraftServer server, float targetHealth, long now) {
-        return request != null && request.expiresAtNanos() >= now && request.entity().get() == target
-                && request.server() == server
-                && Float.floatToIntBits(request.targetHealth()) == Float.floatToIntBits(targetHealth);
-    }
-
-    /* 任一正常通道先成功时撤销旧请求，避免后台完成后重复写入。 */
-    public static void cancelDeferredHealthWrite(LivingEntity target) {
-        if (target == null) return;
-        Map<UUID, DeferredHealthWrite> requests = DEFERRED_HEALTH_WRITES.get(target.getClass());
-        if (requests == null) return;
-        DeferredHealthWrite removed = requests.remove(target.getUUID());
-        if (removed != null) {
-            DelayedHealthVerifier.notifyOutcome(removed.listener(), DelayedHealthVerifier.Outcome.SUPERSEDED);
-        }
-    }
-
-    /* 后台线程只建立模型；实体写入投递回服务器线程，并且每份请求至多续接一次。 */
-    private static void resumeDeferredHealthWrites(Class<?> cls) {
-        Map<UUID, DeferredHealthWrite> pending = DEFERRED_HEALTH_WRITES.get(cls);
-        if (pending == null || pending.isEmpty()) return;
-        long now = System.nanoTime();
-        for (Map.Entry<UUID, DeferredHealthWrite> entry : pending.entrySet()) {
-            DeferredHealthWrite request = entry.getValue();
-            if (request.expiresAtNanos() < now || request.entity().get() == null) {
-                if (pending.remove(entry.getKey(), request)) {
-                    DelayedHealthVerifier.notifyOutcome(
-                            request.listener(), DelayedHealthVerifier.Outcome.INDETERMINATE);
-                }
-            }
-        }
-        if (pending.isEmpty()) return;
-        HealthDataflowAnalyzer.EffectiveHealthModel model =
-                HealthDataflowAnalyzer.peekEffectiveHealthModel(cls);
-        if (model == null && HealthDataflowAnalyzer.hasComparisonCache(cls)) {
-            model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, effectiveModelCandidates(cls));
-        }
-        boolean maintenanceReady = HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)
-                && HealthDataflowAnalyzer.peekMaintenancePlan(cls).hasExternalTransactionSource();
-        if (model == null && !maintenanceReady) {
-            if (HealthDataflowAnalyzer.isMaintenancePlanResolved(cls)) {
-                for (Map.Entry<UUID, DeferredHealthWrite> entry : pending.entrySet()) {
-                    DeferredHealthWrite request = entry.getValue();
-                    if (request.retryAttempt() > 0 && pending.remove(entry.getKey(), request)) {
-                        DelayedHealthVerifier.notifyOutcome(
-                                request.listener(), DelayedHealthVerifier.Outcome.ROLLED_BACK);
-                    }
-                }
-            }
-            return;
-        }
-        for (Map.Entry<UUID, DeferredHealthWrite> entry : pending.entrySet()) {
-            UUID uuid = entry.getKey();
-            DeferredHealthWrite request = entry.getValue();
-            if (!request.scheduled().compareAndSet(false, true)) continue;
-            LivingEntity entity = request.entity().get();
-            if (entity == null || request.expiresAtNanos() < System.nanoTime()) {
-                pending.remove(uuid, request);
-                continue;
-            }
-            MinecraftServer server = request.server();
-            try {
-                server.execute(() -> {
-                    if (pending.get(uuid) != request) {
-                        resumeDeferredHealthWrites(cls);
-                        return;
-                    }
-                    if (entity.isRemoved() || entity.level().getServer() != server
-                            || request.expiresAtNanos() < System.nanoTime()) {
-                        pending.remove(uuid, request);
-                        return;
-                    }
-                    if (!pending.remove(uuid, request)) return;
-                    DEFERRED_HEALTH_RETRY.set(true);
-                    CURRENT_DEFERRED_RETRY_ATTEMPT.set(request.retryAttempt());
-                    try {
-                        boolean success = EntityUtil.setHealth(entity, request.targetHealth(), request.listener());
-                        EcaLogger.info("[EffectiveHealth] deferred write entity={} target={} success={}",
-                                entity.getClass().getName(), request.targetHealth(), success);
-                    } finally {
-                        CURRENT_DEFERRED_RETRY_ATTEMPT.remove();
-                        DEFERRED_HEALTH_RETRY.remove();
-                    }
-                });
-            } catch (Throwable t) {
-                if (t instanceof VirtualMachineError e) throw e;
-                if (pending.get(uuid) == request) request.scheduled().set(false);
-                EcaLogger.info("[EffectiveHealth] deferred write scheduling failed entity={} type={} msg={}",
-                        cls.getName(), t.getClass().getName(), t.getMessage());
-            }
         }
     }
 
@@ -825,7 +596,6 @@ public final class EcaSetHealthManager {
         }
         if (writer == null) return false;
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
-        if (!snapshot.isComplete()) return false;
         // 带死亡语义：target≤0 是斩杀意图，writer 会把血量 clamp 到≥0(实际写成 0)，故实读≤0 即成功，
         // 不能拿负 target 做容差匹配(实读被 clamp 到 0，与负目标的差恒超容差，斩杀永远误判失败)。
         // 快速改血时存储写入/读值可能瞬时偏差，重试几次再判失败，避免一次偏差就丢缓存进冷却。
@@ -864,13 +634,11 @@ public final class EcaSetHealthManager {
         if (EcaConfiguration.getForceCompatibilityModeSafely()
                 || !EcaConfiguration.getAttackEnableRadicalLogicSafely()
                 || !EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) return;
-        if (METHOD_BRIDGE_INSTALLED.add(cls) && !MethodProbe.installBridge(cls)) {
-            METHOD_BRIDGE_INSTALLED.remove(cls);
-        }
+        if (METHOD_BRIDGE_INSTALLED.add(cls)) MethodProbe.installBridge(cls);
     }
 
-    /* 前置通道无法处理不可逆解码时，从数据流死端与实体运行时对象图继续搜索可写数值单元。
-       静态分析失败正是本通道需要承接的情况，不能再作为跳过条件。 */
+    /* 前置通道无法处理不可逆解码时，从无法反演的运行期对象继续搜索可写数值单元。
+       激进逻辑或数值反演关闭，以及没有可用对象根时，直接返回 false。 */
     public static boolean applyNumericInversion(LivingEntity target, float targetHealth) {
         if (target == null) return false;
         Class<?> cls = target.getClass();
@@ -881,12 +649,16 @@ public final class EcaSetHealthManager {
             return false;
         }
         HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(cls);
-        List<Object> roots = new ArrayList<>();
-        if (tree != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
-            roots.addAll(HealthDataflowAnalyzer.collectDeadEndRoots(
-                    tree.returnExpr, HealthDataflowAnalyzer.newContext(target)));
+        if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
+            dumpNumericInversionSkip(cls, "dataflow tree unavailable (no writable structure to frame dead-ends)");
+            return false;
         }
-        if (!roots.contains(target)) roots.add(target);
+        List<Object> roots = HealthDataflowAnalyzer.collectDeadEndRoots(
+                tree.returnExpr, HealthDataflowAnalyzer.newContext(target));
+        if (roots.isEmpty()) {
+            dumpNumericInversionSkip(cls, "no dead-end roots (nothing non-invertible to descend into)");
+            return false;
+        }
         // 进入搜索：命中/失败结局由 NumericInverter 自身记录
         return NumericInverter.search(target, targetHealth, roots);
     }
@@ -914,33 +686,7 @@ public final class EcaSetHealthManager {
     }
 
     private static HealthDataflowAnalyzer.AnalysisResult resolveTree(Class<?> cls) {
-        HealthDataflowAnalyzer.AnalysisResult cached = DATAFLOW_TABLE.get(cls);
-        if (cached != null && cached != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
-            return cached;
-        }
-        long now = System.nanoTime();
-        Long retryAt = DATAFLOW_FAILURE_RETRY.get(cls);
-        if (cached == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
-                && retryAt != null && now - retryAt < 0L) return cached;
-        Object lock = DATAFLOW_ANALYSIS_LOCKS.computeIfAbsent(cls, ignored -> new Object());
-        synchronized (lock) {
-            cached = DATAFLOW_TABLE.get(cls);
-            retryAt = DATAFLOW_FAILURE_RETRY.get(cls);
-            now = System.nanoTime();
-            if (cached != null && cached != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
-                return cached;
-            }
-            if (cached == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
-                    && retryAt != null && now - retryAt < 0L) return cached;
-            HealthDataflowAnalyzer.AnalysisResult analyzed = analyzeForTable(cls);
-            DATAFLOW_TABLE.put(cls, analyzed);
-            if (analyzed == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
-                DATAFLOW_FAILURE_RETRY.put(cls, now + DATAFLOW_FAILURE_COOLDOWN_NANOS);
-            } else {
-                DATAFLOW_FAILURE_RETRY.remove(cls);
-            }
-            return analyzed;
-        }
+        return DATAFLOW_TABLE.computeIfAbsent(cls, EcaSetHealthManager::analyzeForTable);
     }
 
     /* 分析并归一化为 2 态：可写结构(REAL_HEALTH 或 NOT_REAL_HEALTH 带可写源) / DATA_FLOW_ANALYZER_FAILED。
@@ -1161,46 +907,7 @@ public final class EcaSetHealthManager {
 
     /* 探测本身要写原版血量，混在通道事务里会污染快照，故须在任何写入之前先把结论预热进缓存。 */
     public static void warmAnchorTrust(LivingEntity target) {
-        if (target == null) return;
-        ensureFreshClassState(target.getClass());
-        isAnchorTrustworthy(target);
-    }
-
-    /* 捕获器晚于实体加载或类被重新转换时，清除此前基于旧字节码形成的正负结论。 */
-    private static void ensureFreshClassState(Class<?> cls) {
-        int fingerprint = RuntimeBytecodeProvider.fingerprint(cls);
-        Integer previous = BYTECODE_FINGERPRINTS.putIfAbsent(cls, fingerprint);
-        if (previous == null || previous == fingerprint) return;
-        BYTECODE_FINGERPRINTS.put(cls, fingerprint);
-        invalidateClassState(cls);
-        EcaLogger.info("[HealthDataflow] bytecode changed entity={} old={} new={} caches invalidated",
-                cls.getName(), previous, fingerprint);
-    }
-
-    private static void invalidateClassState(Class<?> cls) {
-        DATAFLOW_TABLE.remove(cls);
-        DATAFLOW_FAILURE_RETRY.remove(cls);
-        DATAFLOW_ANALYSIS_LOCKS.remove(cls);
-        CompletableFuture<HealthDataflowAnalyzer.AnalysisResult> task = EXTERNAL_SCAN_TASKS.remove(cls);
-        if (task != null) task.cancel(false);
-        EXTERNAL_SCAN_PENDING.remove(cls);
-        TICK_SCAN_PENDING.remove(cls);
-        WRITER_SCAN_PENDING.remove(cls);
-        METHOD_BRIDGE_INSTALLED.remove(cls);
-        DIRECT_PROBE_RETRY_LEGACY.remove(cls);
-        DIRECT_WRITER_LEGACY.remove(cls);
-        DIRECT_PROBE_RETRY_EXTENDED.remove(cls);
-        DIRECT_WRITER_EXTENDED.remove(cls);
-        ANCHOR_REFLECTS_WRITES.remove(cls);
-        ANCHOR_OBSERVED.remove(cls);
-        PENDING_EFFECTIVE_CONFIRM.remove(cls);
-        MIRROR_REDIRECTED.remove(cls);
-        UNOBSERVED_WRITES.remove(cls);
-        JOIN_PREWARM_SUBMITTED.remove(cls);
-        COMPARISON_PRESCAN_SUBMITTED.remove(cls);
-        EFFECTIVE_MODEL_SUBMITTED.remove(cls);
-        HealthDataflowAnalyzer.invalidateClass(cls);
-        MethodProbe.clearAnalysisCaches();
+        if (target != null) isAnchorTrustworthy(target);
     }
 
     /* 观测到锚点随两个不同写入分别读回对应值时提升为可信。这比原版字段探测强：
@@ -1212,13 +919,7 @@ public final class EcaSetHealthManager {
     /* 单次写入的取证形式：锚点读数从 before 位移到 expected，即证明它反映本次写入。
        两者本就相近时取不到位移，不作判定——没有证据不等于反证。 */
     public static void noteAnchorResponse(LivingEntity target, float before, float expected) {
-        noteAnchorResponse(target, before, expected, null);
-    }
-
-    /* 观测覆写只改变读数，不能凭自身造成的联动取得真实存储信任。 */
-    static void noteAnchorResponse(LivingEntity target, float before, float expected, Source source) {
         if (target == null || !Float.isFinite(before) || !Float.isFinite(expected)) return;
-        if (source instanceof ConstOverrideSource) return;
         if (HealthValueSemantics.matches(before, expected)) return;
         float actual = readHealthAnchor(target);
         if (HealthValueSemantics.matches(actual, expected)) {
@@ -1319,8 +1020,7 @@ public final class EcaSetHealthManager {
     static void recordUnobservedWrite(Class<?> cls, HealthDataflowAnalyzer.Source sink, String sinkLabel) {
         if (cls == null || sinkLabel == null || ANCHOR_OBSERVED.contains(cls)) return;
         if (sink != null) {
-            UNOBSERVED_WRITES.computeIfAbsent(cls, k -> new ConcurrentHashMap<>())
-                    .putIfAbsent(sink.identityKey(), sink);
+            UNOBSERVED_WRITES.computeIfAbsent(cls, k -> new ConcurrentHashMap<>()).putIfAbsent(sinkLabel, sink);
         }
         if (!isWarmupDiagnosticsSuppressed() && UNOBSERVED_DUMPED.add(cls.getName() + "|" + sinkLabel)) {
             EcaLogger.info("[HealthAnchor] write not observed entity={} sink={} anchor={}",
@@ -1368,26 +1068,6 @@ public final class EcaSetHealthManager {
         model.markDelayedRollbackObserved();
     }
 
-    static boolean retryAfterDelayedRollback(LivingEntity entity, float target, int retryAttempt,
-                                              Consumer<DelayedHealthVerifier.Outcome> listener) {
-        if (entity == null || retryAttempt >= MAX_DELAYED_RETRIES) return false;
-        Class<?> cls = entity.getClass();
-        HealthDataflowAnalyzer.MaintenancePlan plan = HealthDataflowAnalyzer.peekMaintenancePlan(cls);
-        boolean maintenanceResolved = HealthDataflowAnalyzer.isMaintenancePlanResolved(cls);
-        if (!maintenanceResolved) {
-            submitMaintenanceAnalysis(cls);
-        } else if (!plan.hasExternalTransactionSource()) {
-            return false;
-        }
-        boolean deferred = deferHealthWrite(entity, target, retryAttempt + 1, listener);
-        if (deferred && maintenanceResolved) resumeDeferredHealthWrites(cls);
-        return deferred;
-    }
-
-    public static int currentDeferredRetryAttempt() {
-        return CURRENT_DEFERRED_RETRY_ATTEMPT.get();
-    }
-
     /* 已按镜像链把写入落到实体内权威的类。重定向后仍被改回，才轮到实体外镜像阶段。 */
     private static final Set<Class<?>> MIRROR_REDIRECTED = ConcurrentHashMap.newKeySet();
     private static final Set<String> MIRROR_PENDING_DUMPED = ConcurrentHashMap.newKeySet();
@@ -1413,15 +1093,11 @@ public final class EcaSetHealthManager {
     /* 服务器停止时清除所有缓存与状态，确保热重载后从干净状态开始。 */
     public static void clear() {
         DATAFLOW_TABLE.clear();
-        DATAFLOW_FAILURE_RETRY.clear();
-        DATAFLOW_ANALYSIS_LOCKS.clear();
-        BYTECODE_FINGERPRINTS.clear();
         EXTERNAL_SCAN_PENDING.clear();
-        EXTERNAL_SCAN_TASKS.clear();
         TICK_SCAN_PENDING.clear();
         WRITER_SCAN_PENDING.clear();
         MAINTENANCE_SCAN_FAILURE_DUMPED.clear();
-        HealthDataflowAnalyzer.clearAnalysisCaches();
+        HealthDataflowAnalyzer.clearMaintenancePlans();
         EXTERNAL_SCAN_SUBMIT_DUMPED.clear();
         EXTERNAL_SCAN_START_DUMPED.clear();
         EXTERNAL_SCAN_FAILURE_DUMPED.clear();
@@ -1443,13 +1119,10 @@ public final class EcaSetHealthManager {
         JOIN_PREWARM_SUBMITTED.clear();
         COMPARISON_PRESCAN_SUBMITTED.clear();
         EFFECTIVE_MODEL_SUBMITTED.clear();
-        DEFERRED_HEALTH_WRITES.clear();
         EFFECTIVE_MODEL_REJECT_DUMPED.clear();
         EFFECTIVE_POLARITY_DUMPED.clear();
+        EXTERNAL_AUTHORITY_WRITTEN.clear();
         EXTERNAL_MIRROR_SUPPRESSED_DUMPED.clear();
         ExternalMirrorWriter.clear();
-        ConstOverride.clear();
-        HealthModel.clear();
-        MethodProbe.clearAnalysisCaches();
     }
 }

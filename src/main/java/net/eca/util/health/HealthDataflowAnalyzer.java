@@ -24,7 +24,6 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandleInfo;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.lang.ref.WeakReference;
 import java.lang.ref.SoftReference;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
@@ -32,7 +31,6 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -86,7 +84,6 @@ public final class HealthDataflowAnalyzer {
     private static final Set<Class<?>> MAINTENANCE_SCAN_DIAG_DUMPED = ConcurrentHashMap.newKeySet();
     /* 单个扫描入口抛出的诊断去重(每类每入口一次) */
     private static final Set<String> EXTERNAL_ENTRY_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
-    private static final Map<String, WeakReference<Class<?>>> RUNTIME_TYPES = new ConcurrentHashMap<>();
 
     private HealthDataflowAnalyzer() {}
 
@@ -206,17 +203,6 @@ public final class HealthDataflowAnalyzer {
         return MAINTENANCE_SINKS_CACHE.getOrDefault(entityClass, List.of());
     }
 
-    /* 伤害语义入口中的 StoreWrite 是独立写入证据；只读取已发布缓存，避免候选查询在服务器线程触发扫描。 */
-    public static List<Source> semanticWriteSinks(Class<?> entityClass) {
-        if (entityClass == null) return List.of();
-        SemanticExternalScan scan = EXTERNAL_SCAN_CACHE.get(entityClass);
-        AnalysisResult result = scan == null ? null : scan.result();
-        if (result == null || result.isEmpty()) return List.of();
-        List<StoreWrite> writes = new ArrayList<>();
-        collectStoreWrites(result.returnExpr, writes);
-        return distinctSinks(writes);
-    }
-
     /* 周期维护把某个单元整体重算自另一个单元时，前者只是后者的镜像：写镜像活不过一次维护，
        而生死判定读的是权威。recomputeExpr 为维护期重算镜像所用的表达式，反解它即得权威应写的值。 */
     public record MirrorLink(Source mirror, Source authority, Expr recomputeExpr) {}
@@ -259,59 +245,6 @@ public final class HealthDataflowAnalyzer {
         MAINTENANCE_SCAN_DIAG_DUMPED.clear();
     }
 
-    /* 字节码版本变化后使该类派生结论失效。方法级缓存可能内联该类，故清空全局方法判据；
-       ClassNode 使用 epoch 令所有分析线程在下一次访问时自行丢弃线程私有旧节点。 */
-    static void invalidateClass(Class<?> entityClass) {
-        if (entityClass == null) return;
-        EXTERNAL_SCAN_CACHE.remove(entityClass);
-        MAINTENANCE_PLAN_CACHE.remove(entityClass);
-        MAINTENANCE_PARTS_CACHE.remove(entityClass);
-        MAINTENANCE_SINKS_CACHE.remove(entityClass);
-        MAINTENANCE_MIRROR_CACHE.remove(entityClass);
-        EXTERNAL_SCAN_DIAG_DUMPED.remove(entityClass);
-        MAINTENANCE_SCAN_DIAG_DUMPED.remove(entityClass);
-        DEATH_GATE_CACHE.remove(entityClass);
-        EFFECTIVE_MODEL_CACHE.remove(entityClass);
-        PROTOCOL_TARGET_MODEL_CACHE.remove(entityClass);
-        EFFECTIVE_MODEL_MISSES.remove(entityClass);
-        EFFECTIVE_MODEL_REJECTED.remove(entityClass);
-        PRIORITY_COMPARISON_CACHE.remove(entityClass);
-        FULL_COMPARISON_CACHE.remove(entityClass);
-        PRIORITY_COMPARISON_PARTIAL.remove(entityClass);
-        FULL_COMPARISON_PARTIAL.remove(entityClass);
-        AUTHORITY_WRITER_SITES.clear();
-        MAY_WRITE_STATE_CACHE.clear();
-        DISCOVERED_CODEC_INVERTERS.clear();
-        CLASS_NODE_CACHE_EPOCH.incrementAndGet();
-    }
-
-    /* 生命周期清理覆盖所有按类或字节码派生的状态，避免集成服务器重启后复用旧结论。 */
-    static void clearAnalysisCaches() {
-        EXTERNAL_SCAN_CACHE.clear();
-        clearMaintenancePlans();
-        EXTERNAL_SCAN_DIAG_DUMPED.clear();
-        EXTERNAL_ENTRY_FAILURE_DUMPED.clear();
-        EXTERNAL_EVAL_DIAG.clear();
-        PROTOCOL_MATCH_DIAG.clear();
-        PROTOCOL_EVAL_DIAG.clear();
-        PROTOCOL_EVAL_DIAG_COUNT.set(0L);
-        MapEntrySource.DUCK_ACCESSORS.clear();
-        DISCOVERED_CODEC_INVERTERS.clear();
-        AUTHORITY_WRITER_SITES.clear();
-        DEATH_GATE_CACHE.clear();
-        EFFECTIVE_MODEL_CACHE.clear();
-        PROTOCOL_TARGET_MODEL_CACHE.clear();
-        EFFECTIVE_MODEL_MISSES.clear();
-        EFFECTIVE_MODEL_REJECTED.clear();
-        PRIORITY_COMPARISON_CACHE.clear();
-        FULL_COMPARISON_CACHE.clear();
-        PRIORITY_COMPARISON_PARTIAL.clear();
-        FULL_COMPARISON_PARTIAL.clear();
-        MAY_WRITE_STATE_CACHE.clear();
-        RUNTIME_TYPES.clear();
-        CLASS_NODE_CACHE_EPOCH.incrementAndGet();
-    }
-
     public static boolean verifyExternalDataflow(Expr root, LivingEntity entity, float expected, Source sink) {
         if (entity == null) return false;
         boolean expressionMatches = externalExpressionMatches(root, sink, expected, newContext(entity));
@@ -331,11 +264,6 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static final Set<String> EXTERNAL_EVAL_DIAG = ConcurrentHashMap.newKeySet();
-
-    private static final Set<String> PROTOCOL_MATCH_DIAG = ConcurrentHashMap.newKeySet();
-    private static final Set<String> PROTOCOL_EVAL_DIAG = ConcurrentHashMap.newKeySet();
-    private static final int PROTOCOL_EVAL_DIAG_LIMIT = 64;
-    private static final AtomicLong PROTOCOL_EVAL_DIAG_COUNT = new AtomicLong();
 
     private static boolean externalExpressionMatches(Expr expression, Source sink, float expected, EvalContext context) {
         if (expression instanceof Choice choice) {
@@ -430,7 +358,7 @@ public final class HealthDataflowAnalyzer {
 
     public record WriteInput(int index, char jvmType) implements Expr {}
 
-    public record ArrayAllocExpr(String id) implements Expr {}
+    public record ArrayAllocExpr(int id) implements Expr {}
 
     public record OptionalContentExpr(Expr optionalExpr) implements Expr {}
 
@@ -453,7 +381,6 @@ public final class HealthDataflowAnalyzer {
         }
         public abstract Object read(LivingEntity entity);
         protected abstract String canonicalKey();
-        public final String identityKey() { return canonicalKey(); }
 
         /* 数值反演默认使用 read() 的结果作为运行期对象锚点。
            容器类型的子类应同时提供容器或根对象，避免依赖具体容器结构。 */
@@ -602,7 +529,7 @@ public final class HealthDataflowAnalyzer {
         }
 
         @Override protected String canonicalKey() {
-            StringBuilder sb = new StringBuilder("CFS:").append(expressionKey(root)).append(':');
+            StringBuilder sb = new StringBuilder("CFS:").append(System.identityHashCode(root)).append(':');
             for (FieldStep s : chain) sb.append(s.ownerInternal()).append('.').append(s.name()).append(';');
             return sb.toString();
         }
@@ -663,8 +590,8 @@ public final class HealthDataflowAnalyzer {
 
         @Override protected String canonicalKey() {
             StringBuilder sb = new StringBuilder("CAP:")
-                    .append(expressionKey(containerExpr)).append(':')
-                    .append(expressionKey(keyExpr)).append(':');
+                    .append(System.identityHashCode(containerExpr)).append(':')
+                    .append(System.identityHashCode(keyExpr)).append(':');
             for (FieldStep step : chain) sb.append(step.ownerInternal()).append('.').append(step.name()).append(';');
             return sb.toString();
         }
@@ -712,14 +639,14 @@ public final class HealthDataflowAnalyzer {
            容器既支持 java.util.Map，也鸭子类型支持不实现 Map 的自定义容器(仅依赖只读 containsKey/get 访问器)。 */
         @Override public Object read(LivingEntity entity) {
             try {
-                EvalContext context = new SimpleEvalContext(entity);
-                Object obj = evaluate(containerExpr, context);
-                Object key = evaluate(keyExpr, context);
-                if (obj == null || key == null) return null;
+                Object obj = evaluate(containerExpr, new SimpleEvalContext(entity));
+                if (obj == null) return null;
+                Object[] fb = {entity, entity.getUUID(), entity.getId()};
                 if (obj instanceof Map<?, ?> map) {
-                    return map.containsKey(key) ? map.get(key) : null;
+                    for (Object k : fb) if (k != null && map.containsKey(k)) return map.get(k);
+                    return null;
                 }
-                return duckMapGet(obj, key);
+                return duckMapGet(obj, fb);
             } catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; return null; }
         }
 
@@ -729,15 +656,15 @@ public final class HealthDataflowAnalyzer {
         }
 
         @Override protected String canonicalKey() {
-            return "ME:" + expressionKey(containerExpr) + ":" + expressionKey(keyExpr) + ":" + keyKind;
+            return "ME:" + System.identityHashCode(containerExpr) + ":" + keyKind;
         }
 
-        /* 鸭子类型读取自定义 map 容器：按容器类缓存 containsKey/get 只读访问器，仅查询分析所得键。
+        /* 鸭子类型读取自定义 map 容器：按容器类缓存 containsKey/get 只读访问器，逐一尝试候选键。
            仅调用只读访问器(无写入/写锁副作用)，使不实现 java.util.Map 的容器也能交出 entry 值供反演下探。 */
         private static final Map<Class<?>, Method[]> DUCK_ACCESSORS = new ConcurrentHashMap<>();
         private static final Method[] NO_DUCK_ACCESSORS = new Method[0];
 
-        private static Object duckMapGet(Object container, Object key) {
+        private static Object duckMapGet(Object container, Object[] keys) {
             Method[] acc = DUCK_ACCESSORS.computeIfAbsent(container.getClass(), cls -> {
                 Method containsKey = findDuckAccessor(cls, "containsKey");
                 Method get = findDuckAccessor(cls, "get");
@@ -748,7 +675,10 @@ public final class HealthDataflowAnalyzer {
             });
             if (acc == NO_DUCK_ACCESSORS) return null;
             try {
-                if (Boolean.TRUE.equals(acc[0].invoke(container, key))) return acc[1].invoke(container, key);
+                for (Object k : keys) {
+                    if (k == null) continue;
+                    if (Boolean.TRUE.equals(acc[0].invoke(container, k))) return acc[1].invoke(container, k);
+                }
             } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
             return null;
         }
@@ -796,7 +726,7 @@ public final class HealthDataflowAnalyzer {
         }
 
         @Override protected String canonicalKey() {
-            return "AE:" + expressionKey(arrayExpr) + ":" + expressionKey(indexExpr);
+            return "AE:" + System.identityHashCode(arrayExpr) + ":" + System.identityHashCode(indexExpr);
         }
     }
 
@@ -821,59 +751,8 @@ public final class HealthDataflowAnalyzer {
         }
 
         @Override protected String canonicalKey() {
-            StringBuilder key = new StringBuilder("MC:").append(ownerInternal).append('#')
-                    .append(name).append('#').append(desc).append('#').append(valueArgIndex);
-            for (Expr argument : args) key.append(':').append(expressionKey(argument));
-            return key.toString();
+            return "MC:" + ownerInternal + "#" + name + "#" + desc + "#" + valueArgIndex;
         }
-    }
-
-    private static String expressionKey(Expr expression) {
-        if (expression == null) return "null";
-        if (expression == EntityParamMarker.I) return "entity";
-        if (expression instanceof Source source) return source.canonicalKey();
-        if (expression instanceof Primitive primitive) {
-            return "p:" + primitive.jvmType() + ':' + primitive.value();
-        }
-        if (expression instanceof Reference reference) {
-            Object value = reference.value();
-            if (value instanceof Class<?> type) return "r:class:" + type.getName();
-            if (value instanceof String || value instanceof Number || value instanceof Enum<?>) {
-                return "r:" + reference.className() + ':' + value;
-            }
-            return "r:" + reference.className() + '@' + System.identityHashCode(value);
-        }
-        if (expression instanceof Op operation) {
-            StringBuilder key = new StringBuilder("op:").append(operation.opcode());
-            for (Expr argument : operation.args()) key.append(':').append(expressionKey(argument));
-            return key.toString();
-        }
-        if (expression instanceof Call call) {
-            StringBuilder key = new StringBuilder("call:").append(call.owner()).append('#')
-                    .append(call.name()).append(call.desc());
-            for (Expr argument : call.args()) key.append(':').append(expressionKey(argument));
-            return key.toString();
-        }
-        if (expression instanceof WriteInput input) return "input:" + input.index() + ':' + input.jvmType();
-        if (expression instanceof ArrayAllocExpr allocation) return "array:" + allocation.id();
-        if (expression instanceof OptionalContentExpr optional) return "optional:" + expressionKey(optional.optionalExpr());
-        if (expression instanceof Choice choice) {
-            List<String> alternatives = new ArrayList<>();
-            for (Expr alternative : choice.alternatives()) alternatives.add(expressionKey(alternative));
-            alternatives.sort(String::compareTo);
-            return "choice:" + String.join("|", alternatives);
-        }
-        if (expression instanceof UnknownExpr unknown) return "unknown:" + unknown.provenance();
-        if (expression instanceof Closure closure) {
-            StringBuilder key = new StringBuilder("closure:").append(closure.implementation()).append('#')
-                    .append(closure.samName()).append(closure.samDesc());
-            for (Expr captured : closure.captured()) key.append(':').append(expressionKey(captured));
-            return key.toString();
-        }
-        if (expression instanceof StoreWrite write) {
-            return "write:" + write.sink().canonicalKey() + ':' + expressionKey(write.valueExpr());
-        }
-        return expression.getClass().getName();
     }
 
     /* ==================== 求逆接口与对偶表 ==================== */
@@ -906,6 +785,7 @@ public final class HealthDataflowAnalyzer {
     /* 运行期发现的编解码对偶：仅在激进逻辑开启时，允许把同一工具类中已存在的 encode(P)->E
        作为 decode(E)->P 的逆，明文 P 可为数字或文本。它不尝试破译密钥，只复用目标自身的合法编码器。 */
     private static final Map<String, Inverter> DISCOVERED_CODEC_INVERTERS = new ConcurrentHashMap<>();
+    private static final Set<String> CODEC_DISCOVERY_FAILED = ConcurrentHashMap.newKeySet();
 
     private static Inverter lookupCallInverter(Call call) {
         Inverter known = TABLE.lookupCall(call.owner(), call.name(), call.desc());
@@ -915,14 +795,17 @@ public final class HealthDataflowAnalyzer {
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) return null;
         String key = call.owner() + "#" + call.name() + "#" + call.desc();
         Inverter cached = DISCOVERED_CODEC_INVERTERS.get(key);
-        if (cached != null) return cached;
+        if (cached != null || CODEC_DISCOVERY_FAILED.contains(key)) return cached;
         Inverter discovered = discoverCodecInverter(call.owner(), call.name(), call.desc());
-        if (discovered == null) return null;
+        if (discovered == null) {
+            CODEC_DISCOVERY_FAILED.add(key);
+            return null;
+        }
         Inverter existing = DISCOVERED_CODEC_INVERTERS.putIfAbsent(key, discovered);
         return existing != null ? existing : discovered;
     }
 
-    static Inverter discoverCodecInverter(String ownerInternal, String decoderName, String decoderDesc) {
+    private static Inverter discoverCodecInverter(String ownerInternal, String decoderName, String decoderDesc) {
         try {
             Type[] decoderArgs = Type.getArgumentTypes(decoderDesc);
             Type decoderReturn = Type.getReturnType(decoderDesc);
@@ -1017,32 +900,6 @@ public final class HealthDataflowAnalyzer {
     }
 
     public static HealthSolveResult solveDetailed(Expr root, Source sink, Object target, EvalContext ctx) {
-        if (root == null || sink == null || ctx == null) {
-            return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "root, sink or context is null");
-        }
-        List<Expr> paths = new ArrayList<>();
-        collectSinkPaths(root, sink, 64, paths);
-        if (paths.isEmpty()) {
-            return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "sink is absent from expression");
-        }
-        HealthSolveResult last = HealthSolveResult.failure(
-                HealthSolveFailure.VALUE_NOT_REPRESENTABLE, "no candidate passed forward protocol validation");
-        for (Expr path : paths) {
-            HealthSolveResult result = solveSinglePath(path, sink, target, ctx);
-            if (!result.solved()) {
-                last = result;
-                continue;
-            }
-            if (path instanceof StoreWrite || candidateMatches(path, sink, result.value(), target, ctx)) {
-                return result;
-            }
-            last = HealthSolveResult.failure(HealthSolveFailure.PROTOCOL_VALIDATION_FAILED,
-                    "inverse candidate does not reproduce target");
-        }
-        return last;
-    }
-
-    private static HealthSolveResult solveSinglePath(Expr root, Source sink, Object target, EvalContext ctx) {
         if (root == null || sink == null) {
             return HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "root or sink is null");
         }
@@ -1056,8 +913,7 @@ public final class HealthDataflowAnalyzer {
                 : HealthSolveResult.success(value);
         }
         if (sameSource(root, sink)) {
-            Object current = sink.read(ctx.entity());
-            Object value = current == null ? coerceForType(target, sink.valueType) : coerceSameType(current, target);
+            Object value = coerceForType(target, sink.valueType);
             return value == null
                 ? HealthSolveResult.failure(HealthSolveFailure.VALUE_NOT_REPRESENTABLE, sink.valueType.getName())
                 : HealthSolveResult.success(value);
@@ -1066,7 +922,7 @@ public final class HealthDataflowAnalyzer {
             HealthSolveResult last = HealthSolveResult.failure(HealthSolveFailure.LOCATION_NOT_FOUND, "sink is absent from all branches");
             for (Expr alt : c.alternatives()) {
                 if (!containsSink(alt, sink)) continue;
-                HealthSolveResult result = solveSinglePath(alt, sink, target, ctx);
+                HealthSolveResult result = solveDetailed(alt, sink, target, ctx);
                 if (result.solved()) return result;
                 last = result;
             }
@@ -1081,7 +937,7 @@ public final class HealthDataflowAnalyzer {
                     if (!containsSink(op.args().get(i), sink)) continue;
                     Object newT = inv.invert(target, op.args(), i, ctx);
                     if (newT == null) continue;
-                    HealthSolveResult result = solveSinglePath(op.args().get(i), sink, newT, ctx);
+                    HealthSolveResult result = solveDetailed(op.args().get(i), sink, newT, ctx);
                     if (result.solved()) return result;
                 }
                 return HealthSolveResult.failure(HealthSolveFailure.MULTI_LOCATION_UNSUPPORTED, "sink occurs in multiple operands");
@@ -1091,7 +947,7 @@ public final class HealthDataflowAnalyzer {
             if (inv == null) return HealthSolveResult.failure(HealthSolveFailure.INVERTER_MISSING, "opcode=" + op.opcode());
             Object newT = inv.invert(target, op.args(), idx, ctx);
             if (newT == null) return HealthSolveResult.failure(HealthSolveFailure.VALUE_NOT_REPRESENTABLE, "operation inverse rejected target");
-            return solveSinglePath(op.args().get(idx), sink, newT, ctx);
+            return solveDetailed(op.args().get(idx), sink, newT, ctx);
         }
         if (root instanceof Call call) {
             int idx = findArgWithSinkDetailed(call.args(), sink);
@@ -1106,7 +962,7 @@ public final class HealthDataflowAnalyzer {
                     if (!containsSink(call.args().get(i), sink)) continue;
                     Object newT = inv.invert(target, call.args(), i, ctx);
                     if (newT == null) continue;
-                    HealthSolveResult result = solveSinglePath(call.args().get(i), sink, newT, ctx);
+                    HealthSolveResult result = solveDetailed(call.args().get(i), sink, newT, ctx);
                     if (result.solved()) return result;
                 }
                 return HealthSolveResult.failure(HealthSolveFailure.MULTI_LOCATION_UNSUPPORTED, "sink occurs in multiple call operands");
@@ -1120,196 +976,9 @@ public final class HealthDataflowAnalyzer {
             }
             Object newT = inv.invert(target, call.args(), idx, ctx);
             if (newT == null) return HealthSolveResult.failure(HealthSolveFailure.VALUE_NOT_REPRESENTABLE, "call inverse rejected target");
-            return solveSinglePath(call.args().get(idx), sink, newT, ctx);
-        }
-        if (root instanceof OptionalContentExpr optional) {
-            Object current = safeEvaluate(optional.optionalExpr(), ctx);
-            Object wrapped = wrapOptionalTarget(current, target);
-            if (wrapped == null) {
-                return HealthSolveResult.failure(HealthSolveFailure.VALUE_NOT_REPRESENTABLE,
-                        "optional container type is unknown");
-            }
-            return solveSinglePath(optional.optionalExpr(), sink, wrapped, ctx);
+            return solveDetailed(call.args().get(idx), sink, newT, ctx);
         }
         return HealthSolveResult.failure(HealthSolveFailure.CALL_NOT_RESOLVED, root.getClass().getSimpleName());
-    }
-
-    /* 路径不敏感的 Choice 必须拆成独立候选；否则异常兜底和真实解码分支会互相抢占。 */
-    private static void collectSinkPaths(Expr expression, Source sink, int limit, List<Expr> paths) {
-        if (expression == null || paths.size() >= limit || !containsSink(expression, sink)) return;
-        if (expression instanceof Choice choice) {
-            for (Expr alternative : choice.alternatives()) {
-                collectSinkPaths(alternative, sink, limit, paths);
-                if (paths.size() >= limit) return;
-            }
-            return;
-        }
-        if (expression instanceof Op operation) {
-            collectParentPaths(operation.args(), sink, limit, paths,
-                    args -> new Op(operation.opcode(), args));
-            return;
-        }
-        if (expression instanceof Call call) {
-            collectParentPaths(call.args(), sink, limit, paths,
-                    args -> new Call(call.owner(), call.name(), call.desc(), args));
-            return;
-        }
-        if (expression instanceof OptionalContentExpr optional) {
-            List<Expr> nested = new ArrayList<>();
-            collectSinkPaths(optional.optionalExpr(), sink, limit, nested);
-            for (Expr path : nested) {
-                if (paths.size() >= limit) return;
-                paths.add(new OptionalContentExpr(path));
-            }
-            return;
-        }
-        paths.add(expression);
-    }
-
-    private interface ParentExpressionFactory {
-        Expr create(List<Expr> arguments);
-    }
-
-    private static void collectParentPaths(List<Expr> arguments, Source sink, int limit, List<Expr> paths,
-                                           ParentExpressionFactory factory) {
-        int sinkIndex = findArgWithSinkDetailed(arguments, sink);
-        if (sinkIndex < 0) return;
-        List<Expr> nested = new ArrayList<>();
-        collectSinkPaths(arguments.get(sinkIndex), sink, limit, nested);
-        for (Expr child : nested) {
-            if (paths.size() >= limit) return;
-            List<Expr> rebuilt = new ArrayList<>(arguments);
-            rebuilt.set(sinkIndex, child);
-            paths.add(factory.create(List.copyOf(rebuilt)));
-        }
-    }
-
-    private static boolean candidateMatches(Expr path, Source sink, Object candidate, Object target,
-                                            EvalContext context) {
-        Object actual;
-        try {
-            actual = evaluateSinkPreferred(path, new SourceOverrideContext(context, sink, candidate), sink);
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            actual = null;
-        }
-        boolean matches;
-        if (actual instanceof Number actualNumber && target instanceof Number targetNumber) {
-            double a = actualNumber.doubleValue();
-            double b = targetNumber.doubleValue();
-            matches = Double.isFinite(a) && Double.isFinite(b)
-                    && Math.abs(a - b) <= Math.max(1.0E-4, Math.abs(b) * 1.0E-5);
-        } else {
-            matches = Objects.equals(actual, target);
-        }
-        if (!matches && PROTOCOL_MATCH_DIAG.add(sink.label + '|' + expressionKey(path))) {
-            EcaLogger.info("[HealthDataflow] candidate mismatch sink={} candidate={} target={} actual={} expr={}",
-                    sink.label, candidate, target, actual, HealthDataFlow.expressionSummary(path));
-        }
-        return matches;
-    }
-
-    /* 反解在 Choice 上只递归含 sink 的分支；校验若按默认顺序取首个非空分支，
-       排在前的常数分支会遮蔽派生分支，导致反演正确却被判不能复现目标。 */
-    private static Object evaluateSinkPreferred(Expr e, EvalContext ctx, Source sink) {
-        if (e instanceof Choice choice) {
-            boolean sinkDependent = containsSink(choice, sink);
-            List<Expr> ordered = orderedReadAlternatives(choice);
-            boolean hasLiveAlternative = !sinkDependent && ordered.stream().anyMatch(HealthDataflowAnalyzer::containsLiveState);
-            Object selected = null;
-            for (Expr alternative : ordered) {
-                if (sinkDependent && !containsSink(alternative, sink)) continue;
-                if (hasLiveAlternative && !containsLiveState(alternative)) continue;
-                Object value = evaluateSinkPreferred(alternative, ctx, sink);
-                if (value == null) continue;
-                if (selected != null && !sameEvaluatedValue(selected, value)) {
-                    logProtocolEvaluationFailure(sink, "choice-conflict", choice);
-                    return null;
-                }
-                selected = value;
-            }
-            if (selected == null) logProtocolEvaluationFailure(sink, "choice-unresolved", choice);
-            return selected;
-        }
-        if (e instanceof Op op) {
-            List<Object> values = new ArrayList<>(op.args().size());
-            for (Expr argument : op.args()) {
-                Object value = evaluateSinkPreferred(argument, ctx, sink);
-                if (value == null) {
-                    logProtocolEvaluationFailure(sink, "operation-argument-unresolved", argument);
-                    return null;
-                }
-                values.add(value);
-            }
-            Object value = execOp(op.opcode(), values);
-            if (value == null) logProtocolEvaluationFailure(sink, "operation-failed-" + op.opcode(), op);
-            return value;
-        }
-        if (e instanceof Call call) {
-            List<Expr> args = new ArrayList<>(call.args().size());
-            for (Expr argument : call.args()) {
-                Object value = evaluateSinkPreferred(argument, ctx, sink);
-                if (value == null) {
-                    logProtocolEvaluationFailure(sink, "call-argument-unresolved", argument);
-                    return null;
-                }
-                args.add(new Reference(value, value.getClass().getName().replace('.', '/')));
-            }
-            Object value = evaluate(new Call(call.owner(), call.name(), call.desc(), List.copyOf(args)), ctx);
-            if (value == null) logProtocolEvaluationFailure(sink, "call-failed", call);
-            return value;
-        }
-        if (e instanceof OptionalContentExpr optional) {
-            Object container = evaluateSinkPreferred(optional.optionalExpr(), ctx, sink);
-            if (container == null) {
-                logProtocolEvaluationFailure(sink, "optional-container-unresolved", optional);
-                return null;
-            }
-            return unwrapOptionalContent(container);
-        }
-        Object value = evaluate(e, ctx);
-        if (value == null && e instanceof UnknownExpr) {
-            logProtocolEvaluationFailure(sink, "unknown-expression", e);
-        }
-        return value;
-    }
-
-    private static boolean sameEvaluatedValue(Object left, Object right) {
-        if (left instanceof Number leftNumber && right instanceof Number rightNumber) {
-            double a = leftNumber.doubleValue();
-            double b = rightNumber.doubleValue();
-            double scale = Math.max(1.0d, Math.max(Math.abs(a), Math.abs(b)));
-            return Double.isFinite(a) && Double.isFinite(b) && Math.abs(a - b) <= scale * 1.0e-6d;
-        }
-        return Objects.equals(left, right);
-    }
-
-    private static void logProtocolEvaluationFailure(Source sink, String reason, Expr expression) {
-        if (PROTOCOL_EVAL_DIAG_COUNT.get() >= PROTOCOL_EVAL_DIAG_LIMIT) return;
-        String key = sink.identityKey() + '|' + reason + '|' + expressionKey(expression);
-        if (!PROTOCOL_EVAL_DIAG.add(key)) return;
-        if (PROTOCOL_EVAL_DIAG_COUNT.incrementAndGet() > PROTOCOL_EVAL_DIAG_LIMIT) return;
-        EcaLogger.info("[HealthDataflow] candidate evaluation failed sink={} reason={} expr={}",
-                sink.label, reason, HealthDataFlow.expressionSummary(expression));
-    }
-
-    private record SourceOverrideContext(EvalContext delegate, Source sink, Object value) implements EvalContext {
-        @Override public Object eval(Expr expression) { return evaluate(expression, this); }
-        @Override public LivingEntity entity() { return delegate.entity(); }
-    }
-
-    private static Object wrapOptionalTarget(Object current, Object target) {
-        if (current instanceof OptionalInt) {
-            return target instanceof Number number ? OptionalInt.of(number.intValue()) : null;
-        }
-        if (current instanceof OptionalLong) {
-            return target instanceof Number number ? OptionalLong.of(number.longValue()) : null;
-        }
-        if (current instanceof OptionalDouble) {
-            return target instanceof Number number ? OptionalDouble.of(number.doubleValue()) : null;
-        }
-        if (current instanceof Optional<?>) return Optional.ofNullable(target);
-        return null;
     }
 
     static Float solveProtocolFloatInput(EffectiveHealthModel model, float target, EvalContext ctx) {
@@ -1410,7 +1079,6 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static Object solveStoreWriteValue(Expr valueExpr, Object target, EvalContext ctx) {
-        if (!containsWriteInput(valueExpr)) return null;
         List<Object> candidates = writeInputCandidates(valueExpr, target);
         for (Object candidate : candidates) {
             Object value = evaluateWithWriteInput(valueExpr, ctx, candidate);
@@ -1418,7 +1086,9 @@ public final class HealthDataflowAnalyzer {
             if (value != null) return value;
             dumpStoreWriteSolve(valueExpr, target, candidate, "null");
         }
-        return null;
+        Object fallback = evaluate(valueExpr, ctx);
+        if (fallback instanceof String s && s.isEmpty()) dumpStoreWriteSolve(valueExpr, target, null, "fallback-empty-string");
+        return fallback;
     }
 
     @SuppressWarnings("unused")
@@ -1504,7 +1174,6 @@ public final class HealthDataflowAnalyzer {
         if (e instanceof Choice c) {
             for (Expr a : c.alternatives()) if (containsSink(a, sink)) return true;
         }
-        if (e instanceof OptionalContentExpr optional) return containsSink(optional.optionalExpr(), sink);
         return false;
     }
 
@@ -1678,48 +1347,12 @@ public final class HealthDataflowAnalyzer {
         catch (Throwable t) { if (t instanceof VirtualMachineError err) throw err; return null; }
     }
 
-    /* 读方向分支合并中，常数分支多为兜底默认值(如属性未就绪时的基础血量)，
-       排在前会被"首个非空"语义选中，遮蔽真实上限等活状态读取。 */
-    private static List<Expr> orderedReadAlternatives(Choice choice) {
-        List<Expr> live = new ArrayList<>();
-        List<Expr> rest = new ArrayList<>();
-        for (Expr alternative : choice.alternatives()) {
-            (containsLiveState(alternative) ? live : rest).add(alternative);
-        }
-        live.addAll(rest);
-        return live;
-    }
-
-    private static boolean containsLiveState(Expr e) {
-        if (e == null) return false;
-        if (e instanceof Source || e instanceof Call) return true;
-        if (e instanceof Op op) {
-            for (Expr a : op.args()) if (containsLiveState(a)) return true;
-            return false;
-        }
-        if (e instanceof Choice c) {
-            for (Expr a : c.alternatives()) if (containsLiveState(a)) return true;
-            return false;
-        }
-        if (e instanceof OptionalContentExpr o) return containsLiveState(o.optionalExpr());
-        if (e instanceof StoreWrite w) return containsLiveState(w.valueExpr());
-        if (e instanceof Closure cl) {
-            for (Expr a : cl.captured()) if (containsLiveState(a)) return true;
-        }
-        return false;
-    }
-
     public static Object evaluate(Expr e, EvalContext ctx) {
         if (e instanceof Primitive p) return p.value();
         if (e instanceof Reference r) return r.value();
         //this 占位符解析为接收者实体，使 getHealth = f(this.method(), this.field) 中的 this 方法调用可被 concrete 求值
         if (e == EntityParamMarker.I) return ctx.entity();
-        if (e instanceof Source s) {
-            if (ctx instanceof SourceOverrideContext override && sameSource(s, override.sink())) {
-                return override.value();
-            }
-            return s.read(ctx.entity());
-        }
+        if (e instanceof Source s) return s.read(ctx.entity());
         if (e instanceof OptionalContentExpr optional) {
             Object container = evaluate(optional.optionalExpr(), ctx);
             return unwrapOptionalContent(container);
@@ -1729,7 +1362,7 @@ public final class HealthDataflowAnalyzer {
         }
         if (e instanceof WriteInput) return null;
         if (e instanceof Choice c) {
-            for (Expr alt : orderedReadAlternatives(c)) {
+            for (Expr alt : c.alternatives()) {
                 Object v = evaluate(alt, ctx);
                 if (v != null) return v;
             }
@@ -2602,9 +2235,10 @@ public final class HealthDataflowAnalyzer {
             entryCosts.add(entryCost(target.name(), entryStart, fetchStart));
             if (result != null && !result.isEmpty() && !result.sources.isEmpty()) candidates.add(result);
         }
-        /* 权威指纹必须在 tick 收集之前定出来。语义入口可能读取其他实体，只用本体 getHealth
-           的来源做剪枝锚点；上面的候选仍只负责产生运行期写入树。 */
-        List<Source> observedAuthorities = observedAuthoritySources(entityClass);
+        /* 权威指纹必须在 tick 收集之前定出来：tick 没有语义锚点，不带指纹进去就会把过程图里
+           每一条写指令都收成候选。指纹取 getHealth 数据流的源与上面四个语义出口的源之并——
+           getHealth 读的正是实体内同步单元镜像，语义出口补上它不读的那部分。 */
+        List<Source> observedAuthorities = observedAuthoritySources(entityClass, candidates);
         AuthorityFingerprint fingerprint = fingerprintAuthorities(entityClass, observedAuthorities);
         /* 语义出口是运行期直接写入的唯一候选树。tick/authority writer 只描述跨 tick 维护关系，
            后续进入独立因果计划，绝不能再合并进这里。 */
@@ -2668,18 +2302,18 @@ public final class HealthDataflowAnalyzer {
                 parts.tickWrites = result.writes();
                 parts.tickCost = cost;
                 parts.tickRunning = false;
-                parts.tickResolved = !result.timedOut();
+                parts.tickResolved = true;
             } else {
                 parts.authorityWrites = result.writes();
                 parts.authorityCost = cost;
                 parts.authorityRunning = false;
-                parts.authorityResolved = !result.timedOut();
+                parts.authorityResolved = true;
             }
             List<StoreWrite> combined = mergeMaintenanceWrites(parts.tickWrites, parts.authorityWrites);
             MaintenancePlan plan = buildMaintenancePlan(semantic.observedAuthorities(), combined);
             MAINTENANCE_PLAN_CACHE.put(entityClass, plan);
             MAINTENANCE_SINKS_CACHE.put(entityClass, distinctSinks(combined));
-            MAINTENANCE_MIRROR_CACHE.put(entityClass, buildMirrorLinks(parts.tickWrites));
+            MAINTENANCE_MIRROR_CACHE.put(entityClass, buildMirrorLinks(combined));
             if (parts.tickResolved && parts.authorityResolved && MAINTENANCE_SCAN_DIAG_DUMPED.add(entityClass)) {
                 List<String> methods = new ArrayList<>();
                 if (!parts.tickWrites.isEmpty()) methods.add("tickWrites");
@@ -2690,7 +2324,7 @@ public final class HealthDataflowAnalyzer {
                         entityClass.getName(), millisSince(parts.firstStartedNanos), parts.tickCost, parts.authorityCost);
                 AuthorityFingerprint fingerprint = semantic.fingerprint();
                 EcaLogger.info("[ExternalScan]   fingerprint entity={} usable={} scope={} tickWrites={} authorityWrites={} causalWrites={}",
-                        entityClass.getName(), fingerprint.usable(), fingerprint.cacheScope(entityClass), parts.tickWrites.size(),
+                        entityClass.getName(), fingerprint.usable(), fingerprint.cacheScope(), parts.tickWrites.size(),
                         parts.authorityWrites.size(), plan.maintenanceWriteCount());
                 dumpMaintenanceSinks(entityClass, combined, plan);
             }
@@ -2730,10 +2364,9 @@ public final class HealthDataflowAnalyzer {
             for (StoreWrite write : branch.maintenanceWrites()) {
                 if (write != null && write.sink() != null) causal.add(write.sink().label);
             }
-            EcaLogger.info("[ExternalScan]   causal branch entity={} authority={} causalSinks={} transactionSources={} requiredSources={}",
-                    entityClass.getName(), branch.authority().identityKey(), causal,
-                    branch.transactionSources().stream().map(Source::identityKey).toList(),
-                    branch.requiredSources().stream().map(Source::identityKey).toList());
+            EcaLogger.info("[ExternalScan]   causal branch entity={} authority={} causalSinks={} transactionSources={}",
+                    entityClass.getName(), branch.authority().label, causal,
+                    branch.transactionSources().stream().map(source -> source.label).toList());
         }
         Map<String, MirrorLink> mirrors = MAINTENANCE_MIRROR_CACHE.getOrDefault(entityClass, Map.of());
         if (!mirrors.isEmpty()) {
@@ -2776,39 +2409,17 @@ public final class HealthDataflowAnalyzer {
         Expr recompute = null;
         boolean uniformShape = true;
         for (StoreWrite write : sinkWrites) {
-            MirrorLink derivation = resolveMirrorDerivation(mirror, write.valueExpr());
-            if (derivation == null) return null;
-            if (authority != null && !authority.equals(derivation.authority())) return null;
-            authority = derivation.authority();
-            if (recompute == null) recompute = derivation.recomputeExpr();
-            else if (!recompute.equals(derivation.recomputeExpr())) uniformShape = false;
+            Set<Source> valueSources = collectSources(write.valueExpr());
+            if (valueSources.size() != 1) return null;
+            Source candidate = valueSources.iterator().next();
+            if (candidate.equals(mirror)) return null;
+            if (authority != null && !authority.equals(candidate)) return null;
+            authority = candidate;
+            if (recompute == null) recompute = write.valueExpr();
+            else if (!recompute.equals(write.valueExpr())) uniformShape = false;
         }
         if (authority == null) return null;
         return new MirrorLink(mirror, authority, uniformShape ? recompute : null);
-    }
-
-    /* 初始化与侧别回退会让维护写值同时出现镜像自身和权威来源。
-       逐个候选规范化后只接受可写权威唯一的表达式；其余来源只能作为只读动态边界。 */
-    private static MirrorLink resolveMirrorDerivation(Source mirror, Expr valueExpr) {
-        Set<Source> sources = collectSources(valueExpr);
-        if (sources.size() == 1) {
-            Source authority = sources.iterator().next();
-            return authority.equals(mirror) || !isStorageSource(authority)
-                    ? null : new MirrorLink(mirror, authority, valueExpr);
-        }
-        for (Source candidate : sources) {
-            if (candidate.equals(mirror) || !isStorageSource(candidate)) continue;
-            Expr normalized = normalizeEffectiveChoices(pruneChoicesTo(valueExpr, candidate), candidate);
-            if (normalized == null || !containsSink(normalized, candidate)) continue;
-            Set<Source> normalizedSources = collectSources(normalized);
-            List<Source> writableSources = normalizedSources.stream()
-                    .filter(source -> !source.equals(mirror) && isStorageSource(source))
-                    .toList();
-            if (writableSources.size() == 1 && writableSources.contains(candidate)) {
-                return new MirrorLink(mirror, candidate, normalized);
-            }
-        }
-        return null;
     }
 
     private static boolean dependsOnMirror(List<StoreWrite> authorityWrites, Source mirror) {
@@ -2969,11 +2580,10 @@ public final class HealthDataflowAnalyzer {
 
     /* 每个权威只携带与其形成因果闭包的周期写入和状态，避免把整个 tick 过程当作改血候选。 */
     public record MaintenanceBranch(Source authority, List<StoreWrite> maintenanceWrites,
-                                    List<Source> transactionSources, List<Source> requiredSources) {
+                                    List<Source> transactionSources) {
         public MaintenanceBranch {
             maintenanceWrites = List.copyOf(maintenanceWrites);
             transactionSources = List.copyOf(transactionSources);
-            requiredSources = List.copyOf(requiredSources);
         }
     }
 
@@ -2992,7 +2602,9 @@ public final class HealthDataflowAnalyzer {
 
         public boolean hasExternalTransactionSource() {
             for (MaintenanceBranch branch : branches) {
-                if (!branch.requiredSources().isEmpty()) return true;
+                for (Source source : branch.transactionSources()) {
+                    if (!source.equals(branch.authority()) && isExternalStorageSource(source)) return true;
+                }
             }
             return false;
         }
@@ -3045,33 +2657,12 @@ public final class HealthDataflowAnalyzer {
                 if (!transactionSources.contains(write.sink())) transactionSources.add(write.sink());
                 if (!causalWrites.contains(write)) causalWrites.add(write);
             }
-            /* 单向恢复源不会进入强连通核心。仅补写回权威时直接读取、且按当前实体寻址的表项，
-               避免把上限、配置和阶段计数器扩大成必须改写的状态。 */
-            for (StoreWrite write : writes) {
-                if (write == null || !write.sink().equals(authority)) continue;
-                for (Source rawDependency : collectSources(write.valueExpr())) {
-                    Source dependency = canonicalSource(dependencies.keySet(), rawDependency);
-                    if (!isEntityAssociatedUpstream(authority, dependency)) continue;
-                    if (!transactionSources.contains(dependency)) transactionSources.add(dependency);
-                    if (!causalWrites.contains(write)) causalWrites.add(write);
-                }
-            }
             transactionSources.sort(Comparator.comparing(source -> source.label));
             if (!causalWrites.isEmpty()) {
-                List<Source> requiredSources = transactionSources.stream()
-                        .filter(source -> !source.equals(authority) && isExternalStorageSource(source))
-                        .toList();
-                branches.add(new MaintenanceBranch(authority, causalWrites, transactionSources, requiredSources));
+                branches.add(new MaintenanceBranch(authority, causalWrites, transactionSources));
             }
         }
         return branches.isEmpty() ? MaintenancePlan.EMPTY : new MaintenancePlan(branches);
-    }
-
-    private static boolean isEntityAssociatedUpstream(Source authority, Source dependency) {
-        if (!(dependency instanceof MapEntrySource map) || dependency.equals(authority)) return false;
-        if (map.keyKind != MapEntrySource.KeyKind.UNKNOWN) return true;
-        return authority instanceof MapEntrySource authorityMap
-                && expressionKey(authorityMap.keyExpr).equals(expressionKey(map.keyExpr));
     }
 
     private static boolean containsAnySink(Expr expression, Collection<Source> sinks) {
@@ -3102,7 +2693,8 @@ public final class HealthDataflowAnalyzer {
 
     /* 剪枝指纹的种子源：getHealth 数据流的源 + 语义出口已定位的源。
        两者都由带语义锚点的入口得出，不含 tick 的无关写入，可以安全地反过来约束 tick。 */
-    private static List<Source> observedAuthoritySources(Class<?> entityClass) {
+    private static List<Source> observedAuthoritySources(Class<?> entityClass,
+                                                         List<AnalysisResult> semanticCandidates) {
         List<Source> sources = new ArrayList<>();
         try {
             AnalysisResult observation = analyze(entityClass);
@@ -3110,8 +2702,12 @@ public final class HealthDataflowAnalyzer {
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
         }
-        /* 语义入口可能读取伤害来源或目标实体。它们只能提供关系证据，不能在没有本体
-           getHealth 读取证据时升级为当前实体的权威。 */
+        for (AnalysisResult candidate : semanticCandidates) {
+            if (candidate == null || candidate.isEmpty()) continue;
+            for (Source source : candidate.sources) {
+                if (!sources.contains(source)) sources.add(source);
+            }
+        }
         return sources;
     }
 
@@ -3134,17 +2730,9 @@ public final class HealthDataflowAnalyzer {
 
     /* 权威指纹：真实存储的字段/accessor/NBT 键集合。任一权威无法落键则该指纹整体不可用。 */
     private record AuthorityFingerprint(Set<String> fieldKeys, Set<String> accessorKeys,
-                                         Set<String> nbtKeys, Set<String> mapEntryKeys,
-                                         Set<String> mapContainerFieldKeys, boolean usable) {
-        String cacheScope(Class<?> entityClass) {
-            ClassLoader loader = entityClass == null ? null : entityClass.getClassLoader();
-            return "loader=" + System.identityHashCode(loader)
-                    + "|epoch=" + CLASS_NODE_CACHE_EPOCH.get()
-                    + "|fields=" + sortedFingerprintPart(fieldKeys)
-                    + "|accessors=" + sortedFingerprintPart(accessorKeys)
-                    + "|nbt=" + sortedFingerprintPart(nbtKeys)
-                    + "|mapEntries=" + sortedFingerprintPart(mapEntryKeys)
-                    + "|mapContainers=" + sortedFingerprintPart(mapContainerFieldKeys);
+                                        Set<String> nbtKeys, boolean usable) {
+        String cacheScope() {
+            return fieldKeys.size() + "/" + accessorKeys.size() + "/" + nbtKeys.size();
         }
 
         boolean matchesField(FieldInsnNode field) {
@@ -3155,31 +2743,21 @@ public final class HealthDataflowAnalyzer {
         boolean matchesAccessor(FieldInsnNode field) {
             return accessorKeys.contains(field.owner + "#" + field.name);
         }
-
-        boolean matchesMapContainer(FieldInsnNode field) {
-            return mapContainerFieldKeys.contains(field.owner + "#" + field.name + "#" + field.desc);
-        }
     }
 
     private static final AuthorityFingerprint NO_AUTHORITY_FINGERPRINT =
-            new AuthorityFingerprint(Set.of(), Set.of(), Set.of(), Set.of(), Set.of(), false);
+            new AuthorityFingerprint(Set.of(), Set.of(), Set.of(), false);
 
-    private static String sortedFingerprintPart(Collection<String> values) {
-        List<String> sorted = new ArrayList<>(values);
-        sorted.sort(String::compareTo);
-        return String.join(",", sorted);
-    }
-
-    /* 从本体读取权威构建指纹。表项同时保留完整来源身份，并追踪容器表达式中的字段或获取方法；
-       任一表权威找不到容器访问锚点时禁用剪枝，避免缓存残缺的无写入结论。 */
+    /* 从已分析出的权威源构建指纹：SynchedDataSource→反查其 accessor 静态字段键，
+       字段链源→末段字段键。非实体权威的源类型(静态字段/容器等)跳过不置不可用——
+       它们只是实体外维护状态，不是"权威"本身，且 tick 收集常混入无关静态字段，
+       把它们当权威会把指纹整体拖成不可用。 */
     private static AuthorityFingerprint fingerprintAuthorities(Class<?> entityClass,
                                                                Collection<Source> authorities) {
         if (authorities == null || authorities.isEmpty()) return NO_AUTHORITY_FINGERPRINT;
         Set<String> fieldKeys = new HashSet<>();
         Set<String> accessorKeys = new HashSet<>();
         Set<String> nbtKeys = new HashSet<>();
-        Set<String> mapEntryKeys = new HashSet<>();
-        Set<String> mapContainerFieldKeys = new HashSet<>();
         boolean usable = true;
         for (Source authority : authorities) {
             if (authority instanceof SynchedDataSource synched) {
@@ -3190,94 +2768,15 @@ public final class HealthDataflowAnalyzer {
                 fieldKeys.add(fieldKey(chain.chain.get(chain.chain.size() - 1)));
             } else if (authority instanceof ChainedFieldSource chain && !chain.chain.isEmpty()) {
                 fieldKeys.add(fieldKey(chain.chain.get(chain.chain.size() - 1)));
-            } else if (authority instanceof MapEntrySource map) {
-                mapEntryKeys.add(map.identityKey());
-                int anchorsBefore = mapContainerFieldKeys.size();
-                collectMapContainerFieldKeys(map.containerExpr, mapContainerFieldKeys,
-                        new HashSet<>(), 0);
-                if (mapContainerFieldKeys.size() == anchorsBefore) usable = false;
             } else {
-                // StaticFieldSource/CapabilityDataSource/ArrayElementSource 等
+                // StaticFieldSource/MapEntrySource/CapabilityDataSource/ArrayElementSource 等
                 // 实体外维护状态，非权威本体，忽略即可
             }
         }
-        if (fieldKeys.isEmpty() && accessorKeys.isEmpty() && nbtKeys.isEmpty() && mapEntryKeys.isEmpty()) {
+        if (fieldKeys.isEmpty() && accessorKeys.isEmpty() && nbtKeys.isEmpty()) {
             return NO_AUTHORITY_FINGERPRINT;
         }
-        return new AuthorityFingerprint(Set.copyOf(fieldKeys), Set.copyOf(accessorKeys), Set.copyOf(nbtKeys),
-                Set.copyOf(mapEntryKeys), Set.copyOf(mapContainerFieldKeys), usable);
-    }
-
-    private static final int MAP_CONTAINER_TRACE_DEPTH = 8;
-
-    private static void collectMapContainerFieldKeys(Expr expression, Set<String> keys,
-                                                     Set<String> visitedMethods, int depth) {
-        if (expression == null || depth > MAP_CONTAINER_TRACE_DEPTH) return;
-        if (expression instanceof StaticFieldSource field) {
-            keys.add(internalName(field.field.getDeclaringClass()) + "#" + field.field.getName()
-                    + "#" + Type.getDescriptor(field.field.getType()));
-        } else if (expression instanceof FieldChainSource chain && !chain.chain.isEmpty()) {
-            keys.add(fieldKey(chain.chain.get(chain.chain.size() - 1)));
-        } else if (expression instanceof ChainedFieldSource chain) {
-            collectMapContainerFieldKeys(chain.root, keys, visitedMethods, depth + 1);
-            if (!chain.chain.isEmpty()) keys.add(fieldKey(chain.chain.get(chain.chain.size() - 1)));
-        } else if (expression instanceof Choice choice) {
-            for (Expr alternative : choice.alternatives()) {
-                collectMapContainerFieldKeys(alternative, keys, visitedMethods, depth + 1);
-            }
-        } else if (expression instanceof Call call) {
-            for (Expr argument : call.args()) {
-                collectMapContainerFieldKeys(argument, keys, visitedMethods, depth + 1);
-            }
-            collectMapContainerMethodFields(call.owner(), call.name(), call.desc(),
-                    keys, visitedMethods, depth + 1);
-        }
-    }
-
-    /* 获取方法只用于找到容器字段访问点；关系建模仍使用原 MapEntrySource 的完整容器与键表达式。 */
-    private static void collectMapContainerMethodFields(String ownerInternal, String name, String desc,
-                                                        Set<String> keys, Set<String> visitedMethods, int depth) {
-        if (depth > MAP_CONTAINER_TRACE_DEPTH) return;
-        String methodKey = ownerInternal + "#" + name + desc;
-        if (!visitedMethods.add(methodKey)) return;
-        Class<?> owner = loadClass(ownerInternal);
-        if (owner == null) return;
-        MethodNode method;
-        try {
-            method = findMethodNode(classNode(owner), name, desc);
-        } catch (Throwable t) {
-            if (t instanceof VirtualMachineError e) throw e;
-            return;
-        }
-        if (method == null) return;
-        for (AbstractInsnNode instruction : method.instructions) {
-            if (instruction instanceof FieldInsnNode field
-                    && (field.getOpcode() == Opcodes.GETSTATIC || field.getOpcode() == Opcodes.GETFIELD)
-                    && isMapDescriptor(field.desc)) {
-                keys.add(field.owner + "#" + field.name + "#" + field.desc);
-            } else if (instruction instanceof MethodInsnNode call && returnsMap(call.desc)) {
-                collectMapContainerMethodFields(call.owner, call.name, call.desc,
-                        keys, visitedMethods, depth + 1);
-            }
-        }
-    }
-
-    private static boolean isMapDescriptor(String descriptor) {
-        try {
-            Type type = Type.getType(descriptor);
-            return type.getSort() == Type.OBJECT && isMapClassByName(type.getInternalName());
-        } catch (RuntimeException ignored) {
-            return false;
-        }
-    }
-
-    private static boolean returnsMap(String descriptor) {
-        try {
-            Type type = Type.getReturnType(descriptor);
-            return type.getSort() == Type.OBJECT && isMapClassByName(type.getInternalName());
-        } catch (RuntimeException ignored) {
-            return false;
-        }
+        return new AuthorityFingerprint(fieldKeys, accessorKeys, nbtKeys, usable);
     }
 
     private static String fieldKey(FieldStep step) {
@@ -3323,11 +2822,10 @@ public final class HealthDataflowAnalyzer {
                                                            AuthorityFingerprint fingerprint,
                                                            long deadline) {
         if (fingerprint == null || !fingerprint.usable()) return WriterSiteScan.EMPTY;
-        if (fingerprint.accessorKeys().isEmpty() && fingerprint.fieldKeys().isEmpty()
-                && fingerprint.mapContainerFieldKeys().isEmpty()) return WriterSiteScan.EMPTY;
+        if (fingerprint.accessorKeys().isEmpty() && fingerprint.fieldKeys().isEmpty()) return WriterSiteScan.EMPTY;
         String scope = modScopePrefix(entityClass);
         if (scope == null) return WriterSiteScan.EMPTY;
-        String key = scope + "|" + fingerprint.cacheScope(entityClass);
+        String key = scope + "|" + fingerprint.cacheScope();
         List<WriterSite> cached = AUTHORITY_WRITER_SITES.get(key);
         if (cached != null) return new WriterSiteScan(cached, false);
         WriterSiteScan scan = scanLoadedClassesForWriterSites(scope, fingerprint, deadline);
@@ -3364,7 +2862,7 @@ public final class HealthDataflowAnalyzer {
         return new WriterSiteScan(List.copyOf(sites), timedOut[0]);
     }
 
-    /* 只读指令表找引用指纹的方法：同步 accessor、字段写或表容器访问命中即记录。 */
+    /* 只读指令表找引用指纹的方法：GETSTATIC 命中 accessor 键或 PUTFIELD 命中字段键即记录。 */
     private static void collectWriterSites(ClassReader reader, AuthorityFingerprint fingerprint,
                                            List<WriterSite> sites) {
         String[] ownerInternal = {reader.getClassName()};
@@ -3382,9 +2880,6 @@ public final class HealthDataflowAnalyzer {
                                 && fingerprint.accessorKeys().contains(owner + "#" + fieldName);
                         hit |= opcode == Opcodes.PUTFIELD
                                 && fingerprint.fieldKeys().contains(owner + "#" + fieldName + "#" + fieldDesc);
-                        hit |= (opcode == Opcodes.GETSTATIC || opcode == Opcodes.GETFIELD)
-                                && fingerprint.mapContainerFieldKeys()
-                                .contains(owner + "#" + fieldName + "#" + fieldDesc);
                         if (!hit) return;
                         recorded = true;
                         sites.add(new WriterSite(ownerInternal[0], name, descriptor));
@@ -3635,7 +3130,7 @@ public final class HealthDataflowAnalyzer {
     /* 比较指令事实：跳转成立的条件为 operand <predicate> threshold。
        predicate 取 IFEQ..IFLE 形式的操作码，0 表示方向不可判定(比较后未紧跟条件跳转，或阈值非常数)。
        只保留操作数会丢失阈值与方向，而血量的正负极性正是由"与零比较"这一事实支撑的。 */
-    public record ComparisonFact(Expr operand, int predicate, float threshold, boolean mortalityEntry) {}
+    public record ComparisonFact(Expr operand, int predicate, float threshold) {}
 
     /* readExpr 为含 storage 的有效血量表达式；storage 是其中真正可写的存储源。
        predicate/threshold 承自 readExpr 所在的比较指令，用于判定血量的正负极性。 */
@@ -3676,10 +3171,10 @@ public final class HealthDataflowAnalyzer {
     }
 
     public static String candidateSignature(List<Source> candidates) {
-        List<String> identities = new ArrayList<>(candidates.size());
-        for (Source source : candidates) identities.add(source.identityKey());
-        Collections.sort(identities);
-        return String.join("|", identities);
+        List<String> labels = new ArrayList<>(candidates.size());
+        for (Source source : candidates) labels.add(source.label);
+        Collections.sort(labels);
+        return String.join("|", labels);
     }
 
     /* 从候选存储源推导有效血量模型；无法确定时返回 null。
@@ -3693,25 +3188,6 @@ public final class HealthDataflowAnalyzer {
     public static EffectiveHealthModel resolveCachedEffectiveHealthModel(Class<?> entityClass,
                                                                          List<Source> candidates) {
         return resolveEffectiveHealthModel(entityClass, candidates, true);
-    }
-
-    /* 首次写入不能等待全类扫描队列时，只分析实际生效的两个死亡语义入口。
-       候选来源与结构判据仍由 selectEffectiveModel 统一裁决，快速路径不拥有宽松规则。 */
-    static EffectiveHealthModel resolveMortalityEffectiveHealthModel(Class<?> entityClass,
-                                                                      List<Source> candidates) {
-        if (entityClass == null || candidates == null || candidates.isEmpty()) return null;
-        EffectiveHealthModel cached = EFFECTIVE_MODEL_CACHE.get(entityClass);
-        if (cached != null) return cached;
-        List<ComparisonFact> comparisons = collectMortalityComparisons(entityClass);
-        if (comparisons.isEmpty()) return null;
-        EffectiveHealthModel model = selectEffectiveModel(entityClass, candidates, comparisons, "mortality");
-        if (model == null) return null;
-        EFFECTIVE_MODEL_CACHE.put(entityClass, model);
-        EFFECTIVE_MODEL_MISSES.remove(entityClass);
-        EcaLogger.info("[EffectiveHealth] model entity={} storage={} readExpr={}",
-                entityClass.getName(), model.storage().label,
-                HealthDataFlow.expressionSummary(model.readExpr()));
-        return model;
     }
 
     private static EffectiveHealthModel resolveEffectiveHealthModel(Class<?> entityClass, List<Source> candidates,
@@ -3737,7 +3213,7 @@ public final class HealthDataflowAnalyzer {
             EcaLogger.info("[EffectiveHealth] model entity={} storage={} readExpr={}",
                     entityClass.getName(), model.storage().label,
                     HealthDataFlow.expressionSummary(model.readExpr()));
-        } else if (!cachedOnly && !hasPartialComparison(entityClass)) {
+        } else if (!cachedOnly) {
             EFFECTIVE_MODEL_MISSES.put(entityClass, signature);
             EcaLogger.info("[EffectiveHealth] no model entity={} candidates={} signature={}",
                     entityClass.getName(), candidates.size(), signature);
@@ -3765,22 +3241,14 @@ public final class HealthDataflowAnalyzer {
        扫描是本流程中最慢的部分，缓存后运行期只需重新匹配证据。 */
     private static final Map<Class<?>, List<ComparisonFact>> PRIORITY_COMPARISON_CACHE = new ConcurrentHashMap<>();
     private static final Map<Class<?>, List<ComparisonFact>> FULL_COMPARISON_CACHE = new ConcurrentHashMap<>();
-    private static final Set<Class<?>> PRIORITY_COMPARISON_PARTIAL = ConcurrentHashMap.newKeySet();
-    private static final Set<Class<?>> FULL_COMPARISON_PARTIAL = ConcurrentHashMap.newKeySet();
 
     private static List<ComparisonFact> comparisonsOf(Class<?> entityClass, boolean priorityOnly) {
         Map<Class<?>, List<ComparisonFact>> cache = priorityOnly ? PRIORITY_COMPARISON_CACHE : FULL_COMPARISON_CACHE;
         List<ComparisonFact> cached = cache.get(entityClass);
         if (cached != null) return cached;
         List<ComparisonFact> scanned = collectClassComparisons(entityClass, priorityOnly);
-        Set<Class<?>> partial = priorityOnly ? PRIORITY_COMPARISON_PARTIAL : FULL_COMPARISON_PARTIAL;
-        if (!partial.contains(entityClass)) cache.put(entityClass, scanned);
+        cache.put(entityClass, scanned);
         return scanned;
-    }
-
-    static boolean hasPartialComparison(Class<?> entityClass) {
-        return entityClass != null && (PRIORITY_COMPARISON_PARTIAL.contains(entityClass)
-                || FULL_COMPARISON_PARTIAL.contains(entityClass));
     }
 
     /* 预热期只填充优先段比较表达式缓存。此时没有写入记录，无法确立模型，
@@ -3805,34 +3273,15 @@ public final class HealthDataflowAnalyzer {
     private static EffectiveHealthModel selectEffectiveModel(Class<?> entityClass, List<Source> evidence,
                                                              List<ComparisonFact> comparisons, String stage) {
         Set<String> rejected = EFFECTIVE_MODEL_REJECTED.getOrDefault(entityClass, Set.of());
-        AnalysisResult healthRead = analyze(entityClass);
-        boolean mixedConstantObservation = healthRead != null && !healthRead.isEmpty()
-                && healthRead.sources.stream().anyMatch(ConstOverrideSource.class::isInstance)
-                && healthRead.sources.stream().anyMatch(source -> !(source instanceof ConstOverrideSource));
         EffectiveHealthModel best = null;
         int bestScore = Integer.MIN_VALUE;
         int matched = 0;
         int rejectedForLiteralBound = 0;
-        int rejectedForSize = 0;
-        int rejectedForMissingMortality = 0;
         for (ComparisonFact fact : comparisons) {
-            if (mixedConstantObservation && !fact.mortalityEntry()) {
-                rejectedForMissingMortality++;
-                continue;
-            }
             Expr expr = fact.operand();
-            if (containsEntityHealthRead(expr)) {
-                if (healthRead != null && !healthRead.isEmpty()) {
-                    expr = expandEntityHealthRead(expr, healthRead.returnExpr);
-                }
-            }
             /* 候选由外部记录和表达式内提取的存储源共同组成。
                直接提取可使模型分析不依赖其他通道的完成时间。 */
-            if (!isFloatingPointExpr(expr)) continue;
-            if (exceedsExpressionNodeBudget(expr, EFFECTIVE_MODEL_NODE_BUDGET)) {
-                rejectedForSize++;
-                continue;
-            }
+            if (!isHealthShapedExpr(expr)) continue;
             /* 候选只取有写入记录的存储。校验读的就是本模型的表达式，若存储也从同一表达式中提取，
                写入与校验会构成闭环而必然通过；写入记录来自实际写入尝试，与表达式无关，可打破该闭环。 */
             for (Source candidate : evidence) {
@@ -3840,12 +3289,8 @@ public final class HealthDataflowAnalyzer {
                 if (rejected.contains(candidate.canonicalKey())) continue;
                 // 表达式即存储本身时两者同向，由原通道处理，无需模型
                 if (sameSource(expr, candidate) || !containsSink(expr, candidate)) continue;
-                Expr refined = normalizeEffectiveChoices(pruneChoicesTo(expr, candidate), candidate);
-                boolean directDecodedHealth = fact.mortalityEntry()
-                        && Float.floatToRawIntBits(fact.threshold()) == Float.floatToRawIntBits(0.0f)
-                        && isDirectDecodedHealth(refined, candidate);
-                if (refined == null || (!containsArithmeticOp(refined) && !directDecodedHealth)
-                        || (!hasIndependentBound(refined, candidate) && !directDecodedHealth)) {
+                Expr refined = normalizeEffectiveChoices(expr, candidate);
+                if (refined == null || !hasIndependentBound(refined, candidate)) {
                     rejectedForLiteralBound++;
                     continue;
                 }
@@ -3857,67 +3302,14 @@ public final class HealthDataflowAnalyzer {
                 }
             }
         }
-        EcaLogger.info("[EffectiveHealth] scan entity={} stage={} comparisons={} matched={} rejectedLiteralBound={} rejectedSize={} rejectedMissingMortality={}",
-                entityClass.getName(), stage, comparisons.size(), matched, rejectedForLiteralBound,
-                rejectedForSize, rejectedForMissingMortality);
+        EcaLogger.info("[EffectiveHealth] scan entity={} stage={} comparisons={} matched={} rejectedLiteralBound={}",
+                entityClass.getName(), stage, comparisons.size(), matched, rejectedForLiteralBound);
         // 未找到匹配项时输出样本，用于区分存储未参与比较和调用未内联两种情况。
         // 优先段未命中属于正常回退，只在全类扫描仍无结果时输出。
         if (matched == 0 && "full".equals(stage)) dumpComparisonSamples(entityClass, comparisons);
         if (best == null) return null;
         return new EffectiveHealthModel(pruneChoicesTo(best.readExpr(), best.storage()), best.storage(),
                 best.predicate(), best.threshold());
-    }
-
-    /* 生死入口的分析预算可能在展开 getHealth 前耗尽，但独立读取分析已经取得了完整表达式。
-       仅替换以当前实体为接收者的调用，避免把攻击目标或附近实体的血量误接到本体存储。 */
-    private static boolean containsEntityHealthRead(Expr expr) {
-        if (expr instanceof Call call) {
-            if (isEntityHealthRead(call)) return true;
-            for (Expr argument : call.args()) {
-                if (containsEntityHealthRead(argument)) return true;
-            }
-        } else if (expr instanceof Op operation) {
-            for (Expr argument : operation.args()) {
-                if (containsEntityHealthRead(argument)) return true;
-            }
-        } else if (expr instanceof Choice choice) {
-            for (Expr alternative : choice.alternatives()) {
-                if (containsEntityHealthRead(alternative)) return true;
-            }
-        }
-        return false;
-    }
-
-    private static Expr expandEntityHealthRead(Expr expr, Expr healthRead) {
-        if (expr instanceof Call call) {
-            if (isEntityHealthRead(call)) return healthRead;
-            List<Expr> arguments = new ArrayList<>(call.args().size());
-            for (Expr argument : call.args()) {
-                arguments.add(expandEntityHealthRead(argument, healthRead));
-            }
-            return new Call(call.owner(), call.name(), call.desc(), List.copyOf(arguments));
-        }
-        if (expr instanceof Op operation) {
-            List<Expr> arguments = new ArrayList<>(operation.args().size());
-            for (Expr argument : operation.args()) {
-                arguments.add(expandEntityHealthRead(argument, healthRead));
-            }
-            return new Op(operation.opcode(), List.copyOf(arguments));
-        }
-        if (expr instanceof Choice choice) {
-            List<Expr> alternatives = new ArrayList<>(choice.alternatives().size());
-            for (Expr alternative : choice.alternatives()) {
-                alternatives.add(expandEntityHealthRead(alternative, healthRead));
-            }
-            return new Choice(List.copyOf(alternatives));
-        }
-        return expr;
-    }
-
-    private static boolean isEntityHealthRead(Call call) {
-        return call.desc().equals(GET_HEALTH.desc())
-                && (call.name().equals(GET_HEALTH.srg()) || call.name().equals(GET_HEALTH.mcp()))
-                && !call.args().isEmpty() && call.args().get(0) == EntityParamMarker.I;
     }
 
     /* 将 Choice 限定到包含目标存储的分支。
@@ -4000,7 +3392,6 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static final int COMPARISON_SAMPLE_LIMIT = 6;
-    private static final int EFFECTIVE_MODEL_NODE_BUDGET = 8_192;
     /* 上溯父类后表达式层数更深，截断过早会把含存储的那一段切掉，判断不了内联展开到哪一层 */
     private static final int COMPARISON_SAMPLE_CHARS = 900;
 
@@ -4038,6 +3429,12 @@ public final class HealthDataflowAnalyzer {
        但该记录不是必需条件，以免模型分析依赖其他通道。 */
     private static int effectiveModelScore(Expr expr) {
         return (referencesMaxHealth(expr) ? 100 : 0) - exprNodeCount(expr);
+    }
+
+    /* 血量由存储经算术运算得出，因此表达式须为浮点算术运算的结果。
+       布尔判定、整数取值、集合判空等表达式虽然也含存储，但不表示血量。 */
+    private static boolean isHealthShapedExpr(Expr expr) {
+        return isFloatingPointExpr(expr) && containsArithmeticOp(expr);
     }
 
     private static boolean isFloatingPointExpr(Expr expr) {
@@ -4141,16 +3538,6 @@ public final class HealthDataflowAnalyzer {
         return referencesMaxHealth(expr) || referencesSourceOtherThan(expr, storage);
     }
 
-    /* 标准生死入口直接把 decode(storage) 与零比较时，解码结果本身就是剩余血量，
-       不需要人为制造“上限减计数”结构；只允许单一存储依赖，避免放宽到配额组合式。 */
-    private static boolean isDirectDecodedHealth(Expr expr, Source storage) {
-        if (!(expr instanceof Call call) || dependsOnDamageInput(expr)) return false;
-        int sort = Type.getReturnType(call.desc()).getSort();
-        if (sort != Type.FLOAT && sort != Type.DOUBLE) return false;
-        Set<Source> sources = collectSources(expr);
-        return sources.size() == 1 && sameSource(sources.iterator().next(), storage);
-    }
-
     private static boolean referencesSourceOtherThan(Expr expr, Source storage) {
         for (Source source : collectSources(expr)) {
             if (!sameSource(source, storage)) return true;
@@ -4190,27 +3577,6 @@ public final class HealthDataflowAnalyzer {
         return 1;
     }
 
-    private static boolean exceedsExpressionNodeBudget(Expr root, int limit) {
-        Set<Expr> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-        ArrayDeque<Expr> pending = new ArrayDeque<>();
-        pending.add(root);
-        while (!pending.isEmpty()) {
-            Expr expression = pending.removeLast();
-            if (expression == null || !visited.add(expression)) continue;
-            if (visited.size() > limit) return true;
-            if (expression instanceof Op operation) pending.addAll(operation.args());
-            else if (expression instanceof Call call) pending.addAll(call.args());
-            else if (expression instanceof Choice choice) pending.addAll(choice.alternatives());
-            else if (expression instanceof Closure closure) pending.addAll(closure.captured());
-            else if (expression instanceof OptionalContentExpr optional) pending.add(optional.optionalExpr());
-            else if (expression instanceof StoreWrite write) {
-                pending.add(write.sink());
-                pending.add(write.valueExpr());
-            }
-        }
-        return false;
-    }
-
     /* 扫描类实例方法中的比较指令，收集与常数比较的表达式；生死判定通常表现为剩余量小于等于零。
        单个方法分析失败不影响其余方法，整体尽力而为。 */
     private static List<ComparisonFact> collectClassComparisons(Class<?> entityClass, boolean priorityOnly) {
@@ -4239,16 +3605,12 @@ public final class HealthDataflowAnalyzer {
             }
             if (classNode == null) continue;
             String ownerInternal = internalName(owner);
-            Class<?> comparisonOwner = owner;
-            List<MethodNode> methods = new ArrayList<>(classNode.methods);
-            methods.sort(Comparator.comparingInt(method -> comparisonMethodPriority(comparisonOwner, method)));
-            for (MethodNode method : methods) {
+            for (MethodNode method : classNode.methods) {
                 if (method.instructions.size() == 0 || method.name.startsWith("<")) continue;
                 if ((method.access & Opcodes.ACC_STATIC) != 0) continue;
                 if (!visitedMethods.add(method.name + method.desc)) continue;
                 if (priorityOnly && !hasFloatComparison(method)) continue;
                 if (System.nanoTime() > deadline) { timedOut = true; break; }
-                long methodStart = System.nanoTime();
                 /* 每个方法使用独立的预算和递归检测集，避免前序方法耗尽预算或残留状态影响后续分析。 */
                 AnalysisCtx ctx = new AnalysisCtx(DEFAULT_MAX_DEPTH);
                 ctx.inheritedInline = true;
@@ -4258,19 +3620,18 @@ public final class HealthDataflowAnalyzer {
                 if (isRecurringOverride(owner, method)) {
                     ctx.inlineBudget = TICK_WRITE_INLINE_BUDGET;
                     ctx.nodeBudget = TICK_WRITE_NODE_BUDGET;
+                    ctx.configureAdaptiveDeadline(deadline);
                 }
-                ctx.configureAdaptiveDeadline(Math.min(deadline,
-                        methodStart + COMPARISON_METHOD_BUDGET_NANOS));
+                long methodStart = System.nanoTime();
                 int fetchStart = bytesFetchCount();
                 analyzed++;
                 try {
                     TaintValue[] seed = seedMethodInputs(method.desc, false);
                     TaintInterpreter interpreter = new TaintInterpreter(ctx, 0, ownerInternal, method, seed);
                     Frame<TaintValue>[] frames = new Analyzer<>(interpreter).analyze(ownerInternal, method);
-                    boolean mortalityEntry = isMortalityEntry(method);
                     int index = 0;
                     for (AbstractInsnNode insn : method.instructions) {
-                        collectComparisonFacts(out, frames[index++], insn, dropped, mortalityEntry);
+                        collectComparisonFacts(out, frames[index++], insn, dropped);
                     }
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
@@ -4287,7 +3648,6 @@ public final class HealthDataflowAnalyzer {
                             + "ms bytes=" + (bytesFetchCount() - fetchStart)
                             + " inlineLeft=" + ctx.inlineBudget + " nodeLeft=" + ctx.nodeBudget);
                 }
-                if (System.nanoTime() > deadline) timedOut = true;
             }
         }
         if (timedOut || System.nanoTime() - scanStart >= COMPARISON_SLOW_SCAN_NANOS) {
@@ -4310,77 +3670,14 @@ public final class HealthDataflowAnalyzer {
             EcaLogger.info("[EffectiveHealth]   dropped unknown operands entity={} stage={} {}",
                     entityClass.getName(), priorityOnly ? "priority" : "full", dropped);
         }
-        Set<Class<?>> partial = priorityOnly ? PRIORITY_COMPARISON_PARTIAL : FULL_COMPARISON_PARTIAL;
-        if (timedOut) partial.add(entityClass);
-        else partial.remove(entityClass);
         return out;
     }
 
-    private static List<ComparisonFact> collectMortalityComparisons(Class<?> entityClass) {
-        List<ComparisonFact> comparisons = new ArrayList<>();
-        Map<String, Integer> dropped = new LinkedHashMap<>();
-        long deadline = System.nanoTime() + MORTALITY_SCAN_BUDGET_NANOS;
-        Set<String> visited = new HashSet<>();
-        for (McMethod entry : new McMethod[]{IS_ALIVE, IS_DEAD_OR_DYING}) {
-            if (System.nanoTime() >= deadline) break;
-            ClassAndMethod target = findMethodOwner(entityClass, entry);
-            if (target == null || !visited.add(target.owner().getName() + "#" + target.name() + entry.desc())) {
-                continue;
-            }
-            try {
-                ClassNode ownerNode = classNode(target.owner());
-                MethodNode method = ownerNode == null ? null : findMethodNode(ownerNode, target.name(), entry.desc());
-                if (method == null || method.instructions.size() == 0) continue;
-                AnalysisCtx context = new AnalysisCtx(DEFAULT_MAX_DEPTH);
-                context.inheritedInline = true;
-                context.configureAdaptiveDeadline(deadline);
-                TaintValue[] seed = seedMethodInputs(method.desc, false);
-                String ownerInternal = internalName(target.owner());
-                TaintInterpreter interpreter = new TaintInterpreter(context, 0, ownerInternal, method, seed);
-                Frame<TaintValue>[] frames = new Analyzer<>(interpreter).analyze(ownerInternal, method);
-                int index = 0;
-                for (AbstractInsnNode instruction : method.instructions) {
-                    collectComparisonFacts(comparisons, frames[index++], instruction, dropped, true);
-                }
-            } catch (Throwable t) {
-                if (t instanceof VirtualMachineError e) throw e;
-            }
-        }
-        return comparisons;
-    }
-
-    private static boolean isMortalityEntry(MethodNode method) {
-        if (method == null) return false;
-        return method.desc.equals(IS_ALIVE.desc())
-                && (method.name.equals(IS_ALIVE.srg()) || method.name.equals(IS_ALIVE.mcp()))
-                || method.desc.equals(IS_DEAD_OR_DYING.desc())
-                && (method.name.equals(IS_DEAD_OR_DYING.srg()) || method.name.equals(IS_DEAD_OR_DYING.mcp()))
-                || method.desc.equals(HURT.desc())
-                && (method.name.equals(HURT.srg()) || method.name.equals(HURT.mcp()))
-                || method.desc.equals(ACTUALLY_HURT.desc())
-                && (method.name.equals(ACTUALLY_HURT.srg()) || method.name.equals(ACTUALLY_HURT.mcp()));
-    }
-
-    private static int comparisonMethodPriority(Class<?> owner, MethodNode method) {
-        if (method.desc.equals(IS_ALIVE.desc())
-                && (method.name.equals(IS_ALIVE.srg()) || method.name.equals(IS_ALIVE.mcp()))) return 0;
-        if (method.desc.equals(IS_DEAD_OR_DYING.desc())
-                && (method.name.equals(IS_DEAD_OR_DYING.srg()) || method.name.equals(IS_DEAD_OR_DYING.mcp()))) return 0;
-        if (isRecurringOverride(owner, method)) return 1;
-        if (method.desc.equals(ACTUALLY_HURT.desc())
-                && (method.name.equals(ACTUALLY_HURT.srg()) || method.name.equals(ACTUALLY_HURT.mcp()))) return 2;
-        if (method.desc.equals(HURT.desc())
-                && (method.name.equals(HURT.srg()) || method.name.equals(HURT.mcp()))) return 3;
-        return 4;
-    }
-
     private static final int COMPARISON_FAILURE_LIMIT = 8;
-    private static final long MORTALITY_SCAN_BUDGET_NANOS = 250_000_000L;
     /* 逐方法计时的记录门槛与条数上限，以及整体扫描的报告门槛。 */
     private static final long COMPARISON_SLOW_METHOD_NANOS = 200_000_000L;
     private static final int COMPARISON_SLOW_METHOD_LIMIT = 8;
     private static final long COMPARISON_SLOW_SCAN_NANOS = 1_000_000_000L;
-    private static final long COMPARISON_METHOD_BUDGET_NANOS = 2_000_000_000L;
     private static final long COMPARISON_SCAN_BUDGET_NANOS = 15_000_000_000L;
 
     private static int externalSourcePriority(Source source) {
@@ -4462,8 +3759,6 @@ public final class HealthDataflowAnalyzer {
         if (args.isEmpty()) return null;
         Expr known = extractKnownWriteCall(call, args);
         if (known != null) return known;
-        Expr functionalMapWrite = extractFunctionalMapWrite(call, args, ctx, depth);
-        if (functionalMapWrite != null) return functionalMapWrite;
         Expr inlined = tryInlineWriteCall(call, args, ctx, depth);
         return inlined != null && !(inlined instanceof UnknownExpr) ? inlined : null;
     }
@@ -4485,34 +3780,6 @@ public final class HealthDataflowAnalyzer {
         return null;
     }
 
-    /* Map.compute 系列把落库动作藏在 JDK 容器实现内；闭包只计算新值。显式恢复为
-       MapEntrySource 写入，才能保留容器、实体键和写回表达式三者的关系。 */
-    private static Expr extractFunctionalMapWrite(MethodInsnNode call, List<Expr> args,
-                                                  AnalysisCtx ctx, int depth) {
-        if (!isMapClassByName(call.owner) || args.size() < 3) return null;
-        String name = call.name;
-        if (!name.equals("compute") && !name.equals("computeIfPresent")
-                && !name.equals("computeIfAbsent") && !name.equals("merge")) return null;
-        Expr closureExpr = args.get(args.size() - 1);
-        if (!(closureExpr instanceof Closure closure)) return null;
-        Expr container = args.get(0);
-        Expr key = args.get(1);
-        MapEntrySource sink = new MapEntrySource(container, key, detectKeyKind(key),
-                mapOwnerHint(container), Object.class, call.owner);
-        List<Expr> invocationArgs = new ArrayList<>();
-        if (name.equals("computeIfAbsent")) {
-            invocationArgs.add(key);
-        } else if (name.equals("merge")) {
-            invocationArgs.add(sink);
-            invocationArgs.add(args.get(2));
-        } else {
-            invocationArgs.add(key);
-            invocationArgs.add(sink);
-        }
-        Expr value = inlineClosureWrites(closure, invocationArgs, ctx, depth, false);
-        return value == null || value instanceof UnknownExpr ? null : new StoreWrite(sink, value);
-    }
-
     /* ==================== 权威可达性剪枝 ====================
        tick/aiStep 这类周期入口没有语义锚点，不剪枝就会把过程图里每一条写指令都收进来，
        其中绝大多数是朝向、目标、冷却等无关字段。内联前先限深预扫
@@ -4526,7 +3793,7 @@ public final class HealthDataflowAnalyzer {
         AuthorityFingerprint fingerprint = ctx.authorityFingerprint;
         if (owner == null || fingerprint == null || !fingerprint.usable()) return true;
         ctx.throwIfDeadlineExceeded();
-        String key = fingerprint.cacheScope(owner) + "@" + internalName(owner) + "#" + name + desc;
+        String key = fingerprint.cacheScope() + "@" + internalName(owner) + "#" + name + desc;
         Boolean cached = MAY_WRITE_STATE_CACHE.get(key);
         if (cached != null) return cached;
         if (depth >= MAY_WRITE_SCAN_DEPTH) return true;
@@ -4560,15 +3827,6 @@ public final class HealthDataflowAnalyzer {
         if (method.instructions.size() == 0) return false;
         for (AbstractInsnNode insn : method.instructions) {
             ctx.checkDeadline();
-            if (insn instanceof InvokeDynamicInsnNode dynamic
-                    && hasFunctionalInvocation(method, dynamic)) {
-                Handle implementation = lambdaImplementation(dynamic);
-                Class<?> implementationOwner = implementation == null ? null : loadClass(implementation.getOwner());
-                if (implementationOwner == null) return true;
-                if (mayWriteAuthority(implementationOwner, implementation.getName(), implementation.getDesc(),
-                        ctx, depth + 1)) return true;
-                continue;
-            }
             if (insn instanceof FieldInsnNode field) {
                 if (insn.getOpcode() == Opcodes.PUTFIELD && fingerprint.matchesField(field)) return true;
                 // 读取 accessor 静态字段是使用该同步单元的必经指令，读写在此不作区分
@@ -4578,14 +3836,10 @@ public final class HealthDataflowAnalyzer {
                 // 形成"找不到→不内联→永远找不到"的死锁
                 if (insn.getOpcode() == Opcodes.GETSTATIC
                         && ENTITY_DATA_ACCESSOR_DESC.equals(field.desc)) return true;
-                if ((insn.getOpcode() == Opcodes.GETSTATIC || insn.getOpcode() == Opcodes.GETFIELD)
-                        && fingerprint.matchesMapContainer(field)) return true;
                 continue;
             }
             if (!(insn instanceof MethodInsnNode call)) continue;
             if (!fingerprint.nbtKeys().isEmpty() && isNbtPut(call)) return true;
-            // SAM 调用本身由 java 接口声明，但解释器会沿实际 Closure 实现继续分析。
-            if (isFunctionalSamCall(call)) return true;
             // 不会被内联的归属不必递归：调用方自身的写入指令已在本轮扫描中判过
             if (!isInlinableOwner(call)) continue;
             Class<?> callee = loadClass(call.owner);
@@ -4597,30 +3851,6 @@ public final class HealthDataflowAnalyzer {
             }
         }
         return false;
-    }
-
-    private static Handle lambdaImplementation(InvokeDynamicInsnNode dynamic) {
-        if (dynamic == null || !dynamic.bsm.getOwner().equals("java/lang/invoke/LambdaMetafactory")) return null;
-        for (Object argument : dynamic.bsmArgs) {
-            if (argument instanceof Handle handle) return handle;
-        }
-        return null;
-    }
-
-    private static boolean hasFunctionalInvocation(MethodNode method, InvokeDynamicInsnNode dynamic) {
-        Type resultType = Type.getReturnType(dynamic.desc);
-        if (resultType.getSort() != Type.OBJECT) return false;
-        String functionalOwner = resultType.getInternalName();
-        for (AbstractInsnNode instruction : method.instructions) {
-            if (instruction instanceof MethodInsnNode call && call.owner.equals(functionalOwner)
-                    && call.name.equals(dynamic.name)) return true;
-        }
-        return false;
-    }
-
-    private static boolean isFunctionalSamCall(MethodInsnNode call) {
-        return call.owner.equals("java/lang/Runnable") && call.name.equals("run")
-                || call.owner.startsWith("java/util/function/");
     }
 
     /* 与 tryInlineWriteCall 的归属过滤保持一致，否则预扫会对实际不展开的调用做无谓递归。 */
@@ -4646,10 +3876,6 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static Expr tryInlineWriteCall(MethodInsnNode call, List<Expr> args, AnalysisCtx ctx, int depth) {
-        if (!args.isEmpty() && args.get(0) instanceof Closure closure
-                && closure.samName().equals(call.name)) {
-            return inlineClosureWrites(closure, args.subList(1, args.size()), ctx, depth, true);
-        }
         if (isMethodHandleInvoke(call) && !args.isEmpty()) {
             if (depth + 1 >= ctx.maxDepth || ctx.inlineBudget <= 0) return null;
             MethodTarget target = resolveMethodHandleTarget(args.get(0));
@@ -4710,40 +3936,6 @@ public final class HealthDataflowAnalyzer {
         }
         ctx.inlineBudget--;
         return analyzeMethodWrites(owner, call.name, call.desc, seedLocals, ctx, depth + 1);
-    }
-
-    private static Expr inlineClosureWrites(Closure closure, List<Expr> invocationArgs,
-                                            AnalysisCtx ctx, int depth, boolean collectWrites) {
-        if (closure == null || depth + 1 >= ctx.maxDepth || ctx.inlineBudget <= 0) return null;
-        Handle implementation = closure.implementation();
-        Class<?> owner = loadClass(implementation.getOwner());
-        if (owner == null) return null;
-        boolean isStatic = implementation.getTag() == Opcodes.H_INVOKESTATIC;
-        List<Expr> seeds = new ArrayList<>();
-        if (isStatic) {
-            seeds.addAll(closure.captured());
-        } else {
-            if (closure.captured().isEmpty()) return null;
-            seeds.add(closure.captured().get(0));
-            seeds.addAll(closure.captured().subList(1, closure.captured().size()));
-        }
-        seeds.addAll(invocationArgs);
-        Type[] argumentTypes = Type.getArgumentTypes(implementation.getDesc());
-        if (seeds.size() != argumentTypes.length + (isStatic ? 0 : 1)) return null;
-        int localCount = isStatic ? 0 : 1;
-        for (Type argumentType : argumentTypes) localCount += argumentType.getSize();
-        TaintValue[] locals = new TaintValue[localCount + 8];
-        int local = 0;
-        int seed = 0;
-        if (!isStatic) locals[local++] = new TaintValue(1, seeds.get(seed++));
-        for (Type argumentType : argumentTypes) {
-            locals[local] = new TaintValue(argumentType.getSize(), seeds.get(seed++));
-            local += argumentType.getSize();
-        }
-        ctx.inlineBudget--;
-        return collectWrites
-                ? analyzeMethodWrites(owner, implementation.getName(), implementation.getDesc(), locals, ctx, depth + 1)
-                : analyzeMethod(owner, implementation.getName(), implementation.getDesc(), locals, ctx, depth + 1);
     }
 
     private static boolean isHealthLifecycleCall(MethodInsnNode call) {
@@ -5200,14 +4392,13 @@ public final class HealthDataflowAnalyzer {
 
     private static void collectComparisonFacts(List<ComparisonFact> facts, Frame<TaintValue> frame,
                                                AbstractInsnNode insn) {
-        collectComparisonFacts(facts, frame, insn, null, false);
+        collectComparisonFacts(facts, frame, insn, null);
     }
 
     /* dropped 非空时统计被丢弃的 Unknown 操作数来源：坍缩原因决定该调哪个预算，
        "有多少比较事实丢了"和"为什么丢"是两件事，只有后者能指导修改。 */
     private static void collectComparisonFacts(List<ComparisonFact> facts, Frame<TaintValue> frame,
-                                               AbstractInsnNode insn, Map<String, Integer> dropped,
-                                               boolean mortalityEntry) {
+                                               AbstractInsnNode insn, Map<String, Integer> dropped) {
         if (frame == null || insn == null) return;
         int opcode = insn.getOpcode();
         boolean numericCompare = opcode == Opcodes.FCMPL || opcode == Opcodes.FCMPG
@@ -5218,13 +4409,12 @@ public final class HealthDataflowAnalyzer {
             int predicate = numericCompare ? predicateAfterCompare(insn) : directPredicate(opcode);
             Expr left = frame.getStack(frame.getStackSize() - 2).expr;
             Expr right = frame.getStack(frame.getStackSize() - 1).expr;
-            addComparisonFact(facts, left, right, predicate, dropped, mortalityEntry);
-            addComparisonFact(facts, right, left, mirrorPredicate(predicate), dropped, mortalityEntry);
+            addComparisonFact(facts, left, right, predicate, dropped);
+            addComparisonFact(facts, right, left, mirrorPredicate(predicate), dropped);
             return;
         }
         if (opcode >= Opcodes.IFEQ && opcode <= Opcodes.IFLE && frame.getStackSize() >= 1) {
-            addComparisonFact(facts, frame.getStack(frame.getStackSize() - 1).expr, null, opcode,
-                    dropped, mortalityEntry);
+            addComparisonFact(facts, frame.getStack(frame.getStackSize() - 1).expr, null, opcode, dropped);
         }
     }
 
@@ -5260,8 +4450,7 @@ public final class HealthDataflowAnalyzer {
     /* 只有与常数比较的操作数才是候选：阈值未知时无法判定血量极性，此时记录事实但不带方向。
        counterpart 为 null 表示单操作数条件跳转，阈值即 0。 */
     private static void addComparisonFact(List<ComparisonFact> facts, Expr candidate, Expr counterpart,
-                                           int predicate, Map<String, Integer> dropped,
-                                           boolean mortalityEntry) {
+                                          int predicate, Map<String, Integer> dropped) {
         if (candidate instanceof UnknownExpr unknown) {
             if (dropped != null) dropped.merge(unknown.provenance(), 1, Integer::sum);
             return;
@@ -5279,13 +4468,27 @@ public final class HealthDataflowAnalyzer {
         addUniqueExpr(flattened, candidate);
         for (Expr expr : flattened) {
             /* 比较扫描沿继承链上溯后会扫到 ECA 注入进宿主实体的判定，其中的锁血密文与密钥
-               在结构上与宿主自定义存储无法区分。Choice 只丢污染替代分支；Op/Call 的必要参数
-               一旦受污染则丢弃完整分支，不能留下缺操作数的算式。 */
-            Expr stripped = stripEcaHealthWrappers(expr);
-            if (stripped == null || stripped instanceof UnknownExpr) continue;
-            ComparisonFact fact = new ComparisonFact(stripped, resolved, threshold, mortalityEntry);
+               在结构上与宿主自定义存储无法区分。含自有状态的事实整条丢弃，而非只剥离该源——
+               剥离会留下一个缺了操作数的算式，求值必得 NaN。 */
+            if (containsEcaOwnedSource(expr)) continue;
+            ComparisonFact fact = new ComparisonFact(expr, resolved, threshold);
             if (!facts.contains(fact)) facts.add(fact);
         }
+    }
+
+    private static boolean containsEcaOwnedSource(Expr expr) {
+        if (expr instanceof Source source) return isEcaHealthWrapperSource(source);
+        if (expr instanceof Op op) {
+            for (Expr arg : op.args()) if (containsEcaOwnedSource(arg)) return true;
+        } else if (expr instanceof Call call) {
+            if (isEcaHealthWrapperCall(call)) return true;
+            for (Expr arg : call.args()) if (containsEcaOwnedSource(arg)) return true;
+        } else if (expr instanceof Choice choice) {
+            for (Expr alt : choice.alternatives()) if (containsEcaOwnedSource(alt)) return true;
+        } else if (expr instanceof OptionalContentExpr optional) {
+            return containsEcaOwnedSource(optional.optionalExpr());
+        }
+        return false;
     }
 
     /* 通用分析入口(查表版)：传入方法表项 + 提取策略即可分析。method.matchIn(cls) 内置 SRG 优先 MCP 后备查找。 */
@@ -5485,19 +4688,17 @@ public final class HealthDataflowAnalyzer {
     }
 
     /* 保留可验证的静态编解码边界，避免分析器把解码器展开成 AES/Base64 等不可逆实现细节。 */
-    static boolean hasStaticCodecInverse(ClassNode owner, MethodNode decoder) {
+    private static boolean hasStaticCodecInverse(ClassNode owner, MethodNode decoder) {
         if ((decoder.access & Opcodes.ACC_STATIC) == 0) return false;
         Type[] decoderArgs = Type.getArgumentTypes(decoder.desc);
         Type decoderReturn = Type.getReturnType(decoder.desc);
         if (decoderArgs.length != 1 || decoderArgs[0].getSort() != Type.OBJECT
-                || (!isNumericAsmType(decoderReturn) && decoderReturn.getSort() != Type.OBJECT)) return false;
+                || !isNumericAsmType(decoderReturn)) return false;
         String encodedDesc = decoderArgs[0].getDescriptor();
-        String plainDesc = decoderReturn.getDescriptor();
         for (MethodNode encoder : owner.methods) {
-            if (encoder == decoder) continue;
             if ((encoder.access & Opcodes.ACC_STATIC) == 0) continue;
             Type[] encoderArgs = Type.getArgumentTypes(encoder.desc);
-            if (encoderArgs.length == 1 && encoderArgs[0].getDescriptor().equals(plainDesc)
+            if (encoderArgs.length == 1 && isNumericAsmType(encoderArgs[0])
                     && Type.getReturnType(encoder.desc).getDescriptor().equals(encodedDesc)) return true;
         }
         return false;
@@ -5602,35 +4803,17 @@ public final class HealthDataflowAnalyzer {
        值用软引用并限量淘汰，避免常驻分析线程持续累积展开后的 ClassNode。
        只服务于只读分析路径；ConstOverride 与 HeadBridge 注入会改指令，必须各自重新解析。 */
     private static final int CLASS_NODE_CACHE_LIMIT = 128;
-    private static final AtomicLong CLASS_NODE_CACHE_EPOCH = new AtomicLong();
-
-    private static final class ClassNodeCache {
-        private long epoch = CLASS_NODE_CACHE_EPOCH.get();
-        private final LinkedHashMap<Class<?>, SoftReference<ClassNode>> nodes =
-                new LinkedHashMap<>(32, 0.75f, true) {
-                    @Override protected boolean removeEldestEntry(
-                            Map.Entry<Class<?>, SoftReference<ClassNode>> eldest) {
-                        return size() > CLASS_NODE_CACHE_LIMIT;
-                    }
-                };
-
-        private LinkedHashMap<Class<?>, SoftReference<ClassNode>> current() {
-            long currentEpoch = CLASS_NODE_CACHE_EPOCH.get();
-            if (epoch != currentEpoch) {
-                nodes.clear();
-                epoch = currentEpoch;
-            }
-            return nodes;
-        }
-    }
-
-    private static final ThreadLocal<ClassNodeCache> CLASS_NODE_CACHE =
-            ThreadLocal.withInitial(ClassNodeCache::new);
+    private static final ThreadLocal<LinkedHashMap<Class<?>, SoftReference<ClassNode>>> CLASS_NODE_CACHE =
+            ThreadLocal.withInitial(() -> new LinkedHashMap<>(32, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(Map.Entry<Class<?>, SoftReference<ClassNode>> eldest) {
+                    return size() > CLASS_NODE_CACHE_LIMIT;
+                }
+            });
 
     /* 取该类以 EXPAND_FRAMES 解析出的 ClassNode；调用方只读，不得修改返回的节点。 */
     private static ClassNode classNode(Class<?> clazz) {
         if (clazz == null) return null;
-        LinkedHashMap<Class<?>, SoftReference<ClassNode>> cache = CLASS_NODE_CACHE.get().current();
+        LinkedHashMap<Class<?>, SoftReference<ClassNode>> cache = CLASS_NODE_CACHE.get();
         SoftReference<ClassNode> cached = cache.get(clazz);
         ClassNode node = cached == null ? null : cached.get();
         if (node != null) return node;
@@ -5656,20 +4839,17 @@ public final class HealthDataflowAnalyzer {
     private static String internalName(Class<?> clazz) {
         String n = clazz.getName().replace('.', '/');
         int hidden = n.indexOf("/0x");
-        String resolved = n;
-        if (hidden >= 0) {
-            resolved = n.substring(0, hidden);
-            if (resolved.indexOf('/') < 0) {                 // 丢了包路径，用超类包补全
-                Class<?> sup = clazz.getSuperclass();
-                if (sup != null) {
-                    String supInternal = sup.getName().replace('.', '/');
-                    int lastSlash = supInternal.lastIndexOf('/');
-                    if (lastSlash > 0) resolved = supInternal.substring(0, lastSlash + 1) + resolved;
-                }
+        if (hidden < 0) return n;
+        String stripped = n.substring(0, hidden);
+        if (stripped.indexOf('/') < 0) {                 // 丢了包路径，用超类包补全
+            Class<?> sup = clazz.getSuperclass();
+            if (sup != null) {
+                String supInternal = sup.getName().replace('.', '/');
+                int lastSlash = supInternal.lastIndexOf('/');
+                if (lastSlash > 0) stripped = supInternal.substring(0, lastSlash + 1) + stripped;
             }
         }
-        RUNTIME_TYPES.put(resolved, new WeakReference<>(clazz));
-        return resolved;
+        return stripped;
     }
 
     private static final class AnalysisCtx {
@@ -5687,8 +4867,8 @@ public final class HealthDataflowAnalyzer {
         /* 权威指纹：非空时内联前先判被调方能否到达权威存储，到不了的整条跳过。
            tick 这类没有语义锚点的入口靠它把额度约束在通往真实血量的路径上。 */
         AuthorityFingerprint authorityFingerprint = null;
-        /* 维护与比较扫描设置截止时间。共享计数器把 nanoTime 检查摊薄到每 256 个解释器操作一次，
-           同时让递归内联与权威可达性预扫服从调用方预算。 */
+        /* 仅维护扫描设置截止时间。共享计数器把 nanoTime 检查摊薄到每 256 个解释器操作一次，
+           同时让递归内联与权威可达性预扫服从同一份总预算。 */
         long deadlineNanos = Long.MAX_VALUE;
         long hardDeadlineNanos = Long.MAX_VALUE;
         int deadlineCheckCounter = 0;
@@ -6059,9 +5239,7 @@ public final class HealthDataflowAnalyzer {
                 case Opcodes.CHECKCAST -> value;
                 case Opcodes.INSTANCEOF -> new TaintValue(1, UnknownExpr.UNKNOWN);
                 case Opcodes.ARRAYLENGTH -> new TaintValue(1, UnknownExpr.UNKNOWN);
-                case Opcodes.NEWARRAY, Opcodes.ANEWARRAY -> new TaintValue(1,
-                        new ArrayAllocExpr(currentOwner + "#" + currentMethod.name + currentMethod.desc
-                                + "@" + currentMethod.instructions.indexOf(insn)));
+                case Opcodes.NEWARRAY, Opcodes.ANEWARRAY -> new TaintValue(1, new ArrayAllocExpr(System.identityHashCode(insn)));
                 case Opcodes.IFEQ, Opcodes.IFNE, Opcodes.IFLT, Opcodes.IFGE,
                      Opcodes.IFGT, Opcodes.IFLE, Opcodes.IFNULL, Opcodes.IFNONNULL,
                      Opcodes.TABLESWITCH, Opcodes.LOOKUPSWITCH,
@@ -6761,12 +5939,6 @@ public final class HealthDataflowAnalyzer {
 
     //从内部名加载类：依次尝试上下文类加载器、系统类加载器、本类加载器，确保模组类能被定位
     static Class<?> loadClass(String internalName) {
-        WeakReference<Class<?>> runtimeReference = RUNTIME_TYPES.get(internalName);
-        if (runtimeReference != null) {
-            Class<?> runtimeType = runtimeReference.get();
-            if (runtimeType != null) return runtimeType;
-            RUNTIME_TYPES.remove(internalName, runtimeReference);
-        }
         String className = internalName.replace('/', '.');
         Throwable last = null;
         for (ClassLoader cl : new ClassLoader[]{
@@ -6783,32 +5955,6 @@ public final class HealthDataflowAnalyzer {
         //终极回退：不指定类加载器(使用调用类的加载器)
         try { return Class.forName(className); }
         catch (Throwable t) { if (t instanceof VirtualMachineError) throw (VirtualMachineError) t; }
-        return null;
-    }
-
-    /* 字节码 owner 与运行时 receiver 分开解析。隐藏类共享模板内部名，但反射必须绑定真实 Class；
-       普通类同样优先沿 receiver 层次定位，避免同名类加载器分裂。 */
-    static Class<?> resolveRuntimeOwner(String ownerInternal, Object receiver) {
-        if (ownerInternal == null) return null;
-        if (receiver != null) {
-            for (Class<?> current = receiver.getClass(); current != null && current != Object.class;
-                 current = current.getSuperclass()) {
-                if (internalName(current).equals(ownerInternal)) return current;
-                for (Class<?> interfaceType : current.getInterfaces()) {
-                    Class<?> matched = resolveRuntimeInterface(ownerInternal, interfaceType);
-                    if (matched != null) return matched;
-                }
-            }
-        }
-        return loadClass(ownerInternal);
-    }
-
-    private static Class<?> resolveRuntimeInterface(String ownerInternal, Class<?> interfaceType) {
-        if (internalName(interfaceType).equals(ownerInternal)) return interfaceType;
-        for (Class<?> parent : interfaceType.getInterfaces()) {
-            Class<?> matched = resolveRuntimeInterface(ownerInternal, parent);
-            if (matched != null) return matched;
-        }
         return null;
     }
 

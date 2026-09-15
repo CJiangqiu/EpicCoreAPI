@@ -29,10 +29,6 @@ public final class HealthModel {
         return MODELS.computeIfAbsent(entityClass, ignored -> new HealthModel());
     }
 
-    static void clear() {
-        MODELS.clear();
-    }
-
     public Observation observation() {
         return observation;
     }

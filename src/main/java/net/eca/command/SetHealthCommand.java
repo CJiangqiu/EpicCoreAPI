@@ -3,8 +3,7 @@ package net.eca.command;
 import com.mojang.brigadier.arguments.FloatArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
-import net.eca.util.EntityUtil;
-import net.eca.util.health.DelayedHealthVerifier;
+import net.eca.api.EcaAPI;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
@@ -45,11 +44,13 @@ public class SetHealthCommand {
                 }
 
                 try {
-                    String entityName = entity.getName().getString();
-                    boolean success = EntityUtil.setHealth(livingEntity, health,
-                            outcome -> reportOutcome(source, entityName, health, outcome));
+                    boolean success = EcaAPI.setHealth(livingEntity, health);
                     if (success) {
                         successCount++;
+                    } else {
+                        source.sendFailure(Component.literal(
+                            "§cFailed to set health for " + entity.getName().getString()
+                        ));
                     }
                 } catch (Exception e) {
                     source.sendFailure(Component.literal(
@@ -64,10 +65,10 @@ public class SetHealthCommand {
 
             if (finalSuccessCount > 0) {
                 source.sendSuccess(() -> Component.literal(
-                    String.format("§eSubmitted health %.1f for %d %s; awaiting persistence verification",
-                        finalHealth,
+                    String.format("§aSet health of %d %s to %.1f",
                         finalSuccessCount,
-                        finalSuccessCount == 1 ? "entity" : "entities")
+                        finalSuccessCount == 1 ? "entity" : "entities",
+                        finalHealth)
                 ), true);
             }
 
@@ -84,20 +85,6 @@ public class SetHealthCommand {
         } catch (Exception e) {
             source.sendFailure(Component.literal("§cCommand execution failed: " + e.getMessage()));
             return 0;
-        }
-    }
-
-    private static void reportOutcome(CommandSourceStack source, String entityName, float health,
-                                      DelayedHealthVerifier.Outcome outcome) {
-        switch (outcome) {
-            case PERSISTED -> source.sendSuccess(() -> Component.literal(
-                    String.format("§aHealth of %s persisted at %.1f", entityName, health)), true);
-            case ROLLED_BACK -> source.sendFailure(Component.literal(
-                    String.format("§cHealth change for %s was rolled back", entityName)));
-            case SUPERSEDED -> source.sendSuccess(() -> Component.literal(
-                    "§eHealth request for " + entityName + " was superseded"), false);
-            case INDETERMINATE -> source.sendFailure(Component.literal(
-                    "§cCould not verify persisted health for " + entityName));
         }
     }
 }
