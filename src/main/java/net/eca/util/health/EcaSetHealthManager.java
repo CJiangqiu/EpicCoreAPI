@@ -139,7 +139,6 @@ public final class EcaSetHealthManager {
         HealthDataflowAnalyzer.AnalysisResult external = HealthDataflowAnalyzer.peekExternalScanResult(cls);
         if (external == null) {
             submitExternalScanAnalysis(cls);
-            submitComparisonPrescan(cls);
             return;
         }
         HealthDataflowAnalyzer.MaintenancePlan maintenance =
@@ -176,9 +175,6 @@ public final class EcaSetHealthManager {
         HealthDataflowAnalyzer.AnalysisResult tree = HealthDataflowAnalyzer.peekExternalScanResult(cls);
         if (tree == null) {
             submitExternalScanAnalysis(cls);
-            /* 比较表达式扫描不依赖证据，与外部扫描并行预跑。两者串行时总等待是各自耗时之和，
-               并行后证据到手时表达式往往已就绪，可当场建模。 */
-            submitComparisonPrescan(cls);
             return false;
         }
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
@@ -225,26 +221,18 @@ public final class EcaSetHealthManager {
     }
 
     /* getHealth 与实际存储解耦时，使用实体生死判定所读取的有效血量表达式作为观测锚点，
-       并通过表达式反演计算存储值。仅对已有解耦记录的类启用。
+       并通过表达式反演计算存储值。仅对已有解耦记录或独立维护写入证据的类启用。
        由 applyExternalScan 在其写入失败后调用，门控与之共用。 */
     private static boolean applyEffectiveHealth(LivingEntity target, float targetHealth) {
         Class<?> cls = target.getClass();
-        // 校验成功会清空解耦证据，故已装锚点的类必须继续放行，否则一旦成功就再也走不进本通道
-        if (!hasHealthAnchor(cls) && !isHealthReadDecoupled(cls)) return false;
+        /* 校验成功会清空解耦证据，故已装锚点的类必须继续放行。维护扫描提供的是独立写入证据，
+           可在直接写入尚未产生解耦记录时解除建模死锁。 */
+        if (!hasHealthAnchor(cls) && !isHealthReadDecoupled(cls)
+                && HealthDataflowAnalyzer.maintenanceSinks(cls).isEmpty()) return false;
         HealthDataflowAnalyzer.EffectiveHealthModel model =
                 HealthDataflowAnalyzer.peekEffectiveHealthModel(cls);
-        if (model == null) {
-            /* 比较表达式已缓存时建模只剩遍历与打分，当场完成即可，省去一次改血往返；
-               未缓存则需扫描字节码，耗时较长，仍转后台并跳过本次。 */
-            if (HealthDataflowAnalyzer.hasComparisonCache(cls)) {
-                // 候选集合必须与后台建模一致，否则同步兜底会因少喂候选而漏掉后台能选中的存储
-                model = HealthDataflowAnalyzer.resolveCachedEffectiveHealthModel(cls, effectiveModelCandidates(cls));
-            }
-            if (model == null) {
-                submitEffectiveModelAnalysis(cls);
-                return false;
-            }
-        }
+        // 缓存表达式的匹配仍可能遍历巨型树，游戏线程只消费后台已经完成的模型
+        if (model == null) return false;
 
         HealthDataflowAnalyzer.EffectiveHealthModel resolved = model;
         /* 依赖当次伤害量的式子不是血量读取，误选它做锚点会因求解与校验共用同一表达式而恒真。
@@ -291,6 +279,10 @@ public final class EcaSetHealthManager {
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
         boolean success = HealthDataFlow.writeEffective(oriented, target, targetHealth);
         if (success) {
+            if (targetHealth <= 0.0f
+                    && oriented.origin() == HealthDataflowAnalyzer.ComparisonOrigin.LIFECYCLE) {
+                DelayedHealthVerifier.scheduleDeathConvergence(target, oriented);
+            }
             /* 写入后的校验读的是模型自身表达式，选对选错都恒真，不能据此确认锚点。
                确认交给延迟复查：值在实体自己跑过一次 tick 后仍留得住，才是独立于该表达式的证据。 */
             PENDING_EFFECTIVE_CONFIRM.add(cls);
@@ -308,6 +300,19 @@ public final class EcaSetHealthManager {
             EFFECTIVE_MODEL_SUBMITTED.remove(cls);
         }
         return false;
+    }
+
+    /* 即时写入通道全部失败后才启动重型建模，避免已有直接 writer 的实体承担无用扫描。 */
+    public static void scheduleEffectiveModelAnalysis(LivingEntity target) {
+        if (target == null) return;
+        if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
+                || !EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) return;
+        Class<?> cls = target.getClass();
+        if (HealthDataflowAnalyzer.peekEffectiveHealthModel(cls) != null) return;
+        if (!hasHealthAnchor(cls) && !isHealthReadDecoupled(cls)
+                && HealthDataflowAnalyzer.maintenanceSinks(cls).isEmpty()) return;
+        submitComparisonPrescan(cls);
+        submitEffectiveModelAnalysis(cls);
     }
 
     /* 结构判据拒绝模型的诊断去重，按类与存储标识。 */
@@ -357,13 +362,12 @@ public final class EcaSetHealthManager {
             if (tree != HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED
                     && isVanillaGetHealthOwner(tree)) return;
             EcaLogger.info("[ExternalScan] join prewarm started entity={}", cls.getName());
-            /* 只在高优先级队列完成四个语义入口；比较扫描和周期维护各自进入独立队列。 */
+            /* 加入世界时只预热语义入口和维护写源；重型比较扫描留到即时通道全部失败后。 */
             long scanStart = System.nanoTime();
             HealthDataflowAnalyzer.resolveExternalScanResult(cls);
             long scanMs = (System.nanoTime() - scanStart) / 1_000_000L;
             EcaLogger.info("[ExternalScan] join semantic prewarm done entity={} elapsedMs={}",
                     cls.getName(), scanMs);
-            submitComparisonPrescan(cls);
             submitMaintenanceAnalysis(cls);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
@@ -379,7 +383,7 @@ public final class EcaSetHealthManager {
         return owner != null && owner.getName().startsWith("net.minecraft.");
     }
 
-    /* 在外部扫描进行的同时预扫比较表达式，使两段耗时重叠而非相加。 */
+    /* 按需预扫比较表达式；与模型任务共用单线程队列，保证模型匹配在预扫之后执行。 */
     private static void submitComparisonPrescan(Class<?> cls) {
         if (HealthDataflowAnalyzer.hasComparisonCache(cls)) return;
         if (!COMPARISON_PRESCAN_SUBMITTED.add(cls)) return;

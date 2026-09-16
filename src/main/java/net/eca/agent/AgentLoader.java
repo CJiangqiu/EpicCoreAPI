@@ -11,14 +11,16 @@ import java.nio.file.Path;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 
 /**
- * Handles self-attach and agent loading.
- * Called from CoreMod (EcaTransformationService) at the earliest possible stage.
+ * Loads ECA's bundled agent into the current game JVM to support defensive
+ * entity-state protection and compatibility transformations.
+ * The attach target is the current process; the agent JAR comes from a bundled resource.
+ * Called during coremod initialization before runtime transformers are registered.
  */
 public final class AgentLoader {
 
     private static final String AGENT_RESOURCE_PATH = "/net/eca/agent/agent.jar";
 
-    //使用 Unsafe 修改 HotSpotVirtualMachine.ALLOW_ATTACH_SELF
+    // Adjust the local JVM's self-attach gate so ECA can obtain Instrumentation after startup.
     public static void enableSelfAttach() {
         try {
             Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
@@ -34,13 +36,13 @@ public final class AgentLoader {
 
             AgentLogWriter.info("[AgentLoader] Self-attach enabled via Unsafe");
         } catch (Throwable t) {
-            // 降级到系统属性
+            // Fall back to the self-attach property if direct access is unavailable.
             System.setProperty("jdk.attach.allowAttachSelf", "true");
             AgentLogWriter.info("[AgentLoader] Self-attach enabled via system property (fallback)");
         }
     }
 
-    //提取 agent.jar 并附着到当前 JVM，传入调用者类名用于桥接 Instrumentation
+    // The Attach API needs a JAR path, so materialize the bundled agent in a temporary directory.
     public static boolean loadAgent() {
         if (EcaAgent.getInstrumentation() != null) {
             return true;
@@ -59,12 +61,13 @@ public final class AgentLoader {
             agentJar.toFile().deleteOnExit();
             tmpDir.toFile().deleteOnExit();
 
+            // Attachment is restricted here to the JVM running this loader.
             String pid = String.valueOf(ProcessHandle.current().pid());
             Class<?> vmClass = Class.forName("com.sun.tools.attach.VirtualMachine");
             Object vm = vmClass.getMethod("attach", String.class).invoke(null, pid);
 
             try {
-                // 传入调用者类名，让 agentmain 桥接 Instrumentation 到调用者的 ClassLoader
+                // Identify ECA's caller loader so agentmain can bridge the Instrumentation handle.
                 String callerClassName = AgentLoader.class.getName();
                 vmClass.getMethod("loadAgent", String.class, String.class)
                     .invoke(vm, agentJar.toAbsolutePath().toString(), callerClassName);

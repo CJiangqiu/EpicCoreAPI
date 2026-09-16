@@ -889,6 +889,7 @@ public class EntityUtil {
                 ok = true;                                                         //方法探针(借实体自身 writer)
             } else {
                 ok = EcaSetHealthManager.applyNumericInversion(entity, expectedHealth); //数值反演(死角对象图扰动)
+                if (!ok) EcaSetHealthManager.scheduleEffectiveModelAnalysis(entity);
             }
 
             //服务端改血成功 → 广播给追踪客户端，令自定义存储型实体客户端显示同步(客户端重跑同一条链)

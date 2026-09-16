@@ -2,6 +2,7 @@ package net.eca.util;
 
 import net.eca.config.EcaConfiguration;
 import net.eca.util.reflect.ObfuscationMapping;
+import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.LivingEntity;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
@@ -9,6 +10,7 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
@@ -31,7 +33,7 @@ public final class DeathGateAnalyzer {
             "LivingEntity.isDeadOrDying", "isDeadOrDying", true);
     private static final MethodTarget IS_ALIVE = new MethodTarget(
             "LivingEntity.isAlive", "isAlive", false);
-    private static final DeathGate NO_GATE = new DeathGate(null, null, null, false);
+    private static final DeathGate NO_GATE = new DeathGate(null, null, null, false, false);
     private static final Map<Class<?>, DeathGate> CACHE = new ConcurrentHashMap<>();
 
     private DeathGateAnalyzer() {}
@@ -43,9 +45,15 @@ public final class DeathGateAnalyzer {
         if (gate == null) return false;
         try {
             Object snapshot = gate.field().get(entity);
-            Object encoded = gate.encoder().invoke(null, gate.deathValue());
-            gate.field().set(entity, encoded);
-            boolean decoded = Boolean.TRUE.equals(gate.decoder().invoke(null, gate.field().get(entity)));
+            if (gate.rawBoolean()) {
+                gate.field().setBoolean(entity, gate.deathValue());
+            } else {
+                Object encoded = gate.encoder().invoke(null, gate.deathValue());
+                gate.field().set(entity, encoded);
+            }
+            boolean decoded = gate.rawBoolean()
+                    ? gate.field().getBoolean(entity)
+                    : Boolean.TRUE.equals(gate.decoder().invoke(null, gate.field().get(entity)));
             if (decoded == gate.deathValue()) {
                 EcaLogger.info("[DeathGate] unlocked entity={} field={} deathValue={}",
                         entity.getClass().getName(), gate.field().getName(), gate.deathValue());
@@ -71,7 +79,9 @@ public final class DeathGateAnalyzer {
 
     private static DeathGate detect(Class<?> entityClass) {
         DeathGate gate = detectMethod(entityClass, IS_DEAD_OR_DYING);
-        return gate != null ? gate : detectMethod(entityClass, IS_ALIVE);
+        if (gate != null) return gate;
+        gate = detectMethod(entityClass, IS_ALIVE);
+        return gate != null ? gate : detectGuardedDeathMethod(entityClass);
     }
 
     private static DeathGate detectMethod(Class<?> entityClass, MethodTarget method) {
@@ -99,7 +109,7 @@ public final class DeathGateAnalyzer {
                 Method encoder = findEncoder(codecOwner, encodedType);
                 if (field == null || decoder == null || encoder == null) continue;
                 field.setAccessible(true);
-                return new DeathGate(field, encoder, decoder, method.deathValue());
+                return new DeathGate(field, encoder, decoder, method.deathValue(), false);
             }
         } catch (Throwable throwable) {
             if (throwable instanceof VirtualMachineError error) throw error;
@@ -107,6 +117,84 @@ public final class DeathGateAnalyzer {
                     entityClass.getName(), target.name(), throwable.getMessage());
         }
         return null;
+    }
+
+    /* die 的入口若以实体布尔字段拒绝调用并在放行后复位，该字段就是原生死亡提交授权。
+       只接受紧邻条件跳转的早退形态，避免把死亡清理阶段的普通状态字段误认成门控。 */
+    private static DeathGate detectGuardedDeathMethod(Class<?> entityClass) {
+        for (Class<?> current = entityClass; current != null && current != LivingEntity.class;
+             current = current.getSuperclass()) {
+            for (Method reflected : current.getDeclaredMethods()) {
+                if (reflected.getReturnType() != void.class || reflected.getParameterCount() != 1
+                        || reflected.getParameterTypes()[0] != DamageSource.class) continue;
+                try {
+                    ClassNode classNode = readClassNode(current);
+                    MethodNode method = findMethod(classNode, reflected.getName(), Type.getMethodDescriptor(reflected));
+                    if (!callsSuperImplementation(current, method)) continue;
+                    DeathGate gate = findRawBooleanEarlyReturn(current, method);
+                    if (gate != null) return gate;
+                } catch (Throwable throwable) {
+                    if (throwable instanceof VirtualMachineError error) throw error;
+                    EcaLogger.info("[DeathGate] guarded death analysis failed entity={} msg={}",
+                            entityClass.getName(), throwable.getMessage());
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean callsSuperImplementation(Class<?> owner, MethodNode method) {
+        if (method == null) return false;
+        String ownerName = internalName(owner);
+        for (AbstractInsnNode instruction : method.instructions) {
+            if (instruction instanceof MethodInsnNode call && call.getOpcode() == Opcodes.INVOKESPECIAL
+                    && call.name.equals(method.name) && call.desc.equals(method.desc)
+                    && !call.owner.equals(ownerName)) return true;
+        }
+        return false;
+    }
+
+    private static DeathGate findRawBooleanEarlyReturn(Class<?> owner, MethodNode method) {
+        if (method == null) return null;
+        for (AbstractInsnNode instruction : method.instructions) {
+            if (!(instruction instanceof FieldInsnNode fieldRead) || fieldRead.getOpcode() != Opcodes.GETFIELD
+                    || !fieldRead.owner.equals(internalName(owner)) || !fieldRead.desc.equals("Z")) continue;
+            AbstractInsnNode jumpNode = nextMeaningful(fieldRead.getNext());
+            if (!(jumpNode instanceof JumpInsnNode jump)
+                    || jump.getOpcode() != Opcodes.IFEQ && jump.getOpcode() != Opcodes.IFNE) continue;
+            AbstractInsnNode fallthrough = nextMeaningful(jump.getNext());
+            if (fallthrough == null || fallthrough.getOpcode() != Opcodes.RETURN) continue;
+            Field field = findField(owner, fieldRead.name);
+            if (field == null || field.getType() != boolean.class || Modifier.isStatic(field.getModifiers())) continue;
+            boolean authorizedValue = jump.getOpcode() == Opcodes.IFNE;
+            if (!resetsGateBeforeSuper(owner, method, fieldRead, authorizedValue)) continue;
+            field.setAccessible(true);
+            return new DeathGate(field, null, null, authorizedValue, true);
+        }
+        return null;
+    }
+
+    private static boolean resetsGateBeforeSuper(Class<?> owner, MethodNode method,
+                                                 FieldInsnNode gateRead, boolean authorizedValue) {
+        boolean resetSeen = false;
+        for (AbstractInsnNode instruction : method.instructions) {
+            if (instruction instanceof FieldInsnNode fieldWrite && fieldWrite.getOpcode() == Opcodes.PUTFIELD
+                    && fieldWrite.owner.equals(gateRead.owner) && fieldWrite.name.equals(gateRead.name)
+                    && fieldWrite.desc.equals("Z")) {
+                AbstractInsnNode value = previousMeaningful(fieldWrite.getPrevious());
+                int resetOpcode = authorizedValue ? Opcodes.ICONST_0 : Opcodes.ICONST_1;
+                if (value != null && value.getOpcode() == resetOpcode) resetSeen = true;
+            }
+            if (instruction instanceof MethodInsnNode call && call.getOpcode() == Opcodes.INVOKESPECIAL
+                    && call.name.equals(method.name) && call.desc.equals(method.desc)
+                    && !call.owner.equals(internalName(owner))) return resetSeen;
+        }
+        return false;
+    }
+
+    private static AbstractInsnNode nextMeaningful(AbstractInsnNode current) {
+        while (current != null && current.getOpcode() == -1) current = current.getNext();
+        return current;
     }
 
     // 仅跨越不改变对象来源的指令，防止把同一方法中的其他字段误认成解码器输入
@@ -156,9 +244,13 @@ public final class DeathGateAnalyzer {
     }
 
     private static MethodNode findMethod(ClassNode classNode, String name) {
+        return findMethod(classNode, name, BOOLEAN_METHOD_DESCRIPTOR);
+    }
+
+    private static MethodNode findMethod(ClassNode classNode, String name, String descriptor) {
         if (classNode == null) return null;
         for (MethodNode method : classNode.methods) {
-            if (method.name.equals(name) && method.desc.equals(BOOLEAN_METHOD_DESCRIPTOR)) return method;
+            if (method.name.equals(name) && method.desc.equals(descriptor)) return method;
         }
         return null;
     }
@@ -284,5 +376,5 @@ public final class DeathGateAnalyzer {
 
     private record ClassAndMethod(Class<?> owner, String name) {}
 
-    private record DeathGate(Field field, Method encoder, Method decoder, boolean deathValue) {}
+    private record DeathGate(Field field, Method encoder, Method decoder, boolean deathValue, boolean rawBoolean) {}
 }

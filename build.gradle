@@ -61,7 +61,6 @@ dependencies {
         transitive = false
     }
     implementation fg.deobf("curse.maven:geckolib-388172:7553267")
-    compileOnly 'net.java.dev.jna:jna:5.12.1'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
 }
 

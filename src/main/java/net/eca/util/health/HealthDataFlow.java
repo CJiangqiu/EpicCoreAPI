@@ -1,7 +1,6 @@
 package net.eca.util.health;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
-import net.eca.coremod.JvmTiChannel;
 import net.eca.util.EcaLogger;
 import net.eca.util.health.HealthDataflowAnalyzer.AnalysisResult;
 import net.eca.util.health.HealthDataflowAnalyzer.ArrayElementSource;
@@ -19,6 +18,7 @@ import net.eca.util.health.HealthDataflowAnalyzer.MapEntrySource;
 import net.eca.util.health.HealthDataflowAnalyzer.MaintenanceBranch;
 import net.eca.util.health.HealthDataflowAnalyzer.MaintenancePlan;
 import net.eca.util.health.HealthDataflowAnalyzer.MethodCallSource;
+import net.eca.util.health.HealthDataflowAnalyzer.MethodPropertySource;
 import net.eca.util.health.HealthDataflowAnalyzer.Op;
 import net.eca.util.health.HealthDataflowAnalyzer.OptionalContentExpr;
 import net.eca.util.health.HealthDataflowAnalyzer.Primitive;
@@ -111,6 +111,7 @@ public final class HealthDataFlow {
     private static final Set<String> ASSOCIATED_SUCCESS_DUMPED = ConcurrentHashMap.newKeySet();
     private static final Set<String> ASSOCIATED_FAILURE_DUMPED = ConcurrentHashMap.newKeySet();
     private static final int MAX_ASSOCIATED_CANDIDATES_PER_SOURCE = 8;
+    private static final int MAX_RUNTIME_CANDIDATES_PER_SOURCE = 8;
     private static final int MAX_ASSOCIATED_COMBINATIONS = 64;
     private static final int MAX_RUNTIME_SOURCES = 32;
     private static final int MAX_DIAGNOSTIC_SOURCES = 32;
@@ -511,71 +512,87 @@ public final class HealthDataFlow {
                         + " (branch does not exist on this entity)");
                 continue;
             }
-            HealthSolveResult solved = HealthDataflowAnalyzer.buildWritePath(ar.returnExpr, sink, Float.valueOf(expected), ctx);
-            if (!solved.solved() || solved.value() == null) {
-                diag.add("    [" + sink.label + "] solve=FAIL " + solved.failure() + " (" + solved.detail() + ")");
+            List<Object> candidates = HealthDataflowAnalyzer.buildWriteCandidates(
+                    ar.returnExpr, sink, Float.valueOf(expected), ctx, MAX_RUNTIME_CANDIDATES_PER_SOURCE);
+            if (candidates.isEmpty()) {
+                HealthSolveResult solved = HealthDataflowAnalyzer.buildWritePath(
+                        ar.returnExpr, sink, Float.valueOf(expected), ctx);
+                diag.add("    [" + sink.label + "] solve=FAIL " + solved.failure()
+                        + " (" + solved.detail() + ")");
                 continue;
             }
 
-            /* 该落点若是周期维护的镜像，写它活不过一次维护，且生死判定读的是它背后的权威。
-               同事务先把权威写成等效值，镜像仍照写以维持本 tick 的观测一致。 */
-            MirrorWrite mirrorWrite = prepareMirrorWrite(cls, sink, solved.value(), entity, ctx);
             Object snapshot = sink.read(entity);
-            solvedWrites.add(new PreparedSourceWrite(sink, snapshot, solved.value()));
-            if (mirrorWrite != null) addSolvedWrite(solvedWrites, mirrorWrite.toPreparedWrite());
-            float readBefore = evaluateReadExpression(ar.returnExpr, entity);
-            float anchorBefore = EcaSetHealthManager.readHealthAnchor(entity);
-            if (mirrorWrite != null && !dispatchWrite(mirrorWrite.authority(), entity, mirrorWrite.value())) {
-                diag.add("    [" + sink.label + "] mirror authority=" + mirrorWrite.authority().label
-                        + " solved=" + mirrorWrite.value() + " write=FAIL");
-                mirrorWrite = null;
-            }
-            if (!dispatchWrite(sink, entity, solved.value())) {
-                boolean restored = restoreSinkWithMirror(sink, snapshot, mirrorWrite, entity);
-                diag.add("    [" + sink.label + "] solved=" + solved.value()
-                        + " write=FAIL restore=" + (restored ? "OK" : "FAIL"));
-                continue;
-            }
-            // 锚点若随本次写入位移到目标值，即为它反映真实存储的证据，据此补正弱取证的误判
-            EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected);
-            EcaSetHealthManager.AnchorVerdict verdict = verifier.verify(entity, expected, sink);
-            /* 锚点不可信时改由读式自证：派生式 getHealth 永不跟随原版写入，锚点探测必然失真；
-               但写入正确存储会让整条读式移动到目标值。写前已等于目标的读式不采纳——
-               诱饵读出口的巧合命中不构成生效证据；已知镜像的自回读恒真由下方降级继续兜住。 */
-            if (verdict == EcaSetHealthManager.AnchorVerdict.INDETERMINATE) {
-                float readAfter = evaluateReadExpression(ar.returnExpr, entity);
-                if (Float.isFinite(readBefore)
-                        && !HealthValueSemantics.matchesWithDeathSemantics(readBefore, expected)
-                        && HealthValueSemantics.matchesWithDeathSemantics(readAfter, expected)) {
-                    verdict = EcaSetHealthManager.AnchorVerdict.PASS;
-                    EcaLogger.info("[HealthDataflow] expression readback verified entity={} sink={} before={} after={} expected={}",
-                            cls.getName(), sink.label, readBefore, readAfter, expected);
+            boolean jointCandidateRecorded = false;
+            for (Object candidate : candidates) {
+                if (System.nanoTime() > deadline) {
+                    candidateScanComplete = false;
+                    break;
                 }
-            }
-            /* 未能回落到权威的镜像，其自回读恒真：值下一次维护即被重算覆盖，PASS 不构成生效证据。
-               既不能判成功也不能判失败，交出裁决权让后续通道继续。 */
-            if (verdict == EcaSetHealthManager.AnchorVerdict.PASS
-                    && mirrorWrite == null && isKnownMirror(cls, sink)) {
-                verdict = EcaSetHealthManager.AnchorVerdict.INDETERMINATE;
-            }
-            if (verdict == EcaSetHealthManager.AnchorVerdict.INDETERMINATE) dumpIndeterminate(cls, sink.label);
-            if (verdict == EcaSetHealthManager.AnchorVerdict.PASS) {
-                EcaSetHealthManager.recordObservedWrite(cls);
-                if (mirrorWrite != null) EcaSetHealthManager.recordMirrorRedirect(cls);
-                if (logSuccess) {
-                    EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}{}",
-                            cls.getName(), sink.label, solved.value(), expected,
-                            mirrorWrite == null ? "" : " authority=" + mirrorWrite.authority().label
-                                    + " authorityValue=" + mirrorWrite.value());
+                /* 该落点若是周期维护的镜像，写它活不过一次维护，且生死判定读的是它背后的权威。
+                   同事务先把权威写成等效值，镜像仍照写以维持本 tick 的观测一致。 */
+                MirrorWrite mirrorWrite = prepareMirrorWrite(cls, sink, candidate, entity, ctx);
+                if (!jointCandidateRecorded) {
+                    solvedWrites.add(new PreparedSourceWrite(sink, snapshot, candidate));
+                    if (mirrorWrite != null) addSolvedWrite(solvedWrites, mirrorWrite.toPreparedWrite());
+                    jointCandidateRecorded = true;
                 }
-                return true;
-            }
+                float readBefore = evaluateReadExpression(ar.returnExpr, entity);
+                float anchorBefore = EcaSetHealthManager.readHealthAnchor(entity);
+                if (mirrorWrite != null && !dispatchWrite(mirrorWrite.authority(), entity, mirrorWrite.value())) {
+                    diag.add("    [" + sink.label + "] mirror authority=" + mirrorWrite.authority().label
+                            + " solved=" + mirrorWrite.value() + " write=FAIL");
+                    mirrorWrite = null;
+                }
+                if (!dispatchWrite(sink, entity, candidate)) {
+                    boolean restored = restoreSinkWithMirror(sink, snapshot, mirrorWrite, entity);
+                    diag.add("    [" + sink.label + "] solved=" + candidate
+                            + " write=FAIL restore=" + (restored ? "OK" : "FAIL"));
+                    continue;
+                }
+                // 锚点若随本次写入位移到目标值，即为它反映真实存储的证据，据此补正弱取证的误判
+                EcaSetHealthManager.noteAnchorResponse(entity, anchorBefore, expected);
+                EcaSetHealthManager.AnchorVerdict verdict = verifier.verify(entity, expected, sink);
+                /* 锚点不可信时改由读式自证：派生式 getHealth 永不跟随原版写入，锚点探测必然失真；
+                   但写入正确存储会让整条读式移动到目标值。写前已等于目标的读式不采纳——
+                   诱饵读出口的巧合命中不构成生效证据；已知镜像的自回读恒真由下方降级继续兜住。 */
+                if (verdict == EcaSetHealthManager.AnchorVerdict.INDETERMINATE) {
+                    float readAfter = evaluateReadExpression(ar.returnExpr, entity);
+                    if (Float.isFinite(readBefore)
+                            && !HealthValueSemantics.matchesWithDeathSemantics(readBefore, expected)
+                            && HealthValueSemantics.matchesWithDeathSemantics(readAfter, expected)) {
+                        verdict = EcaSetHealthManager.AnchorVerdict.PASS;
+                        EcaLogger.info("[HealthDataflow] expression readback verified entity={} sink={} before={} after={} expected={}",
+                                cls.getName(), sink.label, readBefore, readAfter, expected);
+                    }
+                }
+                /* 未能回落到权威的镜像，其自回读恒真：值下一次维护即被重算覆盖，PASS 不构成生效证据。
+                   既不能判成功也不能判失败，交出裁决权让后续通道继续。 */
+                if (verdict == EcaSetHealthManager.AnchorVerdict.PASS
+                        && mirrorWrite == null && isKnownMirror(cls, sink)) {
+                    verdict = EcaSetHealthManager.AnchorVerdict.INDETERMINATE;
+                }
+                if (verdict == EcaSetHealthManager.AnchorVerdict.INDETERMINATE) {
+                    dumpIndeterminate(cls, sink.label);
+                }
+                if (verdict == EcaSetHealthManager.AnchorVerdict.PASS) {
+                    EcaSetHealthManager.recordObservedWrite(cls);
+                    if (mirrorWrite != null) EcaSetHealthManager.recordMirrorRedirect(cls);
+                    if (logSuccess) {
+                        EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}{}",
+                                cls.getName(), sink.label, candidate, expected,
+                                mirrorWrite == null ? "" : " authority=" + mirrorWrite.authority().label
+                                        + " authorityValue=" + mirrorWrite.value());
+                    }
+                    return true;
+                }
 
-            boolean restored = restoreSinkWithMirror(sink, snapshot, mirrorWrite, entity);
-            // 写入成功但校验失败时，单独记录观测锚点与存储可能解耦
-            EcaSetHealthManager.recordUnobservedWrite(cls, sink, sink.label);
-            diag.add("    [" + sink.label + "] solved=" + solved.value()
-                    + " verify=" + verdict + " restore=" + (restored ? "OK" : "FAIL"));
+                boolean restored = restoreSinkWithMirror(sink, snapshot, mirrorWrite, entity);
+                // 写入成功但校验失败时，单独记录观测锚点与存储可能解耦
+                EcaSetHealthManager.recordUnobservedWrite(cls, sink, sink.label);
+                diag.add("    [" + sink.label + "] solved=" + candidate
+                        + " verify=" + verdict + " restore=" + (restored ? "OK" : "FAIL"));
+            }
         }
 
         if (System.nanoTime() > deadline) {
@@ -805,6 +822,9 @@ public final class HealthDataFlow {
             if (sink instanceof ArrayElementSource s) {
                 return HealthDataflowAnalyzer.evaluate(s.arrayExpr, context) != null;
             }
+            if (sink instanceof MethodPropertySource s) {
+                return s.read(entity) != null;
+            }
             return true;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
@@ -855,6 +875,7 @@ public final class HealthDataFlow {
         else if (sink instanceof SynchedDataSource s) wrote = writeSynchedData(s, entity, value);
         else if (sink instanceof MapEntrySource s) wrote = writeMapEntry(s, entity, value);
         else if (sink instanceof ArrayElementSource s) wrote = writeArrayElement(s, entity, value);
+        else if (sink instanceof MethodPropertySource s) wrote = writeMethodProperty(s, entity, value);
         else if (sink instanceof MethodCallSource s) wrote = writeMethodCall(s, entity, value);
         else if (sink instanceof ConstOverrideSource s) wrote = writeConstOverride(s, entity, value);
         else return false;
@@ -1143,6 +1164,137 @@ public final class HealthDataFlow {
             return false;
         }
     }
+
+    private static boolean writeMethodProperty(MethodPropertySource s, LivingEntity entity, Object value) {
+        try {
+            EvalContext context = HealthDataflowAnalyzer.newContext(entity);
+            Object target = HealthDataflowAnalyzer.evaluate(s.entityExpr, context);
+            Object coerced = HealthDataflowAnalyzer.coerceForType(value, s.valueType);
+            if (target == null || (coerced == null && s.valueType.isPrimitive())) return false;
+            List<CompositeMapState> mapStates = findCompositeMapStates(s.getter.getDeclaringClass(), target);
+            s.setter.setAccessible(true);
+            s.setter.invoke(null, target, coerced);
+            if (equivalentValue(s.read(entity), coerced)) return true;
+            return writeCompositeMethodProperty(s, entity, target, coerced, mapStates);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return false;
+        }
+    }
+
+    /* 单向 setter 的正常返回不代表属性已改变。若 getter 实际读取静态实体键表中的不可变记录，
+       则通过同属类的重建工厂一次性更新密文及完整性字段，并以 getter 回读决定提交或回滚。 */
+    private static boolean writeCompositeMethodProperty(MethodPropertySource source, LivingEntity entity,
+                                                        Object target, Object value,
+                                                        List<CompositeMapState> states) {
+        Object encoded = HealthDataflowAnalyzer.encodeMethodPropertyTarget(source.getter, value);
+        if (encoded == null || states.isEmpty()) {
+            restoreCompositeMapStates(states);
+            return false;
+        }
+        for (CompositeMapState state : states) {
+            Object current = state.entry();
+            if (current == null || !current.getClass().isRecord()) continue;
+            RecordComponent[] components = current.getClass().getRecordComponents();
+            Object[] componentValues = readRecordComponents(current, components);
+            if (componentValues == null) continue;
+            for (int componentIndex = 0; componentIndex < components.length; componentIndex++) {
+                if (!components[componentIndex].getType().isInstance(encoded)) continue;
+                Object replacement = rebuildRecordWithFactory(source.getter.getDeclaringClass(), current.getClass(),
+                        components, componentValues, componentIndex, encoded);
+                if (replacement == null) continue;
+                state.map().put(state.key(), replacement);
+                if (equivalentValue(source.read(entity), value)) {
+                    EcaLogger.info("[HealthDataflow] composite property write verified entity={} getter={} component={}",
+                            entity.getClass().getName(), source.getter.getName(), components[componentIndex].getName());
+                    return true;
+                }
+                state.map().put(state.key(), state.entry());
+            }
+        }
+        restoreCompositeMapStates(states);
+        return false;
+    }
+
+    private static List<CompositeMapState> findCompositeMapStates(Class<?> owner, Object key) {
+        List<CompositeMapState> states = new ArrayList<>();
+        for (Class<?> current = owner; current != null && current != Object.class; current = current.getSuperclass()) {
+            for (Field field : current.getDeclaredFields()) {
+                if (!Modifier.isStatic(field.getModifiers()) || !Map.class.isAssignableFrom(field.getType())) continue;
+                try {
+                    field.setAccessible(true);
+                    if (!(field.get(null) instanceof Map<?, ?> map) || !map.containsKey(key)) continue;
+                    states.add(compositeMapState(map, key));
+                } catch (Throwable throwable) {
+                    if (throwable instanceof VirtualMachineError error) throw error;
+                }
+            }
+        }
+        return states;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static CompositeMapState compositeMapState(Map<?, ?> map, Object key) {
+        Map<Object, Object> writable = (Map<Object, Object>) map;
+        return new CompositeMapState(writable, key, writable.get(key));
+    }
+
+    private static Object[] readRecordComponents(Object record, RecordComponent[] components) {
+        try {
+            Object[] values = new Object[components.length];
+            for (int i = 0; i < components.length; i++) {
+                Method accessor = components[i].getAccessor();
+                accessor.setAccessible(true);
+                values[i] = accessor.invoke(record);
+            }
+            return values;
+        } catch (Throwable throwable) {
+            if (throwable instanceof VirtualMachineError error) throw error;
+            return null;
+        }
+    }
+
+    private static Object rebuildRecordWithFactory(Class<?> owner, Class<?> recordClass,
+                                                   RecordComponent[] components, Object[] currentValues,
+                                                   int replacedIndex, Object replacement) {
+        for (Method factory : owner.getDeclaredMethods()) {
+            if (!Modifier.isStatic(factory.getModifiers()) || factory.getReturnType() != recordClass) continue;
+            Class<?>[] parameterTypes = factory.getParameterTypes();
+            if (replacedIndex >= parameterTypes.length || parameterTypes.length > components.length) continue;
+            boolean prefixMatches = true;
+            for (int i = 0; i < parameterTypes.length; i++) {
+                if (parameterTypes[i] != components[i].getType()) {
+                    prefixMatches = false;
+                    break;
+                }
+            }
+            if (!prefixMatches) continue;
+            try {
+                Object[] arguments = new Object[parameterTypes.length];
+                for (int i = 0; i < arguments.length; i++) {
+                    arguments[i] = i == replacedIndex ? replacement : currentValues[i];
+                }
+                factory.setAccessible(true);
+                Object rebuilt = factory.invoke(null, arguments);
+                if (recordClass.isInstance(rebuilt)) return rebuilt;
+            } catch (Throwable throwable) {
+                if (throwable instanceof VirtualMachineError error) throw error;
+            }
+        }
+        return null;
+    }
+
+    private static void restoreCompositeMapStates(List<CompositeMapState> states) {
+        for (CompositeMapState state : states) {
+            try {
+                state.map().put(state.key(), state.entry());
+            } catch (Throwable throwable) {
+                if (throwable instanceof VirtualMachineError error) throw error;
+            }
+        }
+    }
+
+    private record CompositeMapState(Map<Object, Object> map, Object key, Object entry) {}
 
     /* ==================== Map 写入：兄弟表 + entrySet 遍历 + Unsafe ==================== */
 

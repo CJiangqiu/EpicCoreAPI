@@ -23,7 +23,6 @@ public final class CallBridgeManager {
     private static final Set<String> NO_WATCHDOG_SOURCES = ConcurrentHashMap.newKeySet();
     private static final Set<String> INSTALLING_SOURCES = ConcurrentHashMap.newKeySet();
     private static final Set<String> RUNTIME_CONFIRMED_SOURCES = ConcurrentHashMap.newKeySet();
-    private static final Set<String> JVMTI_INSTALLED_SOURCES = ConcurrentHashMap.newKeySet();
     private static final Map<String, Long> PREPARATION_RETRY = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, Class<?>>> WATCHDOGS_BY_SOURCE = new ConcurrentHashMap<>();
 
@@ -109,33 +108,6 @@ public final class CallBridgeManager {
         return watchdogs != null && !watchdogs.isEmpty();
     }
 
-    public static boolean forceJvmTi(Object target) {
-        Class<?> targetClass = targetClass(target);
-        String sourceKey = sourceKey(targetClass);
-        if (targetClass == null || sourceKey == null) return false;
-        if (NO_WATCHDOG_SOURCES.contains(sourceKey)) return false;
-        Map<String, Class<?>> watchdogs = WATCHDOGS_BY_SOURCE.get(sourceKey);
-        if (watchdogs == null || watchdogs.isEmpty()) {
-            CodeSource source = codeSource(targetClass);
-            if (source == null || source.getLocation() == null) return false;
-            watchdogs = scanWatchdogs(targetClass, source);
-            if (watchdogs.isEmpty()) return false;
-            registerWatchdogs(sourceKey, watchdogs);
-        }
-        if (JVMTI_INSTALLED_SOURCES.contains(sourceKey)) return true;
-        boolean requested = EcaTransformerManager.retransformLoadedInternalNamesWithJvmTi(watchdogs.keySet());
-        Set<String> confirmed = confirmedWatchdogs(watchdogs);
-        if (requested && confirmed.size() == watchdogs.size()) {
-            JVMTI_INSTALLED_SOURCES.add(sourceKey);
-            EcaLogger.info("[CallBridge] watchdog JVMTI fallback confirmed classes={} source={}",
-                    confirmed.size(), codeSource(targetClass).getLocation());
-            return true;
-        }
-        EcaLogger.info("[CallBridge] watchdog JVMTI fallback unconfirmed confirmed={} expected={} requested={} source={}",
-                confirmed.size(), watchdogs.size(), requested, codeSource(targetClass).getLocation());
-        return false;
-    }
-
     private static void prepare(Class<?> targetClass) {
         CodeSource source = codeSource(targetClass);
         if (source == null || source.getLocation() == null) return;
@@ -158,21 +130,14 @@ public final class CallBridgeManager {
             Set<String> confirmed = confirmedWatchdogs(watchdogs);
             Set<String> missing = new HashSet<>(watchdogs.keySet());
             missing.removeAll(confirmed);
-            boolean jvmTiRequested = false;
-            if (!missing.isEmpty()) {
-                jvmTiRequested = EcaTransformerManager.retransformLoadedInternalNamesWithJvmTi(missing);
-                confirmed.addAll(confirmedWatchdogs(watchdogs, missing));
-                missing.removeAll(confirmed);
-            }
             if (missing.isEmpty()) {
                 INSTALLED_SOURCES.add(sourceKey);
-                EcaLogger.info("[CallBridge] watchdog bridge confirmed classes={} agentRequested={} jvmTiRequested={} source={}",
-                        confirmed.size(), agentRequested, jvmTiRequested, source.getLocation());
+                EcaLogger.info("[CallBridge] watchdog bridge confirmed classes={} agentRequested={} source={}",
+                        confirmed.size(), agentRequested, source.getLocation());
             } else {
                 PREPARATION_RETRY.put(sourceKey, System.nanoTime() + PREPARATION_RETRY_NANOS);
-                EcaLogger.info("[CallBridge] watchdog bridge unconfirmed confirmed={} missing={} agentRequested={} jvmTiRequested={} source={}",
-                        confirmed.size(), missing.size(), agentRequested, jvmTiRequested,
-                        source.getLocation());
+                EcaLogger.info("[CallBridge] watchdog bridge unconfirmed confirmed={} missing={} agentRequested={} source={}",
+                        confirmed.size(), missing.size(), agentRequested, source.getLocation());
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;

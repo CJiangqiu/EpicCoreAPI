@@ -19,6 +19,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
@@ -44,6 +45,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -53,7 +55,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /*
  * 方法探针模块：数据流和外部扫描无法直接写入存储时，调用实体自身的血量写方法。
  * 三种策略：
- *  DirectCall：静态枚举单参数数值 setter 和函数式字段，通过写入、读取与回滚确定有效 writer。
+ *  DirectCall：静态枚举单参数数值 setter、函数式字段及其多步调用协议，通过写入、读取与回滚确定有效 writer。
  *  HeadBridge：扫 void(float) 方法体识别 token(entity):long + writer(entity,float,long):void 授权写模式，
  *              warmup 在方法 HEAD 注入授权调用(惰性)，运行期借实体自身可信帧发起、绕过后续栈守护/门控。
  *  ProtocolBridge：识别数值编码、命令生成与命令提交的连续事务，在原始方法帧内重放完整写入协议。
@@ -77,6 +79,8 @@ public final class MethodProbe {
     private static final String RUNTIME = "net/eca/util/health/MethodProbe";
     private static final String ENTITY_INTERNAL = Type.getInternalName(Entity.class);
     private static final int MAX_FUNCTIONAL_ARGUMENT_PLANS = 64;
+    private static final int MAX_SELF_TOKEN_PROTOCOLS = 16;
+    private static final int MAX_SELF_TOKEN_SCAN_DISTANCE = 96;
     private static final int MAX_PROTOCOL_COMBINATIONS = 64;
     private static final int MAX_EXTERNAL_PROTOCOL_CLASSES = 4096;
     private static final int MAX_EXTERNAL_PROTOCOL_SPECS = 128;
@@ -144,13 +148,32 @@ public final class MethodProbe {
     public record AuxiliaryArgument(String declaringInternal, String fieldName, String fieldDesc,
                                     AuxiliaryKind kind) {}
 
-    /* DirectCall 候选：METHOD=实体自身 1 参数数值方法；FUNCTIONAL_FIELD=持数值或变长 SAM 的函数式字段。
+    public record SamCall(String name, String desc) {}
+
+    /* 同一变长 SAM 先用常量取得动态令牌，再把令牌与目标值交回该 SAM。参数位置由候选表达，
+       是否真能写入仍由双点回读裁决。 */
+    public record FunctionalProtocol(Object sentinel, boolean tokenFirst) {}
+
+    /* DirectCall 候选：METHOD=实体自身 1 参数数值方法；FUNCTIONAL_FIELD=持数值或变长 SAM 的函数式字段，
+       protocol 可表达从实体合法调用点学到的动态令牌调用序列。
        此处仅记录静态签名，是否有效由运行期行为探测判定。 */
     public record DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc,
-                                  String fieldDesc, boolean fieldStatic, AuxiliaryArgument auxiliary) {
+                                  String fieldDesc, boolean fieldStatic, AuxiliaryArgument auxiliary,
+                                  FunctionalProtocol protocol, SamCall sam) {
+        public DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc,
+                               String fieldDesc, boolean fieldStatic, AuxiliaryArgument auxiliary,
+                               FunctionalProtocol protocol) {
+            this(kind, declaringInternal, memberName, inputDesc, fieldDesc, fieldStatic, auxiliary, protocol, null);
+        }
+
+        public DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc,
+                               String fieldDesc, boolean fieldStatic, AuxiliaryArgument auxiliary) {
+            this(kind, declaringInternal, memberName, inputDesc, fieldDesc, fieldStatic, auxiliary, null, null);
+        }
+
         public DirectCandidate(WriterKind kind, String declaringInternal, String memberName, String inputDesc,
                                String fieldDesc, boolean fieldStatic) {
-            this(kind, declaringInternal, memberName, inputDesc, fieldDesc, fieldStatic, null);
+            this(kind, declaringInternal, memberName, inputDesc, fieldDesc, fieldStatic, null, null, null);
         }
     }
 
@@ -455,6 +478,14 @@ public final class MethodProbe {
         }
         if (samInput != Object[].class) return;
 
+        for (FunctionalProtocol protocol : findSelfTokenProtocols(entityClass, functionalField)) {
+            String key = baseKey + ":P:" + protocolKey(protocol);
+            if (!seen.add(key)) continue;
+            out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, functionalField.getName(),
+                    Type.getDescriptor(samInput), Type.getDescriptor(functionalField.getType()), false,
+                    null, protocol));
+        }
+
         int plans = 0;
         List<Class<?>> sourceClasses = new ArrayList<>();
         sourceClasses.add(functionalField.getDeclaringClass());
@@ -476,6 +507,200 @@ public final class MethodProbe {
                 if (++plans >= MAX_FUNCTIONAL_ARGUMENT_PLANS) return;
             }
         }
+    }
+
+    /* 只从实体自己的合法调用点学习协议：内层 SAM 的返回值必须在外层调用前写入参数数组，
+       且同一段代码还把数值装箱后写入该数组。这样不会对任意变长函数盲试令牌协议。 */
+    private static List<FunctionalProtocol> findSelfTokenProtocols(Class<?> entityClass, Field functionalField) {
+        Method sam = singleAbstract(functionalField.getType());
+        if (sam == null || sam.getParameterTypes()[0] != Object[].class) return List.of();
+        return findSelfTokenProtocols(entityClass, Type.getInternalName(functionalField.getDeclaringClass()),
+                functionalField.getName(), Type.getDescriptor(functionalField.getType()),
+                Type.getInternalName(functionalField.getType()),
+                new SamCall(sam.getName(), Type.getMethodDescriptor(sam)));
+    }
+
+    private static List<FunctionalProtocol> findSelfTokenProtocols(
+            Class<?> entityClass, String fieldOwner, String fieldName, String fieldDesc,
+            String samOwner, SamCall sam) {
+        Type[] samArgs = Type.getArgumentTypes(sam.desc());
+        if (samArgs.length != 1 || !samArgs[0].getDescriptor().equals("[Ljava/lang/Object;")) return List.of();
+        LinkedHashSet<Object> sentinels = new LinkedHashSet<>();
+        for (Class<?> owner = entityClass; owner != null && owner != LivingEntity.class && owner != Object.class;
+             owner = owner.getSuperclass()) {
+            byte[] bytes = bytesProvider.get(owner);
+            if (bytes == null) continue;
+            try {
+                ClassNode node = new ClassNode();
+                new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
+                for (MethodNode method : node.methods) {
+                    collectSelfTokenSentinels(method, fieldOwner, fieldName, fieldDesc,
+                            samOwner, sam.name(), sam.desc(), sentinels);
+                    if (sentinels.size() >= MAX_SELF_TOKEN_PROTOCOLS / 2) break;
+                }
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+            }
+            if (sentinels.size() >= MAX_SELF_TOKEN_PROTOCOLS / 2) break;
+        }
+        if (sentinels.isEmpty()) return List.of();
+        List<FunctionalProtocol> protocols = new ArrayList<>();
+        for (Object sentinel : sentinels) {
+            protocols.add(new FunctionalProtocol(sentinel, true));
+            protocols.add(new FunctionalProtocol(sentinel, false));
+            if (protocols.size() >= MAX_SELF_TOKEN_PROTOCOLS) break;
+        }
+        return List.copyOf(protocols);
+    }
+
+    private static void collectSelfTokenSentinels(MethodNode method, String fieldOwner, String fieldName,
+                                                   String fieldDesc, String samOwner, String samName,
+                                                   String samDesc, Set<Object> sentinels) {
+        if (method.instructions == null || method.instructions.size() == 0) return;
+        List<MethodInsnNode> calls = new ArrayList<>();
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call && call.owner.equals(samOwner)
+                    && call.name.equals(samName) && call.desc.equals(samDesc)) calls.add(call);
+        }
+        for (int outerIndex = 1; outerIndex < calls.size(); outerIndex++) {
+            MethodInsnNode outer = calls.get(outerIndex);
+            for (int innerIndex = outerIndex - 1; innerIndex >= 0; innerIndex--) {
+                MethodInsnNode inner = calls.get(innerIndex);
+                if (meaningfulDistance(inner, outer) > MAX_SELF_TOKEN_SCAN_DISTANCE) break;
+                if (!hasArrayStoreBetween(inner, outer) || !hasNumericBoxBetween(inner, outer)) continue;
+                FieldInsnNode innerField = nearestMatchingFieldRead(
+                        inner, fieldOwner, fieldName, fieldDesc, MAX_SELF_TOKEN_SCAN_DISTANCE);
+                if (innerField == null) continue;
+                FieldInsnNode outerField = nearestMatchingFieldRead(
+                        innerField, fieldOwner, fieldName, fieldDesc, MAX_SELF_TOKEN_SCAN_DISTANCE);
+                if (outerField == null || !hasArrayCreationBetween(outerField, innerField)) continue;
+                collectConstants(innerField, inner, sentinels);
+                if (sentinels.size() >= MAX_SELF_TOKEN_PROTOCOLS / 2) return;
+            }
+        }
+    }
+
+    private static int meaningfulDistance(AbstractInsnNode from, AbstractInsnNode to) {
+        int distance = 0;
+        for (AbstractInsnNode insn = from; insn != null && insn != to; insn = insn.getNext()) {
+            if (isMeaningful(insn)) distance++;
+            if (distance > MAX_SELF_TOKEN_SCAN_DISTANCE) return distance;
+        }
+        return distance;
+    }
+
+    private static boolean hasArrayStoreBetween(AbstractInsnNode from, AbstractInsnNode to) {
+        for (AbstractInsnNode insn = from.getNext(); insn != null && insn != to; insn = insn.getNext()) {
+            if (insn.getOpcode() == Opcodes.AASTORE) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasArrayCreationBetween(AbstractInsnNode from, AbstractInsnNode to) {
+        for (AbstractInsnNode insn = from.getNext(); insn != null && insn != to; insn = insn.getNext()) {
+            if (insn.getOpcode() == Opcodes.ANEWARRAY) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasNumericBoxBetween(AbstractInsnNode from, AbstractInsnNode to) {
+        for (AbstractInsnNode insn = from.getNext(); insn != null && insn != to; insn = insn.getNext()) {
+            if (!(insn instanceof MethodInsnNode call) || call.getOpcode() != Opcodes.INVOKESTATIC
+                    || !call.name.equals("valueOf")) continue;
+            Type[] args = Type.getArgumentTypes(call.desc);
+            if (args.length == 1 && isNumericSort(args[0].getSort())) return true;
+        }
+        return false;
+    }
+
+    private static boolean isNumericSort(int sort) {
+        return sort >= Type.BYTE && sort <= Type.DOUBLE;
+    }
+
+    private static FieldInsnNode nearestMatchingFieldRead(AbstractInsnNode before, String fieldOwner,
+                                                          String fieldName, String fieldDesc, int limit) {
+        int distance = 0;
+        for (AbstractInsnNode insn = before.getPrevious(); insn != null && distance <= limit; insn = insn.getPrevious()) {
+            if (isMeaningful(insn)) distance++;
+            if (insn instanceof FieldInsnNode read
+                    && resolvesToField(read, fieldOwner, fieldName, fieldDesc)) return read;
+        }
+        return null;
+    }
+
+    /* 常量池可用子类作为继承字段的引用 owner。按 JVM 的继承查找解析真实声明者，
+       同时拒绝子类隐藏的同名同类型字段。 */
+    private static boolean resolvesToField(FieldInsnNode read, String expectedOwner,
+                                           String expectedName, String expectedDesc) {
+        if (read.getOpcode() != Opcodes.GETFIELD || !read.name.equals(expectedName)
+                || !read.desc.equals(expectedDesc)) return false;
+        if (read.owner.equals(expectedOwner)) return true;
+        Class<?> referenceOwner = HealthDataflowAnalyzer.loadClass(read.owner);
+        for (Class<?> current = referenceOwner; current != null && current != Object.class;
+             current = current.getSuperclass()) {
+            String currentOwner = Type.getInternalName(current);
+            if (declaresField(current, expectedName, expectedDesc)) return currentOwner.equals(expectedOwner);
+            if (currentOwner.equals(expectedOwner)) return true;
+        }
+        return false;
+    }
+
+    private static boolean declaresField(Class<?> owner, String name, String desc) {
+        byte[] bytes = bytesProvider.get(owner);
+        if (bytes == null) return false;
+        try {
+            ClassNode node = new ClassNode();
+            new ClassReader(bytes).accept(node, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            for (FieldNode field : node.fields) {
+                if (field.name.equals(name) && field.desc.equals(desc)) return true;
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+        return false;
+    }
+
+    private static void collectConstants(AbstractInsnNode from, AbstractInsnNode to, Set<Object> out) {
+        for (AbstractInsnNode insn = from.getNext(); insn != null && insn != to; insn = insn.getNext()) {
+            Object constant = constantValue(insn);
+            if (constant != NO_CONSTANT) out.add(constant);
+        }
+    }
+
+    private static final Object NO_CONSTANT = new Object();
+
+    private static Object constantValue(AbstractInsnNode insn) {
+        return switch (insn.getOpcode()) {
+            case Opcodes.ACONST_NULL -> null;
+            case Opcodes.ICONST_M1 -> -1;
+            case Opcodes.ICONST_0 -> 0;
+            case Opcodes.ICONST_1 -> 1;
+            case Opcodes.ICONST_2 -> 2;
+            case Opcodes.ICONST_3 -> 3;
+            case Opcodes.ICONST_4 -> 4;
+            case Opcodes.ICONST_5 -> 5;
+            case Opcodes.LCONST_0 -> 0L;
+            case Opcodes.LCONST_1 -> 1L;
+            case Opcodes.FCONST_0 -> 0.0f;
+            case Opcodes.FCONST_1 -> 1.0f;
+            case Opcodes.FCONST_2 -> 2.0f;
+            case Opcodes.DCONST_0 -> 0.0d;
+            case Opcodes.DCONST_1 -> 1.0d;
+            default -> insn instanceof LdcInsnNode ldc ? ldc.cst
+                    : insn instanceof IntInsnNode integer ? integer.operand : NO_CONSTANT;
+        };
+    }
+
+    private static boolean isMeaningful(AbstractInsnNode insn) {
+        return insn.getType() != AbstractInsnNode.LABEL && insn.getType() != AbstractInsnNode.LINE
+                && insn.getType() != AbstractInsnNode.FRAME;
+    }
+
+    private static String protocolKey(FunctionalProtocol protocol) {
+        if (protocol == null) return "none";
+        Object sentinel = protocol.sentinel();
+        return (sentinel == null ? "null" : sentinel.getClass().getName() + "=" + sentinel)
+                + ":" + protocol.tokenFirst();
     }
 
     private static AuxiliaryKind auxiliaryKind(Class<?> type) {
@@ -536,12 +761,24 @@ public final class MethodProbe {
                 }
                 if (isStatic) continue;
                 Class<?> fieldType = HealthDataflowAnalyzer.descriptorToClass(field.desc);
-                Class<?> input = singleNumericSamInput(fieldType);
-                if (input == null || !seen.add("F:" + ownerInternal + ":" + field.name)) continue;
-                out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, field.name,
-                        Type.getDescriptor(input), field.desc, false));
+                SamCall sam = singleAbstractCall(fieldType);
+                Class<?> input = samInput(sam);
+                if (input == null) continue;
+                String baseKey = "F:" + ownerInternal + ":" + field.name;
+                if (seen.add(baseKey)) {
+                    out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, field.name,
+                            Type.getDescriptor(input), field.desc, false, null, null, sam));
+                }
                 if (input == Object[].class) {
-                    addBytecodeAuxiliaryCandidates(entityClass, owner, ownerInternal, field, input, out, seen);
+                    String samOwner = Type.getInternalName(fieldType);
+                    for (FunctionalProtocol protocol : findSelfTokenProtocols(entityClass, ownerInternal,
+                            field.name, field.desc, samOwner, sam)) {
+                        String key = baseKey + ":P:" + protocolKey(protocol);
+                        if (!seen.add(key)) continue;
+                        out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, field.name,
+                                Type.getDescriptor(input), field.desc, false, null, protocol, sam));
+                    }
+                    addBytecodeAuxiliaryCandidates(entityClass, owner, ownerInternal, field, input, sam, out, seen);
                 }
             }
         } catch (Throwable t) {
@@ -550,7 +787,7 @@ public final class MethodProbe {
     }
 
     private static void addBytecodeAuxiliaryCandidates(Class<?> entityClass, Class<?> owner, String ownerInternal,
-                                                       FieldNode functionalField, Class<?> samInput,
+                                                       FieldNode functionalField, Class<?> samInput, SamCall sam,
                                                        List<DirectCandidate> out, Set<String> seen) {
         String baseKey = "F:" + ownerInternal + ":" + functionalField.name;
         int plans = 0;
@@ -559,7 +796,7 @@ public final class MethodProbe {
                     + ":" + auxiliary.kind();
             if (!seen.add(key)) continue;
             out.add(new DirectCandidate(WriterKind.FUNCTIONAL_FIELD, ownerInternal, functionalField.name,
-                    Type.getDescriptor(samInput), functionalField.desc, false, auxiliary));
+                    Type.getDescriptor(samInput), functionalField.desc, false, auxiliary, null, sam));
             if (++plans >= MAX_FUNCTIONAL_ARGUMENT_PLANS) return;
         }
     }
@@ -682,11 +919,46 @@ public final class MethodProbe {
 
     private static Class<?> singleNumericSamInput(Class<?> type) {
         if (type == null || !type.isInterface()) return null;
-        Method sam = singleAbstract(type);
-        if (sam == null) return null;
-        Class<?> input = sam.getParameterTypes()[0];
+        SamCall sam = singleAbstractCall(type);
+        Class<?> input = samInput(sam);
+        if (input == null) return null;
         if (input == Object[].class) return input;
         return isNumericInput(input) || input == Object.class ? input : null;
+    }
+
+    private static SamCall singleAbstractCall(Class<?> type) {
+        if (type == null || !type.isInterface()) return null;
+        byte[] bytes = bytesProvider.get(type);
+        if (bytes != null) {
+            try {
+                ClassNode node = new ClassNode();
+                new ClassReader(bytes).accept(node,
+                        ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                SamCall found = null;
+                for (MethodNode method : node.methods) {
+                    if ((method.access & Opcodes.ACC_ABSTRACT) == 0
+                            || (method.access & Opcodes.ACC_STATIC) != 0
+                            || Type.getArgumentTypes(method.desc).length != 1) continue;
+                    SamCall candidate = new SamCall(method.name, method.desc);
+                    if (found != null && !found.equals(candidate)) return null;
+                    found = candidate;
+                }
+                if (found != null) return found;
+            } catch (Throwable t) {
+                if (t instanceof VirtualMachineError e) throw e;
+            }
+        }
+        Method reflected = singleAbstract(type);
+        return reflected == null ? null : new SamCall(reflected.getName(), Type.getMethodDescriptor(reflected));
+    }
+
+    private static Class<?> samInput(SamCall sam) {
+        if (sam == null) return null;
+        Type[] arguments = Type.getArgumentTypes(sam.desc());
+        if (arguments.length != 1) return null;
+        Class<?> input = HealthDataflowAnalyzer.descriptorToClass(arguments[0].getDescriptor());
+        return input != null && (input == Object[].class || isNumericInput(input) || input == Object.class)
+                ? input : null;
     }
 
     private static Class<?> genericNumericInput(Field field) {
@@ -1093,18 +1365,19 @@ public final class MethodProbe {
         float probeB = probes[1];
         for (DirectCandidate candidate : candidates) {
             String diagnosticKey = entity.getClass().getName() + "|" + candidate.declaringInternal()
-                    + "#" + candidate.memberName();
-            boolean diagnostic = candidate.kind() == WriterKind.METHOD_HANDLE_FIELD
+                    + "#" + candidate.memberName() + "|" + protocolKey(candidate.protocol());
+            boolean diagnostic = (candidate.kind() == WriterKind.METHOD_HANDLE_FIELD || candidate.protocol() != null)
                     && METHOD_HANDLE_DIAGNOSTICS.add(diagnosticKey);
-            if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle candidate entity={} field={}#{} static={}",
-                    entity.getClass().getName(), candidate.declaringInternal(), candidate.memberName(), candidate.fieldStatic());
+            if (diagnostic) EcaLogger.info("[MethodProbe] direct candidate entity={} field={}#{} kind={} protocol={} static={}",
+                    entity.getClass().getName(), candidate.declaringInternal(), candidate.memberName(),
+                    candidate.kind(), candidate.protocol(), candidate.fieldStatic());
             DirectWriter writer = bind(candidate, entity);
             if (writer == null) {
-                if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle bind rejected field={}#{}",
+                if (diagnostic) EcaLogger.info("[MethodProbe] direct bind rejected field={}#{}",
                         candidate.declaringInternal(), candidate.memberName());
                 continue;
             }
-            if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle bound writer={} baseline={} probeA={} probeB={} target={}",
+            if (diagnostic) EcaLogger.info("[MethodProbe] direct bound writer={} baseline={} probeA={} probeB={} target={}",
                     writer.describe(), baseline, probeA, probeB, target);
             if (writer.hasAssociatedWrites()) {
                 ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
@@ -1173,7 +1446,7 @@ public final class MethodProbe {
             float actualA = EcaSetHealthManager.readHealthAnchor(entity);
             if (diagnostic) {
                 SynchedDataState afterReadA = SynchedDataState.capture(entity);
-                EcaLogger.info("[MethodProbe] MethodHandle probeA wrote={} expected={} actual={} writeState={} readState={}",
+                EcaLogger.info("[MethodProbe] direct probeA wrote={} expected={} actual={} writeState={} readState={}",
                         wroteA, a, actualA, stateA.diffFrom(beforeA), afterReadA.diffFrom(stateA));
             }
             if (!wroteA || !matches(actualA, a)) {
@@ -1181,7 +1454,7 @@ public final class MethodProbe {
             }
             boolean wroteB = writer.write(entity, b);
             float actualB = EcaSetHealthManager.readHealthAnchor(entity);
-            if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle probeB wrote={} expected={} actual={}", wroteB, b, actualB);
+            if (diagnostic) EcaLogger.info("[MethodProbe] direct probeB wrote={} expected={} actual={}", wroteB, b, actualB);
             if (!wroteB || !matches(actualB, b)) {
                 return false;
             }
@@ -1194,7 +1467,7 @@ public final class MethodProbe {
             }
             boolean wroteTarget = writer.write(entity, target);
             float actualTarget = EcaSetHealthManager.readHealthAnchor(entity);
-            if (diagnostic) EcaLogger.info("[MethodProbe] MethodHandle target wrote={} expected={} actual={}",
+            if (diagnostic) EcaLogger.info("[MethodProbe] direct target wrote={} expected={} actual={}",
                     wroteTarget, target, actualTarget);
             if (wroteTarget && matchesTarget(actualTarget, target)) return true;
             return false;
@@ -1244,19 +1517,19 @@ public final class MethodProbe {
             if (field == null) {
                 Class<?> fieldType = HealthDataflowAnalyzer.descriptorToClass(candidate.fieldDesc());
                 VarHandle handle = findVarHandle(owner, candidate, fieldType);
-                Method sam = singleAbstract(fieldType);
+                BoundSam sam = bindSam(fieldType, candidate.sam());
                 BoundAuxiliary auxiliary = bindAuxiliary(candidate.auxiliary());
                 if (candidate.auxiliary() != null && auxiliary == null) return null;
                 return handle == null || sam == null ? null
-                        : new VarHandleFunctionalWriter(handle, candidate.fieldStatic(), sam, inputType, auxiliary);
+                        : new VarHandleFunctionalWriter(handle, candidate.fieldStatic(), sam, inputType, auxiliary,
+                        candidate.protocol());
             }
-            Method sam = singleAbstract(field.getType());
+            BoundSam sam = bindSam(field.getType(), candidate.sam());
             if (sam == null) return null;
             field.setAccessible(true);
-            sam.setAccessible(true);
             BoundAuxiliary auxiliary = bindAuxiliary(candidate.auxiliary());
             if (candidate.auxiliary() != null && auxiliary == null) return null;
-            return new FunctionalWriter(field, sam, inputType, auxiliary);
+            return new FunctionalWriter(field, sam, inputType, auxiliary, candidate.protocol());
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             return null;
@@ -1362,11 +1635,8 @@ public final class MethodProbe {
         if (method == null) return false;
         Class<?> bridgeOwner = HealthDataflowAnalyzer.loadClass(spec.ownerInternal());
         if (bridgeOwner == null) return false;
-        if (AGENT_RUNTIME_FAILED_OWNERS.contains(spec.ownerInternal())) {
-            if (!EcaTransformerManager.isHealthTransformConfirmed(
-                    bridgeOwner, EcaTransformerManager.Backend.JVMTI)
-                    && !EcaTransformerManager.retransformHealthClassWithJvmTi(bridgeOwner).confirmed()) return false;
-        } else if (!EcaTransformerManager.isHealthTransformConfirmed(bridgeOwner)
+        if (AGENT_RUNTIME_FAILED_OWNERS.contains(spec.ownerInternal())) return false;
+        if (!EcaTransformerManager.isHealthTransformConfirmed(bridgeOwner)
                 && !EcaTransformerManager.retransformHealthClass(bridgeOwner, true).confirmed()) {
             return false;
         }
@@ -1385,9 +1655,7 @@ public final class MethodProbe {
                 EcaTransformerManager.HealthTransformResult reinstall = owner == null
                         ? new EcaTransformerManager.HealthTransformResult(
                                 EcaTransformerManager.Backend.NONE, false)
-                        : AGENT_RUNTIME_FAILED_OWNERS.contains(spec.ownerInternal())
-                                ? EcaTransformerManager.retransformHealthClassWithJvmTi(owner)
-                                : EcaTransformerManager.retransformHealthClass(owner, true);
+                        : EcaTransformerManager.retransformHealthClass(owner, true);
                 if (!reinstall.confirmed()) return false;
                 snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
                 activation = new BridgeActivation(entity);
@@ -1397,25 +1665,9 @@ public final class MethodProbe {
                     return null;
                 });
                 if (!activation.guardObserved) {
-                    if (reinstall.backend() != EcaTransformerManager.Backend.AGENT) {
-                        snapshot.restore();
-                        return false;
-                    }
                     AGENT_RUNTIME_FAILED_OWNERS.add(spec.ownerInternal());
                     snapshot.restore();
-                    reinstall = EcaTransformerManager.retransformHealthClassWithJvmTi(bridgeOwner);
-                    if (!reinstall.confirmed()) return false;
-                    snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
-                    activation = new BridgeActivation(entity);
-                    ACTIVE_ENTITY.set(activation);
-                    CallBridgeManager.callAuthorizedThrowing(entity, () -> {
-                        method.invoke(entity, target);
-                        return null;
-                    });
-                    if (!activation.guardObserved) {
-                        snapshot.restore();
-                        return false;
-                    }
+                    return false;
                 }
             }
             EcaSetHealthManager.noteAnchorResponse(entity, baseline, target);
@@ -1477,12 +1729,8 @@ public final class MethodProbe {
                 }
                 continue;
             }
-            boolean agentRuntimeFailed = AGENT_RUNTIME_FAILED_OWNERS.contains(spec.ownerInternal());
-            if (agentRuntimeFailed) {
-                if (!EcaTransformerManager.isHealthTransformConfirmed(
-                        specOwner, EcaTransformerManager.Backend.JVMTI)
-                        && !EcaTransformerManager.retransformHealthClassWithJvmTi(specOwner).confirmed()) continue;
-            } else if (!EcaTransformerManager.isHealthTransformConfirmed(specOwner)
+            if (AGENT_RUNTIME_FAILED_OWNERS.contains(spec.ownerInternal())) continue;
+            if (!EcaTransformerManager.isHealthTransformConfirmed(specOwner)
                     && !EcaTransformerManager.retransformHealthClass(specOwner, true).confirmed()) {
                 continue;
             }
@@ -1491,19 +1739,8 @@ public final class MethodProbe {
                 ProtocolActivation activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
                 ACTIVE_PROTOCOL.set(activation);
                 ProtocolInvocationResult invocation = invokeProtocolMethod(entity, spec);
-                boolean jvmTiRetried = false;
                 if (!invocation.authorizationObserved() && CallBridgeManager.hasWatchdogs(entity)
-                        && !CallBridgeManager.isRuntimeConfirmed(entity)) {
-                    snapshot.restore();
-                    if (CallBridgeManager.forceJvmTi(entity)) {
-                        jvmTiRetried = true;
-                        snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
-                        activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
-                        ACTIVE_PROTOCOL.set(activation);
-                        invocation = invokeProtocolMethod(entity, spec);
-                    }
-                }
-                if (jvmTiRetried && !invocation.authorizationObserved()
+                        && !CallBridgeManager.isRuntimeConfirmed(entity)
                         && PROTOCOL_BRIDGE_DIAGNOSTICS.add(diagnosticKey + "|call-bridge-runtime")) {
                     EcaLogger.info("[MethodProbe] call bridge runtime receipt missing entity={} owner={} method={}",
                             entity.getClass().getName(), spec.ownerInternal(), spec.methodName());
@@ -1514,30 +1751,15 @@ public final class MethodProbe {
                     EcaTransformerManager.HealthTransformResult reinstall = owner == null
                             ? new EcaTransformerManager.HealthTransformResult(
                                     EcaTransformerManager.Backend.NONE, false)
-                            : AGENT_RUNTIME_FAILED_OWNERS.contains(spec.ownerInternal())
-                                    ? EcaTransformerManager.retransformHealthClassWithJvmTi(owner)
-                                    : EcaTransformerManager.retransformHealthClass(owner, true);
+                            : EcaTransformerManager.retransformHealthClass(owner, true);
                     if (reinstall.confirmed()) {
                         snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
                         activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
                         ACTIVE_PROTOCOL.set(activation);
                         invocation = invokeProtocolMethod(entity, spec);
                     }
-                    if (reinstall.confirmed() && !activation.guardObserved
-                            && reinstall.backend() == EcaTransformerManager.Backend.AGENT) {
+                    if (reinstall.confirmed() && !activation.guardObserved) {
                         AGENT_RUNTIME_FAILED_OWNERS.add(spec.ownerInternal());
-                        snapshot.restore();
-                        EcaTransformerManager.HealthTransformResult jvmTiInstall = owner == null
-                                ? new EcaTransformerManager.HealthTransformResult(
-                                        EcaTransformerManager.Backend.NONE, false)
-                                : EcaTransformerManager.retransformHealthClassWithJvmTi(owner);
-                        reinstall = jvmTiInstall;
-                        if (jvmTiInstall.confirmed()) {
-                            snapshot = ObjectGraphSnapshot.captureProbe(entity, rollbackRoots);
-                            activation = new ProtocolActivation(entity, protocolInputValue(spec, target, protocolInput));
-                            ACTIVE_PROTOCOL.set(activation);
-                            invocation = invokeProtocolMethod(entity, spec);
-                        }
                     }
                     if (!reinstall.confirmed() || !activation.guardObserved) {
                         String reinstallKey = diagnosticKey + "|runtime-reinstall";
@@ -1918,6 +2140,17 @@ public final class MethodProbe {
 
     // ==================== Writer 实现 + 数值工具 ====================
 
+    private record BoundSam(MethodHandle handle, Method reflected) {
+        private Object invoke(Object function, Object argument) throws Throwable {
+            if (handle != null) return handle.invokeWithArguments(function, argument);
+            return reflected.invoke(function, argument);
+        }
+
+        private String name() {
+            return reflected == null ? "SAM" : reflected.getName();
+        }
+    }
+
     private static final class MethodWriter implements DirectWriter {
         private final Method method;
         private final Class<?> inputType;
@@ -1941,22 +2174,25 @@ public final class MethodProbe {
 
     private static final class FunctionalWriter implements DirectWriter {
         private final Field field;
-        private final Method sam;
+        private final BoundSam sam;
         private final Class<?> inputType;
         private final BoundAuxiliary auxiliary;
+        private final FunctionalProtocol protocol;
 
-        private FunctionalWriter(Field field, Method sam, Class<?> inputType, BoundAuxiliary auxiliary) {
+        private FunctionalWriter(Field field, BoundSam sam, Class<?> inputType, BoundAuxiliary auxiliary,
+                                 FunctionalProtocol protocol) {
             this.field = field;
             this.sam = sam;
             this.inputType = inputType;
             this.auxiliary = auxiliary;
+            this.protocol = protocol;
         }
 
         @Override public boolean write(LivingEntity entity, float value) {
             try {
                 Object function = field.get(entity);
                 if (function == null) return false;
-                sam.invoke(function, samArgument(entity, value, inputType, auxiliary));
+                invokeFunctionalWriter(sam, function, entity, value, inputType, auxiliary, protocol);
                 return true;
             } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
         }
@@ -1964,38 +2200,43 @@ public final class MethodProbe {
         @Override public float representable(float value) { return representableFor(value, inputType); }
 
         @Override public String describe() {
-            return field.getDeclaringClass().getName() + "#" + field.getName() + "::" + sam.getName();
+            return field.getDeclaringClass().getName() + "#" + field.getName() + "::" + sam.name()
+                    + (protocol == null ? "" : "[self-token]");
         }
     }
 
     private static final class VarHandleFunctionalWriter implements DirectWriter {
         private final VarHandle field;
         private final boolean isStatic;
-        private final Method sam;
+        private final BoundSam sam;
         private final Class<?> inputType;
         private final BoundAuxiliary auxiliary;
+        private final FunctionalProtocol protocol;
 
-        private VarHandleFunctionalWriter(VarHandle field, boolean isStatic, Method sam, Class<?> inputType,
-                                          BoundAuxiliary auxiliary) {
+        private VarHandleFunctionalWriter(VarHandle field, boolean isStatic, BoundSam sam, Class<?> inputType,
+                                          BoundAuxiliary auxiliary, FunctionalProtocol protocol) {
             this.field = field;
             this.isStatic = isStatic;
             this.sam = sam;
             this.inputType = inputType;
             this.auxiliary = auxiliary;
+            this.protocol = protocol;
         }
 
         @Override public boolean write(LivingEntity entity, float value) {
             try {
                 Object function = isStatic ? field.get() : field.get(entity);
                 if (function == null) return false;
-                sam.invoke(function, samArgument(entity, value, inputType, auxiliary));
+                invokeFunctionalWriter(sam, function, entity, value, inputType, auxiliary, protocol);
                 return true;
             } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
         }
 
         @Override public float representable(float value) { return representableFor(value, inputType); }
 
-        @Override public String describe() { return "VarHandle functional writer"; }
+        @Override public String describe() {
+            return "VarHandle functional writer" + (protocol == null ? "" : "[self-token]");
+        }
     }
 
     /* MethodHandle 字段常被用作可替换的合法 writer；每次写入重读字段，避免缓存失效句柄。 */
@@ -2189,6 +2430,57 @@ public final class MethodProbe {
             return new Object[]{Float.valueOf(value)};
         }
         return coerce(value, inputType);
+    }
+
+    private static void invokeFunctionalWriter(BoundSam sam, Object function, LivingEntity entity, float value,
+                                               Class<?> inputType, BoundAuxiliary auxiliary,
+                                               FunctionalProtocol protocol) throws Throwable {
+        if (protocol == null) {
+            sam.invoke(function, samArgument(entity, value, inputType, auxiliary));
+            return;
+        }
+        if (inputType != Object[].class) return;
+        Object sentinel = resolveProtocolConstant(protocol.sentinel(), entity.getClass().getClassLoader());
+        Object token = sam.invoke(function, new Object[]{sentinel});
+        Object target = Float.valueOf(value);
+        Object[] arguments = protocol.tokenFirst()
+                ? new Object[]{token, target} : new Object[]{target, token};
+        sam.invoke(function, arguments);
+    }
+
+    private static Object resolveProtocolConstant(Object value, ClassLoader loader) {
+        if (!(value instanceof Type type)) return value;
+        if (type.getSort() != Type.OBJECT && type.getSort() != Type.ARRAY) return value;
+        try {
+            return Class.forName(type.getClassName(), false, loader);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return value;
+        }
+    }
+
+    private static BoundSam bindSam(Class<?> owner, SamCall coordinate) {
+        if (owner == null || !owner.isInterface()) return null;
+        SamCall resolved = coordinate != null ? coordinate : singleAbstractCall(owner);
+        if (resolved == null) return null;
+        try {
+            MethodType type = MethodType.fromMethodDescriptorString(resolved.desc(), owner.getClassLoader());
+            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(owner, MethodHandles.lookup());
+            return new BoundSam(lookup.findVirtual(owner, resolved.name(), type).asFixedArity(), null);
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+        try {
+            for (Method method : owner.getMethods()) {
+                if (!method.getName().equals(resolved.name())
+                        || !Type.getMethodDescriptor(method).equals(resolved.desc())) continue;
+                method.setAccessible(true);
+                return new BoundSam(null, method);
+            }
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+        }
+        return null;
     }
 
     private static float representableFor(float value, Class<?> type) {

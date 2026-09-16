@@ -98,8 +98,8 @@ public class EcaConfiguration {
         BUILDER.push("Defence");
 
         DEFENCE_ENABLE_RADICAL_LOGIC = BUILDER
-            .comment("Enable radical defence logic: when the Java agent is unavailable, start JVMTI to perform retransformation.",
-                     "启用激进防御逻辑：当 Java agent 不可用时，将会启动 JVMTI 进行重转换。")
+            .comment("Enable additional radical defence checks. WARNING: This may cause game instability!",
+                     "启用额外的激进防御检查。警告：可能导致游戏不稳定！")
             .define("Enable Radical Logic", false);
 
         DEFENCE_INVULNERABLE_UNTARGETABLE = BUILDER

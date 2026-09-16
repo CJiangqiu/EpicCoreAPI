@@ -4,8 +4,9 @@ import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
 
 /**
- * Ultra-thin Java Agent entry point.
- * Stores Instrumentation and bridges it to the caller's ClassLoader.
+ * Instrumentation entry point for defensive entity-state protection and compatibility
+ * within the game JVM. Transformation targets and guards are defined by the coremod layer.
+ * This entry point stores Instrumentation and bridges it across ECA ClassLoaders.
  */
 public final class EcaAgent {
 
@@ -19,13 +20,13 @@ public final class EcaAgent {
         instrumentation = inst;
         AgentLogWriter.info("[EcaAgent] Instrumentation acquired (agent ClassLoader)");
 
-        // 桥接到调用者的 ClassLoader（CoreMod 层）
+        // The coremod loader may hold a separate EcaAgent class with its own static state.
         if (args != null) {
             bridgeInstrumentation(args, inst);
         }
     }
 
-    //通过调用者类名找到 CoreMod ClassLoader，反射设置其 EcaAgent.instrumentation
+    // Share the JVM-provided handle with ECA's copy in the caller's ClassLoader.
     private static void bridgeInstrumentation(String callerClassName, Instrumentation inst) {
         try {
             Class<?> callerClass = findLoadedClass(inst, callerClassName);
@@ -41,7 +42,7 @@ public final class EcaAgent {
 
             Class<?> targetEcaAgent = Class.forName("net.eca.agent.EcaAgent", false, targetLoader);
             if (targetEcaAgent == EcaAgent.class) {
-                // 同一个类，无需桥接
+                // Identical class objects already share the same Instrumentation field.
                 return;
             }
 
@@ -66,6 +67,23 @@ public final class EcaAgent {
 
     public static Instrumentation getInstrumentation() {
         return instrumentation;
+    }
+
+    // Reuse startup instrumentation when available, avoiding an additional self-attach.
+    public static boolean adoptSystemInstrumentation() {
+        if (instrumentation != null) return true;
+        try {
+            Class<?> systemAgent = Class.forName(EcaAgent.class.getName(), false,
+                    ClassLoader.getSystemClassLoader());
+            if (systemAgent == EcaAgent.class) return false;
+            Object candidate = systemAgent.getMethod("getInstrumentation").invoke(null);
+            if (!(candidate instanceof Instrumentation systemInstrumentation)) return false;
+            instrumentation = systemInstrumentation;
+            AgentLogWriter.info("[EcaAgent] Adopted startup Instrumentation");
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private EcaAgent() {}

@@ -18,14 +18,15 @@ import java.util.function.Consumer;
 
 public final class EcaTransformerManager {
 
+    private static final String TRANSFORMATION_BACKEND_KEY = "net.eca.transform.backend";
+
     public enum Backend {
         AGENT,
-        JVMTI,
+        COREMOD,
         NONE
     }
 
     private static volatile Backend backend = Backend.NONE;
-    private static volatile boolean jvmTiTransformRegistered;
     private static volatile boolean allFailedLogged;
     private static final Object TERMINAL_TRANSFORM_LOCK = new Object();
     private static final AtomicLong TRANSFORM_EPOCH = new AtomicLong();
@@ -34,12 +35,13 @@ public final class EcaTransformerManager {
     private static final Map<String, ConfirmedReceipt> CONFIRMED_RECEIPTS = new ConcurrentHashMap<>();
     private static volatile long terminalTransformGeneration;
 
-    private static final long JVMTI_RECEIPT_GENERATION = -1L;
-
     private record PendingReceipt(long epoch, long generation) {}
     private record ConfirmedReceipt(long epoch, Backend backend) {}
 
     public record HealthTransformResult(Backend backend, boolean confirmed) {}
+
+    public record LoadedClassInfo(String internalName, boolean modifiable,
+                                  boolean livingEntity, boolean entityOnly) {}
 
     private EcaTransformerManager() {}
 
@@ -47,64 +49,35 @@ public final class EcaTransformerManager {
         return backend;
     }
 
-    public static void activateJvmTiIfNeeded() {
-        if (!EcaConfiguration.getDefenceEnableRadicalLogicSafely()) return;
-        try {
-            JvmTiChannel.prepare();
-            ensureJvmTiTransformsRegistered();
-            JvmTiChannel.activate();
-        } catch (Throwable t) {
-            AgentLogWriter.info("[EcaTransformerManager] JVMTI activation failed: " + t.getMessage());
-        }
-    }
-
     public static boolean applyLoadCompleteTransforms() {
+        if (isCoremodBackend()) {
+            backend = Backend.COREMOD;
+            return true;
+        }
         boolean agentOk = tryAgentLoadComplete();
         if (agentOk) {
             backend = Backend.AGENT;
             return true;
         }
 
-        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            AgentLogWriter.info("[EcaTransformerManager] Agent transform verification failed, trying JVMTI");
-            boolean jvmTiOk = tryJvmTiLoadComplete();
-            if (jvmTiOk) {
-                backend = Backend.JVMTI;
-                return true;
-            }
-            logAllFailed();
-        }
-
         backend = Backend.NONE;
+        logAllFailed();
         return false;
     }
 
     public static boolean retransformClass(Class<?> clazz) {
-        if (clazz == null) return false;
-        String internalName = clazz.getName().replace('.', '/');
-        if (backend == Backend.JVMTI) {
-            return retransformInternalNameWithJvmTi(internalName);
-        }
-
+        if (clazz == null || isCoremodBackend()) return false;
         if (tryAgentRetransform(clazz)) {
             backend = Backend.AGENT;
             return true;
         }
 
-        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            AgentLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
-                    + clazz.getName() + ", trying JVMTI");
-            if (retransformInternalNameWithJvmTi(internalName)) {
-                backend = Backend.JVMTI;
-                return true;
-            }
-            logAllFailed();
-        }
         return false;
     }
 
     public static HealthTransformResult retransformHealthClass(Class<?> clazz, boolean refreshTerminal) {
         if (clazz == null) return new HealthTransformResult(Backend.NONE, false);
+        if (isCoremodBackend()) return new HealthTransformResult(Backend.COREMOD, false);
         if (EcaConfiguration.getForceCompatibilityModeSafely()) {
             return new HealthTransformResult(Backend.NONE, false);
         }
@@ -125,18 +98,6 @@ public final class EcaTransformerManager {
         if (clazz == null || expectedBackend == null) return false;
         ConfirmedReceipt receipt = CONFIRMED_RECEIPTS.get(clazz.getName().replace('.', '/'));
         return receipt != null && receipt.backend() == expectedBackend;
-    }
-
-    public static HealthTransformResult retransformHealthClassWithJvmTi(Class<?> clazz) {
-        if (clazz == null || EcaConfiguration.getForceCompatibilityModeSafely()
-                || !EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            return new HealthTransformResult(Backend.NONE, false);
-        }
-        String internalName = clazz.getName().replace('.', '/');
-        Object lock = HEALTH_TRANSFORM_LOCKS.computeIfAbsent(internalName, ignored -> new Object());
-        synchronized (lock) {
-            return retransformHealthClassWithJvmTiLocked(clazz, internalName);
-        }
     }
 
     static void invalidateHealthTransformReceipt(String internalName) {
@@ -163,80 +124,21 @@ public final class EcaTransformerManager {
             }
         }
 
-        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            return retransformHealthClassWithJvmTiLocked(clazz, internalName);
-        }
         return new HealthTransformResult(Backend.NONE, false);
-    }
-
-    private static HealthTransformResult retransformHealthClassWithJvmTiLocked(
-            Class<?> clazz, String internalName) {
-        long epoch = beginReceipt(internalName, JVMTI_RECEIPT_GENERATION);
-        boolean confirmed = retransformInternalNameWithJvmTi(internalName)
-                && receiptConfirmed(internalName, epoch);
-        if (!confirmed) {
-            boolean loadedClassRequested = requestJvmTiHookWithLoadedClass(clazz);
-            confirmed = loadedClassRequested && receiptConfirmed(internalName, epoch);
-        }
-        endReceipt(internalName, epoch);
-        if (confirmed) {
-            backend = Backend.JVMTI;
-            return new HealthTransformResult(Backend.JVMTI, true);
-        }
-        AgentLogWriter.info("[EcaTransformerManager] JVM TI health transform not confirmed for "
-                + clazz.getName());
-        return new HealthTransformResult(Backend.NONE, false);
-    }
-
-    /* 已加载类缺少早期全局引用时，由 Instrumentation 发起请求，转换仍由 JVM TI hook 完成。 */
-    private static boolean requestJvmTiHookWithLoadedClass(Class<?> clazz) {
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null || clazz == null || !JvmTiChannel.isAvailable() || !isModifiable(inst, clazz)) {
-            return false;
-        }
-        try {
-            RuntimeBytecodeProvider.beginSelfRetransform();
-            try {
-                inst.retransformClasses(clazz);
-            } finally {
-                RuntimeBytecodeProvider.endSelfRetransform();
-            }
-            AgentLogWriter.info("[EcaTransformerManager] Requested JVM TI hook for loaded class "
-                    + clazz.getName());
-            return true;
-        } catch (Throwable t) {
-            AgentLogWriter.info("[EcaTransformerManager] Loaded-class JVM TI request failed for "
-                    + clazz.getName() + ": " + t.getMessage());
-            return false;
-        }
     }
 
     public static boolean retransformInternalName(String internalName) {
-        if (internalName == null || internalName.isEmpty()) return false;
-        if (backend == Backend.JVMTI) {
-            return retransformInternalNameWithJvmTi(internalName);
-        }
+        if (internalName == null || internalName.isEmpty() || isCoremodBackend()) return false;
         Class<?> owner = loadClass(internalName);
         if (owner != null && tryAgentRetransform(owner)) {
             backend = Backend.AGENT;
             return true;
         }
-        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            if (retransformInternalNameWithJvmTi(internalName)) {
-                backend = Backend.JVMTI;
-                return true;
-            }
-            logAllFailed();
-        }
         return false;
     }
 
     public static boolean retransformLoadedInternalNames(Set<String> internalNames) {
-        if (internalNames == null || internalNames.isEmpty()) return false;
-        if (backend == Backend.JVMTI) {
-            return retransformInternalNamesWithJvmTi(internalNames);
-        }
-
+        if (internalNames == null || internalNames.isEmpty() || isCoremodBackend()) return false;
         Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst != null) {
             List<Class<?>> targets = new ArrayList<>();
@@ -257,26 +159,11 @@ public final class EcaTransformerManager {
             }
         }
 
-        if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-            if (retransformInternalNamesWithJvmTi(internalNames)) {
-                backend = Backend.JVMTI;
-                return true;
-            }
-            logAllFailed();
-        }
         return false;
     }
 
-    public static boolean retransformLoadedInternalNamesWithJvmTi(Set<String> internalNames) {
-        if (internalNames == null || internalNames.isEmpty()
-                || !EcaConfiguration.getDefenceEnableRadicalLogicSafely()) return false;
-        boolean transformed = retransformInternalNamesWithJvmTi(internalNames);
-        if (transformed) backend = Backend.JVMTI;
-        return transformed;
-    }
-
     public static boolean forEachLoadedClass(Consumer<Class<?>> consumer) {
-        if (consumer == null) return false;
+        if (consumer == null || isCoremodBackend()) return false;
         Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst == null) return false;
         try {
@@ -291,8 +178,8 @@ public final class EcaTransformerManager {
         }
     }
 
-    public static boolean forEachLoadedInternalName(Consumer<JvmTiChannel.LoadedClassInfo> consumer) {
-        if (consumer == null) return false;
+    public static boolean forEachLoadedInternalName(Consumer<LoadedClassInfo> consumer) {
+        if (consumer == null || isCoremodBackend()) return false;
         Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst != null) {
             try {
@@ -300,7 +187,7 @@ public final class EcaTransformerManager {
                     String internalName = clazz.getName().replace('.', '/');
                     boolean modifiable = inst.isModifiableClass(clazz);
                     int entityType = classifyEntity(clazz);
-                    consumer.accept(new JvmTiChannel.LoadedClassInfo(internalName, modifiable,
+                    consumer.accept(new LoadedClassInfo(internalName, modifiable,
                             entityType == 1, entityType == 2));
                 }
                 return true;
@@ -309,9 +196,7 @@ public final class EcaTransformerManager {
                         + t.getMessage());
             }
         }
-        if (!EcaConfiguration.getDefenceEnableRadicalLogicSafely()) return false;
-        activateJvmTiIfNeeded();
-        return JvmTiChannel.forEachLoadedClass(consumer::accept);
+        return false;
     }
 
     private static boolean tryAgentLoadComplete() {
@@ -321,23 +206,6 @@ public final class EcaTransformerManager {
             return EcaClassTransformer.retransformLoadedClassesWithInstrumentation(inst);
         } catch (Throwable t) {
             AgentLogWriter.info("[EcaTransformerManager] Agent load-complete transform failed: " + t.getMessage());
-            return false;
-        }
-    }
-
-    private static boolean tryJvmTiLoadComplete() {
-        try {
-            activateJvmTiIfNeeded();
-            if (!JvmTiChannel.isAvailable()) return false;
-            EcaClassTransformer.ensureWhitelistLoaded();
-            RuntimeBytecodeProvider.beginSelfRetransform();
-            try {
-                return JvmTiChannel.retransformLoadedClasses(EcaClassTransformer::isJvmTiLoadCompleteTarget);
-            } finally {
-                RuntimeBytecodeProvider.endSelfRetransform();
-            }
-        } catch (Throwable t) {
-            AgentLogWriter.info("[EcaTransformerManager] JVMTI load-complete transform failed: " + t.getMessage());
             return false;
         }
     }
@@ -414,14 +282,8 @@ public final class EcaTransformerManager {
         PendingReceipt pending = PENDING_RECEIPTS.get(normalized);
         if (pending == null || pending.generation() != generation) return;
         if (EcaClassTransformer.verifyHealthTail(normalized, bytes)) {
-            Backend receiptBackend = generation == JVMTI_RECEIPT_GENERATION ? Backend.JVMTI : Backend.AGENT;
-            CONFIRMED_RECEIPTS.put(normalized, new ConfirmedReceipt(pending.epoch(), receiptBackend));
+            CONFIRMED_RECEIPTS.put(normalized, new ConfirmedReceipt(pending.epoch(), Backend.AGENT));
         }
-    }
-
-    private static byte[] confirmJvmTiReceipt(String internalName, byte[] bytes) {
-        confirmReceipt(internalName, bytes, JVMTI_RECEIPT_GENERATION);
-        return null;
     }
 
     private static boolean receiptConfirmed(String internalName, long epoch) {
@@ -468,51 +330,6 @@ public final class EcaTransformerManager {
         return successCount > 0;
     }
 
-    private static boolean retransformInternalNameWithJvmTi(String internalName) {
-        try {
-            activateJvmTiIfNeeded();
-            if (!JvmTiChannel.isAvailable()) return false;
-            EcaClassTransformer.ensureWhitelistLoaded();
-            RuntimeBytecodeProvider.beginSelfRetransform();
-            try {
-                return JvmTiChannel.retransformInternalName(internalName);
-            } finally {
-                RuntimeBytecodeProvider.endSelfRetransform();
-            }
-        } catch (Throwable t) {
-            AgentLogWriter.info("[EcaTransformerManager] JVMTI retransform failed for "
-                    + internalName + ": " + t.getMessage());
-            return false;
-        }
-    }
-
-    private static boolean retransformInternalNamesWithJvmTi(Set<String> internalNames) {
-        try {
-            activateJvmTiIfNeeded();
-            if (!JvmTiChannel.isAvailable()) return false;
-            EcaClassTransformer.ensureWhitelistLoaded();
-            RuntimeBytecodeProvider.beginSelfRetransform();
-            try {
-                return JvmTiChannel.retransformLoadedClasses(
-                        info -> internalNames.contains(info.internalName()));
-            } finally {
-                RuntimeBytecodeProvider.endSelfRetransform();
-            }
-        } catch (Throwable t) {
-            AgentLogWriter.info("[EcaTransformerManager] JVMTI selected-mod retransform failed: "
-                    + t.getMessage());
-            return false;
-        }
-    }
-
-    private static void ensureJvmTiTransformsRegistered() {
-        if (jvmTiTransformRegistered) return;
-        jvmTiTransformRegistered = true;
-        JvmTiChannel.addTransformFunction(EcaClassTransformer::transformStatic);
-        RuntimeBytecodeProvider.registerJvmTiCapture();
-        JvmTiChannel.addTransformFunction(EcaTransformerManager::confirmJvmTiReceipt);
-    }
-
     private static Class<?> loadClass(String internalName) {
         try {
             return Class.forName(internalName.replace('/', '.'), false,
@@ -524,6 +341,10 @@ public final class EcaTransformerManager {
                 return null;
             }
         }
+    }
+
+    private static boolean isCoremodBackend() {
+        return Backend.COREMOD.name().equals(System.getProperty(TRANSFORMATION_BACKEND_KEY));
     }
 
     private static int classifyEntity(Class<?> clazz) {
@@ -542,9 +363,9 @@ public final class EcaTransformerManager {
         if (allFailedLogged) return;
         allFailedLogged = true;
         try {
-            EcaLogger.info("WARNNING!ECA Agent and JVMTI all failed!!!");
+            EcaLogger.info("WARNING! ECA runtime transformation backend is unavailable");
         } catch (Throwable ignored) {
-            AgentLogWriter.info("WARNNING!ECA Agent and JVMTI all failed!!!");
+            AgentLogWriter.info("WARNING! ECA runtime transformation backend is unavailable");
         }
     }
 }

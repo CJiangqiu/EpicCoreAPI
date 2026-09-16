@@ -73,32 +73,6 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         return transformCount;
     }
 
-    /* 供 JVM TI 原生回调调用的静态入口——绕过 InstrumentationImpl，直接访问变换逻辑。
-       JVM TI 回调无法提供 ClassLoader/ProtectionDomain/classBeingRedefined，
-       但内部逻辑仅依赖 className 和字节码。强制兼容模式下跳过全部转换。 */
-    public static byte[] transformStatic(String className, byte[] classfileBuffer) {
-        if (className == null) return null;
-        RuntimeBytecodeProvider.captureAnalysisInput(className, classfileBuffer);
-        if (FORCE_COMPATIBILITY_MODE) return null;
-        // 实体健康 hook 目标（LivingEntity/Entity 及已知子类）绕过 net.minecraft 系统保护，只施加 HEAD hook
-        if (isHealthHookTarget(className) && TransformerWhitelist.isSystemProtectedInternal(className)) {
-            try {
-                return SINGLETON.doHookTransform(className, classfileBuffer);
-            } catch (Throwable t) {
-                AgentLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
-                return null;
-            }
-        }
-        if (TransformerWhitelist.isSystemProtectedInternal(className)) return null;
-        try {
-            // 通过静态实例调用，转换器内部包含非 static visitor
-            return SINGLETON.doTransform(className, classfileBuffer);
-        } catch (Throwable t) {
-            AgentLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
-            return null;
-        }
-    }
-
     static byte[] transformHealthTail(String className, byte[] classfileBuffer) {
         if (className == null || classfileBuffer == null) return null;
         if (FORCE_COMPATIBILITY_MODE) return null;
@@ -153,7 +127,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
                 || KNOWN_ENTITY_ONLY_CLASSES.contains(className);
     }
 
-    /* 单例实例，供 transformStatic + JVM TI 回调复用 */
+    // 末端健康转换复用同一实例，避免重复构造访问器。
     private static final EcaClassTransformer SINGLETON = new EcaClassTransformer();
 
     /* 标记当前线程正在执行 ECA 自己发起的 retransform。
@@ -346,30 +320,6 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         } finally {
             OWN_RETRANSFORM.remove();
         }
-    }
-
-    // 返回 1=LivingEntity子类, 2=Entity子类(非LivingEntity), 0=都不是
-    static void noteLoadedClass(String internalName, boolean livingEntity, boolean entityOnly) {
-        if (internalName == null) return;
-        if (livingEntity) {
-            KNOWN_LIVING_ENTITY_CLASSES.add(internalName);
-        } else if (entityOnly) {
-            KNOWN_ENTITY_ONLY_CLASSES.add(internalName);
-        }
-    }
-
-    static boolean isJvmTiLoadCompleteTarget(JvmTiChannel.LoadedClassInfo info) {
-        if (info == null || info.internalName() == null) return false;
-        String internalName = info.internalName();
-        noteLoadedClass(internalName, info.livingEntity(), info.entityOnly());
-        if (LoadingScreenTransformer.ENABLED && LoadingScreenTransformer.TARGET_CLASS.equals(internalName)) {
-            return true;
-        }
-        if (ContainerReplacementTransformer.isTarget(internalName)) {
-            return true;
-        }
-        return info.livingEntity() || info.entityOnly()
-                || LIVING_ENTITY.equals(internalName) || ENTITY.equals(internalName);
     }
 
     private static int classifyEntity(Class<?> clazz) {

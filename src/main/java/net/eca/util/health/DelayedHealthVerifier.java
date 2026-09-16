@@ -29,9 +29,15 @@ public final class DelayedHealthVerifier {
 
     /* 待复查上限。逐 tick 改血的调用方按实体去重后只占一条，正常规模远达不到此数。 */
     private static final int MAX_PENDING = 1024;
+    private static final int MAX_CONVERGENCE_TICKS = 600;
+    private static final int MAX_CONVERGENCE_FAILURES = 3;
 
     private record Pending(WeakReference<LivingEntity> entity, Class<?> entityClass, float target, int dueTick,
                            Ticket ticket) {}
+
+    private record DeathConvergence(WeakReference<LivingEntity> entity, UUID entityUuid,
+                                    HealthDataflowAnalyzer.EffectiveHealthModel model,
+                                    int nextTick, int expiresTick, int failures) {}
 
     public record Ticket(int entityId, UUID entityUuid, long revision) {}
 
@@ -39,6 +45,7 @@ public final class DelayedHealthVerifier {
        put 覆盖即可完成去重，同时使上限检查不必遍历链表。
        id 取自 Entity.ENTITY_COUNTER，单次服务器运行内跨维度唯一；重启后会重排，故须在停服时清空。 */
     private static final Map<Integer, Pending> PENDING = new ConcurrentHashMap<>();
+    private static final Map<Integer, DeathConvergence> DEATH_CONVERGENCE = new ConcurrentHashMap<>();
     private static final Set<String> ROLLBACK_DUMPED = ConcurrentHashMap.newKeySet();
     private static final AtomicBoolean SATURATION_DUMPED = new AtomicBoolean();
     private static final AtomicLong NEXT_REVISION = new AtomicLong();
@@ -76,22 +83,42 @@ public final class DelayedHealthVerifier {
         return ticket;
     }
 
+    /* 多阶段实体会在阶段转换中回复已归零的内部生命。零目标来自生命周期阈值时，
+       在有限时间内持续收敛同一权威，让实体自行推进阶段与死亡许可。 */
+    public static void scheduleDeathConvergence(LivingEntity entity,
+                                                HealthDataflowAnalyzer.EffectiveHealthModel model) {
+        if (entity == null || model == null || entity instanceof Player) return;
+        if (entity.level() == null || entity.level().isClientSide) return;
+        MinecraftServer server = entity.level().getServer();
+        if (server == null) return;
+        if (DEATH_CONVERGENCE.size() >= MAX_PENDING
+                && !DEATH_CONVERGENCE.containsKey(entity.getId())) return;
+        int now = server.getTickCount();
+        DEATH_CONVERGENCE.put(entity.getId(), new DeathConvergence(new WeakReference<>(entity), entity.getUUID(),
+                model, now + 1, now + MAX_CONVERGENCE_TICKS, 0));
+    }
+
     /* 服务端 tick 末尾复查到期条目。此时本 tick 的实体 tick 已经跑完，
        登记时若已在实体 tick 之后，到期判定会顺延一轮，因此复查前必然至少经过一次实体 tick。 */
     public static void onServerTick(MinecraftServer server) {
-        if (server == null || PENDING.isEmpty()) return;
+        if (server == null) return;
         int now = server.getTickCount();
-        for (Iterator<Map.Entry<Integer, Pending>> iterator = PENDING.entrySet().iterator(); iterator.hasNext(); ) {
-            Map.Entry<Integer, Pending> entry = iterator.next();
-            if (now < entry.getValue().dueTick()) continue;
-            iterator.remove();
-            check(entry.getKey(), entry.getValue());
+        /* 先重新施加零目标，再做延迟复查。阶段转换同 tick 的合法回复不能先被误报为回滚。 */
+        convergeDeaths(now);
+        if (!PENDING.isEmpty()) {
+            for (Iterator<Map.Entry<Integer, Pending>> iterator = PENDING.entrySet().iterator(); iterator.hasNext(); ) {
+                Map.Entry<Integer, Pending> entry = iterator.next();
+                if (now < entry.getValue().dueTick()) continue;
+                iterator.remove();
+                check(entry.getKey(), entry.getValue());
+            }
         }
     }
 
     //停服时清空：实体 id 会在下次启动重排，残留条目会拿旧目标值去比对新实体
     public static void clear() {
         PENDING.clear();
+        DEATH_CONVERGENCE.clear();
         ExternalMirrorWriter.clear();
         SATURATION_DUMPED.set(false);
     }
@@ -136,5 +163,43 @@ public final class DelayedHealthVerifier {
         }
         ExternalMirrorWriter.revert(ticket);
         EcaSetHealthManager.onDelayedRollback(cls);
+    }
+
+    private static void convergeDeaths(int now) {
+        if (DEATH_CONVERGENCE.isEmpty()) return;
+        for (Iterator<Map.Entry<Integer, DeathConvergence>> iterator =
+             DEATH_CONVERGENCE.entrySet().iterator(); iterator.hasNext(); ) {
+            Map.Entry<Integer, DeathConvergence> entry = iterator.next();
+            DeathConvergence convergence = entry.getValue();
+            if (now < convergence.nextTick()) continue;
+            LivingEntity entity = convergence.entity().get();
+            if (entity == null || entity.isRemoved()
+                    || entity.getId() != entry.getKey()
+                    || !entity.getUUID().equals(convergence.entityUuid())
+                    || !entity.isAlive() || entity.isDeadOrDying()) {
+                iterator.remove();
+                continue;
+            }
+            if (now >= convergence.expiresTick()) {
+                iterator.remove();
+                EcaLogger.info("[EffectiveHealth] death convergence expired entity={} storage={} ticks={}",
+                        entity.getClass().getName(), convergence.model().storage().label,
+                        MAX_CONVERGENCE_TICKS);
+                continue;
+            }
+
+            boolean wrote = HealthDataFlow.writeEffective(convergence.model(), entity, 0.0f);
+            int failures = wrote ? 0 : convergence.failures() + 1;
+            if (failures >= MAX_CONVERGENCE_FAILURES) {
+                iterator.remove();
+                EcaLogger.info("[EffectiveHealth] death convergence stopped entity={} storage={} failures={}",
+                        entity.getClass().getName(), convergence.model().storage().label, failures);
+                continue;
+            }
+            DeathConvergence next = new DeathConvergence(convergence.entity(),
+                    convergence.entityUuid(), convergence.model(), now + 1,
+                    convergence.expiresTick(), failures);
+            DEATH_CONVERGENCE.replace(entry.getKey(), convergence, next);
+        }
     }
 }

@@ -16,38 +16,71 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.lang.module.Configuration;
 import java.lang.reflect.Field;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
 /**
  * Earliest entry point via ITransformationService SPI.
- * Responsibilities: attach Agent, prepare JVMTI, and prevent dual loading.
+ * Responsibilities: select one transformation backend and prevent dual loading.
  */
 @SuppressWarnings("unchecked")
 public class EcaTransformationService implements ITransformationService {
 
     // Loading screen is an early-display feature and must run before LoadComplete.
     private static final Class<?>[] PRELOADED = preloadAll(
+        "net.eca.coremod.EcaCoreTransformer",
         "net.eca.coremod.LoadingScreenTransformer",
         "net.eca.coremod.LoadingScreenTransformer$DisplayWindowVisitor",
         "net.eca.coremod.LoadingScreenTransformer$PaintMethodVisitor",
         "net.eca.coremod.LoadingScreenTransformer$SafeWriter"
     );
 
+    public enum TransformationBackend {
+        AGENT,
+        COREMOD
+    }
+
+    private static final TransformationBackend TRANSFORMATION_BACKEND;
+    private static final String TRANSFORMATION_BACKEND_KEY = "net.eca.transform.backend";
+
     static {
         AgentLogWriter.resetForNewSession();
-        AgentLoader.enableSelfAttach();
-        AgentLoader.loadAgent();
-        // prepare() 必须在 dual loading 移除 ECA 模块之前：否则 JvmTiChannel 及其 JNA 依赖在模块移除后无法再加载（NoClassDefFoundError）
-        try {
-            boolean collectPreparedClasses = isRadicalDefenceRequestedEarly();
-            JvmTiChannel.prepare(collectPreparedClasses);
-        } catch (Throwable t) {
-            log("[CoreMod] JvmTiChannel prepare skipped: " + t.getMessage());
-        }
+        TRANSFORMATION_BACKEND = initializeTransformationBackend();
+        System.setProperty(TRANSFORMATION_BACKEND_KEY, TRANSFORMATION_BACKEND.name());
         enableEcaDualLoading();
-        initLoadingScreenTransformer();
+        if (TRANSFORMATION_BACKEND == TransformationBackend.AGENT) {
+            initLoadingScreenTransformer();
+        }
+        log("[CoreMod] Selected transformation backend: " + TRANSFORMATION_BACKEND);
+    }
+
+    private static TransformationBackend initializeTransformationBackend() {
+        EcaAgent.adoptSystemInstrumentation();
+        Instrumentation instrumentation = EcaAgent.getInstrumentation();
+        if (instrumentation == null) {
+            AgentLoader.enableSelfAttach();
+            AgentLoader.loadAgent();
+            instrumentation = EcaAgent.getInstrumentation();
+        }
+        if (instrumentation == null) {
+            log("[CoreMod] Agent unavailable; using load-time transformation backend");
+            return TransformationBackend.COREMOD;
+        }
+        try {
+            if (!instrumentation.isRetransformClassesSupported()) {
+                log("[CoreMod] Agent lacks retransformation support; using load-time transformation backend");
+                return TransformationBackend.COREMOD;
+            }
+        } catch (Throwable t) {
+            log("[CoreMod] Agent capability check failed; using load-time transformation backend: "
+                    + t.getMessage());
+            return TransformationBackend.COREMOD;
+        }
+        return TransformationBackend.AGENT;
+    }
+
+    public static TransformationBackend transformationBackend() {
+        return TRANSFORMATION_BACKEND;
     }
 
     private static Class<?>[] preloadAll(String... names) {
@@ -63,35 +96,9 @@ public class EcaTransformationService implements ITransformationService {
         return result;
     }
 
-    // CoreMod 阶段不加载 ForgeConfig；直接读取现有配置，避免默认关闭时保留全局类引用。
-    private static boolean isRadicalDefenceRequestedEarly() {
-        Path configPath = Path.of("config", "eca.toml");
-        if (!Files.isRegularFile(configPath)) return false;
-        try {
-            boolean defenceSection = false;
-            for (String rawLine : Files.readAllLines(configPath)) {
-                String line = rawLine.trim();
-                if (line.startsWith("[") && line.endsWith("]")) {
-                    defenceSection = "[Defence]".equals(line);
-                    continue;
-                }
-                if (!defenceSection || !line.startsWith("\"Enable Radical Logic\"")) continue;
-                int separator = line.indexOf('=');
-                if (separator < 0) return false;
-                String value = line.substring(separator + 1).trim();
-                int comment = value.indexOf('#');
-                if (comment >= 0) value = value.substring(0, comment).trim();
-                return Boolean.parseBoolean(value);
-            }
-        } catch (Throwable t) {
-            log("[CoreMod] Failed to read early defence config: " + t.getMessage());
-        }
-        return false;
-    }
-
     private static void initLoadingScreenTransformer() {
         try {
-            if (PRELOADED[0] == null || !LoadingScreenTransformer.ENABLED) {
+            if (PRELOADED[1] == null || !LoadingScreenTransformer.ENABLED) {
                 log("[CoreMod] Loading screen transformer disabled or unavailable");
                 return;
             }
@@ -150,8 +157,19 @@ public class EcaTransformationService implements ITransformationService {
     @Override
     @SuppressWarnings("rawtypes")
     public @NotNull List<ITransformer> transformers() {
-        // 不再注册 CoreMod 层 ITransformer：实体健康 hook 与容器替换全部改由 agent/JVMTI 在 LoadComplete 收尾施加，避免在 define 期抢跑其他 mod 的同类字节码处理
-        return List.of();
+        if (TRANSFORMATION_BACKEND == TransformationBackend.AGENT) {
+            return List.of();
+        }
+        if (PRELOADED[0] == null) {
+            log("[CoreMod] Load-time transformer unavailable");
+            return List.of();
+        }
+        try {
+            return List.of((ITransformer) PRELOADED[0].getDeclaredConstructor().newInstance());
+        } catch (Throwable t) {
+            log("[CoreMod] Failed to create load-time transformer: " + t.getMessage());
+            return List.of();
+        }
     }
 
     // 双重加载防护

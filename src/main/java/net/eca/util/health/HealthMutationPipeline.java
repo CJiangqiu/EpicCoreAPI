@@ -32,6 +32,7 @@ public final class HealthMutationPipeline {
         if (EcaSetHealthManager.applyNumericInversion(entity, target)) {
             return new Result(true, before);
         }
+        EcaSetHealthManager.scheduleEffectiveModelAnalysis(entity);
         return new Result(false, before);
     }
 
