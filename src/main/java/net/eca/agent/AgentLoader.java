@@ -19,6 +19,7 @@ import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 public final class AgentLoader {
 
     private static final String AGENT_RESOURCE_PATH = "/net/eca/agent/agent.jar";
+    private static volatile Path loadedAgentPath;
 
     // Adjust the local JVM's self-attach gate so ECA can obtain Instrumentation after startup.
     public static void enableSelfAttach() {
@@ -58,6 +59,7 @@ public final class AgentLoader {
                 }
                 Files.copy(in, agentJar, REPLACE_EXISTING);
             }
+            loadedAgentPath = agentJar.toAbsolutePath().normalize();
             agentJar.toFile().deleteOnExit();
             tmpDir.toFile().deleteOnExit();
 
@@ -83,6 +85,10 @@ public final class AgentLoader {
             AgentLogWriter.error("[AgentLoader] Failed to load agent", t);
             return false;
         }
+    }
+
+    public static Path getLoadedAgentPath() {
+        return loadedAgentPath;
     }
 
     private AgentLoader() {}

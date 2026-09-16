@@ -169,6 +169,12 @@ public class NetworkHandler {
                 .decoder(BossShowEditorHeartbeatPacket::decode)
                 .consumerMainThread(BossShowEditorHeartbeatPacket::handle)
                 .add();
+
+        CHANNEL.messageBuilder(BlenderAnimationSyncPacket.class, id(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(BlenderAnimationSyncPacket::encode)
+                .decoder(BlenderAnimationSyncPacket::decode)
+                .consumerMainThread(BlenderAnimationSyncPacket::handle)
+                .add();
     }
 
     /**
@@ -199,6 +205,17 @@ public class NetworkHandler {
                     PacketDistributor.TRACKING_ENTITY.with(() -> entity),
                     message
             );
+        }
+    }
+
+    /**
+     * Send a message to every client tracking an entity, including the entity when it is a player.
+     * @param message the message to send
+     * @param entity the tracked entity
+     */
+    public static <MSG> void sendToTrackingClientsAndSelf(MSG message, Entity entity) {
+        if (entity.level() instanceof ServerLevel) {
+            CHANNEL.send(PacketDistributor.TRACKING_ENTITY_AND_SELF.with(() -> entity), message);
         }
     }
 

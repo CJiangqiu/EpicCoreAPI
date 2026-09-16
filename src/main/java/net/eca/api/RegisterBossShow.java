@@ -13,7 +13,7 @@ import java.lang.annotation.Target;
  * when players enter a configured range of a target entity, or manually via the API. Cutscenes
  * are defined either:
  * <ul>
- *   <li>Purely in JSON (under {@code data/<modid>/bossshow/<name>.json}) - no Java class needed</li>
+ *   <li>Purely in JSON (under {@code data/<modid>/eca/bossshow/<name>.json}) - no Java class needed</li>
  *   <li>In Java by extending {@link net.eca.util.bossshow.BossShow}, which allows server-side
  *       keyframe event callbacks (e.g., summoning particles, triggering sounds, modifying
  *       the target entity). The JSON definition is auto-loaded from the declared id.</li>
@@ -21,7 +21,8 @@ import java.lang.annotation.Target;
  *
  * <p><b>Config override</b></p>
  * Files under {@code config/eca/bossshow/<namespace>/<name>.json} take precedence over mod-bundled
- * assets, allowing modpack authors to tune cutscenes without repacking.
+ * data, allowing modpack authors to tune cutscenes without repacking. The legacy
+ * {@code data/<modid>/bossshow/<name>.json} location remains supported.
  *
  * <p><b>Registration Process</b></p>
  * <ol>

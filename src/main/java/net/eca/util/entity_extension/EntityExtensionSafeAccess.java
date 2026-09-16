@@ -95,6 +95,37 @@ public final class EntityExtensionSafeAccess {
         }
     }
 
+    public static BlenderModelExtension blenderModelExtension(EntityExtension ext, LivingEntity entity) {
+        if (ext == null) {
+            return null;
+        }
+        if (entity != null) {
+            try {
+                return ext.blenderModelExtension(entity);
+            } catch (Throwable t) {
+                logOnce(ext, "blenderModelExtension(LivingEntity)", t);
+            }
+        }
+        try {
+            return ext.blenderModelExtension();
+        } catch (Throwable t) {
+            logOnce(ext, "blenderModelExtension()", t);
+            return null;
+        }
+    }
+
+    public static boolean usesBlenderReplacement(BlenderModelExtension extension) {
+        if (extension == null) {
+            return false;
+        }
+        try {
+            return extension.renderMode() == BlenderRenderMode.REPLACE;
+        } catch (Throwable t) {
+            logOnce(extension, "renderMode", t);
+            return false;
+        }
+    }
+
     public static GlobalFogExtension globalFogExtension(EntityExtension ext, LivingEntity entity) {
         if (ext == null) {
             return null;

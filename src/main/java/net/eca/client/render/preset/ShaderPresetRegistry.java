@@ -22,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /* 着色器预设自动发现注册表（消费端零代码加载器）。
    第三方 mod 只需把标准五文件（<name>.fsh + <name>_block.vsh/.json + <name>_entity.vsh/.json）
-   放进 assets/<ns>/shaders/core/，或把 ECA 导出的五文件放入 config/eca/shadergenerator/<ns>/<name>/，
+   放进 assets/<ns>/eca/shader_presets/，或把 ECA 导出的五文件放入 config/eca/shadergenerator/<ns>/<name>/，
    ECA 启动时自动扫描注册，无需任何 Java 代码或注解。
 
    预设 id = namespace:name。
@@ -95,28 +95,50 @@ public final class ShaderPresetRegistry {
         }
     }
 
-    /* assets/<ns>/shaders/core/<name>.fsh 匹配到 <name>_block.* + <name>_entity.* 即为预设。
-       UnionFileSystem 不支持 getPathMatcher → 不用 glob 过滤，手动 endsWith(".fsh")。 */
+    /* 新目录优先注册；旧 shaders/core 仅在没有同 id 新资源时提供兼容。 */
     private static void scanModPresets() {
         ModList.get().forEachModFile(modFile -> {
             for (IModInfo modInfo : modFile.getModInfos()) {
                 String modid = modInfo.getModId();
-                Path shaderDir = modFile.findResource("assets", modid, "shaders", "core");
-                if (shaderDir == null || !Files.isDirectory(shaderDir)) continue;
-                try (DirectoryStream<Path> files = Files.newDirectoryStream(shaderDir)) {
-                    for (Path fsh : files) {
-                        String fileName = fsh.getFileName().toString();
-                        if (!fileName.endsWith(".fsh")) continue;
-                        String name = fileName.substring(0, fileName.length() - 4);
-                        if (hasPresetFiles(shaderDir, name)) {
-                            register(new ResourceLocation(modid, name));
-                        }
-                    }
-                } catch (IOException | RuntimeException e) {
-                    EcaLogger.info("Shader preset scan skipped mod {}: {}", modid, e.toString());
-                }
+                Path canonical = modFile.findResource("assets", modid, "eca", "shader_presets");
+                scanModPresetDirectory(canonical, canonical, modid);
+                Path legacy = modFile.findResource("assets", modid, "shaders", "core");
+                scanModPresetDirectory(legacy, legacy, modid);
             }
         });
+    }
+
+    private static void scanModPresetDirectory(Path root, Path current, String namespace) {
+        if (root == null || current == null || !Files.isDirectory(current)) return;
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(current)) {
+            for (Path file : files) {
+                if (Files.isDirectory(file)) {
+                    scanModPresetDirectory(root, file, namespace);
+                    continue;
+                }
+                String fileName = file.getFileName().toString();
+                if (!fileName.endsWith(".fsh")) continue;
+                String name = fileName.substring(0, fileName.length() - 4);
+                if (!hasPresetFiles(current, name)) continue;
+                String relative = normalizeResourcePath(root.relativize(current.resolve(name)));
+                ResourceLocation id = ResourceLocation.tryParse(namespace + ":" + relative);
+                if (id != null) {
+                    register(id);
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            EcaLogger.info("Shader preset scan skipped mod {} directory {}: {}",
+                    namespace, current, e.toString());
+        }
+    }
+
+    private static String normalizeResourcePath(Path path) {
+        StringBuilder value = new StringBuilder();
+        for (Path part : path) {
+            if (!value.isEmpty()) value.append('/');
+            value.append(part);
+        }
+        return value.toString();
     }
 
     private static boolean hasPresetFiles(Path dir, String name) {

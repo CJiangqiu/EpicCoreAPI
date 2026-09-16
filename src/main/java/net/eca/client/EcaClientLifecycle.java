@@ -2,6 +2,7 @@ package net.eca.client;
 
 import net.eca.EcaMod;
 import net.eca.client.render.BlockExtensionRenderer;
+import net.eca.client.render.blender.BlenderModelManager;
 import net.eca.client.render.preset.ShaderPresetRegistry;
 import net.eca.compat.GeckoLibCompat;
 import net.eca.util.block_extension.BlockExtensionManager;
@@ -13,6 +14,7 @@ import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 import net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent;
+import net.minecraftforge.client.event.RegisterClientReloadListenersEvent;
 
 @OnlyIn(Dist.CLIENT)
 @Mod.EventBusSubscriber(modid = EcaMod.MOD_ID, bus = Mod.EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
@@ -29,6 +31,11 @@ public final class EcaClientLifecycle {
                 GeckoLibCompat.register();
             }
         });
+    }
+
+    @SubscribeEvent
+    public static void onRegisterReloadListeners(RegisterClientReloadListenersEvent event) {
+        event.registerReloadListener(BlenderModelManager.INSTANCE);
     }
 
     @SubscribeEvent

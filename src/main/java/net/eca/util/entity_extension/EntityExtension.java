@@ -89,6 +89,16 @@ public abstract class EntityExtension {
     }
 
     @OnlyIn(Dist.CLIENT)
+    public BlenderModelExtension blenderModelExtension() {
+        return null;
+    }
+
+    @OnlyIn(Dist.CLIENT)
+    public BlenderModelExtension blenderModelExtension(LivingEntity entity) {
+        return blenderModelExtension();
+    }
+
+    @OnlyIn(Dist.CLIENT)
     public GlobalFogExtension globalFogExtension() {
         return null;
     }

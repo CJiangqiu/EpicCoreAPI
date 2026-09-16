@@ -20,6 +20,11 @@ jarJar.enable()
 // The native extension has no Minecraft references and is isolated from the standard artifact.
 sourceSets {
     jvmti
+    pro {
+        java.srcDir 'src/pro/java'
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += output + compileClasspath
+    }
 }
 
 repositories {
@@ -54,6 +59,7 @@ minecraft {
 
 dependencies {
     jvmtiCompileOnly 'net.java.dev.jna:jna:5.12.1'
+    proImplementation files('lib/forgevm-0.7.0.jar')
     minecraft "net.minecraftforge:forge:${project.forge_version}"
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
     implementation 'org.reflections:reflections:0.9.12'
@@ -210,8 +216,33 @@ tasks.register('jvmtiJar', Jar) {
     }
 }
 
+tasks.register('proJar', Jar) {
+    group = 'build'
+    description = 'Builds the Pro variant from the standard reobfuscated mod plus the optional runtime controller.'
+    dependsOn tasks.named('reobfJarJar'), tasks.named('proClasses')
+    archiveFileName.set(tasks.named('jarJar').flatMap { it.archiveFileName }.map {
+        it.substring(0, it.length() - 4) + '-pro.jar'
+    })
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from({ zipTree(tasks.named('jarJar').get().archiveFile.get().asFile) }) {
+        exclude 'META-INF/MANIFEST.MF', 'logo.png'
+    }
+    from sourceSets.pro.output
+    from({ zipTree(file('lib/forgevm-0.7.0.jar')) }) {
+        include 'forgevm/**'
+    }
+    doFirst {
+        def standardJar = tasks.named('jarJar').get().archiveFile.get().asFile
+        new JarFile(standardJar).withCloseable { archive ->
+            archive.manifest.mainAttributes.each { key, value ->
+                manifest.attributes([(key.toString()): value.toString()])
+            }
+        }
+    }
+}
+
 tasks.named('build') {
-    dependsOn tasks.named('jvmtiJar')
+    dependsOn tasks.named('jvmtiJar'), tasks.named('proJar')
 }
 
 publishing {

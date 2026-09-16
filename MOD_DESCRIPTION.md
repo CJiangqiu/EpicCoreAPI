@@ -301,6 +301,8 @@ Note: Like entity extensions, each item can only have one extension. Duplicate r
 
 ### Shader Presets
 
+Packaged ECA-specific files use the common `assets/<namespace>/eca/<system>/` layout. Server-side definitions use the matching `data/<namespace>/eca/<system>/` layout, while standard Minecraft resources such as textures and language files remain in their vanilla directories. Legacy locations documented by earlier ECA versions continue to load as fallbacks.
+
 This mod also provides several shader presets for the entity extension and item extension systems, which can be used directly in your extensions. Simply use the corresponding preset class in place of your own RenderType holder. Each built-in preset class exposes 4 ready RenderTypes — `BOSS_BAR`, `BOSS_LAYER`, `SKYBOX` for entity extensions and `ITEM` for item extensions — plus `createEntityEffect(texture)` for entity texture overlays. Entity texture overlays are supported through `EntityLayerExtension.getTexture()` — return a texture to overlay it on the entity model, optionally combined with the shader RenderType for a texture‑plus‑shader effect (matching the boss‑bar overlay technique).
 
 Available presets:
@@ -341,7 +343,7 @@ ECA provides an in-game shader preset generator for building portable Minecraft 
 
 The generator edits a layered composition project. Each layer can contain multiple visual modules, including basic shapes, starry sky effects, magic symbols, and image elements. The editor supports live preview, undo/redo, layer visibility, layer ordering, blend modes, canvas editing, project save/load, five-file shader export, and project deletion (**File -> Delete Current Project**, which asks for confirmation and then permanently removes the project directory with its source, textures and imported dependencies).
 
-Each project also owns a five-file source workspace. Use **File -> Source Editor** to switch the same project to manual GLSL/JSON editing with a single-row menu, comment-based quick navigation, undo/redo, save, compile shortcuts, and debounced live preview. The right side places the preview above a scrollable compiler-output panel. Generated fragment shaders emit `// @eca-nav layer: ...` and `// @eca-nav element: ...` markers; manually written `// @eca-nav ...` comments create custom navigation points. Returning to the visual editor does not discard either representation. **File -> Import Shader Folder** opens the native folder picker at Forge's canonical game directory and copies a selected standard JSON/VSH/FSH core shader into a new local ECA project. A folder may contain multiple shader programs, in which case the editor asks which one to import. When a source path contains `assets/<modid>/shaders/core`, the project dialog pre-fills that Mod ID; otherwise the field remains empty. Standard three-file shaders are duplicated into the BLOCK and NEW_ENTITY source slots for independent compile validation; folders containing ECA's shared-fragment `_block`/`_entity` five-file layout preserve both profiles directly. The source folder is never modified.
+Each project also owns a five-file source workspace. Use **File -> Source Editor** to switch the same project to manual GLSL/JSON editing with a single-row menu, comment-based quick navigation, undo/redo, save, compile shortcuts, and debounced live preview. The right side places the preview above a scrollable compiler-output panel. Generated fragment shaders emit `// @eca-nav layer: ...` and `// @eca-nav element: ...` markers; manually written `// @eca-nav ...` comments create custom navigation points. Returning to the visual editor does not discard either representation. **File -> Import Shader Folder** opens the native folder picker at Forge's canonical game directory and copies a selected JSON/VSH/FSH shader into a new local ECA project. A folder may contain multiple shader programs, in which case the editor asks which one to import. When a source path is below `assets/<modid>/`, the project dialog pre-fills that Mod ID; otherwise the field remains empty. Standard three-file shaders are duplicated into the BLOCK and NEW_ENTITY source slots for independent compile validation; folders containing ECA's shared-fragment `_block`/`_entity` five-file layout preserve both profiles directly. The source folder is never modified.
 
 Import supports standard Minecraft core shader JSON/VSH/FSH resources. Common time, camera, scale, opacity, and cosmic-UV uniforms receive preview bindings. A shader that depends on a mod-specific render pipeline, Java callbacks, textures, or uniforms may still need a dedicated adapter; unsupported fragment structure is reported as a compile error instead of being silently rewritten.
 
@@ -350,11 +352,11 @@ Texture dependencies are resolved as well. When an imported shader references a 
 Preview targets currently include plane, item, entity, skybox, and Boss bar. The exported preset uses the standard core shader five-file layout:
 
 ```text
-assets/<namespace>/shaders/core/<name>.fsh
-assets/<namespace>/shaders/core/<name>_block.vsh
-assets/<namespace>/shaders/core/<name>_block.json
-assets/<namespace>/shaders/core/<name>_entity.vsh
-assets/<namespace>/shaders/core/<name>_entity.json
+assets/<namespace>/eca/shader_presets/<name>.fsh
+assets/<namespace>/eca/shader_presets/<name>_block.vsh
+assets/<namespace>/eca/shader_presets/<name>_block.json
+assets/<namespace>/eca/shader_presets/<name>_entity.vsh
+assets/<namespace>/eca/shader_presets/<name>_entity.json
 ```
 
 The fragment shader is shared by both profiles. The two vertex profiles are generated separately because Minecraft uses different vertex formats for different render targets:
@@ -370,7 +372,7 @@ Export modes:
 
 Project files are saved under `config/eca/shadergenerator/<namespace>/<name>/project.json`. Use **File -> Export As <shader>** to export a runtime-loadable five-file preset into `config/eca/shadergenerator/<namespace>/<name>/`. ECA automatically discovers presets from both mod assets and exported config presets. A preset ID is always `<namespace>:<name>`.
 
-For mod-packaged presets, place the five files under `src/main/resources/assets/<namespace>/shaders/core/`. You may also declare the preset with `@RegisterShaderPreset`. The annotation registers the preset ID during startup scanning and is useful for mods that want to expose custom presets through an explicit Java marker class.
+For mod-packaged presets, place the five files under `src/main/resources/assets/<namespace>/eca/shader_presets/`. The legacy `assets/<namespace>/shaders/core/` location remains supported, but the canonical ECA path takes precedence when both define the same ID. You may also declare the preset with `@RegisterShaderPreset`. The annotation registers the preset ID during startup scanning and is useful for mods that want to expose custom presets through an explicit Java marker class.
 
 At runtime, obtain the generated RenderTypes through `EcaPresets`, or query the preset object through `EcaAPI.shaderPreset(id)`. The returned `ShaderPreset` exposes `bossBar()`, `bossLayer()`, `skybox()`, `item()`, `block()`, `geoBlock(texture)` and `entityForPreview(texture)`; `EcaPresets` mirrors the first six as static lookups by preset id. `block()` and `geoBlock(texture)` are the BLOCK and NEW_ENTITY profiles used by block extensions. For entity texture overlays, use `EntityLayerExtension.getTexture()` with `bossLayer()`.
 
@@ -431,7 +433,7 @@ Flight inertia is disabled during recording by default. Enable `BossShow -> Enab
 
 Two ways to define a cutscene:
 
-1. **JSON only** — place a file at `data/<modid>/bossshow/<path>.json`. Loaded automatically on startup. No Java code needed if you don't need server-side event handling.
+1. **JSON only** — place a file at `data/<modid>/eca/bossshow/<path>.json`. Loaded automatically on startup. The legacy `data/<modid>/bossshow/<path>.json` location remains supported. No Java code is needed if you don't need server-side event handling.
 
 2. **Java + JSON** — extend `BossShow` and annotate with `@RegisterBossShow` to get server-side event callbacks during playback.
 
@@ -486,7 +488,7 @@ The `event_id` strings in the JSON above are dispatched to `onKeyframeEvent` on 
 
 **For Modpack Developers**
 
-- **Override cutscenes** — place your modified JSON at `config/eca/bossshow/<namespace>/<path>.json`. Config files override mod-bundled definitions (`data/<modid>/bossshow/`) with the same id.
+- **Override cutscenes** — place your modified JSON at `config/eca/bossshow/<namespace>/<path>.json`. Config files override mod-bundled definitions (`data/<modid>/eca/bossshow/`, with legacy support for `data/<modid>/bossshow/`) with the same id.
 - **Edit in-game** — `/eca bossShow edit` lets you re-record camera paths, edit any tick's pose, adjust triggers, add event/subtitle cues, and operate on frame ranges (copy / cut / delete / paste). Saves go to `config/eca/bossshow/`, leaving the mod jar untouched.
 - **Translate or rewrite subtitles** — create `config/eca/bossshow/lang/<locale>.json` (e.g. `en_us.json`, `zh_cn.json`). These take priority over the mod's own lang files for subtitle keys:
     ```json

@@ -12,6 +12,7 @@ import net.eca.util.ResurrectionManager;
 import net.eca.util.bossshow.BossShowEditorSessionManager;
 import net.eca.util.bossshow.BossShowPlaybackTracker;
 import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.entity_extension.BlenderAnimationManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
 import net.eca.util.faction.FactionManager;
@@ -69,6 +70,7 @@ public class EcaEventHandler {
         if (!(event.getLevel() instanceof ServerLevel serverLevel)) return;
         Entity entity = event.getEntity();
         if (entity instanceof LivingEntity living) {
+            BlenderAnimationManager.onEntityLeave(living);
             ForceLoadingManager.onEntityLeave(living, serverLevel);
             EntityExtensionManager.onEntityLeave(living, serverLevel);
         }
@@ -118,6 +120,7 @@ public class EcaEventHandler {
         if (event.getEntity() instanceof ServerPlayer player &&
             event.getTarget() instanceof LivingEntity living) {
             EntityExtensionManager.onStartTracking(player, living);
+            BlenderAnimationManager.syncToPlayer(player, living);
         }
     }
 
@@ -249,6 +252,7 @@ public class EcaEventHandler {
         InvulnerableEntityManager.clearAll();
         GlobalEffectOverrideManager.clearAllDimensions();
         EntityExtensionManager.clearAll();
+        BlenderAnimationManager.clear();
         FactionManager.clearAll();
         // 传入全部维度以便释放袭击期间强制加载的区块
         RaidManager.clearAll(event.getServer().getAllLevels());

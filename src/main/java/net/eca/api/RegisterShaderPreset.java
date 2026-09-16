@@ -9,8 +9,9 @@ import java.lang.annotation.Target;
  * Declares a shader preset for automatic registration and MCR discovery.
  *
  * <p>The {@code value} is the preset resource id (e.g. {@code "mymod:my_nebula"}).
- * ECA resolves the corresponding five standard core shader files from
- * {@code assets/<namespace>/shaders/core/<path>.*} at startup. The annotated class
+ * ECA resolves the corresponding five shader files from
+ * {@code assets/<namespace>/eca/shader_presets/<path>.*} at startup. The legacy
+ * {@code assets/<namespace>/shaders/core/<path>.*} location remains supported. The annotated class
  * itself serves as a discoverable marker — MCreator plugins can enumerate
  * {@code @RegisterShaderPreset} classes to populate preset dropdowns.
  *

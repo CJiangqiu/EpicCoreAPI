@@ -16,14 +16,12 @@ import java.nio.file.Paths;
 import java.security.ProtectionDomain;
 
 /**
- * Replaces the solid-color glClear in DisplayWindow.paintFramebuffer()
- * with a vertical gradient: purple (128,0,128) at edges → red (239,50,61) at center.
- * The unified load-complete transformer calls this implementation for DisplayWindow.
+ * Adds the optional branded intro and replaces the early clear colour with a vertical gradient.
  */
 public final class LoadingScreenTransformer implements ClassFileTransformer {
 
     public static final String TARGET_CLASS = "net/minecraftforge/fml/earlydisplay/DisplayWindow";
-    public static final boolean ENABLED = readConfig();
+    public static final boolean ENABLED = true;
 
     private static final String PAINT_METHOD  = "paintFramebuffer";
     private static final String PAINT_DESC    = "()V";
@@ -31,6 +29,9 @@ public final class LoadingScreenTransformer implements ClassFileTransformer {
     private static final String CONTEXT_TYPE  = "net/minecraftforge/fml/earlydisplay/RenderElement$DisplayContext";
     private static final String CONTEXT_DESC  = "L" + CONTEXT_TYPE + ";";
     private static final String GL            = "org/lwjgl/opengl/GL11C";
+    private static final String INTRO_CALLBACK_KEY = "net.eca.pro.intro.callback";
+    private static final String PREDICATE = "java/util/function/Predicate";
+    private static final boolean BACKGROUND_ENABLED = readConfig();
 
     private static final int GL_SCISSOR_TEST = 0x0C11;
     private static final int CLEAR_BITS      = 16640;
@@ -56,7 +57,7 @@ public final class LoadingScreenTransformer implements ClassFileTransformer {
             cr.accept(cv, ClassReader.EXPAND_FRAMES);
 
             if (cv.transformed) {
-                AgentLogWriter.info("[LoadingScreenTransformer] Transformed DisplayWindow.paintFramebuffer()");
+                AgentLogWriter.info("[LoadingScreenTransformer] Transformed early loading renderer");
                 return cw.toByteArray();
             }
             return null;
@@ -92,6 +93,40 @@ public final class LoadingScreenTransformer implements ClassFileTransformer {
             super(Opcodes.ASM9, mv);
         }
 
+        @Override
+        public void visitCode() {
+            super.visitCode();
+            Label callbackStart = new Label();
+            Label callbackEnd = new Label();
+            Label callbackFailure = new Label();
+            Label continueRendering = new Label();
+
+            mv.visitTryCatchBlock(callbackStart, callbackEnd, callbackFailure, "java/lang/Throwable");
+            mv.visitLabel(callbackStart);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                    "()Ljava/util/Properties;", false);
+            mv.visitLdcInsn(INTRO_CALLBACK_KEY);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+            mv.visitVarInsn(Opcodes.ASTORE, 1);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitTypeInsn(Opcodes.INSTANCEOF, PREDICATE);
+            mv.visitJumpInsn(Opcodes.IFEQ, callbackEnd);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, PREDICATE);
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitFieldInsn(Opcodes.GETFIELD, TARGET_CLASS, CONTEXT_FIELD, CONTEXT_DESC);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, PREDICATE, "test", "(Ljava/lang/Object;)Z", true);
+            mv.visitJumpInsn(Opcodes.IFEQ, callbackEnd);
+            mv.visitInsn(Opcodes.RETURN);
+
+            mv.visitLabel(callbackEnd);
+            mv.visitJumpInsn(Opcodes.GOTO, continueRendering);
+            mv.visitLabel(callbackFailure);
+            mv.visitInsn(Opcodes.POP);
+            mv.visitLabel(continueRendering);
+        }
+
         private void flush() {
             if (holdingSipush) {
                 holdingSipush = false;
@@ -102,7 +137,7 @@ public final class LoadingScreenTransformer implements ClassFileTransformer {
         @Override
         public void visitIntInsn(int opcode, int operand) {
             flush();
-            if (!replaced && opcode == Opcodes.SIPUSH && operand == CLEAR_BITS) {
+            if (BACKGROUND_ENABLED && !replaced && opcode == Opcodes.SIPUSH && operand == CLEAR_BITS) {
                 holdingSipush = true;
                 return;
             }

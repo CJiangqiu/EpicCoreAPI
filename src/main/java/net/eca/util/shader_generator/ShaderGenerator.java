@@ -35,7 +35,7 @@ public final class ShaderGenerator {
         }
 
         ShaderProject project = request.project();
-        String coreDirectory = "assets/" + project.namespace() + "/shaders/core/";
+        String coreDirectory = "assets/" + project.namespace() + "/eca/shader_presets/";
         String fragmentProgram = project.resourceId();
         List<ShaderExportBundle.File> files = new ArrayList<>();
 

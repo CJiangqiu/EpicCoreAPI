@@ -2,6 +2,7 @@ package net.eca.client.render.shader;
 
 import com.mojang.blaze3d.shaders.Uniform;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import net.eca.client.render.preset.ShaderPresetResourceProvider;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.resources.ResourceLocation;
@@ -22,7 +23,7 @@ public class ArcaneShader {
 
     public static void register(RegisterShadersEvent event) throws IOException {
         ShaderInstance arcaneShader = EcaShaderInstance.create(
-            event.getResourceProvider(),
+            ShaderPresetResourceProvider.wrap(event.getResourceProvider()),
             new ResourceLocation("eca", "arcane"),
             DefaultVertexFormat.BLOCK
         );

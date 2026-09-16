@@ -17,6 +17,7 @@ import net.eca.util.reflect.UnsafeUtil;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import net.eca.util.entity_extension.EntityExtension;
+import net.eca.util.entity_extension.BlenderAnimationManager;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
@@ -1726,7 +1727,7 @@ public final class EcaAPI {
     /**
      * Get a registered custom shader preset by its resource id (client only).
      * ECA auto-discovers presets from standard five-file sets under
-     * {@code config/eca/shadergenerator/} or {@code assets/<namespace>/shaders/core/}.
+     * {@code config/eca/shadergenerator/} or {@code assets/<namespace>/eca/shader_presets/}.
      * The returned object exposes BLOCK-profile RenderTypes for skyboxes, boss bars, and block extensions,
      * plus NEW_ENTITY-profile RenderTypes for entity, item, and GeckoLib block extension passes.
      * @param id the preset resource id
@@ -2580,6 +2581,97 @@ public final class EcaAPI {
      */
     public static Map<String, RaidDefinition> getAllRaidDefinitions() {
         return RaidManager.getAllDefinitions();
+    }
+
+    // 从头播放实体 GLB 模型中的指定动画
+    /**
+     * Start a named animation on an entity's GLB model from the beginning. The call must be made
+     * on the logical server. A non-looping animation holds its final pose until it is stopped or
+     * replaced.
+     *
+     * @param entity the entity whose model should animate
+     * @param animation the exact animation name exported in the GLB file
+     * @return true if the playback state was accepted and synchronized
+     */
+    public static boolean playAnimation(LivingEntity entity, String animation) {
+        return BlenderAnimationManager.play(entity, animation, 1.0f, false);
+    }
+
+    // 以指定速度和循环方式从头播放实体动画
+    /**
+     * Start a named animation on an entity's GLB model with explicit playback settings. The call
+     * must be made on the logical server. Calling this method again restarts the animation even
+     * when the animation name has not changed.
+     *
+     * @param entity the entity whose model should animate
+     * @param animation the exact animation name exported in the GLB file
+     * @param speed positive playback speed where {@code 1.0} is the exported speed
+     * @param loop whether playback should wrap at the end of the animation
+     * @return true if the playback state was accepted and synchronized
+     */
+    public static boolean playAnimation(LivingEntity entity, String animation, float speed, boolean loop) {
+        return BlenderAnimationManager.play(entity, animation, speed, loop);
+    }
+
+    // 停止显式动画并回退到实体扩展或模型定义的默认动画
+    /**
+     * Stop the explicitly played animation and return rendering to the animation selected by the
+     * entity extension or the model definition. The call must be made on the logical server.
+     *
+     * @param entity the animated entity
+     * @return true if an active explicit animation was stopped
+     */
+    public static boolean stopAnimation(LivingEntity entity) {
+        return BlenderAnimationManager.stop(entity);
+    }
+
+    // 暂停实体当前的显式动画并保持当前姿态
+    /**
+     * Pause the entity's current explicit animation while preserving its playback position. The
+     * call must be made on the logical server.
+     *
+     * @param entity the animated entity
+     * @return true if a running explicit animation was paused
+     */
+    public static boolean pauseAnimation(LivingEntity entity) {
+        return BlenderAnimationManager.pause(entity);
+    }
+
+    // 从暂停位置继续播放实体动画
+    /**
+     * Resume the entity's paused explicit animation from its preserved playback position. The call
+     * must be made on the logical server.
+     *
+     * @param entity the animated entity
+     * @return true if a paused explicit animation was resumed
+     */
+    public static boolean resumeAnimation(LivingEntity entity) {
+        return BlenderAnimationManager.resume(entity);
+    }
+
+    // 查询实体是否存在显式播放中的动画状态
+    /**
+     * Check whether an entity currently has an explicit animation playback state. A paused or
+     * completed non-looping animation remains active until it is stopped or replaced.
+     *
+     * @param entity the entity to inspect on the logical server
+     * @return true if the entity has an explicit animation playback state
+     */
+    public static boolean isAnimationPlaying(LivingEntity entity) {
+        return BlenderAnimationManager.isPlaying(entity, null);
+    }
+
+    // 查询实体当前是否显式播放指定名称的动画
+    /**
+     * Check whether an entity's explicit playback state names a specific animation. A paused or
+     * completed non-looping animation still counts as active until it is stopped or replaced.
+     *
+     * @param entity the entity to inspect on the logical server
+     * @param animation the exact animation name to compare
+     * @return true if the named animation is the entity's current explicit animation
+     */
+    public static boolean isAnimationPlaying(LivingEntity entity, String animation) {
+        return animation != null && BlenderAnimationManager.isPlaying(entity, animation);
     }
 
     private EcaAPI() {}

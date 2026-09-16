@@ -28,8 +28,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  *   <li><b>Code</b> — Classes annotated {@code @RegisterBossShow} register a {@link BossShow}
  *       instance in a static block. This provides server-side event hooks (onKeyframeEvent etc).</li>
- *   <li><b>JSON</b> — Definitions loaded from {@code config/eca/bossshow/<namespace>/<name>.json}.
- *       These provide the keyframes, trigger config, and target entity type.</li>
+ *   <li><b>JSON</b> — Definitions bundled under
+ *       {@code data/<namespace>/eca/bossshow/<name>.json} or loaded from
+ *       {@code config/eca/bossshow/<namespace>/<name>.json}. These provide the keyframes,
+ *       trigger config, and target entity type.</li>
  * </ul>
  *
  * <p>A cutscene is playable if at least a JSON definition exists. If a code hook also exists
@@ -83,15 +85,20 @@ public final class BossShowManager {
         autoGenerateMissingTemplates();
     }
 
-    //从所有 mod jar 的 data/<modid>/bossshow/**/*.json 加载定义（Source.MOD）
+    // 从全部 mod 加载定义：新 eca/bossshow 路径覆盖旧 bossshow 路径
     private static void loadModDataDefinitions() {
         int[] count = {0};
         ModList.get().forEachModFile(modFile -> {
             for (IModInfo modInfo : modFile.getModInfos()) {
                 String modid = modInfo.getModId();
-                Path bossshowDir = modFile.findResource("data", modid, "bossshow");
-                if (!Files.isDirectory(bossshowDir)) continue;
-                count[0] += scanModDataDirectory(bossshowDir, bossshowDir, modid);
+                Path legacyDir = modFile.findResource("data", modid, "bossshow");
+                if (legacyDir != null && Files.isDirectory(legacyDir)) {
+                    count[0] += scanModDataDirectory(legacyDir, legacyDir, modid);
+                }
+                Path canonicalDir = modFile.findResource("data", modid, "eca", "bossshow");
+                if (canonicalDir != null && Files.isDirectory(canonicalDir)) {
+                    count[0] += scanModDataDirectory(canonicalDir, canonicalDir, modid);
+                }
             }
         });
         if (count[0] > 0) {

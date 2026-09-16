@@ -1,7 +1,9 @@
 package net.eca.agent;
 
+import java.io.RandomAccessFile;
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Instrumentation entry point for defensive entity-state protection and compatibility
@@ -21,9 +23,10 @@ public final class EcaAgent {
         AgentLogWriter.info("[EcaAgent] Instrumentation acquired (agent ClassLoader)");
 
         // The coremod loader may hold a separate EcaAgent class with its own static state.
-        if (args != null) {
+        if (args != null && !args.isBlank()) {
             bridgeInstrumentation(args, inst);
         }
+        signalRelaunchReady();
     }
 
     // Share the JVM-provided handle with ECA's copy in the caller's ClassLoader.
@@ -83,6 +86,19 @@ public final class EcaAgent {
             return true;
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    private static void signalRelaunchReady() {
+        String pipe = System.getProperty("forgevm.relaunch.readyPipe");
+        String nonce = System.getProperty("forgevm.relaunch.readyNonce");
+        if (pipe == null || pipe.isBlank() || nonce == null || nonce.isBlank()) return;
+        try (RandomAccessFile ready = new RandomAccessFile(pipe, "rw")) {
+            ready.write((nonce + "\n").getBytes(StandardCharsets.UTF_8));
+            System.clearProperty("forgevm.relaunch.readyNonce");
+            AgentLogWriter.info("[EcaAgent] Trusted relaunch handoff completed");
+        } catch (Throwable t) {
+            AgentLogWriter.warn("[EcaAgent] Trusted relaunch handoff failed: " + t.getMessage());
         }
     }
 

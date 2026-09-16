@@ -27,6 +27,7 @@ import java.lang.annotation.Target;
  *     <ul>
  *       <li>{@code BossBarExtension} - Custom boss health bar (single GUI layer with texture/shader support)</li>
  *       <li>{@code EntityLayerExtension} - Additional render layer on entity model</li>
+ *       <li>{@code BlenderModelExtension} - GLB model attached to or replacing the entity model</li>
  *     </ul>
  *   </li>
  *   <li><b>Global-Level</b> (per-dimension, highest priority wins):

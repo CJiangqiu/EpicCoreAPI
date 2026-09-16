@@ -43,7 +43,7 @@ public final class ShaderSourceAssembler {
             fragment = addVisualOverlay(fragment, visualProject);
         }
 
-        String core = "assets/" + namespace + "/shaders/core/";
+        String core = "assets/" + namespace + "/eca/shader_presets/";
         List<ShaderExportBundle.File> files = new ArrayList<>();
         files.add(new ShaderExportBundle.File(core + path + ".fsh", fragment));
         files.add(new ShaderExportBundle.File(core + path + "_block.vsh",
@@ -61,7 +61,7 @@ public final class ShaderSourceAssembler {
         ShaderExportBundle bundle
     ) {
         ShaderSourceWorkspace workspace = new ShaderSourceWorkspace();
-        String core = "assets/" + namespace + "/shaders/core/" + path;
+        String core = "assets/" + namespace + "/eca/shader_presets/" + path;
         put(workspace, ShaderSourceFile.FRAGMENT, bundle.file(core + ".fsh"));
         put(workspace, ShaderSourceFile.BLOCK_VERTEX, bundle.file(core + "_block.vsh"));
         put(workspace, ShaderSourceFile.BLOCK_JSON, bundle.file(core + "_block.json"));

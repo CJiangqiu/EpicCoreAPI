@@ -9,7 +9,7 @@ import net.minecraft.world.entity.EntityType;
  * Subclasses should be annotated with {@link net.eca.api.RegisterBossShow} and register
  * themselves in a static initializer via {@link BossShowManager#register(BossShow)}.
  *
- * Each BossShow must match a JSON file at {@code data/<namespace>/bossshow/<path>.json}
+ * Each BossShow must match a JSON file at {@code data/<namespace>/eca/bossshow/<path>.json}
  * (or an override at {@code config/eca/bossshow/<namespace>/<path>.json}). The Java class
  * exists so that cutscenes can react to keyframe events server-side.
  */

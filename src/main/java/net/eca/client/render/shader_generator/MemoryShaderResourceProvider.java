@@ -50,10 +50,13 @@ final class MemoryShaderResourceProvider implements ResourceProvider {
                 continue;
             }
             String path = file.relativePath().substring(prefix.length());
-            resources.put(
-                new ResourceLocation(namespace, path),
-                file.content().getBytes(StandardCharsets.UTF_8)
-            );
+            byte[] content = file.content().getBytes(StandardCharsets.UTF_8);
+            resources.put(new ResourceLocation(namespace, path), content);
+            String presetPrefix = "eca/shader_presets/";
+            if (path.startsWith(presetPrefix)) {
+                resources.put(new ResourceLocation(namespace,
+                    "shaders/core/" + path.substring(presetPrefix.length())), content);
+            }
         }
     }
 

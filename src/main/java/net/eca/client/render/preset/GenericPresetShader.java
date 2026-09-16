@@ -76,7 +76,9 @@ final class GenericPresetShader {
 
         void reload(ResourceProvider provider) {
             try {
-                ShaderInstance instance = EcaShaderInstance.create(provider, location, format);
+                ShaderInstance instance = EcaShaderInstance.create(
+                    ShaderPresetResourceProvider.wrap(provider), location, format
+                );
                 this.shader = instance;
                 this.timeUniform = instance.getUniform("GameTime");
                 this.cameraYawUniform = instance.getUniform("CameraYaw");

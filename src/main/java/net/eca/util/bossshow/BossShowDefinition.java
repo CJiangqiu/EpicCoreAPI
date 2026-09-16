@@ -45,7 +45,7 @@ public final class BossShowDefinition {
     }
 
     public enum Source {
-        MOD,    //来自 mod jar 内 data/<modid>/bossshow/
+        MOD,    // 来自 mod jar 内 data/<modid>/eca/bossshow/ 或兼容旧目录
         CONFIG, //来自 config/eca/bossshow/<ns>/<name>.json（覆盖 MOD）
         CODE    //纯 Java @RegisterBossShow 类声明的
     }
