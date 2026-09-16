@@ -8,7 +8,9 @@ import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 //Frame / Keyframe / Trigger 在 FriendlyByteBuf 上的共享序列化逻辑
 public final class BossShowNetCodec {
@@ -108,6 +110,47 @@ public final class BossShowNetCodec {
             out.add(new SubtitleCue(tick, text));
         }
         return out;
+    }
+
+    public static void writeEffectCues(FriendlyByteBuf buf, List<BossShowEffectCue> cues) {
+        buf.writeVarInt(cues.size());
+        for (BossShowEffectCue cue : cues) {
+            buf.writeVarInt(cue.tick());
+            buf.writeUtf(cue.type());
+            buf.writeUtf(cue.effect());
+            buf.writeVarInt(cue.durationTicks());
+            buf.writeVarInt(cue.fadeInTicks());
+            buf.writeVarInt(cue.fadeOutTicks());
+            buf.writeByte(cue.easing().ordinal());
+            buf.writeVarInt(cue.parameters().size());
+            cue.parameters().forEach((key, value) -> {
+                buf.writeUtf(key);
+                buf.writeFloat(value);
+            });
+        }
+    }
+
+    public static List<BossShowEffectCue> readEffectCues(FriendlyByteBuf buf) {
+        int count = buf.readVarInt();
+        List<BossShowEffectCue> result = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            int tick = buf.readVarInt();
+            String type = buf.readUtf(64);
+            String effect = buf.readUtf(128);
+            int duration = buf.readVarInt();
+            int fadeIn = buf.readVarInt();
+            int fadeOut = buf.readVarInt();
+            int easingIndex = buf.readByte() & 0xFF;
+            Curve[] curves = Curve.values();
+            Curve easing = easingIndex < curves.length ? curves[easingIndex] : Curve.NONE;
+            int parameterCount = buf.readVarInt();
+            Map<String, Float> parameters = new LinkedHashMap<>();
+            for (int j = 0; j < parameterCount; j++) {
+                parameters.put(buf.readUtf(128), buf.readFloat());
+            }
+            result.add(new BossShowEffectCue(tick, type, effect, duration, fadeIn, fadeOut, easing, parameters));
+        }
+        return result;
     }
 
     public static void writeTrigger(FriendlyByteBuf buf, Trigger trigger) {

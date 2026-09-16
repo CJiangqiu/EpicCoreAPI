@@ -4,6 +4,7 @@ uniform sampler2D Sampler0;
 uniform sampler2D Sampler1;
 uniform vec2 ScreenSize;
 uniform float Time;
+uniform float FilterStrength;
 
 in vec2 texCoord;
 
@@ -103,5 +104,5 @@ void main() {
     vec3 rainColor = black + green * digit * brightness;
 
     vec3 edgeColor = vec3(0.0, edge, 0.0);
-    fragColor = vec4(max(rainColor, edgeColor), 1.0);
+    fragColor = vec4(mix(texture(Sampler1, texCoord).rgb, max(rainColor, edgeColor), FilterStrength), 1.0);
 }

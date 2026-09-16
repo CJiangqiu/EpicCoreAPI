@@ -38,6 +38,12 @@
       "type": "float",
       "count": 1,
       "values": [0.0]
+    },
+    {
+      "name": "FilterStrength",
+      "type": "float",
+      "count": 1,
+      "values": [1.0]
     }
   ]
 }

@@ -16,7 +16,9 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EntityType;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /* JSON 编解码：format_version=2 使用 frames[]、events[] 和 subtitles[] 三条轨道。
  * 读取旧文件时从帧内 keyframe 子对象派生内容轨道。 */
@@ -83,14 +85,16 @@ public final class BossShowJsonCodec {
             boolean hasSubtitleTrack = root.has("subtitles") && root.get("subtitles").isJsonArray();
             List<EventCue> eventCues = hasEventTrack ? parseEventCues(root.getAsJsonArray("events")) : null;
             List<SubtitleCue> subtitleCues = hasSubtitleTrack ? parseSubtitleCues(root.getAsJsonArray("subtitles")) : null;
+            List<BossShowEffectCue> effectCues = root.has("effects") && root.get("effects").isJsonArray()
+                ? parseEffectCues(root.getAsJsonArray("effects")) : List.of();
             if (!hasEventTrack && !hasSubtitleTrack) {
-                return new BossShowDefinition(id, targetType, trigger, cinematic, allowRepeat,
-                    frames, source, anchorYawDeg);
+                eventCues = deriveEventCues(frames);
+                subtitleCues = deriveSubtitleCues(frames);
             }
             if (eventCues == null) eventCues = deriveEventCues(frames);
             if (subtitleCues == null) subtitleCues = deriveSubtitleCues(frames);
             return new BossShowDefinition(id, targetType, trigger, cinematic, allowRepeat,
-                frames, source, anchorYawDeg, eventCues, subtitleCues);
+                frames, source, anchorYawDeg, eventCues, subtitleCues, effectCues);
         } catch (Throwable t) {
             EcaLogger.error("BossShow {} JSON parse failed: {}", id, t.getMessage());
             return null;
@@ -124,6 +128,33 @@ public final class BossShowJsonCodec {
             JsonObject object = element.getAsJsonObject();
             if (!object.has("tick") || !object.has("text")) continue;
             result.add(new SubtitleCue(object.get("tick").getAsInt(), object.get("text").getAsString()));
+        }
+        return result;
+    }
+
+    private static List<BossShowEffectCue> parseEffectCues(JsonArray array) {
+        List<BossShowEffectCue> result = new ArrayList<>();
+        for (JsonElement element : array) {
+            if (!element.isJsonObject()) continue;
+            JsonObject object = element.getAsJsonObject();
+            if (!object.has("tick") || !object.has("type")) continue;
+            String type = object.get("type").getAsString();
+            String effect = object.has("effect") ? object.get("effect").getAsString()
+                : object.has("filter") ? object.get("filter").getAsString() : "";
+            int duration = object.has("duration") ? object.get("duration").getAsInt() : 20;
+            int fadeIn = object.has("fade_in") ? object.get("fade_in").getAsInt() : 0;
+            int fadeOut = object.has("fade_out") ? object.get("fade_out").getAsInt() : 0;
+            Curve easing = object.has("easing") ? Curve.fromKey(object.get("easing").getAsString()) : Curve.NONE;
+            Map<String, Float> parameters = new LinkedHashMap<>();
+            if (object.has("parameters") && object.get("parameters").isJsonObject()) {
+                for (Map.Entry<String, JsonElement> entry : object.getAsJsonObject("parameters").entrySet()) {
+                    if (entry.getValue().isJsonPrimitive() && entry.getValue().getAsJsonPrimitive().isNumber()) {
+                        parameters.put(entry.getKey(), entry.getValue().getAsFloat());
+                    }
+                }
+            }
+            result.add(new BossShowEffectCue(object.get("tick").getAsInt(), type, effect,
+                duration, fadeIn, fadeOut, easing, parameters));
         }
         return result;
     }
@@ -168,7 +199,7 @@ public final class BossShowJsonCodec {
 
     public static String serialize(BossShowDefinition def) {
         JsonObject root = new JsonObject();
-        root.addProperty("format_version", 2);
+        root.addProperty("format_version", 3);
         ResourceLocation typeKey = def.targetType() != null
             ? BuiltInRegistries.ENTITY_TYPE.getKey(def.targetType())
             : null;
@@ -224,6 +255,27 @@ public final class BossShowJsonCodec {
             subtitleArr.add(cueObj);
         }
         root.add("subtitles", subtitleArr);
+
+        JsonArray effectArr = new JsonArray();
+        for (BossShowEffectCue cue : def.effectCues()) {
+            JsonObject cueObj = new JsonObject();
+            cueObj.addProperty("tick", cue.tick());
+            cueObj.addProperty("type", cue.type());
+            if (BossShowEffectCue.FILTER.equals(cue.type())) {
+                cueObj.addProperty("filter", cue.effect());
+            } else if (!cue.effect().isEmpty()) {
+                cueObj.addProperty("effect", cue.effect());
+            }
+            cueObj.addProperty("duration", cue.durationTicks());
+            if (cue.fadeInTicks() > 0) cueObj.addProperty("fade_in", cue.fadeInTicks());
+            if (cue.fadeOutTicks() > 0) cueObj.addProperty("fade_out", cue.fadeOutTicks());
+            if (cue.easing() != Curve.NONE) cueObj.addProperty("easing", cue.easing().key());
+            JsonObject parameters = new JsonObject();
+            cue.parameters().forEach(parameters::addProperty);
+            cueObj.add("parameters", parameters);
+            effectArr.add(cueObj);
+        }
+        root.add("effects", effectArr);
 
         return GSON.toJson(root);
     }

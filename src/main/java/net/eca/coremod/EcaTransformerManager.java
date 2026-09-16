@@ -9,6 +9,8 @@ import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -23,6 +25,7 @@ public final class EcaTransformerManager {
     public enum Backend {
         AGENT,
         COREMOD,
+        JVMTI,
         NONE
     }
 
@@ -34,6 +37,13 @@ public final class EcaTransformerManager {
     private static final Map<String, PendingReceipt> PENDING_RECEIPTS = new ConcurrentHashMap<>();
     private static final Map<String, ConfirmedReceipt> CONFIRMED_RECEIPTS = new ConcurrentHashMap<>();
     private static volatile long terminalTransformGeneration;
+    private static final Object NATIVE_LOCK = new Object();
+    private static volatile boolean nativeActive;
+    private static final ThreadLocal<NativeRequest> NATIVE_REQUEST = new ThreadLocal<>();
+    private static final Set<Class<?>> NATIVE_HEALTH_CONFIRMED = ConcurrentHashMap.newKeySet();
+
+    private record NativeRequest(Set<Class<?>> targets, Map<Class<?>, byte[]> outputs,
+                                 Set<Class<?>> healthConfirmed, boolean health) {}
 
     private record PendingReceipt(long epoch, long generation) {}
     private record ConfirmedReceipt(long epoch, Backend backend) {}
@@ -51,6 +61,7 @@ public final class EcaTransformerManager {
 
     public static boolean applyLoadCompleteTransforms() {
         if (isCoremodBackend()) {
+            if (tryNativeLoadComplete()) return true;
             backend = Backend.COREMOD;
             return true;
         }
@@ -60,24 +71,26 @@ public final class EcaTransformerManager {
             return true;
         }
 
+        if (tryNativeLoadComplete()) return true;
+
         backend = Backend.NONE;
         logAllFailed();
         return false;
     }
 
     public static boolean retransformClass(Class<?> clazz) {
-        if (clazz == null || isCoremodBackend()) return false;
-        if (tryAgentRetransform(clazz)) {
+        if (clazz == null) return false;
+        if (!isCoremodBackend() && tryAgentRetransform(clazz)) {
             backend = Backend.AGENT;
             return true;
         }
 
-        return false;
+        return requestNative(List.of(clazz), false);
     }
 
     public static HealthTransformResult retransformHealthClass(Class<?> clazz, boolean refreshTerminal) {
         if (clazz == null) return new HealthTransformResult(Backend.NONE, false);
-        if (isCoremodBackend()) return new HealthTransformResult(Backend.COREMOD, false);
+        if (isCoremodBackend() && !nativeAllowed()) return new HealthTransformResult(Backend.COREMOD, false);
         if (EcaConfiguration.getForceCompatibilityModeSafely()) {
             return new HealthTransformResult(Backend.NONE, false);
         }
@@ -91,11 +104,15 @@ public final class EcaTransformerManager {
     public static boolean isHealthTransformConfirmed(Class<?> clazz) {
         if (clazz == null) return false;
         String internalName = clazz.getName().replace('.', '/');
-        return CONFIRMED_RECEIPTS.containsKey(internalName);
+        return CONFIRMED_RECEIPTS.containsKey(internalName)
+                || (nativeAllowed() && NATIVE_HEALTH_CONFIRMED.contains(clazz));
     }
 
     public static boolean isHealthTransformConfirmed(Class<?> clazz, Backend expectedBackend) {
         if (clazz == null || expectedBackend == null) return false;
+        if (expectedBackend == Backend.JVMTI) {
+            return nativeAllowed() && NATIVE_HEALTH_CONFIRMED.contains(clazz);
+        }
         ConfirmedReceipt receipt = CONFIRMED_RECEIPTS.get(clazz.getName().replace('.', '/'));
         return receipt != null && receipt.backend() == expectedBackend;
     }
@@ -103,12 +120,14 @@ public final class EcaTransformerManager {
     static void invalidateHealthTransformReceipt(String internalName) {
         if (internalName == null) return;
         CONFIRMED_RECEIPTS.remove(internalName.replace('.', '/'));
+        String normalized = internalName.replace('.', '/');
+        NATIVE_HEALTH_CONFIRMED.removeIf(type -> type.getName().replace('.', '/').equals(normalized));
     }
 
     private static HealthTransformResult retransformHealthClassLocked(
             Class<?> clazz, String internalName, boolean refreshTerminal) {
         Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst != null && isModifiable(inst, clazz)) {
+        if (!isCoremodBackend() && inst != null && isModifiable(inst, clazz)) {
             long generation = ensureTerminalAgentTransformers(inst, refreshTerminal);
             if (generation > 0L) {
                 long epoch = beginReceipt(internalName, generation);
@@ -124,23 +143,28 @@ public final class EcaTransformerManager {
             }
         }
 
+        if (requestNative(List.of(clazz), true) && NATIVE_HEALTH_CONFIRMED.contains(clazz)) {
+            return new HealthTransformResult(Backend.JVMTI, true);
+        }
         return new HealthTransformResult(Backend.NONE, false);
     }
 
     public static boolean retransformInternalName(String internalName) {
-        if (internalName == null || internalName.isEmpty() || isCoremodBackend()) return false;
+        if (internalName == null || internalName.isEmpty()) return false;
+        if (isCoremodBackend() && !nativeAllowed()) return false;
         Class<?> owner = loadClass(internalName);
-        if (owner != null && tryAgentRetransform(owner)) {
+        if (!isCoremodBackend() && owner != null && tryAgentRetransform(owner)) {
             backend = Backend.AGENT;
             return true;
         }
-        return false;
+        return owner != null ? requestNative(List.of(owner), false)
+                : requestNativeNames(Set.of(internalName));
     }
 
     public static boolean retransformLoadedInternalNames(Set<String> internalNames) {
-        if (internalNames == null || internalNames.isEmpty() || isCoremodBackend()) return false;
+        if (internalNames == null || internalNames.isEmpty()) return false;
         Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst != null) {
+        if (!isCoremodBackend() && inst != null) {
             List<Class<?>> targets = new ArrayList<>();
             try {
                 for (Class<?> clazz : inst.getAllLoadedClasses()) {
@@ -159,13 +183,13 @@ public final class EcaTransformerManager {
             }
         }
 
-        return false;
+        return requestNativeNames(internalNames);
     }
 
     public static boolean forEachLoadedClass(Consumer<Class<?>> consumer) {
-        if (consumer == null || isCoremodBackend()) return false;
+        if (consumer == null) return false;
         Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) return false;
+        if (inst == null || isCoremodBackend()) return forEachNativeClass(consumer);
         try {
             for (Class<?> clazz : inst.getAllLoadedClasses()) {
                 consumer.accept(clazz);
@@ -174,14 +198,14 @@ public final class EcaTransformerManager {
         } catch (Throwable t) {
             AgentLogWriter.info("[EcaTransformerManager] Agent loaded-class enumeration failed: "
                     + t.getMessage());
-            return false;
+            return forEachNativeClass(consumer);
         }
     }
 
     public static boolean forEachLoadedInternalName(Consumer<LoadedClassInfo> consumer) {
-        if (consumer == null || isCoremodBackend()) return false;
+        if (consumer == null) return false;
         Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst != null) {
+        if (!isCoremodBackend() && inst != null) {
             try {
                 for (Class<?> clazz : inst.getAllLoadedClasses()) {
                     String internalName = clazz.getName().replace('.', '/');
@@ -196,7 +220,11 @@ public final class EcaTransformerManager {
                         + t.getMessage());
             }
         }
-        return false;
+        return forEachNativeClass(type -> {
+            int entityType = classifyEntity(type);
+            consumer.accept(new LoadedClassInfo(type.getName().replace('.', '/'),
+                    NativeRuntimeBridge.isModifiable(type), entityType == 1, entityType == 2));
+        });
     }
 
     private static boolean tryAgentLoadComplete() {
@@ -246,6 +274,7 @@ public final class EcaTransformerManager {
                     @Override
                     public byte[] transform(ClassLoader loader, String name, Class<?> beingRedefined,
                                             ProtectionDomain domain, byte[] bytes) {
+                        if (NativeRuntimeBridge.isTransforming()) return null;
                         return EcaClassTransformer.transformHealthTail(name, bytes);
                     }
                 }, true);
@@ -253,6 +282,7 @@ public final class EcaTransformerManager {
                     @Override
                     public byte[] transform(ClassLoader loader, String name, Class<?> beingRedefined,
                                             ProtectionDomain domain, byte[] bytes) {
+                        if (NativeRuntimeBridge.isTransforming()) return null;
                         confirmReceipt(name, bytes, generation);
                         return null;
                     }
@@ -328,6 +358,149 @@ public final class EcaTransformerManager {
                     + " selected mod classes via agent");
         }
         return successCount > 0;
+    }
+
+    // Explicit targets preserve ClassLoader identity when a bridge requires native confirmation.
+    public static boolean retransformClassesWithNative(List<? extends Class<?>> classes) {
+        if (classes == null || classes.isEmpty()) return false;
+        return requestNative(classes, false);
+    }
+
+    private static boolean nativeAllowed() {
+        return NativeRuntimeBridge.isPackaged() && !EcaConfiguration.getForceCompatibilityModeSafely()
+                && EcaConfiguration.getDefenceEnableRadicalLogicSafely();
+    }
+
+    private static boolean ensureNativeActive() {
+        synchronized (NATIVE_LOCK) {
+            if (!nativeAllowed()) {
+                if (nativeActive) NativeRuntimeBridge.deactivate();
+                nativeActive = false;
+                NATIVE_HEALTH_CONFIRMED.clear();
+                return false;
+            }
+            if (nativeActive) return true;
+            try {
+                EcaClassTransformer.prepareNativeTargets(List.of());
+                boolean nativeOwnsLoads = isCoremodBackend();
+                nativeActive = NativeRuntimeBridge.activate(new ClassFileTransformer() {
+                    @Override
+                    public byte[] transform(ClassLoader loader, String name, Class<?> type,
+                                            ProtectionDomain domain, byte[] bytes) {
+                        NativeRequest request = NATIVE_REQUEST.get();
+                        if (type == null && nativeOwnsLoads) {
+                            RuntimeBytecodeProvider.captureAnalysisInput(name, bytes);
+                            // Coremod already handles protected base classes and containers at definition time.
+                            if (name == null || TransformerWhitelist.isSystemProtectedInternal(name)) return null;
+                            return EcaClassTransformer.transformNative(name, null, bytes, false);
+                        }
+                        if (request == null || type == null || !request.targets().contains(type)) return null;
+                        String internalName = type.getName().replace('.', '/');
+                        return EcaClassTransformer.transformNative(internalName, type, bytes, request.health());
+                    }
+                }, new ClassFileTransformer() {
+                    @Override
+                    public byte[] transform(ClassLoader loader, String name, Class<?> type,
+                                            ProtectionDomain domain, byte[] bytes) {
+                        NativeRequest request = NATIVE_REQUEST.get();
+                        if (type == null && nativeOwnsLoads) {
+                            RuntimeBytecodeProvider.captureNativeOutput(name, bytes);
+                            return null;
+                        }
+                        if (request == null && type != null) {
+                            // Leave fresh Agent receipts intact, but retire an older native confirmation.
+                            NATIVE_HEALTH_CONFIRMED.remove(type);
+                            return null;
+                        }
+                        if (request == null || type == null || !request.targets().contains(type)) return null;
+                        String internalName = type.getName().replace('.', '/');
+                        request.outputs().put(type, bytes.clone());
+                        if (request.health() && EcaClassTransformer.verifyHealthTail(internalName, bytes)) {
+                            request.healthConfirmed().add(type);
+                        }
+                        return null;
+                    }
+                });
+                return nativeActive;
+            } catch (Throwable t) {
+                AgentLogWriter.info("[EcaTransformerManager] Native activation failed: " + t);
+                return false;
+            }
+        }
+    }
+
+    private static boolean requestNative(List<? extends Class<?>> classes, boolean health) {
+        if (classes.isEmpty() || NATIVE_REQUEST.get() != null || !ensureNativeActive()) return false;
+        try {
+            List<Class<?>> targets = new ArrayList<>(classes.stream().filter(type -> type != null
+                    && NativeRuntimeBridge.isModifiable(type)).distinct().toList());
+            if (targets.isEmpty()) return false;
+            EcaClassTransformer.prepareNativeTargets(targets);
+            boolean anyConfirmed = false;
+            for (Class<?> type : targets) {
+                NativeRequest request = new NativeRequest(Set.of(type), new HashMap<>(), new HashSet<>(), health);
+                NATIVE_REQUEST.set(request);
+                RuntimeBytecodeProvider.beginSelfRetransform();
+                boolean applied;
+                try {
+                    applied = NativeRuntimeBridge.retransform(new Class<?>[]{type});
+                } finally {
+                    RuntimeBytecodeProvider.endSelfRetransform();
+                    NATIVE_REQUEST.remove();
+                }
+                // Callback output is provisional until RetransformClasses also reports success.
+                if (applied && request.outputs().containsKey(type)) {
+                    RuntimeBytecodeProvider.captureNativeOutput(type.getName().replace('.', '/'),
+                            request.outputs().get(type));
+                    if (!health || request.healthConfirmed().contains(type)) {
+                        if (health) NATIVE_HEALTH_CONFIRMED.add(type);
+                        anyConfirmed = true;
+                    }
+                }
+            }
+            if (anyConfirmed) backend = Backend.JVMTI;
+            return anyConfirmed;
+        } catch (Throwable t) {
+            AgentLogWriter.info("[EcaTransformerManager] Native request failed: " + t);
+            return false;
+        }
+    }
+
+    private static Class<?>[] nativeClasses() {
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst != null) {
+            try {
+                return inst.getAllLoadedClasses();
+            } catch (Throwable t) {
+                AgentLogWriter.info("[EcaTransformerManager] Agent enumeration unavailable: " + t);
+            }
+        }
+        return NativeRuntimeBridge.collectedClasses();
+    }
+
+    private static boolean requestNativeNames(Set<String> names) {
+        if (!ensureNativeActive()) return false;
+        List<Class<?>> targets = new ArrayList<>();
+        for (Class<?> type : nativeClasses()) {
+            if (names.contains(type.getName().replace('.', '/'))) targets.add(type);
+        }
+        return requestNative(targets, false);
+    }
+
+    private static boolean tryNativeLoadComplete() {
+        if (!ensureNativeActive()) return false;
+        List<Class<?>> targets = new ArrayList<>();
+        for (Class<?> type : nativeClasses()) {
+            if (EcaClassTransformer.isNativeLoadCompleteTarget(type)) targets.add(type);
+        }
+        return requestNative(targets, false);
+    }
+
+    private static boolean forEachNativeClass(Consumer<Class<?>> consumer) {
+        if (!ensureNativeActive()) return false;
+        Class<?>[] classes = nativeClasses();
+        for (Class<?> type : classes) consumer.accept(type);
+        return classes.length > 0;
     }
 
     private static Class<?> loadClass(String internalName) {

@@ -1,3 +1,5 @@
+import java.util.jar.JarFile
+
 plugins {
     id 'maven-publish'
     id 'idea'
@@ -14,6 +16,11 @@ base {
 }
 
 jarJar.enable()
+
+// The native extension has no Minecraft references and is isolated from the standard artifact.
+sourceSets {
+    jvmti
+}
 
 repositories {
     maven { url = "https://maven.minecraftforge.net/" }
@@ -46,6 +53,7 @@ minecraft {
 }
 
 dependencies {
+    jvmtiCompileOnly 'net.java.dev.jna:jna:5.12.1'
     minecraft "net.minecraftforge:forge:${project.forge_version}"
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
     implementation 'org.reflections:reflections:0.9.12'
@@ -166,6 +174,45 @@ tasks.register('devJar', Jar) {
 }
 
 build.dependsOn devJar
+
+tasks.register('jvmtiBackendJar', Jar) {
+    group = 'build'
+    description = 'Packages the optional JVMTI backend; JNA is supplied by the game runtime.'
+    dependsOn tasks.named('jvmtiClasses')
+    archiveFileName.set('jvmti-backend.jar')
+    destinationDirectory = layout.buildDirectory.dir('embedded-jvmti')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from sourceSets.jvmti.output
+}
+
+tasks.register('jvmtiJar', Jar) {
+    group = 'build'
+    description = 'Builds the _1 variant from the standard reobfuscated mod plus the native extension.'
+    dependsOn tasks.named('reobfJarJar'), tasks.named('jvmtiBackendJar')
+    archiveFileName.set(tasks.named('jarJar').flatMap { it.archiveFileName }.map {
+        it.substring(0, it.length() - 4) + '_1.jar'
+    })
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from({ zipTree(tasks.named('jarJar').get().archiveFile.get().asFile) }) {
+        exclude 'META-INF/MANIFEST.MF'
+    }
+    // Preserve the production manifest, including Mixin configuration, after reobfuscation.
+    doFirst {
+        def standardJar = tasks.named('jarJar').get().archiveFile.get().asFile
+        new JarFile(standardJar).withCloseable { archive ->
+            archive.manifest.mainAttributes.each { key, value ->
+                manifest.attributes([(key.toString()): value.toString()])
+            }
+        }
+    }
+    from(tasks.named('jvmtiBackendJar').flatMap { it.archiveFile }) {
+        into 'net/eca/optional'
+    }
+}
+
+tasks.named('build') {
+    dependsOn tasks.named('jvmtiJar')
+}
 
 publishing {
     publications {

@@ -4,6 +4,7 @@ uniform sampler2D Sampler0;
 uniform sampler2D Sampler1;
 uniform vec2 ScreenSize;
 uniform float Time;
+uniform float FilterStrength;
 
 in vec2 texCoord;
 out vec4 fragColor;
@@ -144,5 +145,5 @@ void main() {
     float lum = dot(result, vec3(0.299, 0.587, 0.114));
     result = mix(result, vec3(lum), 0.06);
 
-    fragColor = vec4(result, 1.0);
+    fragColor = vec4(mix(texture(Sampler1, texCoord).rgb, result, FilterStrength), 1.0);
 }

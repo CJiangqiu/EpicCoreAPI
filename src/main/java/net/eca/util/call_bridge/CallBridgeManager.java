@@ -126,18 +126,23 @@ public final class CallBridgeManager {
                 return;
             }
             registerWatchdogs(sourceKey, watchdogs);
-            boolean agentRequested = EcaTransformerManager.retransformLoadedInternalNames(watchdogs.keySet());
+            boolean transformRequested = EcaTransformerManager.retransformLoadedInternalNames(watchdogs.keySet());
             Set<String> confirmed = confirmedWatchdogs(watchdogs);
             Set<String> missing = new HashSet<>(watchdogs.keySet());
             missing.removeAll(confirmed);
+            if (!missing.isEmpty() && EcaTransformerManager.retransformClassesWithNative(
+                    missing.stream().map(watchdogs::get).toList())) {
+                confirmed.addAll(confirmedWatchdogs(watchdogs, missing));
+                missing.removeAll(confirmed);
+            }
             if (missing.isEmpty()) {
                 INSTALLED_SOURCES.add(sourceKey);
-                EcaLogger.info("[CallBridge] watchdog bridge confirmed classes={} agentRequested={} source={}",
-                        confirmed.size(), agentRequested, source.getLocation());
+                EcaLogger.info("[CallBridge] watchdog bridge confirmed classes={} transformRequested={} source={}",
+                        confirmed.size(), transformRequested, source.getLocation());
             } else {
                 PREPARATION_RETRY.put(sourceKey, System.nanoTime() + PREPARATION_RETRY_NANOS);
-                EcaLogger.info("[CallBridge] watchdog bridge unconfirmed confirmed={} missing={} agentRequested={} source={}",
-                        confirmed.size(), missing.size(), agentRequested, source.getLocation());
+                EcaLogger.info("[CallBridge] watchdog bridge unconfirmed confirmed={} missing={} transformRequested={} source={}",
+                        confirmed.size(), missing.size(), transformRequested, source.getLocation());
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;

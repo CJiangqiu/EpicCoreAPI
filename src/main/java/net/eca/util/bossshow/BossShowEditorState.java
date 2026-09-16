@@ -1,5 +1,6 @@
 package net.eca.util.bossshow;
 
+import net.eca.client.BossShowScreenEffectState;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowDefinition.EventCue;
 import net.eca.util.bossshow.BossShowDefinition.Keyframe;
@@ -35,6 +36,7 @@ public final class BossShowEditorState {
     private static final ArrayList<Frame> workingFrames = new ArrayList<>();
     private static final ArrayList<EventCue> workingEventCues = new ArrayList<>();
     private static final ArrayList<SubtitleCue> workingSubtitleCues = new ArrayList<>();
+    private static final ArrayList<BossShowEffectCue> workingEffectCues = new ArrayList<>();
     //当前选中的关键帧所在的帧下标（-1 = 无选中）
     private static int selectedKeyframeFrameIndex = -1;
     private static boolean dirty = false;
@@ -66,9 +68,10 @@ public final class BossShowEditorState {
     private static int outPoint = -1;
     //剪贴板仅在同一演出内有效，enter/beginSession/exit 时清空
     private static final ArrayList<Frame> clipboard = new ArrayList<>();
+    private static final ArrayList<BossShowEffectCue> effectClipboard = new ArrayList<>();
     //编辑快照仅在当前会话内有效。
-    private static final Deque<List<Frame>> undoStack = new ArrayDeque<>();
-    private static final Deque<List<Frame>> redoStack = new ArrayDeque<>();
+    private static final Deque<EditorSnapshot> undoStack = new ArrayDeque<>();
+    private static final Deque<EditorSnapshot> redoStack = new ArrayDeque<>();
     //仅当编辑器 Screen 打开时为 true（由 Screen init/removed 切换）
     private static boolean previewEnabled = false;
     private static final BossShowPose previewPose = new BossShowPose();
@@ -76,6 +79,8 @@ public final class BossShowEditorState {
     private static int poseCaptureFrame = -1;
     private static boolean previewPlaying = false;
     private static double previewCursor = 0.0;
+
+    private record EditorSnapshot(List<Frame> frames, List<BossShowEffectCue> effects) {}
 
     private BossShowEditorState() {}
 
@@ -90,6 +95,7 @@ public final class BossShowEditorState {
         workingFrames.clear();
         workingEventCues.clear();
         workingSubtitleCues.clear();
+        workingEffectCues.clear();
         selectedKeyframeFrameIndex = -1;
         dirty = false;
         availableDefs.clear();
@@ -99,11 +105,13 @@ public final class BossShowEditorState {
         backupFrames.clear();
         resetTimelineEditing();
         clipboard.clear();
+        effectClipboard.clear();
         undoStack.clear();
         redoStack.clear();
         poseCaptureArmed = false;
         poseCaptureFrame = -1;
         previewPlaying = false;
+        BossShowScreenEffectState.clear();
     }
 
     public static void enter(BossShowDefinition def) {
@@ -118,6 +126,8 @@ public final class BossShowEditorState {
         workingEventCues.addAll(def.eventCues());
         workingSubtitleCues.clear();
         workingSubtitleCues.addAll(def.subtitleCues());
+        workingEffectCues.clear();
+        workingEffectCues.addAll(def.effectCues());
         mergeContentCuesIntoFrames();
         selectedKeyframeFrameIndex = findFirstKeyframeIndex();
         dirty = false;
@@ -131,6 +141,7 @@ public final class BossShowEditorState {
         backupFrames.clear();
         resetTimelineEditing();
         clipboard.clear();
+        effectClipboard.clear();
         undoStack.clear();
         redoStack.clear();
         poseCaptureArmed = false;
@@ -168,6 +179,7 @@ public final class BossShowEditorState {
         workingFrames.clear();
         workingEventCues.clear();
         workingSubtitleCues.clear();
+        workingEffectCues.clear();
         selectedKeyframeFrameIndex = -1;
         dirty = false;
         availableDefs.clear();
@@ -176,11 +188,13 @@ public final class BossShowEditorState {
         backupFrames.clear();
         resetTimelineEditing();
         clipboard.clear();
+        effectClipboard.clear();
         undoStack.clear();
         redoStack.clear();
         poseCaptureArmed = false;
         poseCaptureFrame = -1;
         previewPlaying = false;
+        BossShowScreenEffectState.clear();
     }
 
     //=== 锚点 ===
@@ -653,7 +667,7 @@ public final class BossShowEditorState {
     //撤销最近一次时间轴修改。
     public static boolean undo() {
         if (undoStack.isEmpty() || recState != RecState.IDLE) return false;
-        redoStack.push(new ArrayList<>(workingFrames));
+        redoStack.push(snapshot());
         restoreSnapshot(undoStack.pop());
         return true;
     }
@@ -661,20 +675,26 @@ public final class BossShowEditorState {
     //重做最近一次被撤销的时间轴修改。
     public static boolean redo() {
         if (redoStack.isEmpty() || recState != RecState.IDLE) return false;
-        undoStack.push(new ArrayList<>(workingFrames));
+        undoStack.push(snapshot());
         restoreSnapshot(redoStack.pop());
         return true;
     }
 
     private static void pushUndoSnapshot() {
-        undoStack.push(new ArrayList<>(workingFrames));
+        undoStack.push(snapshot());
         while (undoStack.size() > MAX_UNDO_SNAPSHOTS) undoStack.removeLast();
         redoStack.clear();
     }
 
-    private static void restoreSnapshot(List<Frame> snapshot) {
+    private static EditorSnapshot snapshot() {
+        return new EditorSnapshot(new ArrayList<>(workingFrames), new ArrayList<>(workingEffectCues));
+    }
+
+    private static void restoreSnapshot(EditorSnapshot snapshot) {
         workingFrames.clear();
-        workingFrames.addAll(snapshot);
+        workingFrames.addAll(snapshot.frames());
+        workingEffectCues.clear();
+        workingEffectCues.addAll(snapshot.effects());
         rebuildContentCuesFromFrames();
         if (workingFrames.isEmpty()) {
             playhead = 0;
@@ -695,7 +715,8 @@ public final class BossShowEditorState {
         return new BossShowDefinition(
             editingId, targetType, trigger, cinematic, allowRepeat,
             new ArrayList<>(workingFrames), BossShowDefinition.Source.CONFIG, anchorYawDeg,
-            new ArrayList<>(workingEventCues), new ArrayList<>(workingSubtitleCues));
+            new ArrayList<>(workingEventCues), new ArrayList<>(workingSubtitleCues),
+            new ArrayList<>(workingEffectCues));
     }
 
     public static List<EventCue> getEventCues() {
@@ -704,6 +725,43 @@ public final class BossShowEditorState {
 
     public static List<SubtitleCue> getSubtitleCues() {
         return Collections.unmodifiableList(workingSubtitleCues);
+    }
+
+    public static List<BossShowEffectCue> getEffectCues() {
+        return Collections.unmodifiableList(workingEffectCues);
+    }
+
+    public static List<BossShowEffectCue> getEffectsAtTick(int tick) {
+        return workingEffectCues.stream().filter(cue -> cue.tick() == tick).toList();
+    }
+
+    public static void addEffect(BossShowEffectCue cue) {
+        if (cue == null || cue.tick() >= workingFrames.size()) return;
+        pushUndoSnapshot();
+        workingEffectCues.add(cue);
+        dirty = true;
+    }
+
+    public static void replaceEffect(BossShowEffectCue oldCue, BossShowEffectCue newCue) {
+        int index = workingEffectCues.indexOf(oldCue);
+        if (index < 0 || newCue == null) return;
+        pushUndoSnapshot();
+        workingEffectCues.set(index, newCue);
+        dirty = true;
+    }
+
+    public static void removeEffect(BossShowEffectCue cue) {
+        if (!workingEffectCues.contains(cue)) return;
+        pushUndoSnapshot();
+        workingEffectCues.remove(cue);
+        dirty = true;
+    }
+
+    public static void replaceEffectsAtTick(int tick, List<BossShowEffectCue> effects) {
+        pushUndoSnapshot();
+        workingEffectCues.removeIf(cue -> cue.tick() == tick);
+        if (effects != null) workingEffectCues.addAll(effects);
+        dirty = true;
     }
 
     public static boolean armPoseCapture() {
@@ -742,26 +800,38 @@ public final class BossShowEditorState {
 
     public static void stopPreviewPlayback() {
         previewPlaying = false;
+        BossShowScreenEffectState.clear();
     }
 
     public static void togglePreviewPlayback() {
         if (workingFrames.isEmpty()) return;
         if (previewPlaying) {
             previewPlaying = false;
+            BossShowScreenEffectState.clear();
             setPlayhead((int) Math.round(previewCursor));
             return;
         }
         previewCursor = Math.max(0, Math.min(playhead, workingFrames.size() - 1));
+        BossShowScreenEffectState.clear();
+        for (BossShowEffectCue cue : workingEffectCues) {
+            if (cue.tick() == (int) previewCursor) BossShowScreenEffectState.trigger(cue);
+        }
         previewPlaying = true;
     }
 
     public static void tickPreviewPlayback() {
         if (!previewPlaying || workingFrames.isEmpty()) return;
+        int previousTick = (int) Math.floor(previewCursor);
         previewCursor += 1.0;
         playhead = Math.max(0, Math.min((int) Math.floor(previewCursor), workingFrames.size() - 1));
+        BossShowScreenEffectState.tick();
+        for (BossShowEffectCue cue : workingEffectCues) {
+            if (cue.tick() > previousTick && cue.tick() <= playhead) BossShowScreenEffectState.trigger(cue);
+        }
         if (previewCursor >= workingFrames.size() - 1) {
             previewCursor = workingFrames.size() - 1;
             previewPlaying = false;
+            BossShowScreenEffectState.clear();
             setPlayhead((int) previewCursor);
         }
     }
@@ -830,6 +900,7 @@ public final class BossShowEditorState {
     public static void setPlayhead(int idx) {
         if (workingFrames.isEmpty()) { playhead = 0; return; }
         previewPlaying = false;
+        BossShowScreenEffectState.clear();
         playhead = Math.max(0, Math.min(idx, workingFrames.size() - 1));
     }
 
@@ -862,7 +933,14 @@ public final class BossShowEditorState {
     public static boolean copyRange() {
         if (recState != RecState.IDLE || !hasValidRange()) return false;
         clipboard.clear();
+        effectClipboard.clear();
         for (int i = inPoint; i <= outPoint; i++) clipboard.add(workingFrames.get(i));
+        for (BossShowEffectCue cue : workingEffectCues) {
+            if (cue.tick() >= inPoint && cue.tick() <= outPoint) {
+                effectClipboard.add(new BossShowEffectCue(cue.tick() - inPoint, cue.type(), cue.effect(),
+                    cue.durationTicks(), cue.fadeInTicks(), cue.fadeOutTicks(), cue.easing(), cue.parameters()));
+            }
+        }
         return true;
     }
 
@@ -871,7 +949,10 @@ public final class BossShowEditorState {
         if (recState != RecState.IDLE || !hasValidRange()) return false;
         pushUndoSnapshot();
         int at = inPoint;
+        int removed = outPoint - inPoint + 1;
         workingFrames.subList(inPoint, outPoint + 1).clear();
+        workingEffectCues.removeIf(cue -> cue.tick() >= inPoint && cue.tick() <= outPoint);
+        remapEffectsAfter(outPoint, -removed);
         afterRippleEdit(at);
         return true;
     }
@@ -887,7 +968,12 @@ public final class BossShowEditorState {
         if (recState != RecState.IDLE || clipboard.isEmpty()) return false;
         pushUndoSnapshot();
         int at = workingFrames.isEmpty() ? 0 : Math.max(0, Math.min(playhead, workingFrames.size()));
+        remapEffectsAfter(at - 1, clipboard.size());
         workingFrames.addAll(at, new ArrayList<>(clipboard));
+        for (BossShowEffectCue cue : effectClipboard) {
+            workingEffectCues.add(new BossShowEffectCue(at + cue.tick(), cue.type(), cue.effect(),
+                cue.durationTicks(), cue.fadeInTicks(), cue.fadeOutTicks(), cue.easing(), cue.parameters()));
+        }
         afterRippleEdit(at + clipboard.size() - 1);
         return true;
     }
@@ -903,6 +989,16 @@ public final class BossShowEditorState {
         }
         selectedKeyframeFrameIndex = -1;
         dirty = true;
+    }
+
+    private static void remapEffectsAfter(int tick, int offset) {
+        for (int i = 0; i < workingEffectCues.size(); i++) {
+            BossShowEffectCue cue = workingEffectCues.get(i);
+            if (cue.tick() > tick) {
+                workingEffectCues.set(i, new BossShowEffectCue(cue.tick() + offset, cue.type(), cue.effect(),
+                    cue.durationTicks(), cue.fadeInTicks(), cue.fadeOutTicks(), cue.easing(), cue.parameters()));
+            }
+        }
     }
 
     //=== 相机预览 ===

@@ -6,6 +6,7 @@ import net.eca.util.bossshow.BossShowDefinition;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowDefinition.Keyframe;
 import net.eca.util.bossshow.BossShowEditorState;
+import net.eca.util.bossshow.BossShowEffectCue;
 import net.eca.util.bossshow.Curve;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -29,7 +30,7 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
     private static final int TOP_HEIGHT = 24;
     private static final int INSPECTOR_HEIGHT = 66;
     private static final int DEFAULT_TIMELINE_HEIGHT = 76;
-    private static final int MIN_TIMELINE_HEIGHT = 55;
+    private static final int MIN_TIMELINE_HEIGHT = 68;
     private static final int MIN_PREVIEW_HEIGHT = 80;
     private static final int MENU_HEIGHT = 18;
     private static final int MENU_FILE = 0;
@@ -42,7 +43,7 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
     private static int preferredTimelineHeight = DEFAULT_TIMELINE_HEIGHT;
     private static boolean timelineCollapsed;
 
-    private enum SelectedTrack { CAMERA, EVENT, SUBTITLE }
+    private enum SelectedTrack { CAMERA, EVENT, SUBTITLE, EFFECT }
 
     private record ContextEntry(Component label, boolean enabled, Runnable action, List<ContextEntry> children) { }
 
@@ -54,6 +55,7 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
     private EditBox pitchBox;
     private EditBox eventIdBox;
     private EditBox subtitleBox;
+    private Button effectEditorBtn;
     private Button curveBtn;
     private Button addContentBtn;
     private Button removeContentBtn;
@@ -242,6 +244,9 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
         subtitleBox.setMaxLength(256);
         subtitleBox.setResponder(value -> updateSelectedContent(value, false));
         this.addRenderableWidget(subtitleBox);
+        effectEditorBtn = Button.builder(Component.empty(), b -> openEffectEditor())
+            .bounds(8, fieldY, this.width - 16, 18).build();
+        this.addRenderableWidget(effectEditorBtn);
         int controlsY = inspectorY + 40;
         int controlsGap = 4;
         int controlsWidth = Math.max(40, (this.width - 16 - controlsGap * 5) / 6);
@@ -281,7 +286,8 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
 
     private void onTimelineSelection(BossShowTimelineWidget.Track track, int tick) {
         selectedTrack = track == BossShowTimelineWidget.Track.EVENT ? SelectedTrack.EVENT
-            : track == BossShowTimelineWidget.Track.SUBTITLE ? SelectedTrack.SUBTITLE : SelectedTrack.CAMERA;
+            : track == BossShowTimelineWidget.Track.SUBTITLE ? SelectedTrack.SUBTITLE
+            : track == BossShowTimelineWidget.Track.EFFECT ? SelectedTrack.EFFECT : SelectedTrack.CAMERA;
         syncFromState();
     }
 
@@ -298,6 +304,9 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
             yawBox.visible = camera; pitchBox.visible = camera;
             eventIdBox.visible = selectedTrack == SelectedTrack.EVENT;
             subtitleBox.visible = selectedTrack == SelectedTrack.SUBTITLE;
+            effectEditorBtn.visible = selectedTrack == SelectedTrack.EFFECT;
+            int effectCount = BossShowEditorState.getEffectsAtTick(tick).size();
+            effectEditorBtn.setMessage(Component.translatable("gui.eca.bossshow.effect.edit", effectCount));
             if (frame != null) {
                 dxBox.setValue(format(frame.dx())); dyBox.setValue(format(frame.dy())); dzBox.setValue(format(frame.dz()));
                 yawBox.setValue(format(frame.yaw())); pitchBox.setValue(format(frame.pitch()));
@@ -313,8 +322,8 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
             subtitleBox.setEditable(hasFrame && selectedTrack == SelectedTrack.SUBTITLE && hasContent);
             curveBtn.active = hasContent && camera;
             curveBtn.setMessage(Component.translatable(hasContent ? keyframe.curve().translationKey() : Curve.NONE.translationKey()));
-            addContentBtn.active = hasFrame && !hasContent;
-            removeContentBtn.active = hasContent;
+            addContentBtn.active = hasFrame && (selectedTrack == SelectedTrack.EFFECT || !hasContent);
+            removeContentBtn.active = selectedTrack == SelectedTrack.EFFECT ? effectCount > 0 : hasContent;
             rangeBtn.active = BossShowEditorState.hasValidRange();
             previewBtn.setMessage(Component.translatable(BossShowEditorState.isPreviewPlaying()
                 ? "gui.eca.bossshow.editor.preview.stop" : "gui.eca.bossshow.editor.preview"));
@@ -364,8 +373,21 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
         } catch (NumberFormatException ignored) { }
     }
 
-    private void addContent() { if (BossShowEditorState.addContentAtPlayhead()) syncFromState(); closeDropdown(); }
-    private void removeContent() { if (BossShowEditorState.removeKeyframe(BossShowEditorState.getPlayhead())) syncFromState(); closeDropdown(); }
+    private void addContent() {
+        if (selectedTrack == SelectedTrack.EFFECT) { openEffectEditor(); return; }
+        if (BossShowEditorState.addContentAtPlayhead()) syncFromState();
+        closeDropdown();
+    }
+
+    private void removeContent() {
+        if (selectedTrack == SelectedTrack.EFFECT) {
+            List<BossShowEffectCue> effects =
+                BossShowEditorState.getEffectsAtTick(BossShowEditorState.getPlayhead());
+            if (!effects.isEmpty()) BossShowEditorState.removeEffect(effects.get(0));
+            syncFromState();
+        } else if (BossShowEditorState.removeKeyframe(BossShowEditorState.getPlayhead())) syncFromState();
+        closeDropdown();
+    }
 
     private void cycleCurve() {
         Keyframe keyframe = BossShowEditorState.getSelectedKeyframeData();
@@ -396,6 +418,12 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
     private void openSettings() { closeDropdown(); this.minecraft.setScreen(new BossShowEditorSettingsScreen()); }
     private void openRangeTransform() { closeDropdown(); if (BossShowEditorState.hasValidRange()) this.minecraft.setScreen(new BossShowRangeTransformScreen()); }
     private void openPathGenerator() { closeDropdown(); if (BossShowEditorState.frameCount() > 0) this.minecraft.setScreen(new BossShowPathGeneratorScreen()); }
+    private void openEffectEditor() {
+        closeDropdown();
+        if (BossShowEditorState.frameCount() > 0) {
+            this.minecraft.setScreen(new BossShowEffectEditorScreen(this, BossShowEditorState.getPlayhead()));
+        }
+    }
     private void setIn() { BossShowEditorState.setInPoint(BossShowEditorState.getPlayhead()); closeDropdown(); syncFromState(); }
     private void setOut() { BossShowEditorState.setOutPoint(BossShowEditorState.getPlayhead()); closeDropdown(); syncFromState(); }
     private void openShortcutHelp() { closeDropdown(); this.minecraft.setScreen(new BossShowShortcutHelpScreen()); }
@@ -428,7 +456,8 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
         NetworkHandler.sendToServer(new BossShowSaveEditorPacket(id, typeId, BossShowEditorState.getTrigger(),
             BossShowEditorState.isCinematic(), BossShowEditorState.isAllowRepeat(),
             new ArrayList<>(BossShowEditorState.getFrames()), BossShowEditorState.getAnchorYawDeg(),
-            new ArrayList<>(BossShowEditorState.getEventCues()), new ArrayList<>(BossShowEditorState.getSubtitleCues())));
+            new ArrayList<>(BossShowEditorState.getEventCues()), new ArrayList<>(BossShowEditorState.getSubtitleCues()),
+            new ArrayList<>(BossShowEditorState.getEffectCues())));
         BossShowDefinition snapshot = BossShowEditorState.buildDefinition();
         if (snapshot != null) BossShowEditorState.upsertAvailableDef(snapshot);
         BossShowEditorState.clearDirty();
@@ -625,6 +654,9 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
         } else if (selectedTrack == SelectedTrack.SUBTITLE) {
             g.drawString(this.font, Component.translatable("gui.eca.bossshow.editor.label.subtitle"),
                 8, inspectorY + 4, 0xFF858C9B, false);
+        } else if (selectedTrack == SelectedTrack.EFFECT) {
+            g.drawString(this.font, Component.translatable("gui.eca.bossshow.editor.track.effect"),
+                8, inspectorY + 4, 0xFF858C9B, false);
         }
     }
 
@@ -658,11 +690,15 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
                 () -> focusTrackContent(true)));
             entries.add(contextAction("gui.eca.bossshow.editor.context.delete_event",
                 keyframe != null && keyframe.eventId() != null, () -> deleteTrackContent(true)));
-        } else {
+        } else if (selectedTrack == SelectedTrack.SUBTITLE) {
             entries.add(contextAction("gui.eca.bossshow.editor.context.edit_subtitle", true,
                 () -> focusTrackContent(false)));
             entries.add(contextAction("gui.eca.bossshow.editor.context.delete_subtitle",
                 keyframe != null && keyframe.subtitleText() != null, () -> deleteTrackContent(false)));
+        } else {
+            entries.add(contextAction("gui.eca.bossshow.effect.open", true, this::openEffectEditor));
+            entries.add(contextAction("gui.eca.bossshow.effect.delete",
+                !BossShowEditorState.getEffectsAtTick(BossShowEditorState.getPlayhead()).isEmpty(), this::removeContent));
         }
         entries.add(contextAction("gui.eca.bossshow.editor.menu.set_in", true, this::setIn));
         entries.add(contextAction("gui.eca.bossshow.editor.menu.set_out", true, this::setOut));
@@ -719,6 +755,7 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
     private void deleteSelectedTrackContent() {
         if (selectedTrack == SelectedTrack.EVENT) deleteTrackContent(true);
         else if (selectedTrack == SelectedTrack.SUBTITLE) deleteTrackContent(false);
+        else if (selectedTrack == SelectedTrack.EFFECT) removeContent();
     }
 
     private void deleteTrackContent(boolean event) {
@@ -830,7 +867,7 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
         int newInspectorY = newTimelineY - INSPECTOR_HEIGHT;
         int deltaY = newInspectorY - inspectorY;
         for (AbstractWidget widget : new AbstractWidget[]{dxBox, dyBox, dzBox, yawBox, pitchBox,
-            eventIdBox, subtitleBox, curveBtn, addContentBtn, removeContentBtn, previewBtn, freeCameraBtn, rangeBtn}) {
+            eventIdBox, subtitleBox, effectEditorBtn, curveBtn, addContentBtn, removeContentBtn, previewBtn, freeCameraBtn, rangeBtn}) {
             widget.setY(widget.getY() + deltaY);
         }
         inspectorY = newInspectorY;

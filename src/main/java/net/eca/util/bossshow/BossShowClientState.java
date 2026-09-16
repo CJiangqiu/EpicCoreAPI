@@ -1,6 +1,7 @@
 package net.eca.util.bossshow;
 
 import net.eca.client.gui.BossShowEditorHomeScreen;
+import net.eca.client.BossShowScreenEffectState;
 import net.eca.config.EcaConfiguration;
 import net.eca.network.BossShowSkipPacket;
 import net.eca.network.BossShowStartPacket;
@@ -18,6 +19,7 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 
 import java.util.List;
+import java.util.Comparator;
 import java.util.UUID;
 
 /**
@@ -35,6 +37,8 @@ public final class BossShowClientState {
     private static double anchorX, anchorY, anchorZ;
     private static float anchorYaw;
     private static List<Frame> frames;
+    private static List<BossShowEffectCue> effectCues;
+    private static int nextEffectCueIndex;
     private static boolean cinematic;
     private static int tickCounter;
     private static final BossShowPose POSE = new BossShowPose();
@@ -56,6 +60,9 @@ public final class BossShowClientState {
         anchorZ = msg.anchorZ();
         anchorYaw = msg.anchorYaw();
         frames = msg.frames();
+        effectCues = msg.effectCues().stream().sorted(Comparator.comparingInt(BossShowEffectCue::tick)).toList();
+        nextEffectCueIndex = 0;
+        BossShowScreenEffectState.clear();
         cinematic = msg.cinematic();
         tickCounter = 0;
         active = true;
@@ -92,6 +99,9 @@ public final class BossShowClientState {
         targetUuid = null;
         targetType = null;
         frames = null;
+        effectCues = null;
+        nextEffectCueIndex = 0;
+        BossShowScreenEffectState.clear();
         tickCounter = 0;
         subtitleComponent = null;
         //如果 editor session 还活着（试播结束），自动回到 Home
@@ -107,10 +117,17 @@ public final class BossShowClientState {
         if (!active) return;
         NetworkHandler.sendToServer(new BossShowSkipPacket());
         active = false;
+        BossShowScreenEffectState.clear();
     }
 
     public static void tick() {
         if (!active) return;
+        BossShowScreenEffectState.tick();
+        while (effectCues != null && nextEffectCueIndex < effectCues.size()
+            && effectCues.get(nextEffectCueIndex).tick() <= tickCounter) {
+            BossShowScreenEffectState.trigger(effectCues.get(nextEffectCueIndex));
+            nextEffectCueIndex++;
+        }
         tickCounter++;
     }
 

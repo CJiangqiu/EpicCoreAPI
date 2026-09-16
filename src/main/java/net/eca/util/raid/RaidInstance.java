@@ -341,20 +341,25 @@ public class RaidInstance {
 
         for (RaidSpawnEntry entry : wave.getEntries()) {
             for (int i = 0; i < entry.getCount(); i++) {
-                if (spawnRaider(level, def, entry.getType(), wave, random, entry.getPostSpawn()) != null) {
+                if (spawnRaider(level, def, def.getRaiderFactionId(), entry.getType(), wave, random,
+                        entry.getPostSpawn()) != null) {
                     spawned++;
                 }
             }
         }
 
         for (RaidFactionSpawnEntry factionEntry : wave.getFactionEntries()) {
+            String factionId = factionEntry.getFactionId();
+            if (!FactionManager.isFactionRegistered(factionId) || !factionEntry.hasUsableWeights()) {
+                continue;
+            }
             for (int i = 0; i < factionEntry.getCount(); i++) {
                 EntityType<?> type = factionEntry.rollType(random);
                 if (type == null) {
                     // 本波没有可用权重，跳过该组剩余数量
                     break;
                 }
-                if (spawnRaider(level, def, type, wave, random, null) != null) {
+                if (spawnRaider(level, def, factionId, type, wave, random, null) != null) {
                     spawned++;
                 }
             }
@@ -385,10 +390,11 @@ public class RaidInstance {
         RaidSpawnEntry leaderEntry = wave.getLeaderEntry();
         if (leaderEntry == null) return false;
 
-        Entity leader = spawnRaider(level, def, leaderEntry.getType(), wave, random, leaderEntry.getPostSpawn());
+        String factionId = def.getRaiderFactionId();
+        Entity leader = spawnRaider(level, def, factionId, leaderEntry.getType(), wave, random,
+                leaderEntry.getPostSpawn());
         if (leader == null) return false;
 
-        String factionId = def.getRaiderFactionId();
         if (factionId == null || factionId.isEmpty()) {
             // 没有阵营就没有可领导的对象，该实体作为普通袭击者存在
             EcaLogger.info("[Raid] Raid {} ('{}') declares a wave leader but no raider faction — spawned as an ordinary raider",
@@ -402,7 +408,7 @@ public class RaidInstance {
         return true;
     }
 
-    private Entity spawnRaider(ServerLevel level, RaidDefinition def, EntityType<?> type,
+    private Entity spawnRaider(ServerLevel level, RaidDefinition def, String factionId, EntityType<?> type,
                                RaidWave wave, RandomSource random, Consumer<Mob> postSpawn) {
         if (type == null) return null;
 
@@ -425,21 +431,20 @@ public class RaidInstance {
             level.addFreshEntity(entity);
         }
 
-        registerRaider(entity, def);
+        registerRaider(entity, def, factionId);
         if (postSpawn != null && entity instanceof Mob mob) {
             postSpawn.accept(mob);
         }
         return entity;
     }
 
-    // 将实体登记为本场袭击的袭击者：跟踪、入营、注入寻路 Goal
-    private void registerRaider(Entity entity, RaidDefinition def) {
+    // 将实体登记为本场袭击的袭击者，并按生成来源入营、注入寻路 Goal
+    private void registerRaider(Entity entity, RaidDefinition def, String factionId) {
         UUID uuid = entity.getUUID();
         raiderUuids.add(uuid);
         raiderEntities.put(uuid, entity);
         raiderLastChunks.put(uuid, copyChunkPos(entity.chunkPosition()));
 
-        String factionId = def.getRaiderFactionId();
         if (factionId != null && !factionId.isEmpty()
                 && !FactionManager.joinFaction(entity, factionId) && !factionBindingWarned) {
             // 每场袭击只警告一次：绑定失败会让整批袭击者都失去敌我判定，逐个刷屏没有意义

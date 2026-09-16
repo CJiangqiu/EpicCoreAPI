@@ -4,6 +4,7 @@ uniform sampler2D Sampler0;
 uniform sampler2D Sampler1;
 uniform vec2 ScreenSize;
 uniform float Time;
+uniform float FilterStrength;
 
 in vec2 texCoord;
 out vec4 fragColor;
@@ -210,5 +211,5 @@ void main() {
     // Overall sickly green-yellow wash
     result = result * 0.88 + vec3(0.15, 0.28, 0.05) * 0.12;
 
-    fragColor = vec4(result, 1.0);
+    fragColor = vec4(mix(texture(Sampler1, texCoord).rgb, result, FilterStrength), 1.0);
 }

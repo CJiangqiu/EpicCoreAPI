@@ -98,8 +98,8 @@ public class EcaConfiguration {
         BUILDER.push("Defence");
 
         DEFENCE_ENABLE_RADICAL_LOGIC = BUILDER
-            .comment("Enable additional radical defence checks. WARNING: This may cause game instability!",
-                     "启用额外的激进防御检查。警告：可能导致游戏不稳定！")
+            .comment("Enable additional radical defence checks. The _1 build also enables JVMTI fallback when needed. WARNING: This may cause game instability!",
+                     "启用额外的激进防御检查；_1 构建还会在需要时启用 JVMTI 后备通道。警告：可能导致游戏不稳定！")
             .define("Enable Radical Logic", false);
 
         DEFENCE_INVULNERABLE_UNTARGETABLE = BUILDER

@@ -59,6 +59,7 @@ public final class BossShowDefinition {
     private final List<Frame> frames;
     private final List<EventCue> eventCues;
     private final List<SubtitleCue> subtitleCues;
+    private final List<BossShowEffectCue> effectCues;
     private final Source source;
     //录制时烤入的 anchor yaw：frame 的 anchor-local 编码参考系
     private final float anchorYawDeg;
@@ -72,7 +73,7 @@ public final class BossShowDefinition {
                               Source source,
                               float anchorYawDeg) {
         this(id, targetType, trigger, cinematic, allowRepeat, frames, source, anchorYawDeg,
-            deriveEventCues(frames), deriveSubtitleCues(frames));
+            deriveEventCues(frames), deriveSubtitleCues(frames), List.of());
     }
 
     public BossShowDefinition(ResourceLocation id,
@@ -85,6 +86,21 @@ public final class BossShowDefinition {
                               float anchorYawDeg,
                               List<EventCue> eventCues,
                               List<SubtitleCue> subtitleCues) {
+        this(id, targetType, trigger, cinematic, allowRepeat, frames, source, anchorYawDeg,
+            eventCues, subtitleCues, List.of());
+    }
+
+    public BossShowDefinition(ResourceLocation id,
+                              EntityType<?> targetType,
+                              Trigger trigger,
+                              boolean cinematic,
+                              boolean allowRepeat,
+                              List<Frame> frames,
+                              Source source,
+                              float anchorYawDeg,
+                              List<EventCue> eventCues,
+                              List<SubtitleCue> subtitleCues,
+                              List<BossShowEffectCue> effectCues) {
         this.id = id;
         this.targetType = targetType;
         this.trigger = trigger;
@@ -93,6 +109,7 @@ public final class BossShowDefinition {
         this.frames = Collections.unmodifiableList(new ArrayList<>(frames));
         this.eventCues = Collections.unmodifiableList(new ArrayList<>(eventCues != null ? eventCues : List.of()));
         this.subtitleCues = Collections.unmodifiableList(new ArrayList<>(subtitleCues != null ? subtitleCues : List.of()));
+        this.effectCues = Collections.unmodifiableList(new ArrayList<>(effectCues != null ? effectCues : List.of()));
         this.source = source;
         this.anchorYawDeg = anchorYawDeg;
     }
@@ -105,6 +122,7 @@ public final class BossShowDefinition {
     public List<Frame> frames() { return frames; }
     public List<EventCue> eventCues() { return eventCues; }
     public List<SubtitleCue> subtitleCues() { return subtitleCues; }
+    public List<BossShowEffectCue> effectCues() { return effectCues; }
     public Source source() { return source; }
     public float anchorYawDeg() { return anchorYawDeg; }
 

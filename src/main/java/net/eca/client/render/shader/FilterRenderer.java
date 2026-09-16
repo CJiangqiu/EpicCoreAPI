@@ -11,6 +11,7 @@ import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexSorting;
 import net.eca.EcaMod;
+import net.eca.client.BossShowScreenEffectState;
 import net.eca.util.filter.FilterType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
@@ -25,6 +26,7 @@ import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.client.event.RegisterShadersEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.fml.common.Mod;
 import org.joml.Matrix3f;
 import org.joml.Matrix4f;
@@ -49,6 +51,7 @@ public class FilterRenderer {
     private static ShaderInstance snowShader;
     private static ShaderInstance toxicShader;
     private static ShaderInstance cosmosShader;
+    private static ShaderInstance bossShowEffectShader;
     private static long matrixStartNanos;
     private static long rainStartNanos;
     private static long desertStartNanos;
@@ -56,6 +59,9 @@ public class FilterRenderer {
     private static long toxicStartNanos;
     private static long cosmosStartNanos;
     private static final Set<FilterType> activeFilters = EnumSet.noneOf(FilterType.class);
+    private static FilterType bossShowFilter;
+    private static float bossShowFilterStrength = 1.0F;
+    private static float bossShowFilterSpeed = 1.0F;
 
     private static int copyFbo = -1;
     private static int depthCopyTexture = -1;
@@ -141,6 +147,14 @@ public class FilterRenderer {
                 ),
                 instance -> cosmosShader = instance
         );
+        event.registerShader(
+                EcaShaderInstance.create(
+                        event.getResourceProvider(),
+                        new ResourceLocation(EcaMod.MOD_ID, "filters/boss_show_effect"),
+                        DefaultVertexFormat.POSITION_TEX
+                ),
+                instance -> bossShowEffectShader = instance
+        );
     }
 
     public static void enable(FilterType filter) {
@@ -159,8 +173,21 @@ public class FilterRenderer {
         return EnumSet.copyOf(activeFilters);
     }
 
+    public static void setBossShowFilter(FilterType filter, float strength, float speed) {
+        bossShowFilter = filter;
+        bossShowFilterStrength = Mth.clamp(strength, 0.0F, 1.0F);
+        bossShowFilterSpeed = Math.max(0.0F, speed);
+    }
+
+    public static void clearBossShowFilter() {
+        bossShowFilter = null;
+        bossShowFilterStrength = 1.0F;
+        bossShowFilterSpeed = 1.0F;
+    }
+
     public static void clearAll() {
         activeFilters.clear();
+        clearBossShowFilter();
         destroyCopyTargets();
         destroySpotlightTargets();
         destroyCosmosTerrainTarget();
@@ -174,9 +201,9 @@ public class FilterRenderer {
 
     @SubscribeEvent
     public static void onRenderLevelStage(RenderLevelStageEvent event) {
-        if (activeFilters.isEmpty()) return;
+        if (activeFilters.isEmpty() && bossShowFilter == null) return;
 
-        if (activeFilters.contains(FilterType.SPOTLIGHT) && spotlightShader != null) {
+        if (isRenderedFilter(FilterType.SPOTLIGHT) && spotlightShader != null) {
             if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_ENTITIES) {
                 captureSpotlightEntity(event);
                 return;
@@ -187,42 +214,42 @@ public class FilterRenderer {
             }
             return;
         }
-        if (activeFilters.contains(FilterType.MATRIX) && matrixShader != null) {
+        if (isRenderedFilter(FilterType.MATRIX) && matrixShader != null) {
             if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_LEVEL) {
                 renderMatrix();
                 return;
             }
             return;
         }
-        if (activeFilters.contains(FilterType.RAIN) && rainShader != null) {
+        if (isRenderedFilter(FilterType.RAIN) && rainShader != null) {
             if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_LEVEL) {
                 renderRain();
                 return;
             }
             return;
         }
-        if (activeFilters.contains(FilterType.DESERT) && desertShader != null) {
+        if (isRenderedFilter(FilterType.DESERT) && desertShader != null) {
             if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_LEVEL) {
                 renderDesert();
                 return;
             }
             return;
         }
-        if (activeFilters.contains(FilterType.SNOW) && snowShader != null) {
+        if (isRenderedFilter(FilterType.SNOW) && snowShader != null) {
             if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_LEVEL) {
                 renderSnow();
                 return;
             }
             return;
         }
-        if (activeFilters.contains(FilterType.TOXIC) && toxicShader != null) {
+        if (isRenderedFilter(FilterType.TOXIC) && toxicShader != null) {
             if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_LEVEL) {
                 renderToxic();
                 return;
             }
             return;
         }
-        if (activeFilters.contains(FilterType.COSMOS)) {
+        if (isRenderedFilter(FilterType.COSMOS)) {
             if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_CUTOUT_BLOCKS) {
                 captureCosmosTerrainDepth();
                 return;
@@ -233,15 +260,39 @@ public class FilterRenderer {
             }
             return;
         }
-        if (activeFilters.contains(FilterType.SKETCH) && sketchShader != null) {
+        if (isRenderedFilter(FilterType.SKETCH) && sketchShader != null) {
             if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_LEVEL) {
                 renderSketch();
             }
         }
     }
 
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public static void onBossShowEffectRender(RenderLevelStageEvent event) {
+        if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_LEVEL
+            || !BossShowScreenEffectState.hasShaderEffects()) return;
+        float partialTick = (float) event.getPartialTick();
+        renderFilterPass(bossShowEffectShader, shader -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (shader.getUniform("ScreenSize") != null) {
+                shader.getUniform("ScreenSize").set((float) mc.getMainRenderTarget().width,
+                    (float) mc.getMainRenderTarget().height);
+            }
+            if (shader.getUniform("Time") != null) {
+                shader.getUniform("Time").set((System.nanoTime() % 1_000_000_000_000L) / 1_000_000_000.0F);
+            }
+            BossShowScreenEffectState.applyShaderUniforms(shader, partialTick);
+        });
+    }
+
+    private static boolean isRenderedFilter(FilterType filter) {
+        return bossShowFilter != null ? bossShowFilter == filter && bossShowFilterStrength > 0.0F
+            : activeFilters.contains(filter);
+    }
+
     @SubscribeEvent
     public static void onClientLogout(ClientPlayerNetworkEvent.LoggingOut event) {
+        BossShowScreenEffectState.clear();
         clearAll();
     }
 
@@ -418,7 +469,7 @@ public class FilterRenderer {
                 shader.getUniform("ScreenSize").set((float) mc.getMainRenderTarget().width, (float) mc.getMainRenderTarget().height);
             }
             if (shader.getUniform("Time") != null) {
-                shader.getUniform("Time").set(time);
+                shader.getUniform("Time").set(filterTime(time));
             }
         });
     }
@@ -435,7 +486,7 @@ public class FilterRenderer {
                 shader.getUniform("ScreenSize").set((float) mc.getMainRenderTarget().width, (float) mc.getMainRenderTarget().height);
             }
             if (shader.getUniform("Time") != null) {
-                shader.getUniform("Time").set(time);
+                shader.getUniform("Time").set(filterTime(time));
             }
         });
     }
@@ -452,7 +503,7 @@ public class FilterRenderer {
                 shader.getUniform("ScreenSize").set((float) mc.getMainRenderTarget().width, (float) mc.getMainRenderTarget().height);
             }
             if (shader.getUniform("Time") != null) {
-                shader.getUniform("Time").set(time);
+                shader.getUniform("Time").set(filterTime(time));
             }
         });
     }
@@ -469,7 +520,7 @@ public class FilterRenderer {
                 shader.getUniform("ScreenSize").set((float) mc.getMainRenderTarget().width, (float) mc.getMainRenderTarget().height);
             }
             if (shader.getUniform("Time") != null) {
-                shader.getUniform("Time").set(time);
+                shader.getUniform("Time").set(filterTime(time));
             }
         });
     }
@@ -486,7 +537,7 @@ public class FilterRenderer {
                 shader.getUniform("ScreenSize").set((float) mc.getMainRenderTarget().width, (float) mc.getMainRenderTarget().height);
             }
             if (shader.getUniform("Time") != null) {
-                shader.getUniform("Time").set(time);
+                shader.getUniform("Time").set(filterTime(time));
             }
         });
     }
@@ -527,6 +578,10 @@ public class FilterRenderer {
             RenderSystem.setShaderTexture(2, spotlightColorTexture);
             if (spotlightShader.getUniform("ScreenSize") != null) {
                 spotlightShader.getUniform("ScreenSize").set((float) width, (float) height);
+            }
+            if (spotlightShader.getUniform("FilterStrength") != null) {
+                spotlightShader.getUniform("FilterStrength").set(
+                    bossShowFilter != null ? bossShowFilterStrength : 1.0F);
             }
 
             drawFullscreenQuad(width, height);
@@ -640,6 +695,9 @@ public class FilterRenderer {
             RenderSystem.setShaderTexture(0, depthCopyTexture);
             RenderSystem.setShaderTexture(1, colorCopyTexture);
             uniformApplier.accept(shader);
+            if (shader.getUniform("FilterStrength") != null) {
+                shader.getUniform("FilterStrength").set(bossShowFilter != null ? bossShowFilterStrength : 1.0F);
+            }
 
             drawFullscreenQuad(width, height);
         } finally {
@@ -666,9 +724,13 @@ public class FilterRenderer {
                 shader.getUniform("ScreenSize").set((float) mc.getMainRenderTarget().width, (float) mc.getMainRenderTarget().height);
             }
             if (shader.getUniform("Time") != null) {
-                shader.getUniform("Time").set(time);
+                shader.getUniform("Time").set(filterTime(time));
             }
         });
+    }
+
+    private static float filterTime(float time) {
+        return time * (bossShowFilter != null ? bossShowFilterSpeed : 1.0F);
     }
 
     /* 世界空间滤镜通道：在 renderFilterPass 的基础上，额外向着色器提供逐像素世界坐标
@@ -730,6 +792,9 @@ public class FilterRenderer {
                 shader.getUniform("CameraPos").set((float) cam.x, (float) cam.y, (float) cam.z);
             }
             uniformApplier.accept(shader);
+            if (shader.getUniform("FilterStrength") != null) {
+                shader.getUniform("FilterStrength").set(bossShowFilter != null ? bossShowFilterStrength : 1.0F);
+            }
 
             drawFullscreenQuad(width, height);
         } finally {

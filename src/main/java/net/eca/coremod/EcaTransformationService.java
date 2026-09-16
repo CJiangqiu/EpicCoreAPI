@@ -47,6 +47,7 @@ public class EcaTransformationService implements ITransformationService {
         AgentLogWriter.resetForNewSession();
         TRANSFORMATION_BACKEND = initializeTransformationBackend();
         System.setProperty(TRANSFORMATION_BACKEND_KEY, TRANSFORMATION_BACKEND.name());
+        NativeRuntimeBridge.prepareEarly();
         enableEcaDualLoading();
         if (TRANSFORMATION_BACKEND == TransformationBackend.AGENT) {
             initLoadingScreenTransformer();

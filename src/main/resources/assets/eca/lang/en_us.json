@@ -580,5 +580,22 @@
   "raid.eca.defeat": "Defenses Fallen",
   "raid.eca.wave": "Wave %s / %s",
   "raid.eca.wave_endless": "Wave %s",
-  "raid.eca.raiders_remaining": "%s left"
+  "raid.eca.raiders_remaining": "%s left",
+  "gui.eca.bossshow.editor.track.effect": "Screen Effects",
+  "gui.eca.bossshow.effect.title": "Screen Effects · Tick %s",
+  "gui.eca.bossshow.effect.edit": "Edit effects at tick (%s)",
+  "gui.eca.bossshow.effect.open": "Add/edit screen effects",
+  "gui.eca.bossshow.effect.previous": "Previous",
+  "gui.eca.bossshow.effect.next": "Next",
+  "gui.eca.bossshow.effect.add": "Add",
+  "gui.eca.bossshow.effect.delete": "Delete",
+  "gui.eca.bossshow.effect.save": "Apply",
+  "gui.eca.bossshow.effect.cancel": "Cancel",
+  "gui.eca.bossshow.effect.duration": "Duration ticks",
+  "gui.eca.bossshow.effect.fade_in": "Fade-in ticks",
+  "gui.eca.bossshow.effect.fade_out": "Fade-out ticks",
+  "gui.eca.bossshow.effect.parameters": "Parameters (name=value, comma separated)",
+  "gui.eca.bossshow.effect.type.camera_shake": "Camera shake",
+  "gui.eca.bossshow.effect.type.shader_effect": "Shader effect",
+  "gui.eca.bossshow.effect.type.filter": "ECA filter"
 }

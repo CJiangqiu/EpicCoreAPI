@@ -42,6 +42,8 @@ public final class RuntimeBytecodeProvider {
             @Override
             public byte[] transform(ClassLoader loader, String name,
                     Class<?> beingRedefined, ProtectionDomain pd, byte[] buf) {
+                // Native requests commit their final output only after the JVM accepts the transformation.
+                if (NativeRuntimeBridge.isTransforming()) return null;
                 capture(name, buf);
                 return null;   // 只读不改
             }
@@ -53,6 +55,11 @@ public final class RuntimeBytecodeProvider {
     public static void captureAnalysisInput(String className, byte[] bytes) {
         if (selfRetransformDepth > 0) return;
         capture(ANALYSIS_BYTES, className, bytes, true);
+    }
+
+    // Native fallback output enters the same cache before its request receipt is confirmed.
+    static void captureNativeOutput(String className, byte[] bytes) {
+        capture(className, bytes);
     }
 
     /* 隐藏类的回调名称可为空；以 classfile 内部名建立稳定别名，供 /0x... 运行时类名回查。 */

@@ -5,6 +5,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import net.eca.util.bossshow.BossShowClientState;
 import net.eca.util.bossshow.BossShowEditorState;
 import net.eca.util.bossshow.BossShowPose;
+import net.eca.client.BossShowScreenEffectState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
@@ -89,9 +90,10 @@ public final class BossShowClientEvents {
         } else {
             return;
         }
-        event.setYaw(pose.yaw);
-        event.setPitch(pose.pitch);
-        event.setRoll(0f);
+        float partialTick = (float) event.getPartialTick();
+        event.setYaw(pose.yaw + BossShowScreenEffectState.shakeYaw(partialTick));
+        event.setPitch(pose.pitch + BossShowScreenEffectState.shakePitch(partialTick));
+        event.setRoll(BossShowScreenEffectState.shakeRoll(partialTick));
     }
 
     //拦截 PauseScreen 打开：直接转为 skip

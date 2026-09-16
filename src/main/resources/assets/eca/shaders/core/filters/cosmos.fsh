@@ -7,6 +7,7 @@ uniform mat4 InvViewProjMat;
 uniform vec3 CameraPos;
 uniform vec2 ScreenSize;
 uniform float Time;
+uniform float FilterStrength;
 
 in vec2 texCoord;
 out vec4 fragColor;
@@ -192,7 +193,7 @@ void main() {
         vec3 sky = vec3(0.0);
         sky += twinkleStars(skyUV * 60.0, Time);
         sky += nebulaSphere(dir, Time);
-        fragColor = vec4(sky, 1.0);
+        fragColor = vec4(mix(scene, sky, FilterStrength), 1.0);
         return;
     }
 
@@ -202,5 +203,5 @@ void main() {
     surfaceCosmic += nebula(worldPos.xz * 0.03, Time);
     float lum = luminance(scene);
     float shade = 0.3 + 0.7 * lum;
-    fragColor = vec4(surfaceCosmic * shade, 1.0);
+    fragColor = vec4(mix(scene, surfaceCosmic * shade, FilterStrength), 1.0);
 }

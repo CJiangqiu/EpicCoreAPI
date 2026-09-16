@@ -3,6 +3,7 @@
 uniform sampler2D Sampler0;
 uniform sampler2D Sampler1;
 uniform vec2 ScreenSize;
+uniform float FilterStrength;
 
 in vec2 texCoord;
 
@@ -46,5 +47,5 @@ void main() {
     float colorStrength = smoothstep(0.15, 0.5, colorEdge);
     float edge = max(depthStrength, colorStrength);
 
-    fragColor = vec4(vec3(1.0 - edge), 1.0);
+    fragColor = vec4(mix(texture(Sampler1, texCoord).rgb, vec3(1.0 - edge), FilterStrength), 1.0);
 }

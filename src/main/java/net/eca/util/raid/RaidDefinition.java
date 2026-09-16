@@ -107,13 +107,14 @@ public abstract class RaidDefinition {
 
     // ==================== 可选覆写：袭击者 ====================
 
-    // 袭击者所属阵营 ID
+    // 显式袭击者与波次首领所属的默认阵营 ID
     /**
-     * Faction that spawned raiders are bound to. Binding is what makes vanilla AI,
-     * target selectors and ECA's attack rules treat raiders as hostile to defenders,
-     * so a raid without a faction relies entirely on each entity's own AI.
+     * Default faction for raiders declared with {@link RaidWave#addEntry} and for wave
+     * leaders. Groups declared with {@link RaidWave#addFaction} use their own faction id.
+     * Binding is what makes vanilla AI, target selectors and ECA's attack rules treat
+     * raiders as hostile to defenders, so an unbound raider relies on its own AI.
      *
-     * @return the raider faction id, or null to skip faction binding
+     * @return the default raider faction id, or null to leave explicit entries unbound
      */
     public String getRaiderFactionId() {
         return null;

@@ -167,6 +167,45 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         TransformerWhitelist.loadJsonWhitelist();
     }
 
+    static void prepareNativeTargets(List<Class<?>> targets) throws ClassNotFoundException {
+        ensureWhitelistLoaded();
+        initializeTransformerDependencies();
+        for (Class<?> type : targets) {
+            String name = type.getName().replace('.', '/');
+            if (LIVING_ENTITY.equals(name) || classifyEntity(type) == 1) {
+                KNOWN_LIVING_ENTITY_CLASSES.add(name);
+            } else if (ENTITY.equals(name) || classifyEntity(type) == 2) {
+                KNOWN_ENTITY_ONLY_CLASSES.add(name);
+            }
+        }
+    }
+
+    static boolean isNativeLoadCompleteTarget(Class<?> type) {
+        if (type == null || type.isArray() || type.isPrimitive()) return false;
+        String name = type.getName().replace('.', '/');
+        return isSpecialTarget(name)
+                || (!TransformerWhitelist.isSystemProtectedInternal(name) && classifyEntity(type) != 0);
+    }
+
+    // Sharing the conversion chain keeps target protection and reentrancy rules consistent across backends.
+    static byte[] transformNative(String name, Class<?> type, byte[] bytes, boolean health) {
+        if (name == null || bytes == null || FORCE_COMPATIBILITY_MODE || TRANSFORMING.get()) return null;
+        if (isIntrinsicProtected(name) && !isSpecialTarget(name)) return null;
+        boolean previous = OWN_RETRANSFORM.get();
+        OWN_RETRANSFORM.set(true);
+        TRANSFORMING.set(true);
+        try {
+            byte[] transformed = SINGLETON.transformInternal(name, type, bytes);
+            if (!health) return transformed;
+            byte[] tail = transformHealthTail(name, transformed == null ? bytes : transformed);
+            return tail == null ? transformed : tail;
+        } finally {
+            if (previous) OWN_RETRANSFORM.set(true);
+            else OWN_RETRANSFORM.remove();
+            TRANSFORMING.remove();
+        }
+    }
+
     private static synchronized boolean ensureRegistered(Instrumentation inst) {
         if (registered) return true;
         try {
@@ -194,6 +233,8 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     private static void initializeTransformerDependencies() throws ClassNotFoundException {
         Class<?>[] roots = {
             EcaClassTransformer.class,
+            NativeRuntimeBridge.class,
+            EcaTransformerManager.class,
             RuntimeBytecodeProvider.class,
             ContainerReplacementTransformer.class,
             LoadingScreenTransformer.class,
@@ -336,6 +377,8 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     @Override
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                             ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+        // A native fallback request applies this chain once, in its later JVMTI callback.
+        if (NativeRuntimeBridge.isTransforming()) return null;
         if (className == null) return null;
         RuntimeBytecodeProvider.captureAnalysisInput(className, classfileBuffer);
 

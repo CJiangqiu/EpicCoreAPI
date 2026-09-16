@@ -4,6 +4,7 @@ uniform sampler2D Sampler0;
 uniform sampler2D Sampler1;
 uniform sampler2D Sampler2;
 uniform vec2 ScreenSize;
+uniform float FilterStrength;
 
 in vec2 texCoord;
 
@@ -51,5 +52,6 @@ void main() {
     vec3 originalColor = texture(Sampler1, texCoord).rgb;
 
     float entityMask = smoothstep(0.0, 0.1, texture(Sampler2, texCoord).a);
-    fragColor = mix(sketchColor, vec4(originalColor, 1.0), entityMask);
+    vec4 filtered = mix(sketchColor, vec4(originalColor, 1.0), entityMask);
+    fragColor = mix(vec4(originalColor, 1.0), filtered, FilterStrength);
 }

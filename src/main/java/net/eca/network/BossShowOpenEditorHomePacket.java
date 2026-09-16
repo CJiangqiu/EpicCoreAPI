@@ -6,6 +6,7 @@ import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowDefinition.EventCue;
 import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
 import net.eca.util.bossshow.BossShowNetCodec;
+import net.eca.util.bossshow.BossShowEffectCue;
 import net.eca.util.bossshow.Trigger;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.FriendlyByteBuf;
@@ -45,6 +46,7 @@ public class BossShowOpenEditorHomePacket {
             buf.writeFloat(def.anchorYawDeg());
             BossShowNetCodec.writeEventCues(buf, def.eventCues());
             BossShowNetCodec.writeSubtitleCues(buf, def.subtitleCues());
+            BossShowNetCodec.writeEffectCues(buf, def.effectCues());
         }
     }
 
@@ -61,11 +63,12 @@ public class BossShowOpenEditorHomePacket {
             float yaw = buf.readFloat();
             List<EventCue> eventCues = BossShowNetCodec.readEventCues(buf);
             List<SubtitleCue> subtitleCues = BossShowNetCodec.readSubtitleCues(buf);
+            List<BossShowEffectCue> effectCues = BossShowNetCodec.readEffectCues(buf);
             EntityType<?> type = (typeId != null && BuiltInRegistries.ENTITY_TYPE.containsKey(typeId))
                 ? BuiltInRegistries.ENTITY_TYPE.get(typeId)
                 : null;
             defs.add(new BossShowDefinition(id, type, trig, cine, allowRepeat, frames,
-                BossShowDefinition.Source.CONFIG, yaw, eventCues, subtitleCues));
+                BossShowDefinition.Source.CONFIG, yaw, eventCues, subtitleCues, effectCues));
         }
         return new BossShowOpenEditorHomePacket(defs);
     }

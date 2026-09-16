@@ -4,6 +4,7 @@ import net.eca.util.bossshow.BossShowDefinition.EventCue;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
 import net.eca.util.bossshow.BossShowEditorState;
+import net.eca.util.bossshow.BossShowEffectCue;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
@@ -18,7 +19,7 @@ import java.util.List;
 //BossShow 多轨时间线：镜头、事件和字幕共用同一个播放头。
 final class BossShowTimelineWidget extends AbstractWidget {
 
-    enum Track { CAMERA, EVENT, SUBTITLE }
+    enum Track { CAMERA, EVENT, SUBTITLE, EFFECT }
 
     @FunctionalInterface
     interface SelectionListener {
@@ -79,7 +80,8 @@ final class BossShowTimelineWidget extends AbstractWidget {
         if (frameCount <= 0 || !isMouseOver(mouseX, mouseY) || mouseX < getX() + LABEL_WIDTH) return false;
         int tick = xToTick(mouseX, frameCount);
         int row = (int) ((mouseY - getY() - RULER_HEIGHT) / trackHeight());
-        Track track = row == 1 ? Track.EVENT : row == 2 ? Track.SUBTITLE : Track.CAMERA;
+        Track track = row == 1 ? Track.EVENT : row == 2 ? Track.SUBTITLE
+            : row == 3 ? Track.EFFECT : Track.CAMERA;
         BossShowEditorState.setPlayhead(tick);
         BossShowEditorState.setSelectedKeyframeFrameIndex(tick);
         if (listener != null) listener.onSelected(track, tick);
@@ -142,6 +144,8 @@ final class BossShowTimelineWidget extends AbstractWidget {
             top + RULER_HEIGHT + trackHeight, trackHeight);
         drawTrack(g, font, Track.SUBTITLE, Component.translatable("gui.eca.bossshow.editor.track.subtitle"),
             top + RULER_HEIGHT + trackHeight * 2, trackHeight);
+        drawTrack(g, font, Track.EFFECT, Component.translatable("gui.eca.bossshow.editor.track.effect"),
+            top + RULER_HEIGHT + trackHeight * 3, trackHeight);
 
         if (BossShowEditorState.hasValidRange()) {
             int inX = tickToX(BossShowEditorState.getInPoint());
@@ -220,9 +224,14 @@ final class BossShowTimelineWidget extends AbstractWidget {
             for (EventCue cue : BossShowEditorState.getEventCues()) {
                 drawCue(g, cue.tick(), cue.eventId(), top, trackHeight, 0xFFE7A63B);
             }
-        } else {
+        } else if (track == Track.SUBTITLE) {
             for (SubtitleCue cue : BossShowEditorState.getSubtitleCues()) {
                 drawCue(g, cue.tick(), cue.text(), top, trackHeight, 0xFF52C7A5);
+            }
+        } else {
+            for (BossShowEffectCue cue : BossShowEditorState.getEffectCues()) {
+                drawCue(g, cue.tick(), cue.effect().isEmpty() ? cue.type() : cue.effect(),
+                    top, trackHeight, 0xFFC879FF);
             }
         }
     }
@@ -241,7 +250,7 @@ final class BossShowTimelineWidget extends AbstractWidget {
     }
 
     private int trackHeight() {
-        return Math.max(MIN_TRACK_HEIGHT, (getHeight() - RULER_HEIGHT) / 3);
+        return Math.max(MIN_TRACK_HEIGHT, (getHeight() - RULER_HEIGHT) / 4);
     }
 
     @Override

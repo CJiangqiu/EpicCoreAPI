@@ -6,6 +6,7 @@ import net.eca.util.bossshow.BossShowDefinition.EventCue;
 import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
 import net.eca.util.bossshow.BossShowManager;
 import net.eca.util.bossshow.BossShowNetCodec;
+import net.eca.util.bossshow.BossShowEffectCue;
 import net.eca.util.bossshow.Trigger;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.FriendlyByteBuf;
@@ -30,19 +31,21 @@ public class BossShowSaveEditorPacket {
     private final List<Frame> frames;
     private final List<EventCue> eventCues;
     private final List<SubtitleCue> subtitleCues;
+    private final List<BossShowEffectCue> effectCues;
     private final float anchorYawDeg;
 
     public BossShowSaveEditorPacket(ResourceLocation cutsceneId, ResourceLocation targetTypeId,
                                     Trigger trigger, boolean cinematic, boolean allowRepeat,
                                     List<Frame> frames, float anchorYawDeg) {
         this(cutsceneId, targetTypeId, trigger, cinematic, allowRepeat, frames, anchorYawDeg,
-            deriveEventCues(frames), deriveSubtitleCues(frames));
+            deriveEventCues(frames), deriveSubtitleCues(frames), List.of());
     }
 
     public BossShowSaveEditorPacket(ResourceLocation cutsceneId, ResourceLocation targetTypeId,
                                     Trigger trigger, boolean cinematic, boolean allowRepeat,
                                     List<Frame> frames, float anchorYawDeg,
-                                    List<EventCue> eventCues, List<SubtitleCue> subtitleCues) {
+                                    List<EventCue> eventCues, List<SubtitleCue> subtitleCues,
+                                    List<BossShowEffectCue> effectCues) {
         this.cutsceneId = cutsceneId;
         this.targetTypeId = targetTypeId;
         this.trigger = trigger;
@@ -52,6 +55,7 @@ public class BossShowSaveEditorPacket {
         this.anchorYawDeg = anchorYawDeg;
         this.eventCues = eventCues;
         this.subtitleCues = subtitleCues;
+        this.effectCues = effectCues;
     }
 
     public static void encode(BossShowSaveEditorPacket msg, FriendlyByteBuf buf) {
@@ -64,6 +68,7 @@ public class BossShowSaveEditorPacket {
         buf.writeFloat(msg.anchorYawDeg);
         BossShowNetCodec.writeEventCues(buf, msg.eventCues);
         BossShowNetCodec.writeSubtitleCues(buf, msg.subtitleCues);
+        BossShowNetCodec.writeEffectCues(buf, msg.effectCues);
     }
 
     public static BossShowSaveEditorPacket decode(FriendlyByteBuf buf) {
@@ -76,8 +81,9 @@ public class BossShowSaveEditorPacket {
         float yaw = buf.readFloat();
         List<EventCue> eventCues = BossShowNetCodec.readEventCues(buf);
         List<SubtitleCue> subtitleCues = BossShowNetCodec.readSubtitleCues(buf);
+        List<BossShowEffectCue> effectCues = BossShowNetCodec.readEffectCues(buf);
         return new BossShowSaveEditorPacket(cutsceneId, typeId, trigger, cine, allowRepeat, frames, yaw,
-            eventCues, subtitleCues);
+            eventCues, subtitleCues, effectCues);
     }
 
     public static void handle(BossShowSaveEditorPacket msg, Supplier<NetworkEvent.Context> ctxSup) {
@@ -91,7 +97,7 @@ public class BossShowSaveEditorPacket {
             BossShowDefinition def = new BossShowDefinition(
                 msg.cutsceneId, type, msg.trigger, msg.cinematic, msg.allowRepeat,
                 msg.frames, BossShowDefinition.Source.CONFIG, msg.anchorYawDeg,
-                msg.eventCues, msg.subtitleCues);
+                msg.eventCues, msg.subtitleCues, msg.effectCues);
             boolean ok = BossShowManager.save(def);
             if (ok) {
                 player.sendSystemMessage(Component.literal("§aSaved BossShow " + msg.cutsceneId));

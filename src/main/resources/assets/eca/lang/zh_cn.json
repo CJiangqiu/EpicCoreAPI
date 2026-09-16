@@ -580,5 +580,22 @@
   "raid.eca.defeat": "防守失败",
   "raid.eca.wave": "第 %s / %s 波",
   "raid.eca.wave_endless": "第 %s 波",
-  "raid.eca.raiders_remaining": "剩余 %s"
+  "raid.eca.raiders_remaining": "剩余 %s",
+  "gui.eca.bossshow.editor.track.effect": "屏幕效果轨道",
+  "gui.eca.bossshow.effect.title": "屏幕效果 · Tick %s",
+  "gui.eca.bossshow.effect.edit": "编辑当前效果（%s）",
+  "gui.eca.bossshow.effect.open": "添加/编辑屏幕效果",
+  "gui.eca.bossshow.effect.previous": "上一个",
+  "gui.eca.bossshow.effect.next": "下一个",
+  "gui.eca.bossshow.effect.add": "新增",
+  "gui.eca.bossshow.effect.delete": "删除",
+  "gui.eca.bossshow.effect.save": "应用",
+  "gui.eca.bossshow.effect.cancel": "取消",
+  "gui.eca.bossshow.effect.duration": "持续 Tick",
+  "gui.eca.bossshow.effect.fade_in": "淡入 Tick",
+  "gui.eca.bossshow.effect.fade_out": "淡出 Tick",
+  "gui.eca.bossshow.effect.parameters": "参数（名称=数值，以逗号分隔）",
+  "gui.eca.bossshow.effect.type.camera_shake": "镜头震动",
+  "gui.eca.bossshow.effect.type.shader_effect": "着色器效果",
+  "gui.eca.bossshow.effect.type.filter": "ECA 滤镜"
 }
