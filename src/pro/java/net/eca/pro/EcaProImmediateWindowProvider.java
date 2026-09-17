@@ -1,6 +1,6 @@
 package net.eca.pro;
 
-import net.eca.coremod.ProRuntimeBridge;
+import net.eca.coremod.RuntimeExtensionBridge;
 import net.minecraftforge.fml.loading.ImmediateWindowProvider;
 
 import java.util.Optional;
@@ -13,7 +13,8 @@ import java.util.function.Supplier;
 // This service is loaded before transformation services, closing the unprotected startup window.
 public final class EcaProImmediateWindowProvider implements ImmediateWindowProvider {
     static {
-        ProRuntimeBridge.prepareEarly();
+        RuntimeExtensionBridge.prepareEarly();
+        RuntimeExtensionBridge.afterAgentReady();
     }
 
     @Override

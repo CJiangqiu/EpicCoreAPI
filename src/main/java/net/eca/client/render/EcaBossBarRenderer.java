@@ -22,6 +22,7 @@ import net.minecraftforge.api.distmarker.OnlyIn;
 import org.joml.Matrix4f;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 
 /*
  * ECA 自定义 Boss 血条绘制器 —— 实体扩展与袭击系统共用。
@@ -188,7 +189,10 @@ public final class EcaBossBarRenderer {
     }
 
     private static String formatNumber(double value) {
-        return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString();
+        return BigDecimal.valueOf(value)
+                .setScale(2, RoundingMode.HALF_UP)
+                .stripTrailingZeros()
+                .toPlainString();
     }
 
     private static void renderLayer(GuiGraphics graphics, ResourceLocation texture, RenderType renderType,

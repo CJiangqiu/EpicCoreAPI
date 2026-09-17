@@ -28,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Unified ClassFileTransformer for all ECA bytecode injection.
  * Handles LivingEntity (getHealth, getMaxHealth, isDeadOrDying, isAlive),
- * Entity (isRemoved), and DisplayWindow (loading screen gradient).
+ * Entity (isRemoved), and entity-container storage.
  */
 public final class EcaClassTransformer implements ClassFileTransformer {
 
@@ -47,8 +47,6 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
     private static final String LIVING_ENTITY = "net/minecraft/world/entity/LivingEntity";
     private static final String ENTITY        = "net/minecraft/world/entity/Entity";
-    private static final String DISPLAY_WINDOW = "net/minecraftforge/fml/earlydisplay/DisplayWindow";
-
     private static final Set<String> CONTAINER_TARGETS = Set.of(
         "net/minecraft/world/level/entity/EntityTickList",
         "net/minecraft/world/level/entity/EntityLookup",
@@ -237,7 +235,6 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             EcaTransformerManager.class,
             RuntimeBytecodeProvider.class,
             ContainerReplacementTransformer.class,
-            LoadingScreenTransformer.class,
             TransformerWhitelist.class,
             AllReturnToggle.class,
             AllReturnTransformer.class,
@@ -287,7 +284,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         return false;
     }
 
-    //重转换已加载的类（Entity/LivingEntity 子类 + Entity/LivingEntity 自身 + DisplayWindow）
+    //重转换已加载的类（Entity/LivingEntity 子类 + Entity/LivingEntity 自身）
     private static void retransformLoadedClasses(Instrumentation inst) {
         List<Class<?>> toRetransform = new ArrayList<>();
 
@@ -308,12 +305,6 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             if (!inst.isModifiableClass(clazz)) continue;
             String name = clazz.getName();
 
-            // 白名单内的特殊目标
-            if (LoadingScreenTransformer.ENABLED &&
-                name.equals("net.minecraftforge.fml.earlydisplay.DisplayWindow")) {
-                toRetransform.add(clazz);
-                continue;
-            }
             String internalName = name.replace('.', '/');
             if (ContainerReplacementTransformer.isTarget(internalName)) {
                 toRetransform.add(clazz);
@@ -399,12 +390,6 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
     private byte[] transformInternal(String className, Class<?> classBeingRedefined, byte[] classfileBuffer) {
 
-        // 白名单内的特殊目标：DisplayWindow 渐变背景
-        if (LoadingScreenTransformer.ENABLED &&
-            LoadingScreenTransformer.TARGET_CLASS.equals(className)) {
-            return LoadingScreenTransformer.transform(classfileBuffer);
-        }
-
         // 白名单内的特殊目标：MC 原版容器替换
         if (ContainerReplacementTransformer.isTarget(className)) {
             return ContainerReplacementTransformer.transform(className, classfileBuffer);
@@ -433,8 +418,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     }
 
     private static boolean isSpecialTarget(String className) {
-        return DISPLAY_WINDOW.equals(className)
-                || CONTAINER_TARGETS.contains(className)
+        return CONTAINER_TARGETS.contains(className)
                 || isHealthHookTarget(className);
     }
 

@@ -211,7 +211,7 @@ public final class TransformerWhitelist {
         if (!customAllReturn.add(normalized)) return;
         rebuildFirstSegments();
         CACHE_ALL.clear();
-        ProRuntimeBridge.refreshInterception();
+        RuntimeExtensionBridge.refreshInterception();
     }
 
     //移除 AllReturn 白名单前缀
@@ -222,7 +222,7 @@ public final class TransformerWhitelist {
         if (removed) {
             rebuildFirstSegments();
             CACHE_ALL.clear();
-            ProRuntimeBridge.refreshInterception();
+            RuntimeExtensionBridge.refreshInterception();
         }
         return removed;
     }
@@ -296,7 +296,7 @@ public final class TransformerWhitelist {
         jsonLoaded = true;
         loadFromConfigDirectory();
         rebuildFirstSegments();
-        ProRuntimeBridge.refreshInterception();
+        RuntimeExtensionBridge.refreshInterception();
     }
 
     private static void loadFromConfigDirectory() {

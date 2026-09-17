@@ -108,10 +108,12 @@ tasks.withType(Test).configureEach {
 tasks.jar {
     destinationDirectory = layout.buildDirectory.dir('intermediates/slim')
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'eca.mixins.dev.json'
 }
 
 tasks.named('jarJar') {
-    archiveClassifier.set('')
+    archiveFileName.set("${project.archives_name}-${project.version}_cf.jar")
+    exclude 'eca.mixins.dev.json'
 }
 
 // Agent JAR
@@ -147,39 +149,12 @@ tasks.named('jarJar') {
 
 tasks.named('jar') {
     dependsOn tasks.named('agentJar')
-    finalizedBy 'devJar'
 
     from(tasks.named('agentJar').flatMap { it.archiveFile }) {
         into 'net/eca/agent'
         rename { 'agent.jar' }
     }
 }
-
-tasks.register('devJar', Jar) {
-    group = 'build'
-    dependsOn tasks.named('classes'), tasks.named('agentJar'), tasks.named('jarJar')
-    archiveClassifier.set('dev')
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-
-    from sourceSets.main.output
-    from(sourceSets.main.resources.srcDirs)
-    from({ zipTree(tasks.named('jarJar').get().archiveFile.get().asFile) }) {
-        include 'META-INF/jarjar/**'
-    }
-
-    from(tasks.named('agentJar').flatMap { it.archiveFile }) {
-        into 'net/eca/agent'
-        rename { 'agent.jar' }
-    }
-
-    manifest {
-        attributes([
-                'MixinConfigs': 'eca.mixins.dev.json'
-        ])
-    }
-}
-
-build.dependsOn devJar
 
 tasks.register('jvmtiBackendJar', Jar) {
     group = 'build'
@@ -191,13 +166,40 @@ tasks.register('jvmtiBackendJar', Jar) {
     from sourceSets.jvmti.output
 }
 
-tasks.register('jvmtiJar', Jar) {
+tasks.register('devJar', Jar) {
     group = 'build'
-    description = 'Builds the _1 variant from the standard reobfuscated mod plus the native extension.'
+    description = 'Builds the MCreator development variant with JVMTI and development mixins.'
+    dependsOn tasks.named('classes'), tasks.named('agentJar'), tasks.named('jarJar'), tasks.named('jvmtiBackendJar')
+    archiveFileName.set("${project.archives_name}-${project.version}_dev.jar")
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from(sourceSets.main.output) {
+        exclude 'eca.mixins.json'
+    }
+    from({ zipTree(tasks.named('jarJar').get().archiveFile.get().asFile) }) {
+        include 'META-INF/jarjar/**'
+    }
+
+    from(tasks.named('agentJar').flatMap { it.archiveFile }) {
+        into 'net/eca/agent'
+        rename { 'agent.jar' }
+    }
+    from(tasks.named('jvmtiBackendJar').flatMap { it.archiveFile }) {
+        into 'net/eca/optional'
+    }
+
+    manifest {
+        attributes([
+                'MixinConfigs': 'eca.mixins.dev.json'
+        ])
+    }
+}
+
+tasks.register('mrJar', Jar) {
+    group = 'build'
+    description = 'Builds the Modrinth variant from the CurseForge variant plus JVMTI.'
     dependsOn tasks.named('reobfJarJar'), tasks.named('jvmtiBackendJar')
-    archiveFileName.set(tasks.named('jarJar').flatMap { it.archiveFileName }.map {
-        it.substring(0, it.length() - 4) + '_1.jar'
-    })
+    archiveFileName.set("${project.archives_name}-${project.version}_mr.jar")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     from({ zipTree(tasks.named('jarJar').get().archiveFile.get().asFile) }) {
         exclude 'META-INF/MANIFEST.MF'
@@ -216,20 +218,51 @@ tasks.register('jvmtiJar', Jar) {
     }
 }
 
+tasks.register('proAgentJar', Jar) {
+    group = 'build'
+    description = 'Packages the Pro agent with its early interception implementation.'
+    dependsOn tasks.named('classes'), tasks.named('proClasses')
+    archiveFileName.set('agent.jar')
+    destinationDirectory = layout.buildDirectory.dir('embedded-pro-agent')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from(sourceSets.main.output) {
+        include 'net/eca/agent/**'
+    }
+    from(sourceSets.pro.output) {
+        include 'net/eca/agent/**'
+    }
+
+    manifest {
+        attributes(
+                'Agent-Class': 'net.eca.agent.EcaAgent',
+                'Premain-Class': 'net.eca.agent.EcaAgent',
+                'Can-Redefine-Classes': 'true',
+                'Can-Retransform-Classes': 'true'
+        )
+    }
+}
+
 tasks.register('proJar', Jar) {
     group = 'build'
-    description = 'Builds the Pro variant from the standard reobfuscated mod plus the optional runtime controller.'
-    dependsOn tasks.named('reobfJarJar'), tasks.named('proClasses')
-    archiveFileName.set(tasks.named('jarJar').flatMap { it.archiveFileName }.map {
-        it.substring(0, it.length() - 4) + '-pro.jar'
-    })
+    description = 'Builds the Pro variant from the Modrinth feature set plus Pro runtime components.'
+    dependsOn tasks.named('reobfJarJar'), tasks.named('jvmtiBackendJar'), tasks.named('proClasses'),
+            tasks.named('proAgentJar')
+    archiveFileName.set("${project.archives_name}-${project.version}_pro.jar")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     from({ zipTree(tasks.named('jarJar').get().archiveFile.get().asFile) }) {
-        exclude 'META-INF/MANIFEST.MF', 'logo.png'
+        exclude 'META-INF/MANIFEST.MF', 'logo.png', 'net/eca/agent/agent.jar'
     }
     from sourceSets.pro.output
     from({ zipTree(file('lib/forgevm-0.7.0.jar')) }) {
         include 'forgevm/**'
+    }
+    from(tasks.named('jvmtiBackendJar').flatMap { it.archiveFile }) {
+        into 'net/eca/optional'
+    }
+    from(tasks.named('proAgentJar').flatMap { it.archiveFile }) {
+        into 'net/eca/agent'
+        rename { 'agent.jar' }
     }
     doFirst {
         def standardJar = tasks.named('jarJar').get().archiveFile.get().asFile
@@ -242,7 +275,7 @@ tasks.register('proJar', Jar) {
 }
 
 tasks.named('build') {
-    dependsOn tasks.named('jvmtiJar'), tasks.named('proJar')
+    dependsOn tasks.named('mrJar'), tasks.named('devJar'), tasks.named('proJar')
 }
 
 publishing {

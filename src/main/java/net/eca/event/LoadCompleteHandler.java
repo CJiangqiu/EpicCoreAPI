@@ -4,8 +4,6 @@ import net.eca.EcaMod;
 import net.eca.agent.AgentLogWriter;
 import net.eca.agent.EcaAgent;
 import net.eca.coremod.EcaClassTransformer;
-import net.eca.coremod.ProRuntimeBridge;
-
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.bossshow.BossShowManager;
@@ -91,7 +89,6 @@ public final class LoadCompleteHandler {
 
             // 触发 retransform：填充 KNOWN_* 并对已加载的 Entity/LivingEntity/子类/容器施加 hook
             EcaClassTransformer.init();
-            ProRuntimeBridge.activateFallbackMonitor();
 
             hasDelayedRetransform = true;
 

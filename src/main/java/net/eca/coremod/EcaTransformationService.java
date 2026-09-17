@@ -26,7 +26,6 @@ import java.util.*;
 @SuppressWarnings("unchecked")
 public class EcaTransformationService implements ITransformationService {
 
-    // Loading screen is an early-display feature and must run before LoadComplete.
     private static final Class<?>[] PRELOADED = preloadAll(
         "net.eca.coremod.EcaCoreTransformer",
         "net.eca.coremod.LoadingScreenTransformer",
@@ -44,14 +43,14 @@ public class EcaTransformationService implements ITransformationService {
     private static final String TRANSFORMATION_BACKEND_KEY = "net.eca.transform.backend";
 
     static {
-        ProRuntimeBridge.prepareEarly();
+        RuntimeExtensionBridge.prepareEarly();
         TRANSFORMATION_BACKEND = initializeTransformationBackend();
-        ProRuntimeBridge.afterAgentReady();
+        RuntimeExtensionBridge.afterAgentReady();
         System.setProperty(TRANSFORMATION_BACKEND_KEY, TRANSFORMATION_BACKEND.name());
         NativeRuntimeBridge.prepareEarly();
         enableEcaDualLoading();
         if (TRANSFORMATION_BACKEND == TransformationBackend.AGENT) {
-            initLoadingScreenTransformer();
+            RuntimeExtensionBridge.installEarlyDisplayTransformer(EcaAgent.getInstrumentation());
         }
         log("[CoreMod] Selected transformation backend: " + TRANSFORMATION_BACKEND);
     }
@@ -96,36 +95,6 @@ public class EcaTransformationService implements ITransformationService {
             }
         }
         return result;
-    }
-
-    private static void initLoadingScreenTransformer() {
-        try {
-            if (PRELOADED[1] == null || !LoadingScreenTransformer.ENABLED) {
-                log("[CoreMod] Loading screen transformer disabled or unavailable");
-                return;
-            }
-
-            Instrumentation inst = EcaAgent.getInstrumentation();
-            if (inst == null) {
-                log("[CoreMod] No Instrumentation, skipping loading screen transformer");
-                return;
-            }
-
-            LoadingScreenTransformer transformer = new LoadingScreenTransformer();
-            inst.addTransformer(transformer, true);
-
-            for (Class<?> clazz : inst.getAllLoadedClasses()) {
-                if (clazz.getName().equals("net.minecraftforge.fml.earlydisplay.DisplayWindow")) {
-                    inst.retransformClasses(clazz);
-                    log("[CoreMod] Retransformed DisplayWindow");
-                    break;
-                }
-            }
-
-            log("[CoreMod] Loading screen transformer registered");
-        } catch (Throwable t) {
-            log("[CoreMod] Failed to init loading screen transformer: " + t.getMessage());
-        }
     }
 
     private static final String SERVICE_NAME = "eca_coremod";

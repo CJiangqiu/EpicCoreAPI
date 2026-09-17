@@ -5,15 +5,27 @@ import net.eca.agent.AgentLogWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 
 final class EcaProConfig {
     private static final Path PATH = Path.of("config", "eca_pro.toml");
+    private static final String COREMOD_DEFAULTS = """
+
+            [coremod]
+            # Block transformation services whose provider packages are not trusted.
+            # Requires enable_fvm = true and jvm_guard.relaunch = true.
+            ban = false
+            # Allowed transformation-service provider package prefixes.
+            # Platform services and ECA's verified archive are added automatically.
+            # Example: whitelist = ["com.example.bootstrap."]
+            whitelist = []
+            """;
     private static final String DEFAULTS = """
             # ECA Pro configuration. Restart the game after changing this file.
-            # Master switch for the FVM controller. JVM guards, relaunch, interception and
-            # transformer fallback require this option to be true. The intro is independent.
+            # Master switch for the FVM controller. JVM guards, relaunch and interception
+            # require this option to be true. The intro is independent.
             enable_fvm = true
             # Show the FVM status window. Requires enable_fvm = true.
             status_window = true
@@ -81,14 +93,8 @@ final class EcaProConfig {
             # Platform packages, ECA and registered AllReturn packages are added automatically.
             whitelist = []
 
-            [transformer_fallback]
-            # Activate the fallback monitor when repeated transformer failures are detected.
-            # Requires enable_fvm = true.
-            enabled = false
-            # Consecutive failure count that activates the fallback. Requires enabled = true.
-            # Valid range: 1-20. Example: failure_threshold = 3
-            failure_threshold = 3
-            """;
+            %s
+            """.formatted(COREMOD_DEFAULTS.strip());
 
     boolean enabled = true;
     boolean statusWindow = true;
@@ -103,13 +109,13 @@ final class EcaProConfig {
     boolean nativeLoad;
     boolean processCreate;
     boolean threadCreate;
-    boolean fallback;
-    int failureThreshold = 3;
+    boolean coremod;
     final List<String> javaAgentPaths = new ArrayList<>();
     final List<String> jvmtiModules = new ArrayList<>();
     final List<String> nativePackages = new ArrayList<>();
     final List<String> processPackages = new ArrayList<>();
     final List<String> threadPackages = new ArrayList<>();
+    final List<String> coremodPackages = new ArrayList<>();
 
     static EcaProConfig load() {
         EcaProConfig config = new EcaProConfig();
@@ -118,11 +124,23 @@ final class EcaProConfig {
                 Files.createDirectories(PATH.getParent());
                 Files.writeString(PATH, DEFAULTS, StandardCharsets.UTF_8);
             }
-            config.read(Files.readAllLines(PATH, StandardCharsets.UTF_8));
+            List<String> lines = Files.readAllLines(PATH, StandardCharsets.UTF_8);
+            config.read(lines);
+            if (!hasSection(lines, "coremod")) {
+                Files.writeString(PATH, COREMOD_DEFAULTS, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+            }
         } catch (Throwable t) {
             AgentLogWriter.info("[EcaProConfig] Configuration read failed: " + t.getMessage());
         }
         return config;
+    }
+
+    private static boolean hasSection(List<String> lines, String expected) {
+        for (String raw : lines) {
+            String line = stripComment(raw).trim();
+            if (line.equals("[" + expected + "]")) return true;
+        }
+        return false;
     }
 
     private void read(List<String> lines) {
@@ -170,11 +188,6 @@ final class EcaProConfig {
             else if ("reject_argument_files".equals(key)) rejectArgumentFiles = bool(value);
             return;
         }
-        if ("transformer_fallback".equals(section)) {
-            if ("enabled".equals(key)) fallback = bool(value);
-            else if ("failure_threshold".equals(key)) failureThreshold = integer(value, 3, 1, 20);
-            return;
-        }
         applyInterception(section, key, value);
     }
 
@@ -194,6 +207,9 @@ final class EcaProConfig {
         } else if ("thread_create".equals(section)) {
             if ("ban".equals(key)) threadCreate = bool(value);
             else if ("whitelist".equals(key)) threadPackages.addAll(array(value));
+        } else if ("coremod".equals(section)) {
+            if ("ban".equals(key)) coremod = bool(value);
+            else if ("whitelist".equals(key)) coremodPackages.addAll(array(value));
         }
     }
 
@@ -209,14 +225,6 @@ final class EcaProConfig {
 
     private static boolean bool(String value) {
         return Boolean.parseBoolean(value.trim());
-    }
-
-    private static int integer(String value, int fallback, int minimum, int maximum) {
-        try {
-            return Math.max(minimum, Math.min(maximum, Integer.parseInt(value.trim())));
-        } catch (NumberFormatException ignored) {
-            return fallback;
-        }
     }
 
     private static List<String> array(String value) {

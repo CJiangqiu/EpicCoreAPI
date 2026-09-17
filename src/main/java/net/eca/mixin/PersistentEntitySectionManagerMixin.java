@@ -40,6 +40,24 @@ public class PersistentEntitySectionManagerMixin {
         }
     }
 
+    // 无事件入口不会经过 addEntity，必须独立阻止
+    @Inject(method = "addEntityWithoutEvent", at = @At("HEAD"), cancellable = true, remap = false)
+    private void eca$onAddEntityWithoutEvent(EntityAccess entity, boolean flag,
+                                              CallbackInfoReturnable<Boolean> cir) {
+        if (SpawnBanHook.shouldBlockSpawn(entity)) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    // 公开包装入口也单独拦截，避免调用链被改写后绕过内部实现
+    @Inject(method = "addNewEntityWithoutEvent", at = @At("HEAD"), cancellable = true, remap = false)
+    private void eca$onAddNewEntityWithoutEvent(EntityAccess entity,
+                                                 CallbackInfoReturnable<Boolean> cir) {
+        if (SpawnBanHook.shouldBlockSpawn(entity)) {
+            cir.setReturnValue(false);
+        }
+    }
+
     @Inject(method = "unloadEntity", at = @At("HEAD"), cancellable = true)
     private void eca$onUnloadEntity(EntityAccess entity, CallbackInfo ci) {
         if (entity instanceof LivingEntity realEntity) {

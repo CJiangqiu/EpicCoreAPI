@@ -37,7 +37,8 @@ public final class EcaCoreTransformer implements ITransformer<ClassNode> {
     @Override
     public ClassNode transform(ClassNode classNode, ITransformerVotingContext context) {
         try {
-            if (LoadingScreenTransformer.TARGET_CLASS.equals(classNode.name)) {
+            if (RuntimeExtensionBridge.hasEarlyDisplayTransformer()
+                    && RuntimeExtensionBridge.EARLY_DISPLAY_TARGET.equals(classNode.name)) {
                 return transformLoadingScreen(classNode);
             } else if (LIVING_ENTITY.equals(classNode.name)) {
                 transformLivingEntity(classNode);
@@ -69,7 +70,9 @@ public final class EcaCoreTransformer implements ITransformer<ClassNode> {
         targets.add(Target.targetClass("net.minecraft.world.level.entity.PersistentEntitySectionManager"));
         targets.add(Target.targetClass("net.minecraft.world.level.entity.EntitySectionStorage"));
         targets.add(Target.targetClass("net.minecraft.server.level.ServerLevel"));
-        targets.add(Target.targetClass("net.minecraftforge.fml.earlydisplay.DisplayWindow"));
+        if (RuntimeExtensionBridge.hasEarlyDisplayTransformer()) {
+            targets.add(Target.targetClass(RuntimeExtensionBridge.EARLY_DISPLAY_TARGET.replace('/', '.')));
+        }
         return targets;
     }
 
@@ -117,10 +120,9 @@ public final class EcaCoreTransformer implements ITransformer<ClassNode> {
     }
 
     private static ClassNode transformLoadingScreen(ClassNode classNode) {
-        if (!LoadingScreenTransformer.ENABLED) return classNode;
         ClassWriter inputWriter = new SafeClassWriter(0);
         classNode.accept(inputWriter);
-        byte[] transformed = LoadingScreenTransformer.transform(inputWriter.toByteArray());
+        byte[] transformed = RuntimeExtensionBridge.transformEarlyDisplay(inputWriter.toByteArray());
         if (transformed == null) return classNode;
         ClassNode result = new ClassNode();
         new ClassReader(transformed).accept(result, ClassReader.EXPAND_FRAMES);

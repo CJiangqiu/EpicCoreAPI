@@ -3,6 +3,7 @@ package net.eca.agent;
 import java.io.RandomAccessFile;
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -11,11 +12,22 @@ import java.nio.charset.StandardCharsets;
  * This entry point stores Instrumentation and bridges it across ECA ClassLoaders.
  */
 public final class EcaAgent {
+    private static final String BOOTSTRAP_PREFIX = "eca-bootstrap:";
+    private static final String OPTIONAL_BOOTSTRAP = "net.eca.agent.EcaProAgentBootstrap";
 
     private static volatile Instrumentation instrumentation;
 
     public static void premain(String args, Instrumentation inst) {
-        agentmain(args, inst);
+        instrumentation = inst;
+        AgentLogWriter.info("[EcaAgent] Instrumentation acquired (premain)");
+        if (args != null && args.startsWith(BOOTSTRAP_PREFIX)) {
+            if (!installOptionalBootstrap(args.substring(BOOTSTRAP_PREFIX.length()), inst)) {
+                signalRelaunchReady();
+            }
+            return;
+        }
+        if (args != null && !args.isBlank()) bridgeInstrumentation(args, inst);
+        signalRelaunchReady();
     }
 
     public static void agentmain(String args, Instrumentation inst) {
@@ -27,6 +39,17 @@ public final class EcaAgent {
             bridgeInstrumentation(args, inst);
         }
         signalRelaunchReady();
+    }
+
+    private static boolean installOptionalBootstrap(String arguments, Instrumentation inst) {
+        try {
+            Class<?> bootstrap = Class.forName(OPTIONAL_BOOTSTRAP, true, EcaAgent.class.getClassLoader());
+            Method install = bootstrap.getMethod("install", String.class, Instrumentation.class);
+            return Boolean.TRUE.equals(install.invoke(null, arguments, inst));
+        } catch (Throwable t) {
+            AgentLogWriter.error("[EcaAgent] Optional bootstrap failed", t);
+            return false;
+        }
     }
 
     // Share the JVM-provided handle with ECA's copy in the caller's ClassLoader.
