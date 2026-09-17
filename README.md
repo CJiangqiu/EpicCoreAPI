@@ -616,16 +616,16 @@ public class MyBossExtension extends EntityExtension {
 
 ### Blender GLB Models and Animation
 
-ECA can load glTF 2.0 binary models directly without a separate model runtime. Blender resources follow the common ECA asset layout:
+ECA can attach a Blender model to an entity or use it to replace the entity's normal model. Export the model from Blender as **glTF Binary (.glb)**, then place the model and its definition in your resources:
 
 ```text
 assets/<namespace>/eca/blender/<model-path>/model.glb
 assets/<namespace>/eca/blender/<model-path>/definition.json
 ```
 
-The directory `assets/example/eca/blender/guardian/` defines model id `example:guardian`.
+The directory `assets/example/eca/blender/guardian/` defines the model id `example:guardian`. Subdirectories are supported, so `assets/example/eca/blender/bosses/guardian/` becomes `example:bosses/guardian`.
 
-`definition.json` selects the GLB and controls the model-wide transform:
+Use `definition.json` to select the GLB file, adjust its transform, and choose its default animation:
 
 ```json
 {
@@ -639,14 +639,21 @@ The directory `assets/example/eca/blender/guardian/` defines model id `example:g
 }
 ```
 
-- `model` names a GLB in the same directory and defaults to `model.glb`.
-- `scale` is a uniform multiplier; the recommended authoring convention is one Blender metre per game block.
-- `translation` is a model-local offset and `rotation` contains X/Y/Z degrees.
-- `default_animation` is used when neither explicit playback nor the entity extension selects an animation.
-- `loop` controls default playback; a non-looping clip holds its last frame.
-- `hidden_nodes` suppresses each named node and all descendants, which is useful for presentation floors that should not enter the game.
+- `model`: GLB filename in the same directory; defaults to `model.glb`.
+- `scale`: overall model scale.
+- `translation`: X/Y/Z position offset.
+- `rotation`: X/Y/Z rotation in degrees.
+- `default_animation`: animation to play when the entity extension does not select one.
+- `loop`: whether the default animation loops.
+- `hidden_nodes`: node names to hide together with their children.
 
-Export from Blender as **glTF Binary (.glb)**. Apply intended object transforms, export normals and the first UV set, embed PNG/JPEG textures where practical, exclude cameras, lights and presentation geometry, and give every action a stable unique name. ECA supports indexed triangle meshes, node hierarchies, base colors and textures, transparency, `STEP`/`LINEAR` translation, rotation and scale animation, and four-influence skeletal skinning through `skins`, `inverseBindMatrices`, `JOINTS_0`, and `WEIGHTS_0`.
+Recommended Blender export workflow:
+
+1. Finish the model, UVs, materials and animations in Blender.
+2. Give every animation a stable, unique name such as `Idle`, `Walk` or `Attack`.
+3. Export as **glTF Binary (.glb)** with normals, UVs and animations enabled. Pack the textures into the GLB when possible.
+4. Put the exported file beside `definition.json` and use the folder path as the model id.
+5. Reload resources after changing the model files. Load failures are written to the game log with the affected resource path.
 
 Bind a model through the entity's existing `EntityExtension`:
 
@@ -682,9 +689,11 @@ public BlenderModelExtension blenderModelExtension() {
 }
 ```
 
-`ADDITIVE` draws the GLB in addition to the normal entity model. `REPLACE` replaces the entity body and its normal render layers while retaining the surrounding entity render flow such as nameplates, shadows, outlines and poses. `BlenderModelExtension` can also control `enabled`, per-entity `shouldRender`, animation speed, uniform scale and X/Y/Z offsets. Override `blenderModelExtension(LivingEntity)` when only selected instances should use the model.
+Use `ADDITIVE` to draw the GLB together with the normal entity model, or `REPLACE` to use the GLB as the entity's main model. `BlenderModelExtension` can also control whether the model is visible, select an animation from the current entity state, change animation speed, adjust scale, and apply X/Y/Z offsets. Override `blenderModelExtension(LivingEntity)` when different instances of the same entity type need different models or settings.
 
-Gameplay code can explicitly control a bound model's animation. These calls must run on the logical server; ECA synchronizes the animation name, start time, speed, loop and pause state to tracking clients, including the animated player itself:
+`animation(LivingEntity)` is suitable for state-driven animations such as idle and movement. Return the exact animation name exported from Blender, or return `null` to use `default_animation` from `definition.json`.
+
+Use the animation API when gameplay needs to start a specific animation. Call it on the logical server; ECA synchronizes playback to clients:
 
 ```java
 EcaAPI.playAnimation(entity, "Attack");
@@ -698,27 +707,15 @@ if (EcaAPI.isAnimationPlaying(entity, "Attack")) {
 }
 ```
 
-Playing the same name again restarts it. A paused or completed non-looping animation remains the active explicit state, so `isAnimationPlaying` stays true until that state is stopped or replaced. Explicit playback is transient rather than saved to entity NBT; callers should start it again after the entity leaves and later rejoins a server level. `stopAnimation` clears explicit playback and falls back in this order:
+Playing the same animation again restarts it. `pauseAnimation` holds the current position, `resumeAnimation` continues from that position, and `stopAnimation` returns control to the animation selected by the entity extension or `definition.json`. Explicit playback is temporary and should be started again when required after the entity is unloaded and later returns.
+
+Animation selection uses the following priority:
 
 ```text
 BlenderModelExtension.animation(entity)
 → definition.json default_animation
 → the model's unanimated pose
 ```
-
-ECA intentionally does not define skills, cooldowns, hit frames or a wait scheduler. The caller owns the authoritative gameplay timeline; animation is synchronized presentation only. For example, the following is pseudocode using a developer-supplied plan system:
-
-```java
-plan.run(() -> EcaAPI.playAnimation(boss, "HeavyAttack"));
-plan.waitSeconds(0.6);
-plan.run(() -> EcaAPI.hurt(target, boss, 40.0f));
-plan.waitSeconds(0.4);
-plan.run(() -> EcaAPI.stopAnimation(boss));
-```
-
-Rigid characters may animate separate object nodes, while continuous characters can use skeletal weights. Skinning is evaluated on the CPU and then submitted through Minecraft's entity buffers, preserving entity light, depth, transparency, outlines and shader-pack render passes. `JOINTS_1`/`WEIGHTS_1`, sparse accessors, morph targets and `CUBICSPLINE` animation are not currently supported. Large high-poly crowds should be profiled because every visible skinned vertex is deformed on the CPU.
-
-Blender Geometry Nodes are an authoring tool rather than part of the glTF runtime. Apply or bake their result into ordinary meshes before export. ECA can render that baked result, but it does not execute Blender node graphs in-game; topology-changing Geometry Nodes animation would require a future morph-target or geometry-cache system.
 
 ### Block Extensions
 
@@ -1958,16 +1955,16 @@ public class MyBossExtension extends EntityExtension {
 
 ### Blender GLB 模型与动画
 
-ECA 可以直接加载 glTF 2.0 二进制模型，不需要额外的模型运行库。Blender 资源遵循统一的 ECA 资源目录：
+ECA 可以把 Blender 模型附加到实体上，也可以用它替换实体原有模型。先在 Blender 中将模型导出为 **glTF Binary (.glb)**，再把模型及其定义文件放入资源目录：
 
 ```text
 assets/<命名空间>/eca/blender/<模型路径>/model.glb
 assets/<命名空间>/eca/blender/<模型路径>/definition.json
 ```
 
-例如 `assets/example/eca/blender/guardian/` 对应模型 ID `example:guardian`。
+例如，`assets/example/eca/blender/guardian/` 对应模型 ID `example:guardian`。模型可以继续使用子目录，如 `assets/example/eca/blender/bosses/guardian/` 对应 `example:bosses/guardian`。
 
-`definition.json` 负责选择 GLB 文件并设置模型整体变换：
+使用 `definition.json` 指定 GLB 文件、调整整体变换并选择默认动画：
 
 ```json
 {
@@ -1981,14 +1978,21 @@ assets/<命名空间>/eca/blender/<模型路径>/definition.json
 }
 ```
 
-- `model` 是同目录下的 GLB 文件名，默认值为 `model.glb`。
-- `scale` 是统一缩放倍率；建议约定 Blender 中一米对应游戏中的一格。
-- `translation` 是模型局部偏移，`rotation` 按 X/Y/Z 角度声明。
-- `default_animation` 在没有显式播放、实体扩展也未选择动画时生效。
-- `loop` 控制默认动画是否循环；非循环动画会保持最后一帧。
-- `hidden_nodes` 隐藏指定节点及其全部子节点，适合排除 Blender 展示地面。
+- `model`：同目录下的 GLB 文件名，默认值为 `model.glb`。
+- `scale`：模型整体缩放倍率。
+- `translation`：模型在 X/Y/Z 方向的位置偏移。
+- `rotation`：模型绕 X/Y/Z 轴旋转的角度。
+- `default_animation`：实体扩展没有选择动画时播放的默认动画。
+- `loop`：默认动画是否循环。
+- `hidden_nodes`：需要连同子节点一起隐藏的节点名称。
 
-从 Blender 导出时选择 **glTF Binary (.glb)**。应应用预期的对象变换，导出法线和第一套 UV，尽量嵌入 PNG/JPEG 贴图，排除摄像机、灯光和展示场景，并为每个动作设置稳定且唯一的名称。ECA 支持索引三角形网格、节点层级、基础颜色与贴图、透明材质、`STEP`/`LINEAR` 位移、旋转和缩放动画，以及由 `skins`、`inverseBindMatrices`、`JOINTS_0`、`WEIGHTS_0` 表示的每顶点四权重骨骼蒙皮。
+推荐的 Blender 导出流程：
+
+1. 在 Blender 中完成模型、UV、材质和动画。
+2. 为每个动画设置稳定且唯一的名称，例如 `Idle`、`Walk` 或 `Attack`。
+3. 导出为 **glTF Binary (.glb)**，并启用法线、UV 和动画；条件允许时将贴图打包进 GLB。
+4. 把导出的文件放在 `definition.json` 旁边，并使用文件夹路径作为模型 ID。
+5. 修改模型文件后重新加载资源。加载失败时，游戏日志会记录对应的资源路径。
 
 通过已有的实体扩展绑定模型：
 
@@ -2024,9 +2028,11 @@ public BlenderModelExtension blenderModelExtension() {
 }
 ```
 
-`ADDITIVE` 会在原实体模型之外附加绘制 GLB；`REPLACE` 会替换实体主体及其原有渲染层，但仍保留名称、阴影、发光轮廓和实体姿态等外围渲染流程。`BlenderModelExtension` 还可以控制 `enabled`、按实体判断的 `shouldRender`、动画速度、统一缩放和 X/Y/Z 偏移。如果只希望部分实例使用模型，可以重写 `blenderModelExtension(LivingEntity)`。
+使用 `ADDITIVE` 可以让 GLB 与实体原模型同时显示；使用 `REPLACE` 则会把 GLB 作为实体的主体模型。`BlenderModelExtension` 还可以控制模型是否显示、根据实体状态选择动画、调整动画速度和缩放，以及设置 X/Y/Z 偏移。如果同一种实体的不同实例需要使用不同模型或配置，可以重写 `blenderModelExtension(LivingEntity)`。
 
-游戏逻辑可以显式控制已绑定模型的动画。这些调用必须发生在逻辑服务端；ECA 会把动画名称、开始时间、速度、循环与暂停状态同步给追踪实体的客户端，也包括被播放动画的玩家自身：
+`animation(LivingEntity)` 适合选择待机、移动等随实体状态变化的动画。返回 Blender 中导出的准确动画名称；返回 `null` 时使用 `definition.json` 中的 `default_animation`。
+
+需要由游戏逻辑主动播放指定动画时，可以使用动画 API。这些调用必须发生在逻辑服务端，ECA 会把播放状态同步到客户端：
 
 ```java
 EcaAPI.playAnimation(entity, "Attack");
@@ -2040,27 +2046,15 @@ if (EcaAPI.isAnimationPlaying(entity, "Attack")) {
 }
 ```
 
-重复播放同名动画会从头开始。暂停动画或已经到达末帧的非循环动画仍属于活跃显式状态，因此 `isAnimationPlaying` 会持续返回 true，直到该状态停止或被替换。显式播放状态是临时状态，不会写入实体 NBT；实体离开服务端世界后再次加入时，调用方应重新发起播放。`stopAnimation` 清除显式播放状态，并按以下顺序回退：
+重复播放同名动画会从头开始。`pauseAnimation` 会保持当前播放位置，`resumeAnimation` 会从该位置继续，`stopAnimation` 则把动画控制权交还给实体扩展或 `definition.json`。显式播放状态是临时状态；实体卸载后重新出现时，应在需要的情况下重新播放。
+
+动画按以下优先级选择：
 
 ```text
 BlenderModelExtension.animation(entity)
 → definition.json 的 default_animation
 → 模型未播放动画时的原始姿态
 ```
-
-ECA 不定义技能、冷却、命中帧或等待调度器。调用方负责权威游戏时间线，动画只负责同步表现。例如以下代码是使用开发者自有 Plan 系统的伪代码：
-
-```java
-plan.run(() -> EcaAPI.playAnimation(boss, "HeavyAttack"));
-plan.waitSeconds(0.6);
-plan.run(() -> EcaAPI.hurt(target, boss, 40.0f));
-plan.waitSeconds(0.4);
-plan.run(() -> EcaAPI.stopAnimation(boss));
-```
-
-刚性角色可以直接动画化独立物体节点，连续网格角色则可以使用骨骼权重。蒙皮在 CPU 侧计算，随后仍通过 Minecraft 实体缓冲提交，因此保留实体光照、深度、透明、轮廓和光影渲染通道。目前不支持 `JOINTS_1`/`WEIGHTS_1`、稀疏访问器、Morph Target 和 `CUBICSPLINE` 动画。大量高面数蒙皮实体会逐顶点消耗 CPU，应按实际场景评估性能。
-
-Blender 几何节点属于创作工具，并不是 glTF 运行时的一部分。导出前需要把结果应用或烘焙为普通网格；ECA 可以渲染烘焙结果，但不会在游戏内执行 Blender 节点图。会改变拓扑的几何节点动画，需要未来通过 Morph Target 或几何缓存体系另行支持。
 
 ### 方块扩展
 
