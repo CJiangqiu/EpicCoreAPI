@@ -208,9 +208,10 @@ public final class TransformerWhitelist {
     public static void addAllReturn(String prefix) {
         String normalized = normalizePrefix(prefix);
         if (normalized == null) return;
-        customAllReturn.add(normalized);
+        if (!customAllReturn.add(normalized)) return;
         rebuildFirstSegments();
         CACHE_ALL.clear();
+        ProRuntimeBridge.refreshInterception();
     }
 
     //移除 AllReturn 白名单前缀
@@ -221,6 +222,7 @@ public final class TransformerWhitelist {
         if (removed) {
             rebuildFirstSegments();
             CACHE_ALL.clear();
+            ProRuntimeBridge.refreshInterception();
         }
         return removed;
     }
@@ -259,6 +261,13 @@ public final class TransformerWhitelist {
         return Collections.unmodifiableSet(all);
     }
 
+    //获取通过 API 或 JSON 注册的 AllReturn 白名单前缀
+    public static Set<String> getCustomAllReturn() {
+        synchronized (customAllReturn) {
+            return Collections.unmodifiableSet(new HashSet<>(customAllReturn));
+        }
+    }
+
     //获取所有转换白名单前缀（内置 + 自定义）
     public static Set<String> getAllTransform() {
         Set<String> all = new HashSet<>(SYSTEM);
@@ -287,6 +296,7 @@ public final class TransformerWhitelist {
         jsonLoaded = true;
         loadFromConfigDirectory();
         rebuildFirstSegments();
+        ProRuntimeBridge.refreshInterception();
     }
 
     private static void loadFromConfigDirectory() {

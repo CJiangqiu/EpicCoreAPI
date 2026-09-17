@@ -44,7 +44,6 @@ public class EcaTransformationService implements ITransformationService {
     private static final String TRANSFORMATION_BACKEND_KEY = "net.eca.transform.backend";
 
     static {
-        AgentLogWriter.resetForNewSession();
         ProRuntimeBridge.prepareEarly();
         TRANSFORMATION_BACKEND = initializeTransformationBackend();
         ProRuntimeBridge.afterAgentReady();

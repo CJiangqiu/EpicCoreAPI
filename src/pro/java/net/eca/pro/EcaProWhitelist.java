@@ -7,14 +7,23 @@ import forgevm.jvm.NativeFilter;
 import forgevm.jvm.ProcessFilter;
 import forgevm.jvm.ThreadFilter;
 import net.eca.agent.AgentLoader;
+import net.eca.coremod.TransformerWhitelist;
 
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.function.BiFunction;
+import java.util.Set;
 
 final class EcaProWhitelist {
+    private static final List<String> PLATFORM_PACKAGES = List.of(
+            "java.", "javax.", "jdk.", "sun.", "com.sun.",
+            "net.minecraft.", "com.mojang.", "net.minecraftforge.", "cpw.mods.", "net.minecrell.",
+            "org.lwjgl.", "org.spongepowered.", "org.objectweb.asm.", "io.netty.", "com.google.",
+            "it.unimi.", "org.slf4j.", "org.apache.", "org.joml.", "com.electronwill."
+    );
+
     private EcaProWhitelist() {
     }
 
@@ -34,27 +43,49 @@ final class EcaProWhitelist {
     }
 
     static NativeFilter nativeLoad(EcaProConfig config) {
-        List<InterceptionRule> rules = rules(config.nativeRules);
+        List<InterceptionRule> rules = sourceRules(config.nativePackages);
         return NativeFilter.Whitelist(rules.get(0), rest(rules));
     }
 
     static ProcessFilter process(EcaProConfig config) {
-        List<InterceptionRule> rules = rules(config.processRules);
+        List<InterceptionRule> rules = sourceRules(config.processPackages);
         return ProcessFilter.Whitelist(rules.get(0), rest(rules));
     }
 
     static ThreadFilter thread(EcaProConfig config) {
-        List<InterceptionRule> rules = rules(config.threadRules);
+        List<InterceptionRule> rules = sourceRules(config.threadPackages);
         return ThreadFilter.Whitelist(rules.get(0), rest(rules));
     }
 
-    private static List<InterceptionRule> rules(EcaProConfig.RuleEntries configured) {
+    private static List<InterceptionRule> sourceRules(List<String> configuredPackages) {
+        Set<String> sources = new LinkedHashSet<>(ownSources());
+        addPackageSources(sources, PLATFORM_PACKAGES);
+        addPackageSources(sources, TransformerWhitelist.getCustomAllReturn());
+        addPackageSources(sources, configuredPackages);
         ArrayList<InterceptionRule> rules = new ArrayList<>();
-        ownSources().forEach(source -> rules.add(InterceptionRule.Source(source)));
-        configured.names.forEach(name -> rules.add(InterceptionRule.Name(name)));
-        configured.sources.forEach(source -> rules.add(InterceptionRule.Source(source)));
-        addPairs(rules, configured.nameAndSources, InterceptionRule::NameAndSource);
+        sources.forEach(source -> rules.add(InterceptionRule.Source(source)));
         return List.copyOf(rules);
+    }
+
+    private static void addPackageSources(Set<String> sources, Iterable<String> packages) {
+        for (String packagePrefix : packages) {
+            String normalized = normalizePackage(packagePrefix);
+            if (normalized == null) continue;
+            sources.add("class:" + normalized + "*");
+            sources.add("initiator-class:" + normalized + "*");
+        }
+    }
+
+    private static String normalizePackage(String packagePrefix) {
+        if (packagePrefix == null) return null;
+        String normalized = packagePrefix.trim().replace('/', '.');
+        if (normalized.isEmpty() || normalized.indexOf(':') >= 0) return null;
+        while (normalized.endsWith("*")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        if (normalized.isEmpty()) return null;
+        if (!normalized.endsWith(".")) normalized += ".";
+        return normalized;
     }
 
     private static List<String> ownSources() {
@@ -69,17 +100,6 @@ final class EcaProWhitelist {
         } catch (Throwable ignored) {
         }
         return sources;
-    }
-
-    private static void addPairs(List<InterceptionRule> rules, List<String> pairs,
-                                 BiFunction<String, String, InterceptionRule> factory) {
-        for (String pair : pairs) {
-            int separator = pair.indexOf("=>");
-            if (separator <= 0 || separator >= pair.length() - 2) continue;
-            String name = pair.substring(0, separator).trim();
-            String source = pair.substring(separator + 2).trim();
-            if (!name.isEmpty() && !source.isEmpty()) rules.add(factory.apply(name, source));
-        }
     }
 
     private static InterceptionRule[] rest(List<InterceptionRule> rules) {

@@ -1,6 +1,6 @@
 # EpicCoreAPI
 
-This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
+This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, Blender GLB models and animation, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
 
 The original intent of this mod is to provide developers with simplified entity manipulation APIs while achieving a certain level of strength under the premise of ensuring performance and compatibility. Therefore, please do not use this mod for mod power comparisons or endless code arms races. Additionally, in modpack survival environments, it is best to ensure that the Attack and Defence Radical Logic config options are disabled.
 
@@ -166,6 +166,12 @@ side="BOTH"
 - `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
 - `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
 - `clearActiveEntityExtensionTable(level)` - Clear active entity extension table in current dimension
+- `playAnimation(entity, animation)` - Start a named GLB animation from the beginning at normal speed without looping (logical server only)
+- `playAnimation(entity, animation, speed, loop)` - Start or restart a named GLB animation with explicit playback settings (logical server only)
+- `stopAnimation(entity)` - Stop explicit playback and return to the extension-selected or model-default animation
+- `pauseAnimation(entity)` - Pause explicit playback while holding its current position
+- `resumeAnimation(entity)` - Resume explicit playback from its preserved position
+- `isAnimationPlaying(entity[, animation])` - Query explicit playback, optionally matching an exact animation name
 - `setGlobalFog(level, fogData)` - Set global fog effect override for a dimension (does not change effect priority)
 - `clearGlobalFog(level)` - Clear global fog effect override
 - `setGlobalSkybox(level, skyboxData)` - Set global skybox effect override for a dimension (does not change effect priority)
@@ -276,6 +282,16 @@ This mod also provides a customizable entity type extension feature for adding s
 Entity extensions can opt into a custom boss bar through `enableBossBar()`, control visibility with `shouldShowBossBar(LivingEntity)`, and provide the client-side appearance through `bossBarExtension()`. `BossBarExtension.showValueText()` enables centered `current/max` text; override `getDisplayCurrentValue(LivingEntity)` and `getDisplayMaxValue(LivingEntity)` to provide custom display values. The default value sources are the entity's health and maximum health.
 
 Entity, item, and block shader overlays share the same `ShaderMaskPass` pipeline. Every pass supplies a RenderType, an optional UV-aligned mask texture, a target RGB color (black by default), a near-color tolerance, and opacity. An extension may return multiple passes so different colors in one mask use different shaders. Passes render in list order, and later passes draw over earlier passes where selected regions overlap. Transparent and non-matching mask pixels are discarded.
+
+### Blender GLB Models and Animation
+
+Entity extensions may attach or replace an entity model with a glTF 2.0 binary asset. A model id such as `example:guardian` resolves to `assets/example/eca/blender/guardian/model.glb` plus `definition.json`; this is the canonical and only Blender resource layout. Definitions select the GLB and configure scale, translation, rotation, a default animation, default looping, and hidden node subtrees.
+
+The renderer supports indexed triangle meshes, node hierarchies, base colors and textures, transparency, `STEP`/`LINEAR` node animation, and four-influence skeletal skinning through `skins`, `inverseBindMatrices`, `JOINTS_0`, and `WEIGHTS_0`. Skinning runs on the CPU and is submitted through the normal entity render buffers. `ADDITIVE` retains the original entity model, while `REPLACE` replaces its body and normal layers without bypassing nameplates, shadows, outlines, entity lighting, depth, or shader-pack passes.
+
+Explicit animation control is server-authoritative. `playAnimation` restarts even the same named clip and synchronizes timing, speed, loop and pause state to tracking clients; paused and completed non-looping clips remain active until replaced or stopped. Playback state is transient and is not saved to entity NBT. `stopAnimation` falls back to `BlenderModelExtension.animation(entity)`, then `definition.json`'s `default_animation`, then the unanimated pose. ECA deliberately leaves skills, waits, cooldowns, hit timing and damage to the calling mod.
+
+Blender Geometry Nodes must be applied or baked to ordinary mesh data before GLB export; ECA renders the result but does not execute Blender node graphs. Sparse accessors, `JOINTS_1`/`WEIGHTS_1`, morph targets and `CUBICSPLINE` animation are not currently supported.
 
 ### Block Extensions
 

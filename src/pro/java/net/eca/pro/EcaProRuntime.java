@@ -22,6 +22,7 @@ public final class EcaProRuntime {
     private static volatile EcaProConfig config;
     private static volatile Path trustedAgent;
     private static volatile boolean active;
+    private static volatile boolean interceptionInstalled;
 
     private EcaProRuntime() {
     }
@@ -60,6 +61,12 @@ public final class EcaProRuntime {
     public static synchronized void afterAgentReady() {
         if (!active || config == null) return;
         EcaProInterception.install(config, trustedAgent);
+        interceptionInstalled = true;
+    }
+
+    public static synchronized void refreshInterception() {
+        if (!active || !interceptionInstalled || config == null) return;
+        EcaProInterception.refreshSourceFilters(config);
     }
 
     public static synchronized void activateFallbackMonitor() {

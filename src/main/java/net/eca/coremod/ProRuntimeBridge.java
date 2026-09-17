@@ -11,11 +11,15 @@ public final class ProRuntimeBridge {
     private static final String PROVIDER = "net.eca.pro.EcaProRuntime";
     private static volatile Class<?> provider;
     private static volatile boolean resolved;
+    private static volatile boolean earlyPrepared;
 
     private ProRuntimeBridge() {
     }
 
-    public static void prepareEarly() {
+    public static synchronized void prepareEarly() {
+        if (earlyPrepared) return;
+        earlyPrepared = true;
+        AgentLogWriter.resetForNewSession();
         invoke("prepareEarly");
     }
 
@@ -25,6 +29,10 @@ public final class ProRuntimeBridge {
 
     public static void activateFallbackMonitor() {
         invoke("activateFallbackMonitor");
+    }
+
+    public static void refreshInterception() {
+        invoke("refreshInterception");
     }
 
     private static void invoke(String methodName) {

@@ -32,6 +32,15 @@ final class EcaProInterception {
                 () -> ForgeVM.banThreadCreate(EcaProWhitelist.thread(config)));
     }
 
+    static void refreshSourceFilters(EcaProConfig config) {
+        if (config.nativeLoad) invoke("Native load whitelist refresh",
+                () -> ForgeVM.banNativeLoad(EcaProWhitelist.nativeLoad(config)));
+        if (config.processCreate) invoke("Process creation whitelist refresh",
+                () -> ForgeVM.banProcessCreate(EcaProWhitelist.process(config)));
+        if (config.threadCreate) invoke("Thread creation whitelist refresh",
+                () -> ForgeVM.banThreadCreate(EcaProWhitelist.thread(config)));
+    }
+
     private static void invoke(String name, BooleanSupplier operation) {
         try {
             boolean success = operation.getAsBoolean();

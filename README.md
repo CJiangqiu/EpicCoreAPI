@@ -1,8 +1,6 @@
 # EpicCoreAPI
 
-Blender GLB 模型资源和实体扩展接入方式见 [BLENDER_MODELS.md](BLENDER_MODELS.md)。
-
-This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
+This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, Blender GLB models and animation, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
 
 The original intent of this mod is to provide developers with simplified entity manipulation APIs while achieving a certain level of strength under the premise of ensuring performance and compatibility. Therefore, please do not use this mod for mod power comparisons or endless code arms races. Additionally, in modpack survival environments, it is best to ensure that the Attack and Defence Radical Logic config options are disabled.
 
@@ -168,6 +166,12 @@ side="BOTH"
 - `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
 - `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
 - `clearActiveEntityExtensionTable(level)` - Clear active entity extension table in current dimension
+- `playAnimation(entity, animation)` - Start a named GLB animation from the beginning at normal speed without looping (logical server only)
+- `playAnimation(entity, animation, speed, loop)` - Start or restart a named GLB animation with explicit playback settings (logical server only)
+- `stopAnimation(entity)` - Stop explicit playback and return to the extension-selected or model-default animation
+- `pauseAnimation(entity)` - Pause explicit playback while holding its current position
+- `resumeAnimation(entity)` - Resume explicit playback from its preserved position
+- `isAnimationPlaying(entity[, animation])` - Query explicit playback, optionally matching an exact animation name
 - `setGlobalFog(level, fogData)` - Set global fog effect override for a dimension (does not change effect priority)
 - `clearGlobalFog(level)` - Clear global fog effect override
 - `setGlobalSkybox(level, skyboxData)` - Set global skybox effect override for a dimension (does not change effect priority)
@@ -609,6 +613,112 @@ public class MyBossExtension extends EntityExtension {
     }
 }
 ```
+
+### Blender GLB Models and Animation
+
+ECA can load glTF 2.0 binary models directly without a separate model runtime. Blender resources follow the common ECA asset layout:
+
+```text
+assets/<namespace>/eca/blender/<model-path>/model.glb
+assets/<namespace>/eca/blender/<model-path>/definition.json
+```
+
+The directory `assets/example/eca/blender/guardian/` defines model id `example:guardian`. Blender model support was introduced with this canonical path and has no older asset location to fall back to.
+
+`definition.json` selects the GLB and controls the model-wide transform:
+
+```json
+{
+  "model": "model.glb",
+  "scale": 1.0,
+  "translation": [0.0, 0.0, 0.0],
+  "rotation": [0.0, 0.0, 0.0],
+  "default_animation": "Idle",
+  "loop": true,
+  "hidden_nodes": ["PresentationGround"]
+}
+```
+
+- `model` names a GLB in the same directory and defaults to `model.glb`.
+- `scale` is a uniform multiplier; the recommended authoring convention is one Blender metre per game block.
+- `translation` is a model-local offset and `rotation` contains X/Y/Z degrees.
+- `default_animation` is used when neither explicit playback nor the entity extension selects an animation.
+- `loop` controls default playback; a non-looping clip holds its last frame.
+- `hidden_nodes` suppresses each named node and all descendants, which is useful for presentation floors that should not enter the game.
+
+Export from Blender as **glTF Binary (.glb)**. Apply intended object transforms, export normals and the first UV set, embed PNG/JPEG textures where practical, exclude cameras, lights and presentation geometry, and give every action a stable unique name. ECA supports indexed triangle meshes, node hierarchies, base colors and textures, transparency, `STEP`/`LINEAR` translation, rotation and scale animation, and four-influence skeletal skinning through `skins`, `inverseBindMatrices`, `JOINTS_0`, and `WEIGHTS_0`.
+
+Bind a model through the entity's existing `EntityExtension`:
+
+```java
+import net.eca.util.entity_extension.BlenderModelExtension;
+import net.eca.util.entity_extension.BlenderRenderMode;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.LivingEntity;
+
+@Override
+public BlenderModelExtension blenderModelExtension() {
+    return new BlenderModelExtension() {
+        @Override
+        public ResourceLocation modelId() {
+            return new ResourceLocation("example", "guardian");
+        }
+
+        @Override
+        public BlenderRenderMode renderMode() {
+            return BlenderRenderMode.REPLACE;
+        }
+
+        @Override
+        public String animation(LivingEntity entity) {
+            return entity.getDeltaMovement().horizontalDistanceSqr() > 0.001 ? "Walk" : "Idle";
+        }
+
+        @Override
+        public float scale(LivingEntity entity) {
+            return 1.0f;
+        }
+    };
+}
+```
+
+`ADDITIVE` draws the GLB in addition to the normal entity model. `REPLACE` replaces the entity body and its normal render layers while retaining the surrounding entity render flow such as nameplates, shadows, outlines and poses. `BlenderModelExtension` can also control `enabled`, per-entity `shouldRender`, animation speed, uniform scale and X/Y/Z offsets. Override `blenderModelExtension(LivingEntity)` when only selected instances should use the model.
+
+Gameplay code can explicitly control a bound model's animation. These calls must run on the logical server; ECA synchronizes the animation name, start time, speed, loop and pause state to tracking clients, including the animated player itself:
+
+```java
+EcaAPI.playAnimation(entity, "Attack");
+EcaAPI.playAnimation(entity, "Run", 1.25f, true);
+
+EcaAPI.pauseAnimation(entity);
+EcaAPI.resumeAnimation(entity);
+
+if (EcaAPI.isAnimationPlaying(entity, "Attack")) {
+    EcaAPI.stopAnimation(entity);
+}
+```
+
+Playing the same name again restarts it. A paused or completed non-looping animation remains the active explicit state, so `isAnimationPlaying` stays true until that state is stopped or replaced. Explicit playback is transient rather than saved to entity NBT; callers should start it again after the entity leaves and later rejoins a server level. `stopAnimation` clears explicit playback and falls back in this order:
+
+```text
+BlenderModelExtension.animation(entity)
+→ definition.json default_animation
+→ the model's unanimated pose
+```
+
+ECA intentionally does not define skills, cooldowns, hit frames or a wait scheduler. The caller owns the authoritative gameplay timeline; animation is synchronized presentation only. For example, the following is pseudocode using a developer-supplied plan system:
+
+```java
+plan.run(() -> EcaAPI.playAnimation(boss, "HeavyAttack"));
+plan.waitSeconds(0.6);
+plan.run(() -> EcaAPI.hurt(target, boss, 40.0f));
+plan.waitSeconds(0.4);
+plan.run(() -> EcaAPI.stopAnimation(boss));
+```
+
+Rigid characters may animate separate object nodes, while continuous characters can use skeletal weights. Skinning is evaluated on the CPU and then submitted through Minecraft's entity buffers, preserving entity light, depth, transparency, outlines and shader-pack render passes. `JOINTS_1`/`WEIGHTS_1`, sparse accessors, morph targets and `CUBICSPLINE` animation are not currently supported. Large high-poly crowds should be profiled because every visible skinned vertex is deformed on the CPU.
+
+Blender Geometry Nodes are an authoring tool rather than part of the glTF runtime. Apply or bake their result into ordinary meshes before export. ECA can render that baked result, but it does not execute Blender node graphs in-game; topology-changing Geometry Nodes animation would require a future morph-target or geometry-cache system.
 
 ### Block Extensions
 
@@ -1233,7 +1343,7 @@ Any `.json` filename works, and you can have multiple files.
 
 # 中文
 
-本 Mod 提供了一些基于 CoreMod (ITransformationService)、Java Agent 和 Mixin 等技术所实现的实体操作 API 和相关命令，此外还提供一系列功能模块：BossShow、实体扩展、方块扩展、物品扩展、屏幕滤镜、ECA 着色器生成器、自定义阵营与自定义袭击。注意，本 Mod 的实体操作方法虽然在命名上可能与原版一致，但本质上的实现完全不同。例如，设置生命值 API 可以修改部分使用自定义生命值（包括但不限于实体数据、数字类型字段、部分哈希表）的实体；清除 API 则是进行了 Minecraft 底层容器的相关清除；设置无敌 API 则是提供了比原版创造模式无敌更强大的实现。此外，本 Mod 还将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
+本 Mod 提供了一些基于 CoreMod (ITransformationService)、Java Agent 和 Mixin 等技术所实现的实体操作 API 和相关命令，此外还提供一系列功能模块：BossShow、实体扩展、Blender GLB 模型与动画、方块扩展、物品扩展、屏幕滤镜、ECA 着色器生成器、自定义阵营与自定义袭击。注意，本 Mod 的实体操作方法虽然在命名上可能与原版一致，但本质上的实现完全不同。例如，设置生命值 API 可以修改部分使用自定义生命值（包括但不限于实体数据、数字类型字段、部分哈希表）的实体；清除 API 则是进行了 Minecraft 底层容器的相关清除；设置无敌 API 则是提供了比原版创造模式无敌更强大的实现。此外，本 Mod 还将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
 
 本 Mod 的初衷是为开发者提供简化的实体操作 API，并在确保性能和兼容性的前提下获得一定的强度。因此，请不要将本 Mod 用于 Mod 战力对比和无休止的代码军火竞赛中。此外，在整合包生存环境下，最好确保攻击和防御逻辑的激进配置项处于关闭状态。
 
@@ -1399,6 +1509,12 @@ side="BOTH"
 - `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
 - `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）
 - `clearActiveEntityExtensionTable(level)` - 清空当前维度活跃扩展表
+- `playAnimation(entity, animation)` - 以正常速度从头播放指定 GLB 动画且不循环（仅逻辑服务端调用）
+- `playAnimation(entity, animation, speed, loop)` - 按指定速度和循环设置开始或重新播放 GLB 动画（仅逻辑服务端调用）
+- `stopAnimation(entity)` - 停止显式动画并回退到扩展选择或模型默认动画
+- `pauseAnimation(entity)` - 暂停显式动画并保持当前播放位置
+- `resumeAnimation(entity)` - 从保存的位置继续显式动画
+- `isAnimationPlaying(entity[, animation])` - 查询实体是否存在显式动画，可选择精确匹配动画名
 - `setGlobalFog(level, fogData)` - 设置维度全局雾气效果覆盖（不改变效果优先级）
 - `clearGlobalFog(level)` - 清除全局雾气效果覆盖
 - `setGlobalSkybox(level, skyboxData)` - 设置维度全局天空盒效果覆盖（不改变效果优先级）
@@ -1839,6 +1955,112 @@ public class MyBossExtension extends EntityExtension {
     }
 }
 ```
+
+### Blender GLB 模型与动画
+
+ECA 可以直接加载 glTF 2.0 二进制模型，不需要额外的模型运行库。Blender 资源遵循统一的 ECA 资源目录：
+
+```text
+assets/<命名空间>/eca/blender/<模型路径>/model.glb
+assets/<命名空间>/eca/blender/<模型路径>/definition.json
+```
+
+例如 `assets/example/eca/blender/guardian/` 对应模型 ID `example:guardian`。Blender 模型系统从一开始就使用这个规范目录，因此没有需要兼容的旧 Blender 资源路径。
+
+`definition.json` 负责选择 GLB 文件并设置模型整体变换：
+
+```json
+{
+  "model": "model.glb",
+  "scale": 1.0,
+  "translation": [0.0, 0.0, 0.0],
+  "rotation": [0.0, 0.0, 0.0],
+  "default_animation": "Idle",
+  "loop": true,
+  "hidden_nodes": ["PresentationGround"]
+}
+```
+
+- `model` 是同目录下的 GLB 文件名，默认值为 `model.glb`。
+- `scale` 是统一缩放倍率；建议约定 Blender 中一米对应游戏中的一格。
+- `translation` 是模型局部偏移，`rotation` 按 X/Y/Z 角度声明。
+- `default_animation` 在没有显式播放、实体扩展也未选择动画时生效。
+- `loop` 控制默认动画是否循环；非循环动画会保持最后一帧。
+- `hidden_nodes` 隐藏指定节点及其全部子节点，适合排除 Blender 展示地面。
+
+从 Blender 导出时选择 **glTF Binary (.glb)**。应应用预期的对象变换，导出法线和第一套 UV，尽量嵌入 PNG/JPEG 贴图，排除摄像机、灯光和展示场景，并为每个动作设置稳定且唯一的名称。ECA 支持索引三角形网格、节点层级、基础颜色与贴图、透明材质、`STEP`/`LINEAR` 位移、旋转和缩放动画，以及由 `skins`、`inverseBindMatrices`、`JOINTS_0`、`WEIGHTS_0` 表示的每顶点四权重骨骼蒙皮。
+
+通过已有的实体扩展绑定模型：
+
+```java
+import net.eca.util.entity_extension.BlenderModelExtension;
+import net.eca.util.entity_extension.BlenderRenderMode;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.LivingEntity;
+
+@Override
+public BlenderModelExtension blenderModelExtension() {
+    return new BlenderModelExtension() {
+        @Override
+        public ResourceLocation modelId() {
+            return new ResourceLocation("example", "guardian");
+        }
+
+        @Override
+        public BlenderRenderMode renderMode() {
+            return BlenderRenderMode.REPLACE;
+        }
+
+        @Override
+        public String animation(LivingEntity entity) {
+            return entity.getDeltaMovement().horizontalDistanceSqr() > 0.001 ? "Walk" : "Idle";
+        }
+
+        @Override
+        public float scale(LivingEntity entity) {
+            return 1.0f;
+        }
+    };
+}
+```
+
+`ADDITIVE` 会在原实体模型之外附加绘制 GLB；`REPLACE` 会替换实体主体及其原有渲染层，但仍保留名称、阴影、发光轮廓和实体姿态等外围渲染流程。`BlenderModelExtension` 还可以控制 `enabled`、按实体判断的 `shouldRender`、动画速度、统一缩放和 X/Y/Z 偏移。如果只希望部分实例使用模型，可以重写 `blenderModelExtension(LivingEntity)`。
+
+游戏逻辑可以显式控制已绑定模型的动画。这些调用必须发生在逻辑服务端；ECA 会把动画名称、开始时间、速度、循环与暂停状态同步给追踪实体的客户端，也包括被播放动画的玩家自身：
+
+```java
+EcaAPI.playAnimation(entity, "Attack");
+EcaAPI.playAnimation(entity, "Run", 1.25f, true);
+
+EcaAPI.pauseAnimation(entity);
+EcaAPI.resumeAnimation(entity);
+
+if (EcaAPI.isAnimationPlaying(entity, "Attack")) {
+    EcaAPI.stopAnimation(entity);
+}
+```
+
+重复播放同名动画会从头开始。暂停动画或已经到达末帧的非循环动画仍属于活跃显式状态，因此 `isAnimationPlaying` 会持续返回 true，直到该状态停止或被替换。显式播放状态是临时状态，不会写入实体 NBT；实体离开服务端世界后再次加入时，调用方应重新发起播放。`stopAnimation` 清除显式播放状态，并按以下顺序回退：
+
+```text
+BlenderModelExtension.animation(entity)
+→ definition.json 的 default_animation
+→ 模型未播放动画时的原始姿态
+```
+
+ECA 不定义技能、冷却、命中帧或等待调度器。调用方负责权威游戏时间线，动画只负责同步表现。例如以下代码是使用开发者自有 Plan 系统的伪代码：
+
+```java
+plan.run(() -> EcaAPI.playAnimation(boss, "HeavyAttack"));
+plan.waitSeconds(0.6);
+plan.run(() -> EcaAPI.hurt(target, boss, 40.0f));
+plan.waitSeconds(0.4);
+plan.run(() -> EcaAPI.stopAnimation(boss));
+```
+
+刚性角色可以直接动画化独立物体节点，连续网格角色则可以使用骨骼权重。蒙皮在 CPU 侧计算，随后仍通过 Minecraft 实体缓冲提交，因此保留实体光照、深度、透明、轮廓和光影渲染通道。目前不支持 `JOINTS_1`/`WEIGHTS_1`、稀疏访问器、Morph Target 和 `CUBICSPLINE` 动画。大量高面数蒙皮实体会逐顶点消耗 CPU，应按实际场景评估性能。
+
+Blender 几何节点属于创作工具，并不是 glTF 运行时的一部分。导出前需要把结果应用或烘焙为普通网格；ECA 可以渲染烘焙结果，但不会在游戏内执行 Blender 节点图。会改变拓扑的几何节点动画，需要未来通过 Morph Target 或几何缓存体系另行支持。
 
 ### 方块扩展
 

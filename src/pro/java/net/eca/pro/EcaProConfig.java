@@ -5,58 +5,88 @@ import net.eca.agent.AgentLogWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 
 final class EcaProConfig {
     private static final Path PATH = Path.of("config", "eca_pro.toml");
     private static final String DEFAULTS = """
-            # ECA Pro startup options. Restart the game after changing this file.
-            [general]
-            enabled = true
+            # ECA Pro configuration. Restart the game after changing this file.
+            # Master switch for the FVM controller. JVM guards, relaunch, interception and
+            # transformer fallback require this option to be true. The intro is independent.
+            enable_fvm = true
+            # Show the FVM status window. Requires enable_fvm = true.
             status_window = true
 
             [intro]
+            # Play the ECA Pro intro before the normal loading window. Does not require FVM.
             enabled = true
 
             [jvm_guard]
+            # Prevent unauthorized attempts to terminate or detach the protected JVM.
+            # Requires enable_fvm = true.
             lock_jvm = false
+            # Restart the game under a controlled JVM with the policy applied before startup.
+            # Requires enable_fvm = true.
             relaunch = false
+            # Remove Java agents already present on the original command line during relaunch.
+            # Requires relaunch = true.
             drop_existing_agents = false
+            # Remove injection-related environment variables during relaunch.
+            # Requires relaunch = true.
             sanitize_environment = true
+            # Reject @argument files so hidden JVM arguments cannot bypass relaunch filtering.
+            # Requires relaunch = true.
             reject_argument_files = true
 
-            [interception]
-            java_agent = false
-            jvmti = false
-            native_load = false
-            process_create = false
-            thread_create = false
+            [java_agent]
+            # Block Java agents not matched by this whitelist. Requires enable_fvm = true.
+            ban = false
+            # Allowed Agent JAR path patterns. Effective only when ban = true.
+            # Example: whitelist = ["*trusted-agent.jar"]
+            whitelist = []
 
-            [whitelist.java_agent]
-            paths = []
+            [jvmti]
+            # Block JVMTI access from native modules not matched by this whitelist.
+            # Requires enable_fvm = true.
+            ban = false
+            # Allowed native module path patterns. Effective only when ban = true.
+            # Example: whitelist = ["*trusted-native.dll"]
+            whitelist = []
 
-            [whitelist.jvmti]
-            modules = []
+            [native_load]
+            # Block native-library loads from Java packages outside this whitelist.
+            # Requires enable_fvm = true.
+            ban = false
+            # Allowed Java package prefixes. Effective only when ban = true.
+            # Example: whitelist = ["com.example.mod."]
+            # Platform packages, ECA and registered AllReturn packages are added automatically.
+            whitelist = []
 
-            [whitelist.native_load]
-            names = []
-            sources = []
-            name_and_sources = []
+            [process_create]
+            # Block child-process creation from Java packages outside this whitelist.
+            # Requires enable_fvm = true.
+            ban = false
+            # Allowed Java package prefixes. Effective only when ban = true.
+            # Example: whitelist = ["com.example.mod."]
+            # Platform packages, ECA and registered AllReturn packages are added automatically.
+            whitelist = []
 
-            [whitelist.process_create]
-            names = []
-            sources = []
-            name_and_sources = []
-
-            [whitelist.thread_create]
-            names = []
-            sources = []
-            name_and_sources = []
+            [thread_create]
+            # Block platform-thread creation from Java packages outside this whitelist.
+            # Requires enable_fvm = true. Virtual threads are not controlled by this option.
+            ban = false
+            # Allowed Java package prefixes. Effective only when ban = true.
+            # Example: whitelist = ["com.example.mod."]
+            # Platform packages, ECA and registered AllReturn packages are added automatically.
+            whitelist = []
 
             [transformer_fallback]
+            # Activate the fallback monitor when repeated transformer failures are detected.
+            # Requires enable_fvm = true.
             enabled = false
+            # Consecutive failure count that activates the fallback. Requires enabled = true.
+            # Valid range: 1-20. Example: failure_threshold = 3
             failure_threshold = 3
             """;
 
@@ -77,9 +107,9 @@ final class EcaProConfig {
     int failureThreshold = 3;
     final List<String> javaAgentPaths = new ArrayList<>();
     final List<String> jvmtiModules = new ArrayList<>();
-    final RuleEntries nativeRules = new RuleEntries();
-    final RuleEntries processRules = new RuleEntries();
-    final RuleEntries threadRules = new RuleEntries();
+    final List<String> nativePackages = new ArrayList<>();
+    final List<String> processPackages = new ArrayList<>();
+    final List<String> threadPackages = new ArrayList<>();
 
     static EcaProConfig load() {
         EcaProConfig config = new EcaProConfig();
@@ -88,12 +118,7 @@ final class EcaProConfig {
                 Files.createDirectories(PATH.getParent());
                 Files.writeString(PATH, DEFAULTS, StandardCharsets.UTF_8);
             }
-            List<String> lines = Files.readAllLines(PATH, StandardCharsets.UTF_8);
-            config.read(lines);
-            if (!hasOption(lines, "intro", "enabled")) {
-                Files.writeString(PATH, "\n[intro]\nenabled = true\n", StandardCharsets.UTF_8,
-                        StandardOpenOption.APPEND);
-            }
+            config.read(Files.readAllLines(PATH, StandardCharsets.UTF_8));
         } catch (Throwable t) {
             AgentLogWriter.info("[EcaProConfig] Configuration read failed: " + t.getMessage());
         }
@@ -128,8 +153,8 @@ final class EcaProConfig {
     }
 
     private void apply(String section, String key, String value) {
-        if ("general".equals(section)) {
-            if ("enabled".equals(key)) enabled = bool(value);
+        if (section.isEmpty()) {
+            if ("enable_fvm".equals(key)) enabled = bool(value);
             else if ("status_window".equals(key)) statusWindow = bool(value);
             return;
         }
@@ -145,37 +170,31 @@ final class EcaProConfig {
             else if ("reject_argument_files".equals(key)) rejectArgumentFiles = bool(value);
             return;
         }
-        if ("interception".equals(section)) {
-            if ("java_agent".equals(key)) javaAgent = bool(value);
-            else if ("jvmti".equals(key)) jvmti = bool(value);
-            else if ("native_load".equals(key)) nativeLoad = bool(value);
-            else if ("process_create".equals(key)) processCreate = bool(value);
-            else if ("thread_create".equals(key)) threadCreate = bool(value);
-            return;
-        }
         if ("transformer_fallback".equals(section)) {
             if ("enabled".equals(key)) fallback = bool(value);
             else if ("failure_threshold".equals(key)) failureThreshold = integer(value, 3, 1, 20);
             return;
         }
-        if ("whitelist.java_agent".equals(section) && "paths".equals(key)) {
-            javaAgentPaths.addAll(array(value));
-            return;
+        applyInterception(section, key, value);
+    }
+
+    private void applyInterception(String section, String key, String value) {
+        if ("java_agent".equals(section)) {
+            if ("ban".equals(key)) javaAgent = bool(value);
+            else if ("whitelist".equals(key)) javaAgentPaths.addAll(array(value));
+        } else if ("jvmti".equals(section)) {
+            if ("ban".equals(key)) jvmti = bool(value);
+            else if ("whitelist".equals(key)) jvmtiModules.addAll(array(value));
+        } else if ("native_load".equals(section)) {
+            if ("ban".equals(key)) nativeLoad = bool(value);
+            else if ("whitelist".equals(key)) nativePackages.addAll(array(value));
+        } else if ("process_create".equals(section)) {
+            if ("ban".equals(key)) processCreate = bool(value);
+            else if ("whitelist".equals(key)) processPackages.addAll(array(value));
+        } else if ("thread_create".equals(section)) {
+            if ("ban".equals(key)) threadCreate = bool(value);
+            else if ("whitelist".equals(key)) threadPackages.addAll(array(value));
         }
-        if ("whitelist.jvmti".equals(section) && "modules".equals(key)) {
-            jvmtiModules.addAll(array(value));
-            return;
-        }
-        RuleEntries entries = switch (section) {
-            case "whitelist.native_load" -> nativeRules;
-            case "whitelist.process_create" -> processRules;
-            case "whitelist.thread_create" -> threadRules;
-            default -> null;
-        };
-        if (entries == null) return;
-        if ("names".equals(key)) entries.names.addAll(array(value));
-        else if ("sources".equals(key)) entries.sources.addAll(array(value));
-        else if ("name_and_sources".equals(key)) entries.nameAndSources.addAll(array(value));
     }
 
     private static String stripComment(String line) {
@@ -186,23 +205,6 @@ final class EcaProConfig {
             if (c == '#' && !quoted) return line.substring(0, i);
         }
         return line;
-    }
-
-    private static boolean hasOption(List<String> lines, String targetSection, String targetKey) {
-        String section = "";
-        for (String raw : lines) {
-            String line = stripComment(raw).trim();
-            if (line.startsWith("[") && line.endsWith("]")) {
-                section = line.substring(1, line.length() - 1).trim();
-                continue;
-            }
-            int separator = line.indexOf('=');
-            if (separator > 0 && targetSection.equals(section)
-                    && targetKey.equals(line.substring(0, separator).trim())) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static boolean bool(String value) {
@@ -247,9 +249,4 @@ final class EcaProConfig {
         if (!value.isEmpty()) values.add(value);
     }
 
-    static final class RuleEntries {
-        final List<String> names = new ArrayList<>();
-        final List<String> sources = new ArrayList<>();
-        final List<String> nameAndSources = new ArrayList<>();
-    }
 }
