@@ -597,5 +597,12 @@
   "gui.eca.bossshow.effect.parameters": "Parameters (name=value, comma separated)",
   "gui.eca.bossshow.effect.type.camera_shake": "Camera shake",
   "gui.eca.bossshow.effect.type.shader_effect": "Shader effect",
-  "gui.eca.bossshow.effect.type.filter": "ECA filter"
+  "gui.eca.bossshow.effect.type.filter": "ECA filter",
+  "command.eca.set_health.failed": "Failed to set health for %s",
+  "command.eca.set_health.error": "Error setting health for %s: %s",
+  "command.eca.set_health.report_created": "Health report: %s",
+  "command.eca.set_health.report_failed": "Failed to create health report for %s",
+  "command.eca.set_health.success": "Set health of %s living entities to %s",
+  "command.eca.set_health.skipped": "Skipped %s non-living entities",
+  "command.eca.set_health.command_error": "Command execution failed: %s"
 }

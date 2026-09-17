@@ -54,7 +54,8 @@ public final class ExternalMirrorWriter {
     private static final Set<String> DIAG_DUMPED = ConcurrentHashMap.newKeySet();
 
     private static void diag(Class<?> cls, String reason) {
-        if (DIAG_DUMPED.add(cls.getName() + "|" + reason)) {
+        boolean firstDump = DIAG_DUMPED.add(cls.getName() + "|" + reason);
+        if (firstDump || HealthReportManager.isCapturing(cls)) {
             EcaLogger.info("[ExternalMirror] {} entity={}", reason, cls.getName());
         }
     }

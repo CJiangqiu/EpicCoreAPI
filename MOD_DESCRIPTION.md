@@ -9,7 +9,7 @@ This mod also provides an [MCreator plugin](https://mcreator.net/plugin/121284/2
 ## Usage for Players
 
 Players can use the following `/eca` commands (requires permission level ≥ 2):
-- `/eca setHealth <targets> <health>` - Set entity health
+- `/eca setHealth <targets> <health> [report]` - Set entity health. Add `report` to write one structured `<entity>_health_report_<timestamp>.txt` file per living target directly under `logs/`; the report includes the health-model judgment, channel outcome, delayed verification, complete per-source dataflow inversion trace, and related background analysis.
 - `/eca setMaxHealth <targets> <maxHealth>` - Set entity max health (reverse-calculates attribute base value)
 - `/eca setInvulnerable <targets> <true|false>` - Set entity invulnerability
  - `/eca lockHealth <targets> true <value>` - Lock entity health at specific value
@@ -285,7 +285,7 @@ Entity, item, and block shader overlays share the same `ShaderMaskPass` pipeline
 
 ### Blender GLB Models and Animation
 
-Entity extensions may attach or replace an entity model with a glTF 2.0 binary asset. A model id such as `example:guardian` resolves to `assets/example/eca/blender/guardian/model.glb` plus `definition.json`; this is the canonical and only Blender resource layout. Definitions select the GLB and configure scale, translation, rotation, a default animation, default looping, and hidden node subtrees.
+Entity extensions may attach or replace an entity model with a glTF 2.0 binary asset. A model id such as `example:guardian` resolves to `assets/example/eca/blender/guardian/model.glb` plus `definition.json`. Definitions select the GLB and configure scale, translation, rotation, a default animation, default looping, and hidden node subtrees.
 
 The renderer supports indexed triangle meshes, node hierarchies, base colors and textures, transparency, `STEP`/`LINEAR` node animation, and four-influence skeletal skinning through `skins`, `inverseBindMatrices`, `JOINTS_0`, and `WEIGHTS_0`. Skinning runs on the CPU and is submitted through the normal entity render buffers. `ADDITIVE` retains the original entity model, while `REPLACE` replaces its body and normal layers without bypassing nameplates, shadows, outlines, entity lighting, depth, or shader-pack passes.
 

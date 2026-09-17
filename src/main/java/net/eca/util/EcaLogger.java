@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 // ECA日志系统 - 支持统一前缀和多mod委托
 /**
@@ -19,6 +20,39 @@ public final class EcaLogger {
 
     // 已注册的委托日志器缓存 (modId -> ModLogger)
     private static final Map<String, ModLogger> MOD_LOGGERS = new ConcurrentHashMap<>();
+    private static final ThreadLocal<Consumer<String>> DIAGNOSTIC_CAPTURE = new ThreadLocal<>();
+
+    public static void setDiagnosticCapture(Consumer<String> capture) {
+        if (capture == null) DIAGNOSTIC_CAPTURE.remove();
+        else DIAGNOSTIC_CAPTURE.set(capture);
+    }
+
+    public static void clearDiagnosticCapture() {
+        DIAGNOSTIC_CAPTURE.remove();
+    }
+
+    private static void capture(String message) {
+        Consumer<String> consumer = DIAGNOSTIC_CAPTURE.get();
+        if (consumer != null) consumer.accept(message);
+    }
+
+    private static String format(String pattern, Object... arguments) {
+        if (pattern == null || arguments == null || arguments.length == 0) return pattern;
+        StringBuilder result = new StringBuilder(pattern.length() + arguments.length * 16);
+        int offset = 0;
+        int argumentIndex = 0;
+        while (argumentIndex < arguments.length) {
+            int placeholder = pattern.indexOf("{}", offset);
+            if (placeholder < 0) break;
+            result.append(pattern, offset, placeholder).append(String.valueOf(arguments[argumentIndex++]));
+            offset = placeholder + 2;
+        }
+        result.append(pattern, offset, pattern.length());
+        while (argumentIndex < arguments.length) {
+            result.append(' ').append(String.valueOf(arguments[argumentIndex++]));
+        }
+        return result.toString();
+    }
 
     // ==================== ECA主日志方法 ====================
 
@@ -37,6 +71,7 @@ public final class EcaLogger {
      * @param msg the message to log
      */
     public static void info(String msg) {
+        capture(msg);
         LOGGER.info("{} {}", ECA_PREFIX, msg);
     }
 
@@ -47,6 +82,7 @@ public final class EcaLogger {
      * @param args the arguments
      */
     public static void info(String fmt, Object... args) {
+        capture(format(fmt, args));
         LOGGER.info(ECA_PREFIX + " " + fmt, args);
     }
 
@@ -56,6 +92,7 @@ public final class EcaLogger {
      * @param msg the message to log
      */
     public static void warn(String msg) {
+        capture(msg);
         LOGGER.warn("{} {}", ECA_PREFIX, msg);
     }
 
@@ -66,6 +103,7 @@ public final class EcaLogger {
      * @param args the arguments
      */
     public static void warn(String fmt, Object... args) {
+        capture(format(fmt, args));
         LOGGER.warn(ECA_PREFIX + " " + fmt, args);
     }
 
@@ -75,6 +113,7 @@ public final class EcaLogger {
      * @param msg the message to log
      */
     public static void error(String msg) {
+        capture(msg);
         LOGGER.error("{} {}", ECA_PREFIX, msg);
     }
 
@@ -85,6 +124,7 @@ public final class EcaLogger {
      * @param args the arguments
      */
     public static void error(String fmt, Object... args) {
+        capture(format(fmt, args));
         LOGGER.error(ECA_PREFIX + " " + fmt, args);
     }
 
@@ -95,6 +135,7 @@ public final class EcaLogger {
      * @param throwable the exception to log
      */
     public static void error(String msg, Throwable throwable) {
+        capture(msg + (throwable == null ? "" : " — " + throwable));
         LOGGER.error("{} {}", ECA_PREFIX, msg, throwable);
     }
 
@@ -104,6 +145,7 @@ public final class EcaLogger {
      * @param msg the message to log
      */
     public static void debug(String msg) {
+        capture(msg);
         LOGGER.debug("{} {}", ECA_PREFIX, msg);
     }
 
@@ -114,6 +156,7 @@ public final class EcaLogger {
      * @param args the arguments
      */
     public static void debug(String fmt, Object... args) {
+        capture(format(fmt, args));
         LOGGER.debug(ECA_PREFIX + " " + fmt, args);
     }
 
@@ -123,6 +166,7 @@ public final class EcaLogger {
      * @param msg the message to log
      */
     public static void trace(String msg) {
+        capture(msg);
         LOGGER.trace("{} {}", ECA_PREFIX, msg);
     }
 
@@ -133,6 +177,7 @@ public final class EcaLogger {
      * @param args the arguments
      */
     public static void trace(String fmt, Object... args) {
+        capture(format(fmt, args));
         LOGGER.trace(ECA_PREFIX + " " + fmt, args);
     }
 

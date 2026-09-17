@@ -597,5 +597,12 @@
   "gui.eca.bossshow.effect.parameters": "参数（名称=数值，以逗号分隔）",
   "gui.eca.bossshow.effect.type.camera_shake": "镜头震动",
   "gui.eca.bossshow.effect.type.shader_effect": "着色器效果",
-  "gui.eca.bossshow.effect.type.filter": "ECA 滤镜"
+  "gui.eca.bossshow.effect.type.filter": "ECA 滤镜",
+  "command.eca.set_health.failed": "无法设置 %s 的血量",
+  "command.eca.set_health.error": "设置 %s 的血量时发生错误：%s",
+  "command.eca.set_health.report_created": "血量报告：%s",
+  "command.eca.set_health.report_failed": "无法为 %s 生成血量报告",
+  "command.eca.set_health.success": "已将 %s 个生物实体的血量设为 %s",
+  "command.eca.set_health.skipped": "已跳过 %s 个非生物实体",
+  "command.eca.set_health.command_error": "命令执行失败：%s"
 }

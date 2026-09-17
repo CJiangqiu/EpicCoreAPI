@@ -1,6 +1,7 @@
 package net.eca.util.health;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.util.EcaLogger;
 import net.eca.util.health.HealthDataflowAnalyzer.AnalysisResult;
 import net.eca.util.health.HealthDataflowAnalyzer.ArrayElementSource;
@@ -88,16 +89,20 @@ public final class HealthDataFlow {
     /* RuntimeBytecodeProvider 优先(含 mixin/coremod 转换后)，缺失回退分析器内置默认实现 */
     private static byte[] classBytesViaRuntime(Class<?> clazz) {
         try {
-            byte[] runtime = net.eca.coremod.RuntimeBytecodeProvider.get(clazz);
+            byte[] runtime = RuntimeBytecodeProvider.get(clazz);
             if (runtime != null) {
-                if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed() && BYTES_SOURCE_DUMPED.add(clazz.getName()))
+                boolean firstDump = BYTES_SOURCE_DUMPED.add(clazz.getName());
+                if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed()
+                        && (firstDump || HealthReportManager.isCapturing(clazz)))
                     EcaLogger.info("[HealthDataflow] bytes for {} <- RuntimeBytecodeProvider(runtime,{}B)", clazz.getName(), runtime.length);
                 return runtime;
             }
         } catch (Throwable ignored) {
             if (ignored instanceof VirtualMachineError e) throw e;
         }
-        if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed() && BYTES_SOURCE_DUMPED.add(clazz.getName()))
+        boolean firstDump = BYTES_SOURCE_DUMPED.add(clazz.getName());
+        if (!EcaSetHealthManager.isWarmupDiagnosticsSuppressed()
+                && (firstDump || HealthReportManager.isCapturing(clazz)))
             EcaLogger.info("[HealthDataflow] bytes for {} <- DISK fallback (runtime capture MISSING)", clazz.getName());
         return HealthDataflowAnalyzer.defaultClassBytes(clazz);
     }
@@ -124,8 +129,9 @@ public final class HealthDataFlow {
         if (tree == null || entity == null) return false;
         Class<?> cls = entity.getClass();
         boolean firstWrite = FIRST_WRITE_DUMPED.add(cls.getName());
-        if (firstWrite) dumpAnalysisStructure(cls, tree, target);
-        return writeViaSources(cls, tree, entity, target, firstWrite,
+        boolean diagnosticWrite = firstWrite || HealthReportManager.isCapturing(entity);
+        if (diagnosticWrite) dumpAnalysisStructure(cls, tree, target);
+        return writeViaSources(cls, tree, entity, target, diagnosticWrite,
                 (verifiedEntity, verifiedTarget, sink) ->
                     EcaSetHealthManager.judgeAnchor(verifiedEntity, verifiedTarget),
                 "dataflow");
@@ -137,10 +143,11 @@ public final class HealthDataFlow {
         if (tree == null || entity == null) return false;
         Class<?> cls = entity.getClass();
         boolean firstWrite = FIRST_EXTERNAL_WRITE_DUMPED.add(cls.getName());
-        if (firstWrite) dumpExternalAnalysisStructure(cls, tree, target);
+        boolean diagnosticWrite = firstWrite || HealthReportManager.isCapturing(entity);
+        if (diagnosticWrite) dumpExternalAnalysisStructure(cls, tree, target);
         // 只写与权威有依赖的源：实体外的常量写入源(阶段标记等)写入后回读必匹配，会抢先假成功
         AnalysisResult filtered = HealthDataflowAnalyzer.AnalysisResult.withoutConstantOnlySources(tree);
-        return writeViaSources(cls, filtered, entity, target, firstWrite,
+        return writeViaSources(cls, filtered, entity, target, diagnosticWrite,
                 (verifiedEntity, verifiedTarget, sink) ->
                     // 自回读只能证明候选可写，不能证明它承载真实血量。
                     HealthDataflowAnalyzer.verifyExternalDataflow(tree.returnExpr, verifiedEntity, verifiedTarget, sink)
@@ -299,6 +306,7 @@ public final class HealthDataFlow {
            模型是否可信改由 applyEffectiveHealth 的结构判据在建模阶段裁决。 */
         if (EcaSetHealthManager.verify(entity, target)) {
             EcaSetHealthManager.recordObservedWrite(cls);
+            HealthReportManager.recordSuccessfulStorage(entity, model.storage(), false);
             if (EFFECTIVE_SUCCESS_DUMPED.add(cls.getName())) {
                 EcaLogger.info("[EffectiveHealth] success entity={} storage={} solved={} target={}",
                         cls.getName(), model.storage().label, solved.value(), target);
@@ -397,6 +405,9 @@ public final class HealthDataFlow {
         }
         if (verified) {
             EcaSetHealthManager.recordObservedWrite(entity.getClass());
+            List<Source> successfulSources = new ArrayList<>(writes.size());
+            for (PreparedSourceWrite write : writes) successfulSources.add(write.sink());
+            HealthReportManager.recordSuccessfulStorageGroup(entity, successfulSources);
             return new AssociatedAttempt(true, true, true, states);
         }
         // 关联写入全部成功但校验失败时，记录观测锚点与存储可能解耦
@@ -578,6 +589,8 @@ public final class HealthDataFlow {
                 if (verdict == EcaSetHealthManager.AnchorVerdict.PASS) {
                     EcaSetHealthManager.recordObservedWrite(cls);
                     if (mirrorWrite != null) EcaSetHealthManager.recordMirrorRedirect(cls);
+                    HealthReportManager.recordSuccessfulStorage(entity, sink, mirrorWrite != null);
+                    dumpReportDiagnostics(entity, diagnosticChannel, diag);
                     if (logSuccess) {
                         EcaLogger.info("[HealthDataflow] setHealth success entity={} sink={} solved={} expected={}{}",
                                 cls.getName(), sink.label, candidate, expected,
@@ -600,9 +613,13 @@ public final class HealthDataFlow {
             candidateScanComplete = false;
         }
         if (candidateScanComplete
-                && writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) return true;
+                && writeAllSources(solvedWrites, entity, expected, diag, verifier, logSuccess)) {
+            dumpReportDiagnostics(entity, diagnosticChannel, diag);
+            return true;
+        }
 
-        if (FAIL_DUMPED.add(cls.getName() + "|" + diagnosticChannel)) {
+        boolean firstFailure = FAIL_DUMPED.add(cls.getName() + "|" + diagnosticChannel);
+        if (firstFailure || HealthReportManager.isCapturing(entity)) {
             EcaLogger.info("[{}] setHealth failed entity={} expected={} sink results:",
                     diagnosticChannel, cls.getName(), expected);
             for (String line : diag) EcaLogger.info("[{}] {}", diagnosticChannel, line);
@@ -671,7 +688,8 @@ public final class HealthDataFlow {
        当前一律回滚——排查时凭此定位需要替代锚点的实体与具体单元。 */
     private static void dumpIndeterminate(Class<?> cls, String sinkLabel) {
         String className = cls == null ? "null" : cls.getName();
-        if (INDETERMINATE_DUMPED.add(className + "|" + sinkLabel)) {
+        boolean firstDump = INDETERMINATE_DUMPED.add(className + "|" + sinkLabel);
+        if (firstDump || HealthReportManager.isCapturing(cls)) {
             EcaLogger.info("[HealthAnchor] verdict indeterminate (no trustworthy anchor) entity={} sink={} — write rolled back",
                     className, sinkLabel);
         }
@@ -772,6 +790,9 @@ public final class HealthDataFlow {
             dumpIndeterminate(entity.getClass(), "all-sources");
         if (verdict == EcaSetHealthManager.AnchorVerdict.PASS) {
             EcaSetHealthManager.recordObservedWrite(entity.getClass());
+            List<Source> successfulSources = new ArrayList<>(writes.size());
+            for (PreparedSourceWrite write : writes) successfulSources.add(write.sink());
+            HealthReportManager.recordSuccessfulStorageGroup(entity, successfulSources);
             if (logSuccess) {
                 EcaLogger.info("[HealthDataflow] setHealth success entity={} sink=all-sources expected={}",
                         entity.getClass().getName(), expected);
@@ -799,7 +820,8 @@ public final class HealthDataFlow {
             if (sink instanceof ChainedFieldSource s) {
                 Object cur = HealthDataflowAnalyzer.evaluate(s.root, context);
                 if (cur == null) {
-                    if (ADDRESS_DIAG.add(entity.getClass().getName() + "|" + s.label)) {
+                    boolean firstDump = ADDRESS_DIAG.add(entity.getClass().getName() + "|" + s.label);
+                    if (firstDump || HealthReportManager.isCapturing(entity)) {
                         EcaLogger.info("[HealthDataflow] isAddressable root=null entity={} sink={} level={} rootExpr={}",
                                 entity.getClass().getName(), s.label,
                                 entity.level() != null ? entity.level().getClass().getName() : "null",
@@ -1214,6 +1236,11 @@ public final class HealthDataFlow {
         }
         restoreCompositeMapStates(states);
         return false;
+    }
+
+    private static void dumpReportDiagnostics(LivingEntity entity, String diagnosticChannel, List<String> lines) {
+        if (!HealthReportManager.isCapturing(entity)) return;
+        for (String line : lines) EcaLogger.info("[{}] {}", diagnosticChannel, line);
     }
 
     private static List<CompositeMapState> findCompositeMapStates(Class<?> owner, Object key) {

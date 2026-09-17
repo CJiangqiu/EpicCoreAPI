@@ -38,7 +38,7 @@ public abstract class ChunkMapMixin {
 
     @Inject(method = "addEntity", at = @At("HEAD"), cancellable = true)
     private void eca$onAddEntity(Entity entity, CallbackInfo ci) {
-        if (SpawnBanHook.shouldBlockSpawn(entity.level(), entity)) {
+        if (SpawnBanHook.shouldBlockSpawn(entity)) {
             ci.cancel();
             return;
         }

@@ -116,7 +116,8 @@ public final class EcaContainers {
      * @return true if removal should be blocked
      */
     private static boolean shouldProtectEntity(Entity entity) {
-        return entity instanceof LivingEntity
+        return !EntityRemovalQuarantine.isQueryHidden(entity)
+                && entity instanceof LivingEntity
                 && EcaAPI.isInvulnerable(entity)
                 && !EntityUtil.isChangingDimension(entity);
     }

@@ -76,8 +76,10 @@ public final class DelayedHealthVerifier {
         if (previous != null) {
             if (previous.ticket().entityUuid().equals(ticket.entityUuid())) {
                 ExternalMirrorWriter.supersede(previous.ticket(), ticket);
+                HealthReportManager.completeDelayed(previous.ticket(), "后续改血取代本次延迟复查", Float.NaN);
             } else {
                 ExternalMirrorWriter.revert(previous.ticket());
+                HealthReportManager.completeDelayed(previous.ticket(), "实体身份变化，本次延迟复查已撤销", Float.NaN);
             }
         }
         return ticket;
@@ -120,6 +122,7 @@ public final class DelayedHealthVerifier {
         PENDING.clear();
         DEATH_CONVERGENCE.clear();
         ExternalMirrorWriter.clear();
+        HealthReportManager.clear();
         SATURATION_DUMPED.set(false);
     }
 
@@ -131,21 +134,25 @@ public final class DelayedHealthVerifier {
         // 已卸载或已移除的实体无从复查；目标为死亡时实体消失本身就是写入生效
         if (entity == null || entity.isRemoved()) {
             ExternalMirrorWriter.commit(ticket);
+            HealthReportManager.completeDelayed(ticket, "实体已移除，按目标已生效处理", Float.NaN);
             return;
         }
         if (entity.getId() != entityId || !entity.getUUID().equals(ticket.entityUuid())) {
             ExternalMirrorWriter.revert(ticket);
+            HealthReportManager.completeDelayed(ticket, "实体身份发生变化，无法复查", Float.NaN);
             return;
         }
         /* 锚点已被证明与真实存储解耦时，它读回什么都不构成"被改回去了"的证据。
            此处据它判失败会把诱饵型目标上的每次成功都揭成假成功，并误启外部镜像。 */
         if (EcaSetHealthManager.isAnchorUntrusted(entity)) {
             ExternalMirrorWriter.commit(ticket);
+            HealthReportManager.completeDelayed(ticket, "观测出口不可信，无法据此否定写入", Float.NaN);
             return;
         }
         float actual = EcaSetHealthManager.readHealthAnchor(entity);
         if (!Float.isFinite(actual)) {
             ExternalMirrorWriter.commit(ticket);
+            HealthReportManager.completeDelayed(ticket, "延迟观测值不可用，保留已提交写入", actual);
             return;
         }
         /* 只认向上偏离：血量自行回升是回滚与强制回血的特征。向下偏离可能只是这一 tick 内的
@@ -153,6 +160,7 @@ public final class DelayedHealthVerifier {
         if (HealthValueSemantics.retainedAfterDelay(actual, pending.target())) {
             EcaSetHealthManager.onDelayedRetained(pending.entityClass());
             ExternalMirrorWriter.commit(ticket);
+            HealthReportManager.completeDelayed(ticket, "目标值在下一 tick 后保留", actual);
             return;
         }
 
@@ -163,6 +171,7 @@ public final class DelayedHealthVerifier {
         }
         ExternalMirrorWriter.revert(ticket);
         EcaSetHealthManager.onDelayedRollback(cls);
+        HealthReportManager.completeDelayed(ticket, "目标值在下一 tick 被回滚", actual);
     }
 
     private static void convergeDeaths(int now) {

@@ -71,7 +71,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         return transformCount;
     }
 
-    static byte[] transformHealthTail(String className, byte[] classfileBuffer) {
+    public static byte[] transformHealthTail(String className, byte[] classfileBuffer) {
         if (className == null || classfileBuffer == null) return null;
         if (FORCE_COMPATIBILITY_MODE) return null;
         byte[] result = classfileBuffer;
@@ -99,7 +99,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         }
     }
 
-    static boolean verifyHealthTail(String className, byte[] bytes) {
+    public static boolean verifyHealthTail(String className, byte[] bytes) {
         if (className == null || bytes == null) return false;
         if (FORCE_COMPATIBILITY_MODE) return false;
         boolean requested = false;

@@ -23,7 +23,7 @@ public class EntityTickListMixin {
             ci.cancel();
             return;
         }
-        if (SpawnBanHook.shouldBlockSpawn(entity.level(), entity)) {
+        if (SpawnBanHook.shouldBlockSpawn(entity)) {
             ci.cancel();
         }
     }

@@ -41,7 +41,8 @@ public final class NumericInverter {
     private static final Set<String> DIAG_DUMPED = ConcurrentHashMap.newKeySet();
 
     private static void diag(LivingEntity entity, String reason) {
-        if (DIAG_DUMPED.add(entity.getClass().getName() + "|" + reason))
+        boolean firstDump = DIAG_DUMPED.add(entity.getClass().getName() + "|" + reason);
+        if (firstDump || HealthReportManager.isCapturing(entity))
             EcaLogger.info("[NumericInverter] {} entity={}", reason, entity.getClass().getName());
     }
 

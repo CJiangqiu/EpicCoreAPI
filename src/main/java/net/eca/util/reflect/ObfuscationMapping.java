@@ -54,6 +54,9 @@ public final class ObfuscationMapping {
 
         // ChunkMap
         fields.put("ChunkMap.entityMap", "f_140150_");
+        fields.put("ChunkMap.updatingChunkMap", "f_140129_");
+        fields.put("ChunkMap.pendingUnloads", "f_140131_");
+        fields.put("ChunkMap.entitiesInLevel", "f_140132_");
         fields.put("ChunkMap.TrackedEntity.seenBy", "f_140475_");
 
         // PersistentEntitySectionManager
@@ -62,6 +65,9 @@ public final class ObfuscationMapping {
         fields.put("PersistentEntitySectionManager.sectionStorage", "f_157495_");
         fields.put("PersistentEntitySectionManager.callbacks", "f_157492_");
         fields.put("PersistentEntitySectionManager.loadingInbox", "f_157500_");
+        fields.put("PersistentEntitySectionManager.chunkVisibility", "f_157497_");
+        fields.put("PersistentEntitySectionManager.chunksToUnload", "f_157499_");
+        fields.put("PersistentEntitySectionManager.chunkLoadStatuses", "f_157498_");
 
         // EntityLookup
         fields.put("EntityLookup.byUuid", "f_156808_");
@@ -69,12 +75,15 @@ public final class ObfuscationMapping {
 
         // EntitySectionStorage
         fields.put("EntitySectionStorage.sections", "f_156852_");
+        fields.put("EntitySectionStorage.intialSectionVisibility", "f_156851_");
+        fields.put("EntitySectionStorage.sectionIds", "f_156853_");
 
         // EntitySection
         fields.put("EntitySection.storage", "f_156827_");
 
         // ClassInstanceMultiMap
         fields.put("ClassInstanceMultiMap.byClass", "f_13527_");
+        fields.put("ClassInstanceMultiMap.allInstances", "f_13529_");
 
         // ClientLevel
         fields.put("ClientLevel.tickingEntities", "f_171630_");
@@ -113,6 +122,19 @@ public final class ObfuscationMapping {
         methods.put("Entity.tick", "m_8119_");
         methods.put("Entity.baseTick", "m_6075_");
         methods.put("Entity.onSyncedDataUpdated", "m_7350_");
+
+        // Entity storage
+        methods.put("EntityLookup.add", "m_156814_");
+        methods.put("EntitySection.add", "m_188346_");
+        methods.put("EntityTickList.add", "m_156908_");
+        methods.put("PersistentEntitySectionManager.addEntity", "m_157538_");
+        methods.put("PersistentEntitySectionManager.addNewEntity", "m_157533_");
+        methods.put("TransientEntitySectionManager.addEntity", "m_157653_");
+        methods.put("ChunkMap.addEntity", "m_140199_");
+        methods.put("ServerLevel.addEntity", "m_8872_");
+        methods.put("ServerLevel.addFreshEntity", "m_7967_");
+        methods.put("ServerLevel.addWithUUID", "m_8847_");
+        methods.put("ServerLevel.addDuringTeleport", "m_143334_");
 
         // CompoundTag
         methods.put("CompoundTag.getBoolean", "m_128471_");

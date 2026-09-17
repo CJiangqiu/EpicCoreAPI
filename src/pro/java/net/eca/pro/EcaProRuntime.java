@@ -5,6 +5,7 @@ import forgevm.core.ForgeVMOptions;
 import forgevm.jvm.RelaunchException;
 import forgevm.jvm.RelaunchSpec;
 import net.eca.agent.AgentLogWriter;
+import net.eca.pro.ingot.ProIngotManager;
 
 import java.io.InputStream;
 import java.net.URI;
@@ -76,6 +77,22 @@ public final class EcaProRuntime {
     public static synchronized void refreshInterception() {
         if (!active || !interceptionInstalled || config == null) return;
         EcaProInterception.refreshSourceFilters(config);
+    }
+
+    public static synchronized void onLoadComplete() {
+        AgentLogWriter.info("[EcaPro] Load-complete Ingot entry");
+        EcaProConfig current = config;
+        if (current == null) {
+            current = EcaProConfig.load();
+            config = current;
+            AgentLogWriter.info("[EcaPro] Reloaded Pro configuration in mod classloader");
+        }
+        if (!current.enabled) {
+            AgentLogWriter.info("[EcaPro] Load-complete Ingot installation disabled by configuration");
+            return;
+        }
+        AgentLogWriter.info("[EcaPro] Delegating load-complete Ingot installation");
+        ProIngotManager.install();
     }
 
     public static boolean renderIntro(Object displayContext) {

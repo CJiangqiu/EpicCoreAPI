@@ -16,7 +16,7 @@ import java.nio.file.Paths;
 import java.security.ProtectionDomain;
 
 /**
- * Adds the optional branded intro and replaces the early clear colour with a vertical gradient.
+ * Replaces the early clear colour with a vertical gradient and invokes an optional intro callback.
  */
 public final class LoadingScreenTransformer implements ClassFileTransformer {
 

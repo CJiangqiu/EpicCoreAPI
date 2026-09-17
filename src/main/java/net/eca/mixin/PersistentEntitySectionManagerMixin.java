@@ -4,7 +4,6 @@ import net.eca.api.EcaAPI;
 
 import net.eca.util.EntityUtil;
 import net.eca.util.spawn_ban.SpawnBanHook;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.entity.EntityAccess;
@@ -23,20 +22,16 @@ public class PersistentEntitySectionManagerMixin {
     // 禁生成：阻止被禁实体添加到PersistentEntitySectionManager
     @Inject(method = "addEntity", at = @At("HEAD"), cancellable = true)
     private void eca$onAddEntity(EntityAccess entity, boolean flag, CallbackInfoReturnable<Boolean> cir) {
-        if (entity instanceof Entity realEntity && realEntity.level() instanceof ServerLevel level) {
-            if (SpawnBanHook.shouldBlockSpawn(level, realEntity)) {
-                cir.setReturnValue(false);
-            }
+        if (SpawnBanHook.shouldBlockSpawn(entity)) {
+            cir.setReturnValue(false);
         }
     }
 
     // 禁生成：阻止被禁实体添加到PersistentEntitySectionManager
     @Inject(method = "addNewEntity", at = @At("HEAD"), cancellable = true)
     private void eca$onAddNewEntity(EntityAccess entity, CallbackInfoReturnable<Boolean> cir) {
-        if (entity instanceof Entity realEntity && realEntity.level() instanceof ServerLevel level) {
-            if (SpawnBanHook.shouldBlockSpawn(level, realEntity)) {
-                cir.setReturnValue(false);
-            }
+        if (SpawnBanHook.shouldBlockSpawn(entity)) {
+            cir.setReturnValue(false);
         }
     }
 

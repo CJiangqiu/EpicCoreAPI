@@ -10,6 +10,7 @@ import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.EcaSetHealthManager;
+import net.eca.util.health.HealthReportManager;
 import net.eca.util.health.health_lock.HealthLockManager;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -872,24 +873,63 @@ public class EntityUtil {
             //锚点可信度探测自身要写原版血量，必须先于所有通道完成，否则会污染通道的回滚快照
             EcaSetHealthManager.warmAnchorTrust(entity);
             float beforeHealth = EcaSetHealthManager.safeGetHealth(entity);
+            HealthReportManager.recordInitialValue(entity, beforeHealth);
 
             //第一步：写原版 DATA_HEALTH_ID。若目标 getHealth 就是读这里(原版实体多数如此)，验证已通过则直接成功，
             //  避免每次都触发数据流逆向分析。Player 跳过(原版自带保护)，非 Player 走完整链。
             setBasicHealth(entity, expectedHealth);
+            boolean vanillaVerified = EcaSetHealthManager.verify(entity, expectedHealth);
+            HealthReportManager.recordAttempt(entity, "原版同步数据直写", vanillaVerified,
+                    vanillaVerified ? "观测锚点匹配目标值" : "观测锚点未匹配目标值");
             boolean ok;
             if (entity instanceof Player) {
-                ok = EcaSetHealthManager.verify(entity, expectedHealth);
-            } else if (EcaSetHealthManager.verify(entity, expectedHealth)) {
+                ok = vanillaVerified;
+                HealthReportManager.recordSkipped(entity, "数据流逆向", "玩家仅使用原版直写");
+            } else if (vanillaVerified) {
                 ok = true;                                                         //原版同步即生效
-            } else if (EcaSetHealthManager.applyDataflow(entity, expectedHealth)) {
-                ok = true;                                                         //数据流逆向定位真实存储
-            } else if (EcaSetHealthManager.applyExternalScan(entity, expectedHealth)) {
-                ok = true;                                                         //外部扫描(isAlive/hurt 旁证，含有效血量换算)
-            } else if (EcaSetHealthManager.applyMethodProbe(entity, expectedHealth)) {
-                ok = true;                                                         //方法探针(借实体自身 writer)
             } else {
-                ok = EcaSetHealthManager.applyNumericInversion(entity, expectedHealth); //数值反演(死角对象图扰动)
-                if (!ok) EcaSetHealthManager.scheduleEffectiveModelAnalysis(entity);
+                boolean dataflow = EcaSetHealthManager.applyDataflow(entity, expectedHealth);
+                if (EcaConfiguration.getAttackSetHealthEnableDataflowSafely()) {
+                    HealthReportManager.recordAttempt(entity, "数据流逆向", dataflow,
+                            dataflow ? "数据流定位与回读校验通过" : "未定位可提交的写入");
+                } else {
+                    HealthReportManager.recordSkipped(entity, "数据流逆向", "配置未启用");
+                }
+                if (dataflow) {
+                    ok = true;
+                } else {
+                    boolean external = EcaSetHealthManager.applyExternalScan(entity, expectedHealth);
+                    if (!EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) {
+                        HealthReportManager.recordSkipped(entity, "外部语义扫描", "配置未启用");
+                        HealthReportManager.recordSkipped(entity, "有效血量反演", "与外部扫描共用配置门控");
+                    } else {
+                        HealthReportManager.recordAttempt(entity, "外部语义扫描", external,
+                                external ? "语义存储或有效血量模型写入成功" : "本次未成功", false);
+                    }
+                    if (external) {
+                        ok = true;
+                    } else {
+                        boolean methodProbe = EcaSetHealthManager.applyMethodProbe(entity, expectedHealth);
+                        if (EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) {
+                            HealthReportManager.recordAttempt(entity, "方法探针", methodProbe,
+                                    methodProbe ? "实体自身 writer 写入并通过校验" : "本次未找到可用 writer");
+                        } else {
+                            HealthReportManager.recordSkipped(entity, "方法探针", "配置未启用");
+                        }
+                        if (methodProbe) {
+                            ok = true;
+                        } else {
+                            ok = EcaSetHealthManager.applyNumericInversion(entity, expectedHealth);
+                            if (EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely()) {
+                                HealthReportManager.recordAttempt(entity, "数值反演", ok,
+                                        ok ? "运行期数值单元扰动定位成功" : "本次未定位可写数值单元");
+                            } else {
+                                HealthReportManager.recordSkipped(entity, "数值反演", "配置未启用");
+                            }
+                            if (!ok) EcaSetHealthManager.scheduleEffectiveModelAnalysis(entity);
+                        }
+                    }
+                }
             }
 
             //服务端改血成功 → 广播给追踪客户端，令自定义存储型实体客户端显示同步(客户端重跑同一条链)
@@ -900,7 +940,10 @@ public class EntityUtil {
                    须登记成功才写，那批世界数据的提交与撤销全靠这次复查裁定。 */
                 DelayedHealthVerifier.Ticket ticket = DelayedHealthVerifier.schedule(entity, expectedHealth);
                 if (ticket != null) {
-                    EcaSetHealthManager.applyExternalMirror(entity, beforeHealth, expectedHealth, ticket);
+                    HealthReportManager.attachDelayedTicket(entity, ticket);
+                    boolean mirror = EcaSetHealthManager.applyExternalMirror(
+                            entity, beforeHealth, expectedHealth, ticket);
+                    HealthReportManager.recordExternalMirror(entity, mirror);
                 }
             }
             return ok;

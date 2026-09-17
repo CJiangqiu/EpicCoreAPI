@@ -180,11 +180,21 @@ public final class EcaSetHealthManager {
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
         boolean success = HealthDataFlow.writeExternal(tree, target, targetHealth);
-        if (success) return true;
+        if (success) {
+            HealthReportManager.recordAttempt(target, "外部语义扫描", true,
+                    "语义存储直接写入并通过校验");
+            HealthReportManager.recordSkipped(target, "有效血量反演", "外部语义存储已直接写入成功");
+            return true;
+        }
+        HealthReportManager.recordAttempt(target, "外部语义扫描", false,
+                "直接写入未通过校验，继续尝试有效血量反演");
         snapshot.restore();
         /* 外部扫描按存储即血量处理，存储经换算才得到血量时写入值方向不对，且校验读 getHealth 也不反映。
            此处承接同一批存储，改用有效血量表达式求逆与校验；证据正是上面写入尝试刚记录下来的。 */
-        return applyEffectiveHealth(target, targetHealth);
+        boolean effective = applyEffectiveHealth(target, targetHealth);
+        HealthReportManager.recordAttempt(target, "有效血量反演", effective,
+                effective ? "有效血量表达式求逆与校验通过" : "模型未就绪或写入未通过校验");
+        return effective;
     }
 
     /* 外部扫描第三阶段：实体存储写对了、当场校验也过了，却在下一 tick 被改回——
@@ -388,7 +398,7 @@ public final class EcaSetHealthManager {
         if (HealthDataflowAnalyzer.hasComparisonCache(cls)) return;
         if (!COMPARISON_PRESCAN_SUBMITTED.add(cls)) return;
         try {
-            MODEL_ANALYSIS_EXECUTOR.submit(() -> {
+            HealthReportManager.submitTracked(MODEL_ANALYSIS_EXECUTOR, cls, () -> {
                 try {
                     HealthDataflowAnalyzer.prewarmClassComparisons(cls);
                 } catch (Throwable t) {
@@ -412,7 +422,7 @@ public final class EcaSetHealthManager {
         EcaLogger.info("[EffectiveHealth] model analysis submitted entity={} candidates={}",
                 cls.getName(), candidates.size());
         try {
-            MODEL_ANALYSIS_EXECUTOR.submit(() -> {
+            HealthReportManager.submitTracked(MODEL_ANALYSIS_EXECUTOR, cls, () -> {
                 try {
                     HealthDataflowAnalyzer.resolveEffectiveHealthModel(cls, candidates);
                 } catch (Throwable t) {
@@ -448,14 +458,16 @@ public final class EcaSetHealthManager {
        以便区分配置关闭、分析进行中和分析失败。 */
     private static void submitExternalScanAnalysis(Class<?> cls) {
         if (!EXTERNAL_SCAN_PENDING.add(cls)) return;
-        if (EXTERNAL_SCAN_SUBMIT_DUMPED.add(cls.getName())) {
+        boolean firstSubmission = EXTERNAL_SCAN_SUBMIT_DUMPED.add(cls.getName());
+        if (firstSubmission || HealthReportManager.isCapturing(cls)) {
             EcaLogger.info("[ExternalScan] analysis submitted entity={}", cls.getName());
         }
         try {
-            RUNTIME_ANALYSIS_EXECUTOR.submit(() -> {
+            HealthReportManager.submitTracked(RUNTIME_ANALYSIS_EXECUTOR, cls, () -> {
                 try {
                     // 与 submitted 配对：只有 submitted 没有 started，说明任务卡在队列而非分析失败
-                    if (EXTERNAL_SCAN_START_DUMPED.add(cls.getName())) {
+                    boolean firstStart = EXTERNAL_SCAN_START_DUMPED.add(cls.getName());
+                    if (firstStart || HealthReportManager.isCapturing(cls)) {
                         EcaLogger.info("[ExternalScan] analysis started entity={}", cls.getName());
                     }
                     HealthDataflowAnalyzer.resolveExternalScanResult(cls);
@@ -484,7 +496,7 @@ public final class EcaSetHealthManager {
     private static void submitTickAnalysis(Class<?> cls) {
         if (HealthDataflowAnalyzer.isTickMaintenanceResolved(cls) || !TICK_SCAN_PENDING.add(cls)) return;
         try {
-            TICK_ANALYSIS_EXECUTOR.submit(() -> {
+            HealthReportManager.submitTracked(TICK_ANALYSIS_EXECUTOR, cls, () -> {
                 try {
                     HealthDataflowAnalyzer.resolveTickMaintenancePlan(cls);
                 } catch (Throwable t) {
@@ -507,7 +519,7 @@ public final class EcaSetHealthManager {
     private static void submitWriterAnalysis(Class<?> cls) {
         if (HealthDataflowAnalyzer.isAuthorityMaintenanceResolved(cls) || !WRITER_SCAN_PENDING.add(cls)) return;
         try {
-            WRITER_ANALYSIS_EXECUTOR.submit(() -> {
+            HealthReportManager.submitTracked(WRITER_ANALYSIS_EXECUTOR, cls, () -> {
                 try {
                     HealthDataflowAnalyzer.resolveAuthorityMaintenancePlan(cls);
                 } catch (Throwable t) {
@@ -529,7 +541,8 @@ public final class EcaSetHealthManager {
 
     /* 外部扫描失败时每类记录一次异常类型、消息和有限数量的栈帧。 */
     private static void dumpExternalScanFailure(Class<?> cls, Throwable t) {
-        if (!EXTERNAL_SCAN_FAILURE_DUMPED.add(cls.getName())) return;
+        boolean firstDump = EXTERNAL_SCAN_FAILURE_DUMPED.add(cls.getName());
+        if (!firstDump && !HealthReportManager.isCapturing(cls)) return;
         EcaLogger.info("[ExternalScan] analysis threw entity={} type={} msg={}",
                 cls.getName(), t.getClass().getName(), t.getMessage());
         StackTraceElement[] frames = t.getStackTrace();
@@ -669,7 +682,8 @@ public final class EcaSetHealthManager {
 
     // 数值反演前置跳过诊断：每类每原因只打一次
     private static void dumpNumericInversionSkip(Class<?> cls, String reason) {
-        if (NUMERIC_INVERSION_SKIP_DUMPED.add(cls.getName() + "|" + reason))
+        boolean firstDump = NUMERIC_INVERSION_SKIP_DUMPED.add(cls.getName() + "|" + reason);
+        if (firstDump || HealthReportManager.isCapturing(cls))
             EcaLogger.info("[NumericInverter] skipped entity={} reason={}", cls.getName(), reason);
     }
 
@@ -941,7 +955,8 @@ public final class EcaSetHealthManager {
         if (cached != null) return cached;
         boolean tracks = probeVanillaHealthTracking(target);
         ANCHOR_REFLECTS_WRITES.put(cls, tracks);
-        if (!tracks && ANCHOR_TRUST_DUMPED.add(cls.getName())) {
+        boolean firstDump = ANCHOR_TRUST_DUMPED.add(cls.getName());
+        if (!tracks && (firstDump || HealthReportManager.isCapturing(cls))) {
             EcaLogger.info("[HealthAnchor] getHealth did not follow vanilla write entity={} (awaiting stronger evidence)",
                     cls.getName());
         }
@@ -1026,7 +1041,9 @@ public final class EcaSetHealthManager {
         if (sink != null) {
             UNOBSERVED_WRITES.computeIfAbsent(cls, k -> new ConcurrentHashMap<>()).putIfAbsent(sinkLabel, sink);
         }
-        if (!isWarmupDiagnosticsSuppressed() && UNOBSERVED_DUMPED.add(cls.getName() + "|" + sinkLabel)) {
+        boolean firstDump = UNOBSERVED_DUMPED.add(cls.getName() + "|" + sinkLabel);
+        if (!isWarmupDiagnosticsSuppressed()
+                && (firstDump || HealthReportManager.isCapturing(cls))) {
             EcaLogger.info("[HealthAnchor] write not observed entity={} sink={} anchor={}",
                     cls.getName(), sinkLabel, hasHealthAnchor(cls) ? "custom" : "getHealth");
         }

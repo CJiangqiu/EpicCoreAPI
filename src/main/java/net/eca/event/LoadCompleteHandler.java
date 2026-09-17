@@ -4,6 +4,7 @@ import net.eca.EcaMod;
 import net.eca.agent.AgentLogWriter;
 import net.eca.agent.EcaAgent;
 import net.eca.coremod.EcaClassTransformer;
+import net.eca.coremod.RuntimeExtensionBridge;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.bossshow.BossShowManager;
@@ -67,6 +68,7 @@ public final class LoadCompleteHandler {
         // 最终字节码必须先完成转换，协议分析才能避开尚未稳定的中间结果
         event.enqueueWork(() -> {
             applyLoadCompleteTransformers();
+            RuntimeExtensionBridge.onLoadComplete();
             HealthDataFlow.init();
             EcaSetHealthManager.startWarmup();
         });

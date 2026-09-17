@@ -9,7 +9,7 @@ This mod also provides an [MCreator plugin](https://mcreator.net/plugin/121284/2
 ## Usage for Players
 
 Players can use the following `/eca` commands (requires permission level ≥ 2):
-- `/eca setHealth <targets> <health>` - Set entity health
+- `/eca setHealth <targets> <health> [report]` - Set entity health. Add `report` to write one structured `<entity>_health_report_<timestamp>.txt` file per living target directly under `logs/`; the report identifies the observed storage pattern, channel attempts, successful mutation module, confidence, evidence, configuration gates, delayed next-tick verification, and the complete per-source dataflow inversion trace, including background analysis that belongs to the request.
 - `/eca setMaxHealth <targets> <maxHealth>` - Set entity max health (reverse-calculates attribute base value)
 - `/eca setInvulnerable <targets> <true|false>` - Set entity invulnerability
  - `/eca lockHealth <targets> true <value>` - Lock entity health at specific value
@@ -623,7 +623,7 @@ assets/<namespace>/eca/blender/<model-path>/model.glb
 assets/<namespace>/eca/blender/<model-path>/definition.json
 ```
 
-The directory `assets/example/eca/blender/guardian/` defines model id `example:guardian`. Blender model support was introduced with this canonical path and has no older asset location to fall back to.
+The directory `assets/example/eca/blender/guardian/` defines model id `example:guardian`.
 
 `definition.json` selects the GLB and controls the model-wide transform:
 
@@ -1352,7 +1352,7 @@ Any `.json` filename works, and you can have multiple files.
 ## 玩家使用
 
 玩家可以使用以下 `/eca` 命令（需要确保权限等级 ≥ 2）：
-- `/eca setHealth <目标> <血量值>` - 设置实体血量值
+- `/eca setHealth <目标> <血量值> [report]` - 设置实体血量值。追加 `report` 后，会直接在 `logs/` 中为每个生物目标生成独立的 `<实体名>_health_report_<时间点>.txt` 结构化报告，给出观测到的存储模型、各通道执行结果、实际成功模块、置信度与判断依据、配置门控及下一 tick 延迟复查结果。
 - `/eca setMaxHealth <目标> <最大血量值>` - 设置实体最大生命值（反算属性基础值）
 - `/eca setInvulnerable <目标> <true|false>` - 设置实体无敌状态
  - `/eca lockHealth <目标> true <血量值>` - 锁定实体血量
@@ -1965,7 +1965,7 @@ assets/<命名空间>/eca/blender/<模型路径>/model.glb
 assets/<命名空间>/eca/blender/<模型路径>/definition.json
 ```
 
-例如 `assets/example/eca/blender/guardian/` 对应模型 ID `example:guardian`。Blender 模型系统从一开始就使用这个规范目录，因此没有需要兼容的旧 Blender 资源路径。
+例如 `assets/example/eca/blender/guardian/` 对应模型 ID `example:guardian`。
 
 `definition.json` 负责选择 GLB 文件并设置模型整体变换：
 

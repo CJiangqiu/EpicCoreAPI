@@ -115,6 +115,7 @@ public class UnsafeUtil {
 
     // ClassInstanceMultiMap
     private static long CLASS_INSTANCE_MULTI_MAP_BY_CLASS_OFFSET = -1;
+    private static long CLASS_INSTANCE_MULTI_MAP_ALL_INSTANCES_OFFSET = -1;
 
     // ==================== 初始化 ====================
 
@@ -215,6 +216,8 @@ public class UnsafeUtil {
         // ClassInstanceMultiMap 相关字段
         CLASS_INSTANCE_MULTI_MAP_BY_CLASS_OFFSET = getFieldOffset(ClassInstanceMultiMap.class,
             ObfuscationMapping.getFieldMapping("ClassInstanceMultiMap.byClass"));
+        CLASS_INSTANCE_MULTI_MAP_ALL_INSTANCES_OFFSET = getFieldOffset(ClassInstanceMultiMap.class,
+            ObfuscationMapping.getFieldMapping("ClassInstanceMultiMap.allInstances"));
     }
 
     private static long getFieldOffset(Class<?> clazz, String fieldName) throws Exception {
@@ -388,9 +391,13 @@ public class UnsafeUtil {
      * @return true if removal succeeded, false otherwise
      */
     public static boolean unsafeRemove(Entity entity, Entity.RemovalReason reason) {
-        if (entity == null || entity.level() == null) return false;
-        if (entity.level().isClientSide) return false;
-        ServerLevel serverLevel = (ServerLevel) entity.level();
+        if (entity == null || !(entity.level instanceof ServerLevel serverLevel)) return false;
+        return unsafeRemove(serverLevel, entity, reason);
+    }
+
+    // 使用调用方确认的世界，避免实体逻辑 getter 影响清除目标
+    public static boolean unsafeRemove(ServerLevel serverLevel, Entity entity, Entity.RemovalReason reason) {
+        if (serverLevel == null || entity == null || reason == null) return false;
 
         try {
             List<UUID> bossEventUUIDs = EntityUtil.collectAllBossEventUUIDsForRemoval(entity);
@@ -610,6 +617,16 @@ public class UnsafeUtil {
                 if (ENTITY_SECTION_STORAGE_OFFSET < 0) continue;
                 Object storage = lwjglGetObject(section, ENTITY_SECTION_STORAGE_OFFSET);
                 if (storage == null) continue;
+
+                if (CLASS_INSTANCE_MULTI_MAP_ALL_INSTANCES_OFFSET >= 0) {
+                    List<?> allInstances = (List<?>) lwjglGetObject(
+                        storage,
+                        CLASS_INSTANCE_MULTI_MAP_ALL_INSTANCES_OFFSET
+                    );
+                    if (allInstances != null) {
+                        allInstances.remove(entity);
+                    }
+                }
 
                 if (CLASS_INSTANCE_MULTI_MAP_BY_CLASS_OFFSET < 0) continue;
                 Map<Class<?>, List<?>> byClass = (Map<Class<?>, List<?>>)

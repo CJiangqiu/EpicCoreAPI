@@ -6,7 +6,6 @@ import net.eca.util.EntityUtil;
 
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.spawn_ban.SpawnBanHook;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.ChunkPos;
@@ -32,10 +31,8 @@ public class TransientEntitySectionManagerMixin {
     // 禁生成：阻止被禁实体添加到TransientEntitySectionManager
     @Inject(method = "addEntity", at = @At("HEAD"), cancellable = true)
     private void eca$onAddEntity(EntityAccess entity, CallbackInfo ci) {
-        if (entity instanceof Entity realEntity && realEntity.level() instanceof ServerLevel level) {
-            if (SpawnBanHook.shouldBlockSpawn(level, realEntity)) {
-                ci.cancel();
-            }
+        if (SpawnBanHook.shouldBlockSpawn(entity)) {
+            ci.cancel();
         }
     }
 

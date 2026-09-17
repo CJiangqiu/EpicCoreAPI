@@ -37,6 +37,10 @@ public final class RuntimeExtensionBridge {
         invoke("refreshInterception");
     }
 
+    public static void onLoadComplete() {
+        invoke("onLoadComplete");
+    }
+
     public static boolean hasEarlyDisplayTransformer() {
         return resolveEarlyDisplayTransformer() != null;
     }
