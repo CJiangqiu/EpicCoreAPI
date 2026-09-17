@@ -640,3 +640,700 @@ Any `.json` filename works, and you can have multiple files.
 
 ---
 
+# 中文
+
+本 Mod 提供了一些基于 CoreMod (ITransformationService)、Java Agent 和 Mixin 等技术所实现的实体操作 API 和相关命令，此外还提供一系列功能模块：BossShow、实体扩展、Blender GLB 模型与动画、方块扩展、物品扩展、屏幕滤镜、ECA 着色器生成器、自定义阵营与自定义袭击。注意，本 Mod 的实体操作方法虽然在命名上可能与原版一致，但本质上的实现完全不同。例如，设置生命值 API 可以修改部分使用自定义生命值（包括但不限于实体数据、数字类型字段、部分哈希表）的实体；清除 API 则是进行了 Minecraft 底层容器的相关清除；设置无敌 API 则是提供了比原版创造模式无敌更强大的实现。此外，本 Mod 还将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
+
+本 Mod 的初衷是为开发者提供简化的实体操作 API，并在确保性能和兼容性的前提下获得一定的强度。因此，请不要将本 Mod 用于 Mod 战力对比和无休止的代码军火竞赛中。此外，在整合包生存环境下，最好确保攻击和防御逻辑的激进配置项处于关闭状态。
+
+本 Mod 还提供了一个 [MCreator 插件](https://mcreator.net/plugin/121284/20244epic-core-api-plugin)来方便 MCreator 用户使用本 Mod 中的 API。
+
+## 玩家使用
+
+玩家可以使用以下 `/eca` 命令（需要确保权限等级 ≥ 2）：
+- `/eca setHealth <目标> <血量值> [report]` - 设置实体血量值。追加 `report` 后，会直接在 `logs/` 中为每个生物目标生成独立的 `<实体名>_health_report_<时间点>.txt` 结构化报告，给出观测到的存储模型、各通道执行结果、实际成功模块、置信度与判断依据、配置门控及下一 tick 延迟复查结果。
+- `/eca setMaxHealth <目标> <最大血量值>` - 设置实体最大生命值（反算属性基础值）
+- `/eca setInvulnerable <目标> <true|false>` - 设置实体无敌状态
+ - `/eca lockHealth <目标> true <血量值>` - 锁定实体血量
+ - `/eca lockHealth <目标> false` - 解锁实体血量
+ - `/eca lockMaxHealth <目标> true <值>` - 锁定实体最大生命值
+ - `/eca lockMaxHealth <目标> false` - 解锁实体最大生命值
+ - `/eca banHealing <目标> true [血量值]` - 禁止实体治疗（血量值可选，默认使用当前血量）
+ - `/eca banHealing <目标> false` - 解除禁疗
+ - `/eca hurt <目标> <伤害值>` - 强制实体受伤（先走原版 hurt，血没扣对时强制写入；由生物执行时掉落与经验归属给执行者）
+ - `/eca kill <目标>` - 击杀实体
+- `/eca remove <目标> [原因]` - 从世界中移除实体
+- `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 内部通道清除实体
+- `/eca teleport <目标> <x> <y> <z>` - 传送实体
+- `/eca lockLocation <目标> <true|false> [x y z]` - 锁定/解除实体位置
+- `/eca cleanBossBar <目标>` - 清理 Boss 血条
+- `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体所属 mod 文件全部布尔和 void 方法的 return transformation，并对其已加载的类执行 retransform。原版实体（含玩家）没有可转换的 mod 文件，此时改以其装备所属 mod 文件为目标
+- `/eca allReturn global <true|false>` - 危险！启用/禁用全局 AllReturn，影响所有非白名单 mod
+- `/eca banSpawn <目标> <秒数>` - 禁止选中实体的类型生成指定时长
+- `/eca banSpawn clear` - 解除当前维度所有禁生成
+- `/eca setForceLoading <目标> <true|false>` - 启用/禁用实体强加载
+- `/eca setInvulnerable show_all` - 显示所有无敌实体
+- `/eca entityExtension get_registry` - 查看实体扩展注册表
+- `/eca entityExtension get_active` - 查看当前维度活跃的扩展类型
+- `/eca entityExtension get_current` - 查看当前生效的实体扩展
+- `/eca entityExtension clear` - 清空当前维度活跃扩展表和所有全局效果覆盖
+- `/eca entityExtension set_skybox <预设名>` - 设置全局天空盒着色器预设
+- `/eca setFilter <目标> true <类型>` - 为玩家施加屏幕滤镜（类型：sketch、spotlight、matrix、rain、desert、snow、toxic、cosmos）
+- `/eca setFilter <目标> false` - 移除玩家的所有激活滤镜
+- `/eca bossShow edit` - 打开游戏内演出编辑器（自动切换旁观模式）
+- `/eca bossShow exit` - 退出编辑器并恢复之前的游戏模式
+- `/eca bossShow list` - 列出所有已加载的演出定义
+- `/eca bossShow play <观看者> <目标> <id>` - 强制播放指定演出
+- `/eca bossShow stop <观看者>` - 停止该玩家当前的演出
+- `/eca bossShow reload` - 从磁盘重新加载所有演出 JSON 定义
+- `/eca bossShow clearHistory <玩家>` - 清除该玩家的"已观看"记录
+- `/eca shaderGenerator` - 打开游戏内着色器预设生成器
+- `/eca resurrection start` - 启动线程复活守护线程
+- `/eca resurrection stop` - 停止守护线程
+- `/eca resurrection status` - 查看线程状态及复活/检查计数
+- `/eca resurrection add <目标>` - 将实体加入复活追踪（每次轮询自动复活死亡实体）
+- `/eca resurrection remove <目标>` - 将实体从追踪中移除
+- `/eca resurrection list` - 列出所有被追踪实体及其容器完整性状态
+- `/eca resurrection check <目标>` - 对实体进行一次性容器完整性检查（不执行复活）
+- `/eca resurrection revive <目标>` - 立即手动强制复活一个被追踪的实体
+- `/eca resurrection interval <毫秒>` - 设置轮询间隔（100~10000 ms，默认 25 ms）
+- `/eca faction create <id> <显示名> [颜色]` - 创建阵营（颜色可用预设名，如 red/gold/teal）
+- `/eca faction remove <id>` - 删除阵营定义，并清除指向它的全部实体绑定
+- `/eca faction join <阵营ID> [目标]` - 将实体加入阵营（省略目标时为命令执行者）
+- `/eca faction leave [目标]` - 将实体移出当前阵营
+- `/eca faction list` - 列出全部已注册阵营
+- `/eca faction info [阵营ID]` - 查看阵营的颜色、成员与关系覆盖
+- `/eca faction relation <阵营A> <阵营B> <关系>` - 设置 A 对 B 的关系。`hostile` / `neutral` / `friendly` 写入关系覆盖；`same_faction` 则是把 B 并入 A（B 的成员改绑到 A，关系归并，随后删除 B）
+- `/eca faction leader <阵营ID>` - 查看阵营首领及其当前是否已加载
+- `/eca faction leader <阵营ID> set [目标]` - 设置首领（省略目标时为命令执行者，会自动加入该阵营）
+- `/eca faction leader <阵营ID> clear` - 清除首领，原首领仍保留成员身份
+- `/eca raid defs` - 列出全部已注册的袭击定义
+- `/eca raid list` - 列出当前维度的活跃袭击
+- `/eca raid start <定义ID> [坐标]` - 在目标结构内发起袭击（省略坐标时为命令执行者位置）
+- `/eca raid startat <定义ID> <坐标>` - 以指定坐标为中心强制发起袭击，跳过结构查询
+- `/eca raid info <实例ID>` - 查看单场袭击的详情
+- `/eca raid end <实例ID> <victory|defeat>` - 结束袭击并清除全部仍存活的袭击者
+
+新增了由 ECA 选择器实现的命令选择器：
+- `@eca_e[...]` - 所有实体
+- `@eca_p[...]` - 最近玩家
+- `@eca_a[...]` - 所有玩家
+- `@eca_r[...]` - 随机玩家
+- `@eca_s[...]` - 命令执行源实体（自身）
+
+## 开发者使用
+
+### 添加 ECA 依赖
+
+**第一步：添加 Modrinth Maven 仓库** (build.gradle)
+```groovy
+repositories {
+    maven { url = "https://api.modrinth.com/maven"; content { includeGroup "maven.modrinth" } }
+}
+```
+
+**第二步：添加 ECA 依赖** (build.gradle)
+```groovy
+dependencies {
+    implementation fg.deobf("maven.modrinth:epic-core-api:VERSION")
+}
+```
+> 将 `VERSION` 替换为所需版本（如 `1.1.7-fix-fix`）。前往 [ECA Modrinth 页面](https://modrinth.com/mod/epic-core-api) 查看可用版本。
+
+**第三步：声明依赖** (mods.toml)
+```toml
+[[dependencies.你的modId]]
+modId="eca"
+mandatory=true
+versionRange="[1.1.5,)"
+ordering="NONE"
+side="BOTH"
+```
+
+### API 参考
+
+- `lockHealth(entity, value)` - 锁定实体血量值（用于无敌阶段、治疗等）
+- `unlockHealth(entity)` - 解除血量锁定
+- `getLockedHealth(entity)` - 获取当前锁定值（未锁定返回 null）
+- `isHealthLocked(entity)` - 检查是否锁定
+- `banHealing(entity, value)` - 禁止实体治疗（可受伤害，但不能治疗）
+- `unbanHealing(entity)` - 解除禁疗
+- `getHealBanValue(entity)` - 获取当前禁疗值（未禁疗返回 null）
+- `isHealingBanned(entity)` - 检查是否被禁疗
+- `getHealth(entity)` - 读取实体当前生命协议观测到的血量：先取分析器确定的血量锚点，锚点无法解析时回退原版 `DATA_HEALTH_ID`（实体为 null 返回 0.0f）
+- `getRealHealth(entity)` - 同一份权威观测值，实体为 null 时返回 NaN 而非 0.0f
+- `setHealth(entity, health)` - 带校验的改血事务，仅在上一通道校验失败时逐级升级：原版直写（直接写 `DATA_HEALTH_ID`）→ 数据流逆向（ASM 数据流分析 `getHealth()` 定位真实存储并反演其读取表达式）→ 外部扫描（逆向 `isAlive` / `isDeadOrDying` / `hurt` / `actuallyHurt` 定位存储，含需要换算的有效血量模型）→ 方法探针（借实体自身的 writer：反射 setter、函数式字段、注入桥接）。每次尝试都以回读血量锚点、落在 `max(0.5, abs(目标) * 2%)` 容差内为判据；三态裁决下诱饵读数不构成反证，常量诱饵读出口改用存储回读、编码往返或生死谓词双值因果证据放行。写入前先对受影响状态快照，校验失败整体回滚；默认写与必需伴随源（影子表/速率基准）同一事务联写，任一失败整体回滚。服务端写入成功后向追踪客户端发送提交后的权威读值，新开始追踪的玩家获得定向补发。玩家只执行原版直写。原版直写之后的每条通道都需要激进攻击逻辑，外加 `Attack → setHealth` 下各自的开关（Dataflow / External Scan / Method Probe），默认全部关闭。
+- `setMaxHealth(entity, maxHealth)` - 通过反算属性基础值设置最大生命值
+- `lockMaxHealth(entity, value)` - 锁定实体最大生命值（每 tick 强制维持）
+- `unlockMaxHealth(entity)` - 解锁最大生命值
+- `getLockedMaxHealth(entity)` - 获取最大生命值锁定值（未锁定返回 null）
+- `isMaxHealthLocked(entity)` - 检查最大生命值是否被锁定
+- `addHealthWhitelistKeyword(keyword)` - 添加血量值修改白名单关键词
+- `removeHealthWhitelistKeyword(keyword)` - 移除血量值修改白名单关键词
+- `getHealthWhitelistKeywords()` - 获取全部白名单关键词
+- `addHealthBlacklistKeyword(keyword)` - 添加血量值修改黑名单关键词
+- `removeHealthBlacklistKeyword(keyword)` - 移除血量值修改黑名单关键词
+- `getHealthBlacklistKeywords()` - 获取全部黑名单关键词
+- `hurt(entity, damageSource, amount)` - 强制实体受伤并保证血量确实扣掉。原版 `hurt` 的实际扣血只有 `actuallyHurt` 末尾的 `setHealth(getHealth() - damage)` 一处，走的是实体自己的 getter 与 setter：两者被重写或与真实存储解耦时，整套流程照常跑完、事件照常发出，血却没掉。本方法先清无敌帧并调用原版 `hurt`（减免、击退、仇恨与受击表现均正常发生），再以 `min(1.0, 伤害值 * 50%)` 容差比对血量锚点与 `受伤前 - 伤害值`。不符时补齐原版本该留下的伤害源记账（lastHurtByMob、lastHurtByPlayer/Time、lastDamageSource/Stamp、战斗记录、受击动画）并通过 `setHealth` 强制落血量，下限钳到 0。致死结果不会在此强行推进死亡流程：实体停在 0 血，由原版 `tickDeath` 播放死亡动画并移除——需要立即击杀请改用 `kill`。处于 ECA 锁血或无敌状态的实体交由那两套系统处理——原版 `hurt` 照常调用，但不做强制写入。
+- `hurt(entity, attacker, amount)` - 同一流程，伤害源由攻击者推导：玩家用 `playerAttack`，其他生物用 `mobAttack`，使击杀归属与掉落归属符合预期
+- `kill(entity, damageSource)` - 击杀实体（掉落 + 成就 + 移除）
+- `revive(entity)` - 复活实体（清除死亡状态）
+- `revive(level, uuid)` - 在指定维度按 UUID 复活实体
+- `reviveAllContainers(entity)` - 复活实体的所有关键容器（tickList、lookup、sections、tracker）
+- `reviveAllContainers(level, uuid)` - 在指定维度按 UUID 复活实体的所有关键容器
+- `teleport(entity, x, y, z)` - 直接字段访问传送并同步到客户端
+- `lockLocation(entity)` - 锁定实体当前位置
+- `lockLocation(entity, position)` - 锁定实体到指定位置
+- `unlockLocation(entity)` - 解除实体位置锁定
+- `isLocationLocked(entity)` - 检查实体位置是否锁定
+- `getLockedLocation(entity)` - 获取锁定位置（未锁定返回 null）
+- `remove(entity, reason)` - 完整移除（AI、Boss 血条、容器、乘客等）
+- `memoryRemove(entity, reason)` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 内部通道清除实体
+- `cleanupBossBar(entity)` - 仅移除 Boss 血条
+- `isInvulnerable(entity)` - 检查 ECA 无敌状态
+- `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活、锁血、阻断伤害、每 tick 清除有害效果、阻止怪物锁定、保护玩家物品栏；关闭：清除所有保护）
+- `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，对目标实体所属 mod 文件的全部布尔和 void 方法进行 return transformation，并 retransform 该 mod 已加载的类。原版实体（含玩家）回退为以其装备所属 mod 文件为目标
+- `disableAllReturn(entity)` - 关闭该实体所属 mod 文件的 AllReturn，目标解析规则与开启一致，同样包含装备回退
+- `setGlobalAllReturn(enable)` - 危险！需要开启激进攻击逻辑配置，启用/禁用全局 AllReturn，影响所有非白名单 mod
+- `disableAllReturn()` - 关闭 AllReturn 并清除目标
+- `isAllReturnEnabled()` - 检查 AllReturn 是否启用
+- `addAllReturnWhitelist(prefix)` - 添加 AllReturn 白名单前缀（跳过 AllReturn 转换，防御性 Hook 仍然生效）
+- `removeAllReturnWhitelist(prefix)` - 移除 AllReturn 白名单前缀（内置条目不能移除）
+- `addTransformWhitelist(prefix)` - 添加转换白名单前缀（跳过全部 ECA 转换，包括防御性 Hook）
+- `removeTransformWhitelist(prefix)` - 移除转换白名单前缀（内置条目不能移除）
+- `isAllReturnWhitelisted(className)` - 检查类是否在 AllReturn 白名单中
+- `isTransformWhitelisted(className)` - 检查类是否在转换白名单中（跳过全部转换）
+- `getAllWhitelistedPackages()` - 获取所有白名单前缀（两级合并，内置 + 自定义）
+- `getEntityExtensionRegistry()` - 获取所有已注册的实体扩展（Map<EntityType, EntityExtension>）
+- `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
+- `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）
+- `clearActiveEntityExtensionTable(level)` - 清空当前维度活跃扩展表
+- `playAnimation(entity, animation)` - 以正常速度从头播放指定 GLB 动画且不循环（仅逻辑服务端调用）
+- `playAnimation(entity, animation, speed, loop)` - 按指定速度和循环设置开始或重新播放 GLB 动画（仅逻辑服务端调用）
+- `stopAnimation(entity)` - 停止显式动画并回退到扩展选择或模型默认动画
+- `pauseAnimation(entity)` - 暂停显式动画并保持当前播放位置
+- `resumeAnimation(entity)` - 从保存的位置继续显式动画
+- `isAnimationPlaying(entity[, animation])` - 查询实体是否存在显式动画，可选择精确匹配动画名
+- `setGlobalFog(level, fogData)` - 设置维度全局雾气效果覆盖（不改变效果优先级）
+- `clearGlobalFog(level)` - 清除全局雾气效果覆盖
+- `setGlobalSkybox(level, skyboxData)` - 设置维度全局天空盒效果覆盖（不改变效果优先级）
+- `clearGlobalSkybox(level)` - 清除全局天空盒效果覆盖
+- `setGlobalMusic(level, musicData)` - 设置维度全局战斗音乐效果覆盖（不改变效果优先级）
+- `clearGlobalMusic(level)` - 清除全局战斗音乐效果覆盖
+- `clearAllGlobalEffects(level)` - 清除维度所有全局效果覆盖（雾气、天空盒、音乐）
+- `enableFilter(player, filterType)` - 为玩家施加屏幕滤镜（FilterType：SKETCH、SPOTLIGHT、MATRIX、RAIN、DESERT、SNOW、TOXIC、COSMOS）
+- `disableFilter(player, filterType)` - 移除玩家的某个屏幕滤镜
+- `isFilterEnabled(player, filterType)` - 检查玩家是否激活了某个滤镜
+- `getActiveFilters(player)` - 获取玩家激活的滤镜（不可变 Set<FilterType>）
+- `playBossShow(viewer, target, cutsceneId)` - 强制为观看者播放 BossShow 演出（无视观看历史）
+- `playBossShowIfNew(viewer, target, cutsceneId)` - 仅在观看者未看过时播放 BossShow 演出
+- `stopBossShow(viewer)` - 停止观看者当前的 BossShow 演出
+- `isBossShowPlaying(viewer)` - 检查观看者是否正在 BossShow 演出中
+- `launchBossShowEvent(eventName, viewer, target)` - 触发所有匹配该事件名的自定义触发 BossShow（返回启动数量）
+- `banSpawn(level, entityType, seconds)` - 禁止指定实体类型生成指定时长
+- `isSpawnBanned(level, entityType)` - 检查实体类型是否被禁生成
+- `getSpawnBanTime(level, entityType)` - 获取禁生成剩余秒数
+- `unbanSpawn(level, entityType)` - 解除指定实体类型的禁生成
+- `getAllSpawnBans(level)` - 获取所有禁生成（Map<EntityType, Integer>）
+- `unbanAllSpawns(level)` - 解除所有禁生成
+- `setForceLoading(entity, level, forceLoad)` - 启用/禁用实体强加载
+- `isForceLoaded(entity)` - 检查实体是否被强加载（包含 EntityExtension 和 API 两种来源）
+- `getEntity(level, entityId)` - 在指定维度按运行时 id 获取实体（ECA 选择器路径）
+- `getEntity(level, uuid)` - 在指定维度按 UUID 获取实体（ECA 选择器路径）
+- `getEntity(level, entityId, entityClass)` - 按 id 获取指定类型实体
+- `getEntity(level, uuid, entityClass)` - 按 UUID 获取指定类型实体
+- `getEntity(server, entityId)` - 跨全部维度按 id 获取实体
+- `getEntity(server, uuid)` - 跨全部维度按 UUID 获取实体
+- `getEntities(level)` - 获取维度内全部实体
+- `getEntities(level, area)` - 获取维度内 AABB 范围实体
+- `getEntities(level, filter)` - 使用自定义条件获取维度实体
+- `getEntities(level, area, filter)` - 使用自定义条件获取范围内实体
+- `getEntities(level, entityClass)` - 获取维度内指定类型的全部实体
+- `getEntities(level, area, entityClass)` - 获取范围内指定类型实体
+- `getEntities(server)` - 获取全服全部实体
+- `getEntities(server, filter)` - 使用自定义条件获取全服实体
+- `getNearestEntity(level, pos, filter)` - 按自定义条件获取最近实体（走 ECA 解析器，无敌实体同样在搜索范围内）
+- `getNearestEntity(level, pos, area, filter)` - 同上，限定在 AABB 范围内
+- `getNearestEntity(level, pos, entityClass)` - 获取最近的指定类型实体
+- `getNearestEntity(level, pos, area, entityClass)` - 获取 AABB 范围内最近的指定类型实体
+- `shaderPreset(id)` - 按 ID 获取着色器预设对象，取用其现成的渲染目标
+- `startResurrection()` - 启动复活守护线程（幂等）
+- `stopResurrection()` - 停止复活守护线程
+- `isResurrectionRunning()` - 检查守护线程是否运行
+- `addResurrectionTarget(entity)` - 将实体加入复活追踪
+- `removeResurrectionTarget(entity)` - 将实体从复活追踪中移除
+- `isResurrectionTracked(entity)` - 检查实体是否在复活追踪中
+- `getResurrectionTrackedCount()` - 获取当前追踪的实体数量
+- `clearAllResurrectionTargets()` - 清除全部复活追踪目标
+- `setResurrectionPollInterval(ms)` - 设置复活轮询间隔（毫秒，范围 1–10000，默认 25）
+- `getResurrectionPollInterval()` - 获取当前轮询间隔（毫秒）
+- `getResurrectionTotalRevived()` - 获取累计复活次数
+- `getResurrectionTotalChecks()` - 获取累计检查次数
+- `checkResurrectionTarget(level, entity)` - 进行一次容器完整性检查
+- `reviveResurrectionTarget(level, entity)` - 手动强制复活被追踪的实体
+- `createFaction(id, displayName, color)` - 创建并注册阵营（仅内存）
+- `createFaction(id, displayName, color, level)` - 创建并注册阵营，持久化到世界存档
+- `removeFaction(id)` - 删除阵营定义（仅内存）
+- `removeFaction(id, level)` - 删除阵营定义，并清除指向它的全部实体绑定
+- `mergeFactions(intoId, fromId, level)` - 将一个阵营并入另一个：成员改绑、关系覆盖归并，被解散的阵营随后删除。返回迁移的成员数，无法执行时返回 -1
+- `getFaction(id)` - 按 ID 获取阵营定义
+- `getAllFactions()` - 获取全部已注册阵营
+- `joinFaction(entity, factionId)` - 将实体绑定到阵营
+- `leaveFaction(entity)` - 将实体移出所属阵营
+- `getEntityFaction(entity)` - 获取实体所属阵营 ID（无阵营返回 null；驯服动物回退为主人的阵营）
+- `areSameFaction(a, b)` - 判断两个实体是否属于同一阵营
+- `isFriendly(a, b)` - 完整判断友方关系：ECA 同阵营/友好阵营、原版计分板同盟或宠物主从同盟（不含创造、旁观和 ECA 无敌）
+- `getFactionMembers(level, factionId)` - 将阵营成员表解析为指定维度中的已加载实体
+- `kickAllFromFaction(factionId, level)` - 全局移出全部显式成员，包括未加载和其他维度中的成员
+- `setFactionRelation(a, b, relation)` - 设置阵营 A 对阵营 B 的关系（仅内存）
+- `setFactionRelation(a, b, relation, level)` - 设置阵营 A 对 B 的关系并持久化
+- `getFactionRelation(a, b)` - 查询 A 对 B 的显式关系（无覆盖返回 null）
+- `getEffectiveFactionRelation(source, target)` - 解析两个实体之间的有效关系
+- `canHarm(source, target)` - 判断阵营规则是否允许 source 攻击 target
+- `canTarget(source, target)` - 判断完整阵营与保护规则是否允许 source 主动锁定 target
+- `alertFactionMembers(factionId, attacker, victim, level)` - 让附近无目标的同阵营盟友反击攻击者
+- `joinFaction(uuid, typeId, isPlayer, factionId, level)` - 按 UUID 将实体加入阵营，无需实体在线或已加载
+- `leaveFaction(uuid, level)` - 按 UUID 将实体移出所属阵营，无需实体在线
+- `getEntityFaction(uuid)` - 按 UUID 查询所属阵营（纯索引查询；不含需要实体才能解析的宠物继承）
+- `isFactionMember(uuid, factionId)` - 判断指定 UUID 是否为该阵营成员
+- `getFactionMemberRecords(factionId)` - 获取阵营全部成员记录（UUID + 实体类型），无需加载实体
+- `getFactionMemberUuids(factionId)` - 获取阵营全部成员 UUID，无需加载实体
+- `getFactionMembersByType(factionId, typeId)` - 按实体类型筛选阵营成员，无需加载实体
+- `getFactionMemberCount(factionId)` - 获取阵营成员数量，无需加载实体
+- `resolveFactionMembers(factionId, level)` - 将阵营成员解析为该维度中实际存在的实体
+- `setFactionLeader(factionId, leader, level)` - 设置阵营首领（若未入营则自动加入）
+- `clearFactionLeader(factionId, level)` - 清除阵营首领，原首领仍保留成员身份
+- `getFactionLeader(factionId)` - 获取阵营首领记录，无需加载实体
+- `getFactionLeaderUuid(factionId)` - 获取阵营首领的 UUID
+- `resolveFactionLeader(factionId, server)` - 将阵营首领解析为实体，跨全部维度搜索
+- `isFactionLeader(entity)` - 判断实体是否为任意阵营的首领
+- `getFactionByLeader(uuid)` - 反查某实体担任首领的阵营
+- `startRaid(level, pos, raidId)` - 在目标结构内发起袭击（中心取自结构包围盒）
+- `startRaidAt(level, center, raidId)` - 以指定坐标为中心发起袭击，跳过结构查询
+- `endRaid(level, raid, victory)` - 结束袭击并清除全部仍存活的袭击者
+- `endRaid(level, raidId, victory)` - 按实例 ID 结束袭击并清除全部仍存活的袭击者
+- `getRaid(level, raidId)` - 按实例 ID 获取活跃袭击
+- `getActiveRaids(level)` - 获取该世界中的全部活跃袭击
+- `getNearestRaid(level, pos, maxDistance)` - 获取指定范围内最近的活跃袭击
+- `getAllRaidDefinitions()` - 获取全部已注册的袭击定义
+
+### 实体扩展
+
+本 Mod 还提供了一个可自定义的实体类型扩展功能，用于为你的实体增加一些特殊的视觉效果。你需要创建继承 `EntityExtension` 的子类，并在类上标注 `@RegisterEntityExtension` 进行注册扩展。
+
+自定义 Boss 血条可使用 `enableBossBar()`、`shouldShowBossBar(LivingEntity)` 和 `bossBarExtension()`。在 `BossBarExtension` 中，`showValueText()` 用于开启居中的“当前值/最大值”文本；覆写 `getDisplayCurrentValue(LivingEntity)` 与 `getDisplayMaxValue(LivingEntity)` 可以返回自定义显示数值，默认分别使用实体当前生命值和最大生命值。
+
+### Blender GLB 模型与动画
+
+ECA 可以直接加载 glTF 2.0 二进制模型，不需要额外的模型运行库。Blender 资源遵循统一的 ECA 资源目录：
+
+```text
+assets/<命名空间>/eca/blender/<模型路径>/model.glb
+assets/<命名空间>/eca/blender/<模型路径>/definition.json
+```
+
+例如 `assets/example/eca/blender/guardian/` 对应模型 ID `example:guardian`。
+
+`definition.json` 负责选择 GLB 文件并设置模型整体变换：
+
+```json
+{
+  "model": "model.glb",
+  "scale": 1.0,
+  "translation": [0.0, 0.0, 0.0],
+  "rotation": [0.0, 0.0, 0.0],
+  "default_animation": "Idle",
+  "loop": true,
+  "hidden_nodes": ["PresentationGround"]
+}
+```
+
+- `model` 是同目录下的 GLB 文件名，默认值为 `model.glb`。
+- `scale` 是统一缩放倍率；建议约定 Blender 中一米对应游戏中的一格。
+- `translation` 是模型局部偏移，`rotation` 按 X/Y/Z 角度声明。
+- `default_animation` 在没有显式播放、实体扩展也未选择动画时生效。
+- `loop` 控制默认动画是否循环；非循环动画会保持最后一帧。
+- `hidden_nodes` 隐藏指定节点及其全部子节点，适合排除 Blender 展示地面。
+
+从 Blender 导出时选择 **glTF Binary (.glb)**。应应用预期的对象变换，导出法线和第一套 UV，尽量嵌入 PNG/JPEG 贴图，排除摄像机、灯光和展示场景，并为每个动作设置稳定且唯一的名称。ECA 支持索引三角形网格、节点层级、基础颜色与贴图、透明材质、`STEP`/`LINEAR` 位移、旋转和缩放动画，以及由 `skins`、`inverseBindMatrices`、`JOINTS_0`、`WEIGHTS_0` 表示的每顶点四权重骨骼蒙皮。
+
+模型通过已有的 `EntityExtension` 绑定。
+
+`ADDITIVE` 会在原实体模型之外附加绘制 GLB；`REPLACE` 会替换实体主体及其原有渲染层，但仍保留名称、阴影、发光轮廓和实体姿态等外围渲染流程。`BlenderModelExtension` 还可以控制 `enabled`、按实体判断的 `shouldRender`、动画速度、统一缩放和 X/Y/Z 偏移。如果只希望部分实例使用模型，可以重写 `blenderModelExtension(LivingEntity)`。
+
+游戏逻辑可以显式控制已绑定模型的动画。这些调用必须发生在逻辑服务端；ECA 会把动画名称、开始时间、速度、循环与暂停状态同步给追踪实体的客户端，也包括被播放动画的玩家自身。
+
+重复播放同名动画会从头开始。暂停动画或已经到达末帧的非循环动画仍属于活跃显式状态，因此 `isAnimationPlaying` 会持续返回 true，直到该状态停止或被替换。显式播放状态是临时状态，不会写入实体 NBT；实体离开服务端世界后再次加入时，调用方应重新发起播放。`stopAnimation` 清除显式播放状态，并按以下顺序回退：
+
+```text
+BlenderModelExtension.animation(entity)
+→ definition.json 的 default_animation
+→ 模型未播放动画时的原始姿态
+```
+
+ECA 不定义技能、冷却、命中帧或等待调度器。调用方负责权威游戏时间线，动画只负责同步表现。
+
+刚性角色可以直接动画化独立物体节点，连续网格角色则可以使用骨骼权重。蒙皮在 CPU 侧计算，随后仍通过 Minecraft 实体缓冲提交，因此保留实体光照、深度、透明、轮廓和光影渲染通道。目前不支持 `JOINTS_1`/`WEIGHTS_1`、稀疏访问器、Morph Target 和 `CUBICSPLINE` 动画。大量高面数蒙皮实体会逐顶点消耗 CPU，应按实际场景评估性能。
+
+Blender 几何节点属于创作工具，并不是 glTF 运行时的一部分。导出前需要把结果应用或烘焙为普通网格；ECA 可以渲染烘焙结果，但不会在游戏内执行 Blender 节点图。会改变拓扑的几何节点动画，需要未来通过 Morph Target 或几何缓存体系另行支持。
+
+### 方块扩展
+
+方块扩展会在原方块模型之上附加着色器层，不会替换正常模型。普通烘焙方块和下落方块使用 `getBlockShaderPasses()` 返回的 BLOCK profile pass；GeckoLib 方块实体使用 `getGeoShaderPasses(texture)` 返回的 NEW_ENTITY profile pass。逻辑预设 ID 仍会为两个 profile 提供默认 RenderType。
+
+烘焙方块虽然使用图集，但外部遮罩会自动获得按 sprite 转换后的局部 UV。Geo 遮罩直接使用模型纹理的 UV 布局，并与 `overlayGeoBones()` 的骨骼范围取交集。普通世界方块按 section 建立稀疏索引并批量绘制覆盖层；下落方块与 GeckoLib 方块实体会自动接入。方块物品仍属于 `ItemExtension`。旧颜色键和单遮罩 getter 已标记为废弃兼容入口。
+
+### 物品扩展
+
+你可以创建物品扩展为指定物品附加着色器渲染效果：首先创建继承 `ItemExtension` 的子类，并在类上标注 `@RegisterItemExtension` 即可注册。
+
+结构化 tooltip 行可以分别决定自己的插入位置：
+
+- `EcaTooltipLine.head(...)`：插入到物品名下方。
+- `EcaTooltipLine.body(...)`：插入到主体 tooltip 区域；存在高级物品 ID、NBT 或 disabled 提示时，会尽量放在这些行之前。
+- `EcaTooltipLine.tail(...)`：插入到 tooltip 末尾。
+
+每一行都可以传入普通 `Component`，也可以传入 `ItemUtil.of(...)` 创建的 `EcaText`，因此 tooltip 支持和物品名相同的富文本效果：渐变、彩虹、纯色、闪烁、乱码、粗体、斜体、下划线和删除线。旧的 `appendTooltip(ItemStack, TooltipFlag, List<Component>)` 仍然保留，适合需要直接修改最终 tooltip 列表的高级用法。
+
+物品遮罩 pass 会自动使用 sprite 局部 UV。`ShaderMaskPass.masked(...)` 采样外部遮罩贴图，`ShaderMaskPass.baseTexture(...)` 则直接从物品贴图选择颜色。旧 `getRenderType()`、颜色键和单遮罩 getter 已标记为废弃兼容入口。
+
+注意：和实体扩展一样，每个物品只能有一个扩展，重复注册会被拒绝并输出错误日志。实体层扩展（`EntityLayerExtension.getAlpha()`，默认 0.5）和物品扩展（`ItemExtension.getAlpha()`，默认 1.0）均支持调整着色器叠加层的透明度。
+
+### 着色器遮罩 Pass
+
+实体、物品和方块着色器覆盖层共用同一套 `ShaderMaskPass` 流程。每个 pass 包含一个 RenderType、可选的 UV 对齐遮罩贴图、目标 RGB 颜色（默认黑色）、近色容差和透明度。一个扩展可以返回多个 pass，让同一张遮罩中的不同颜色分别使用不同着色器。pass 按列表顺序绘制，选区重叠时后面的 pass 覆盖在前面的 pass 之上；透明或颜色不匹配的像素不会渲染。
+
+### 着色器预设
+
+Mod 内置的 ECA 专属文件统一使用 `assets/<namespace>/eca/<system>/`；需要服务端读取的定义使用对应的 `data/<namespace>/eca/<system>/`。纹理、语言文件等 Minecraft 标准资源仍保留在原生目录，旧版 ECA 已公开的路径继续作为兼容回退来源。
+
+本 Mod 还提供了一些用于实体扩展、物品扩展和方块扩展系统的着色器预设，可以直接在扩展中使用相关的 RenderType。使用时将示例代码中的 `CustomRenderTypes` 替换为对应预设名字即可。每个内置预设类提供 5 个现成 RenderType：实体扩展用的 `BOSS_BAR`、`BOSS_LAYER`、`SKYBOX`，物品扩展用的 `ITEM`，方块扩展用的 `BLOCK`；另有 `createEntityEffect(texture)` 用于实体纹理叠加。实体纹理叠加通过 `EntityLayerExtension.getTexture()` 支持——返回纹理即可叠加到实体模型上，可与着色器 RenderType 组合，实现 Boss 血条同款的纹理+着色器叠加效果。
+
+每个内置预设同时以五文件形式打包，因此会注册为预设 ID `eca:<name>`，可由 `BlockExtension.getShaderPresetId()` 返回。GeckoLib 方块实体所需的 NEW_ENTITY 档通过 `EcaPresets.geoBlock("eca:<name>", texture)` 获取——预设类本身没有 geo 字段。
+
+可用预设：
+- `TheLastEndRenderTypes` / `eca:the_last_end` — 终焉
+- `DreamSakuraRenderTypes` / `eca:dream_sakura` — 梦之樱
+- `ForestRenderTypes` / `eca:forest` — 森林
+- `OceanRenderTypes` / `eca:ocean` — 海洋
+- `StormRenderTypes` / `eca:storm` — 风暴
+- `VolcanoRenderTypes` / `eca:volcano` — 火山
+- `ArcaneRenderTypes` / `eca:arcane` — 奥术
+- `AuroraRenderTypes` / `eca:aurora` — 极光
+- `HackerRenderTypes` / `eca:hacker` — 黑客
+- `StarlightRenderTypes` / `eca:starlight` — 星辉
+- `CosmosRenderTypes` / `eca:cosmos` — 宇宙
+- `BlackHoleRenderTypes` / `eca:black_hole` — 黑洞
+
+### 屏幕滤镜
+
+本 Mod 提供了一组全屏后处理滤镜预设，可由服务端按玩家施加，通过命令或 API 均可。滤镜会同步到客户端，作为一道着色器 pass 叠加在世界画面上。每个玩家同一时刻只能激活一个滤镜——施加新滤镜会替换当前滤镜。
+
+滤镜预设：
+- `SKETCH` — 素描
+- `SPOTLIGHT` — 聚光灯
+- `MATRIX` — 矩阵
+- `RAIN` — 雨
+- `DESERT` — 沙漠
+- `SNOW` — 雪
+- `TOXIC` — 剧毒
+- `COSMOS` — 宇宙
+
+### ECA 着色器生成器
+
+ECA 提供了游戏内着色器预设生成器，用于在不手写 GLSL 的情况下制作可移植的 Minecraft core shader 预设。使用以下命令打开：
+
+```mcfunction
+/eca shaderGenerator
+```
+
+生成器编辑的是一个分层合成工程。每个图层可以包含多个视觉模块，例如基础形状、星空效果、魔法符号和图片元素。编辑器支持实时预览、撤销/重做、图层显隐、图层排序、混合模式、画布编辑、工程保存/读取、标准五文件导出，以及删除工程（**文件 -> 删除当前工程**，二次确认后永久删除该工程目录及其源码、贴图与已导入的依赖）。
+
+每个工程还拥有一套独立持久化的五文件源码工作区。使用 **文件 -> 源码编辑器** 可在同一工程中切换到手写 GLSL/JSON，源码页面提供单行菜单、基于注释的快速导航、撤销/重做、保存、编译快捷键和防抖实时预览；右侧上方是预览，下方是可滚动的编译信息与报错面板。生成的片段源码会为图层和元素写入 `// @eca-nav layer: ...` 与 `// @eca-nav element: ...` 标记，手写 `// @eca-nav ...` 注释也可创建自定义导航点。返回图层编辑器不会丢弃任意一侧的数据。使用 **文件 -> 导入已有着色器文件夹** 会从 Forge 规范化后的当前游戏目录打开系统原生文件夹选择器，把所选文件夹中的 JSON/VSH/FSH 着色器复制为新的本地 ECA 工程；一个文件夹检测到多个程序时会先要求选择。源码位于 `assets/<modid>/` 下时，工程对话框会自动填写该 Mod ID，否则保持空白。标准三文件会复制到 BLOCK 与 NEW_ENTITY 源码槽位并分别接受编译验证；符合 ECA 共享片元 `_block`/`_entity` 命名的五文件则直接保留两个 profile。源文件夹不会被修改。
+
+导入范围是标准 Minecraft core shader 的 JSON/VSH/FSH 资源。预览运行时会为常见的时间、相机、缩放、不透明度及 cosmic UV uniform 提供绑定。若着色器依赖原 Mod 专用渲染管线、Java 回调、纹理或特殊 uniform，仍可能需要单独适配；无法支持的片元结构会明确报告编译错误，不会静默改写。
+
+贴图依赖同样会被解析。外部着色器引用多张连续编号的 PNG 时，ECA 会尝试复制这些文件，在预览时将它们组合成一张纹理，并向对应的 sampler 和 uniform 提供每张图片在组合纹理中的 UV 范围。带 `.mcmeta` 动画段的 PNG 会在组合纹理中逐帧更新，并遵循帧序、每帧时长与插值设置。如果无法确认文件与 sampler 或 uniform 的对应关系，编译输出面板会说明未解析的依赖和扫描目录，而不是静默失败；着色器编译本身仍可成功。
+
+当前预览目标包括平面、物品、实体、天空盒和 Boss 血条。导出的预设使用标准 core shader 五文件结构：
+
+```text
+assets/<namespace>/eca/shader_presets/<name>.fsh
+assets/<namespace>/eca/shader_presets/<name>_block.vsh
+assets/<namespace>/eca/shader_presets/<name>_block.json
+assets/<namespace>/eca/shader_presets/<name>_entity.vsh
+assets/<namespace>/eca/shader_presets/<name>_entity.json
+```
+
+片元着色器由两个 profile 共享。顶点着色器必须分成两个 profile，因为 Minecraft 不同渲染目标使用的顶点格式不同：
+
+- `<name>_block.*` 使用 `DefaultVertexFormat.BLOCK`，用于天空盒、平面预览和 Boss 血条。
+- `<name>_entity.*` 使用 `DefaultVertexFormat.NEW_ENTITY`，用于实体额外渲染层、物品额外渲染层和带纹理的实体效果层。
+
+导出模式：
+
+- `PORTABLE`：标准 Minecraft core shader 输出，不包含 ECA 专属 uniform。
+- `PORTABLE_WITH_ECA_HINTS`：包含 ECA uniform 钩子和无害默认值，但脱离 ECA 仍可使用。
+- `ECA_ENHANCED`：包含 ECA 专属 uniform，并预期由 ECA 增强运行时加载。
+
+工程会保存到 `config/eca/shadergenerator/<namespace>/<name>/project.json`。使用 **File -> Export As <shader>** 可以把当前工程导出为运行时可加载的五文件预设，位置为 `config/eca/shadergenerator/<namespace>/<name>/`。ECA 会自动发现 mod assets 内的预设，以及 config 中导出的预设。预设 ID 固定为 `<namespace>:<name>`。
+
+如果要把预设打包进 Mod，将五个文件放到 `src/main/resources/assets/<namespace>/eca/shader_presets/`。旧目录 `assets/<namespace>/shaders/core/` 继续兼容；同一 ID 同时存在时以新的 ECA 目录为准。也可以使用 `@RegisterShaderPreset` 显式声明预设。这个注解会在启动扫描阶段注册对应的预设 ID，适合希望通过 Java 标记类明确暴露自定义预设的 Mod。
+
+运行时可以通过 `EcaPresets` 获取生成后的 RenderType，也可以通过 `EcaAPI` 查询预设对象。
+
+返回的 `ShaderPreset` 提供 `bossBar()`、`bossLayer()`、`skybox()`、`item()`、`block()`、`geoBlock(texture)` 和 `entityForPreview(texture)`；`EcaPresets` 以预设 ID 静态查询的形式镜像了前六个。`block()` 与 `geoBlock(texture)` 分别是方块扩展使用的 BLOCK 与 NEW_ENTITY profile。实体纹理叠加请通过 `EntityLayerExtension.getTexture()` 配合 `bossLayer()` 使用。
+
+#### ECA 着色器 AI 助手
+
+着色器生成器内置 AI 助手，可以让所选模型直接操作当前工程。支持 OpenAI Responses、OpenAI Chat 兼容和 Anthropic Messages 三种接口格式；每种格式保存为独立 profile，可配置 API URL、模型、API Key 或 Key 环境变量、自定义请求头及 10–600 秒超时。配置保存在 `config/eca/shadergenerator/settings.json`。
+
+模型可以读取工程与模块参数、编辑图层和元素、导入 PNG、局部修改五个源码文件、保存工程、导出五个着色器文件、编译并读取诊断、获取实时预览，以及撤销或重做自己的改动。用户可以分别控制自动编辑、编辑后自动编译和向视觉模型发送预览图；关闭自动编辑后，模型只能查看和讲解工程。
+
+#### MCP
+
+AI 助手页面中的 **MCP** 按钮会启动本地 ECA Shader MCP，让外部 Agent 操作当前着色器工程。服务使用 Streamable HTTP，只监听 `127.0.0.1`，无需访问令牌；MCP 页面会显示端口和已连接 Agent，端口配置保存在 `config/eca/shadergenerator/mcp_settings.json`。URL 端口应与 MCP 页面一致，并且 Minecraft 和 MCP 服务需要保持运行。
+
+使用顺序：先在游戏内 **着色器生成器 → AI 助手 → MCP** 点击按钮启动服务，再启动并连接 Agent。服务未启动时 Agent 无法连接。
+
+##### Codex
+
+命令行注册：
+
+```bash
+codex mcp add eca_shader --url http://localhost:8767/mcp
+```
+
+##### Claude Code
+
+命令行注册：
+
+```bash
+claude mcp add --transport http eca_shader http://127.0.0.1:8767/mcp
+```
+
+### BossShow 演出
+
+BossShow 会把玩家的镜头锁定在围绕目标实体录制的路径上播放一段过场动画，支持字幕和服务端事件回调。镜头路径用游戏内编辑器录制，不需要手写关键帧。
+
+**默认编辑器快捷键**：
+
+| 按键 | 功能 |
+|------|------|
+| `J` | 开始 / 恢复录制 |
+| `I` | 暂停录制 |
+| `ENTER` | 保存录制 |
+| `ESC` | 放弃录制 |
+
+**编辑器流程**：
+1. 在至少一个 LivingEntity 附近（64 格内）执行 `/eca bossShow edit`。
+2. 在主页面点击 **+ New cutscene from entity** → 瞄准一个实体 → 右键选中作为摄像机锚点；或点击 **Edit** 编辑已有演出。
+3. 配置触发方式（Range 范围触发 / Custom 自定义触发）、目标实体类型、电影黑边、是否允许重复播放等。
+4. 点击 **● Record**，按 `J` 开始录制。在旁观模式下自由移动镜头——每个 tick 都会被记录为可编辑帧。
+5. 录制完成后点击时间轴上的任意 tick，编辑位置和镜头朝向；使用 **▶ 预览** 播放时间轴。需要从游戏视角重新取样时，点击 **自由镜头回写**，移动镜头后按回车写入当前 tick。
+6. 按 `ENTER` 保存，`ESC` 放弃。保存的文件位于 `config/eca/bossshow/<命名空间>/<路径>.json`。
+
+**时间轴编辑**（录制完成后，在编辑器界面内）：每一帧都可以选择。点击或拖动时间轴 scrub，使用方向键逐 tick 移动，并在属性面板编辑 `dx/dy/dz/yaw/pitch`。使用 **添加内容** 在当前 tick 挂载事件或字幕。时间轴还支持 **设入点** / **设出点**、**复制** / **剪切** / **删除**、**粘贴**、范围统一偏移/渐变偏移和 `Ctrl+Z` / `Ctrl+Y`。
+
+编辑器内按 `Space` 播放或暂停，末帧时会从头播放；`Shift+←/→` 跨 10 tick 移动，`Home/End` 跳到首尾，`I/O` 设置入点和出点，`Ctrl+C/X/V` 操作选区。右键镜头、事件或字幕轨道会定位到对应 tick，并打开该轨道的上下文菜单；曲线和选区操作位于二级菜单。完整按键表可从 **编辑 → 快捷键说明** 查看。
+
+录制时飞行惯性默认关闭，可在配置文件 `BossShow` 项的 `Enable Recording Flight Inertia` 中开启。
+
+**Mod 开发者**
+
+定义演出有两种方式：
+
+1. **纯 JSON** — 将文件放在 `data/<modid>/eca/bossshow/<path>.json`，启动时自动加载；旧目录 `data/<modid>/bossshow/<path>.json` 继续兼容。不需要服务端事件处理的话不用写 Java 代码。
+
+2. **Java + JSON** — 继承 `BossShow` 并使用 `@RegisterBossShow` 注解，可以在播放过程中收到服务端事件回调。
+
+JSON 示例 — `frames` 由录制器自动生成，`events` 和 `subtitles` 是独立的 tick 内容轨道：
+
+```json
+{
+  "format_version": 3,
+  "target_type": "minecraft:warden",
+  "trigger": { "type": "range", "effect_radius": 32.0 },
+  "cinematic": true,
+  "allow_repeat": false,
+  "anchor_yaw": 0.0,
+  "frames": [
+    { "dx": 0.0, "dy": 1.8, "dz": -6.0, "yaw": 0.0, "pitch": 10.0 },
+    { "dx": 0.0, "dy": 1.8, "dz": -5.8, "yaw": 2.0, "pitch": 10.0,
+      "keyframe": { "event_id": "intro", "subtitle": "mymod.bossshow.warden.intro" } },
+    { "dx": 0.0, "dy": 1.8, "dz": -4.0, "yaw": 8.0, "pitch": 10.0,
+      "keyframe": { "event_id": "finisher" } }
+  ],
+  "events": [
+    { "tick": 20, "event_id": "intro" },
+    { "tick": 40, "event_id": "finisher" }
+  ],
+  "subtitles": [
+    { "tick": 20, "text": "mymod.bossshow.warden.intro" }
+  ],
+  "effects": [
+    { "tick": 20, "type": "camera_shake", "duration": 16, "fade_out": 8,
+      "parameters": { "yaw": 1.5, "pitch": 1.0, "roll": 0.5, "frequency": 1.2 } },
+    { "tick": 40, "type": "shader_effect", "effect": "chromatic_aberration",
+      "duration": 30, "fade_in": 3, "fade_out": 10,
+      "parameters": { "strength": 0.012, "angle": 15.0, "pulse_amount": 0.4, "pulse_speed": 2.0 } }
+  ]
+}
+```
+
+- `frames`：每 tick 一个对象，按播放顺序排列。帧在数组里的下标就是它的 tick，没有单独的时间字段。由编辑器录制生成。
+- `frames[].dx/dy/dz`：相机在锚点局部坐标系下的偏移。
+- `frames[].yaw/pitch`：相机朝向（yaw 为锚点局部）。
+- `events`：独立事件轨道。每项包含 `tick` 和可选的 `event_id`，在对应 tick 传递给 `BossShow.onKeyframeEvent()`。
+- `subtitles`：独立字幕轨道。每项包含 `tick` 和可选的 `text`，可使用纯文本或翻译 key。
+- `effects`：客户端屏幕效果轨道。公共字段包括 `tick`、`type`、`duration`、`fade_in`、`fade_out`、`easing` 和 `parameters`。类型支持 `camera_shake`、`shader_effect` 与 `filter`；着色器效果支持色差、波浪扭曲、热浪、亮度脉冲、色相循环、扫描线和暗角，滤镜名称沿用 ECA 滤镜系统。
+- `frames[].keyframe`：旧格式兼容字段，新文件建议使用 `events` 和 `subtitles`。
+- `trigger`：`{"type":"range","effect_radius":N}` 玩家进入目标实体范围时自动触发；`{"type":"custom","event_name":"..."}` 仅通过 `EcaAPI.launchBossShowEvent(...)` 匹配触发。
+
+> 旧版 `samples` + `markers` 格式已不再识别——用旧格式的文件会被加载为零帧演出。请重新录制或迁移到 `frames`。
+
+JSON 中的 `event_id` 会在对应 tick 被分发到服务端的 `onKeyframeEvent`。
+
+演出也可以通过 `EcaAPI.playBossShow(...)` 或 `launchBossShowEvent(...)` 从代码触发。
+
+> 如果 `@RegisterBossShow` 类在首次启动时还没有对应 JSON，会在 `config/eca/bossshow/` 下自动生成只含 `target_type` 的空壳文件作为兜底。
+
+**整合包开发者**
+
+- **覆盖演出** — 将修改后的 JSON 放到 `config/eca/bossshow/<命名空间>/<路径>.json`。该目录下的文件会覆盖 Mod 内置的同 id 定义（规范目录为 `data/<modid>/eca/bossshow/`，同时兼容 `data/<modid>/bossshow/`）。
+- **游戏内调整** — `/eca bossShow edit` 可以重新录制镜头路径、逐 tick 编辑位姿、调整触发方式、添加事件/字幕内容，并在时间轴上复制/剪切/删除/粘贴帧区间。保存写入 `config/eca/bossshow/`，不影响 Mod 原始文件。
+- **翻译/改写字幕** — 在 `config/eca/bossshow/lang/<locale>.json`（如 `en_us.json`、`zh_cn.json`）中覆盖字幕翻译 key，优先级高于 Mod 自带的语言文件：
+    ```json
+    {
+      "mymod.bossshow.warden.intro": "深处传来一阵低沉的回响……"
+    }
+    ```
+- **热重载** — `/eca bossShow reload` 立即加载所有 JSON 更改，无需重启游戏。
+
+### 自定义阵营
+
+本 Mod 提供了一套约束目标选择与伤害关系的阵营系统。实体绑定阵营后，原版同盟判断和目标设置会遵守同阵营、友好与中立规则，无需实现接口或编写混入。绑定阵营的生物会周期性地通过 `Mob.setTarget` 获取附近与之为 `HOSTILE` 关系的阵营实体，其既有战斗 Goal 仍负责移动与攻击；无阵营的实体不会被这一索敌流程选中。标准 `LivingEntity` 伤害路径会执行友军保护，直接修改状态的 API 则仍需调用方自行判断。`FactionUtil.isFriendly` 负责解析同盟关系，`FactionUtil.canAttack` 则额外执行创造/旁观与 ECA 无敌保护。
+
+对外可通过 `EcaAPI.isFriendly(a, b)` 完整判断友方关系。它涵盖 ECA 同阵营、ECA 友好阵营、原版计分板同盟、玩家与自己的宠物、同主人的宠物，以及主人属于原版同盟队伍的宠物。创造模式、旁观模式和 ECA 无敌刻意不计入友方，因为它们属于攻击保护而非同盟关系。只有需要判断 ECA 阵营 ID 完全相同时才使用 `areSameFaction`；`canHarm` 只检查 ECA 阵营伤害关系，`canTarget` 则同时拒绝中立关系和完整目标免疫。
+
+注册阵营需要创建继承 `FactionDefinition` 的子类，并在类上标注 `@RegisterFaction`。ECA 在 `FMLLoadCompleteEvent` 期间扫描全部 Mod，重复 ID 会被记录并跳过（先扫描到的生效）。也可以通过 `EcaAPI.createFaction` 在运行时创建阵营，可选择是否持久化。实体扩展还可以重写 `getFactionId()`，使该类型实体自动加入某个阵营——阵营必须在这些实体生成前完成注册，否则绑定会被拒绝并记录日志。
+
+四种关系：
+- `SAME_FACTION` — 同一阵营，完全免伤且不会被设为目标
+- `FRIENDLY` — 不同阵营但结盟，不造成伤害也不设目标
+- `NEUTRAL` — 不会被主动设为目标，但误伤仍然生效
+- `HOSTILE` — 正常敌对
+
+`SAME_FACTION` 是派生关系而非可存储关系：它由"双方解析出同一阵营 ID"产生，写成跨阵营覆盖永远不会被读回。要让两个阵营真正成为同一个，只能合并——`EcaAPI.mergeFactions(intoId, fromId, level)`，`/eca faction relation A B same_faction` 即以 A 为存活方调用它。B 的成员改绑到 A，B 的关系覆盖仅在 A 未显式设定时被继承，第三方指向 B 的条目改指 A 或直接丢弃，随后删除 B。A 保留自己的显示名、颜色、默认关系与首领，仅在自身无首领时接手 B 的首领。
+
+关系解析按以下顺序进行，命中即返回：
+1. 阵营 ID 相同 → `SAME_FACTION`
+2. A 的 `getRelation(self, target)` 条件覆写
+3. A 的静态 `hostileTo` / `friendlyTo` / `neutralTo` 预设
+4. 对称回退 —— 从 B 的角度重复上述两项判断
+5. A 的 `getDefaultRelation(self, target)` 条件覆写（仅当对方无阵营时）
+6. A 的静态默认关系
+
+每个阵营拥有自己的成员表。成员以 UUID 加实体类型的形式记录，因此列出名单、按类型筛选、统计数量都无需加载任何实体——处于未加载区块或其他维度的成员同样可见、可管理。阵营存储于主世界存档，成员归属跨维度全局共享并能在重启后恢复。
+
+实体被永久移除时绑定会被清除；区块卸载和跨维度传送会保留绑定，玩家的绑定则在死亡重生后始终保留。成员身份不能脱离阵营存在——注销阵营会一并清空其成员表，加入不存在的阵营会被拒绝而不是被静默记录。
+
+驯服动物会自动继承主人的阵营，因此宠物同样受主人盟友保护，并可响应附近的阵营求援。继承在查询时解析而非落库：继承阵营的宠物不会出现在持久化成员表、离线查询、成员计数或遍历成员表的首领传导中。宠物会始终跟随主人换营且自身不会产生绑定——对这类宠物调用 `leaveFaction` 不会有任何效果。若希望宠物归属其他阵营或参与成员表操作，需要显式绑定；显式绑定始终优先于继承。
+
+阵营系统只负责成员归属、关系和首领。`FactionDefinition` 不提供实体组成或生成权重 API；这些内容由实际执行生成的系统自行管理，因此同一阵营可以被不同系统使用而不共享生成规则。
+
+**首领**：阵营可以指定一名成员作为首领。设置首领时若该实体尚未入营会自动加入——首领不属于自己的阵营是自相矛盾的状态。退出阵营同时卸任首领，首领被永久移除时首领记录会自动清除。
+
+**仇恨传导**：当首领攻击某个实体或被某个实体攻击时，系统会尝试把该实体交给成员表中可解析的全部生物作为目标；已有目标和阵营目标权限仍可能阻止切换。系统中并存两套机制：
+
+| | 触发条件 | 范围 |
+|---|---|---|
+| 首领保护 | 首领攻击他人或被攻击 | 整张成员表 |
+| 成员求援 | 任意成员受到伤害 | 受害者周围的可配置半径 |
+
+首领保护刻意不设范围限制：直接遍历成员表，因此远离主人的召唤物同样会响应。无法在首领所在维度解析到的成员会被跳过，传导也绝不会让成员获得一个它本就不允许攻击的目标。同一 tick 内对同一目标的重复传导会被丢弃，避免首领连续攻击时反复遍历成员表。
+
+两套机制完全由配置文件控制，不提供按阵营覆写，因此同一服务器上所有阵营表现一致：
+
+- `Leader Protection Enabled`（默认 `true`）
+- `Immediate Leader Protection`（默认 `false`）
+- `Alert Enabled`（默认 `true`）/ `Alert Range`（默认 `32`）/ `Immediate Member Alert`（默认 `false`）
+
+"Immediate" 关闭时只有当前没有目标的成员才会响应；开启时成员会放弃正在交战的目标。
+
+**查询**：归属关系可以从两个方向查询，其中不解析实体的方法完全离线可用：
+
+| 方向 | 方法 |
+|---|---|
+| 实体关系 | `areSameFaction(a, b)`（仅 ECA 同阵营）、`isFriendly(a, b)`（完整 ECA + 原版友方判断）、`getEffectiveFactionRelation(a, b)`、`canHarm(a, b)`（仅 ECA 阵营伤害规则）、`canTarget(a, b)`（包含中立与免疫的目标检查） |
+| 成员 → 阵营 | `getEntityFaction(entity)`（含宠物继承）、`getEntityFaction(uuid)`、`isFactionMember(uuid, id)` |
+| 阵营 → 成员 | `getFactionMemberRecords(id)`、`getFactionMemberUuids(id)`、`getFactionMembersByType(id, typeId)`、`getFactionMemberCount(id)` |
+| 阵营 → 实体 | `resolveFactionMembers(id, level)` |
+| 阵营 → 首领 | `getFactionLeader(id)`、`getFactionLeaderUuid(id)`、`resolveFactionLeader(id, server)`（跨全部维度搜索） |
+| 首领 → 阵营 | `getFactionByLeader(uuid)`、`isFactionLeader(entity)` |
+
+`joinFaction` 与 `leaveFaction` 均提供 UUID 重载，用于管理实体未加载的成员。
+
+阵营成员还可以按关系颜色对附近玩家发光，该功能可在配置中开关，默认关闭。
+
+### 自定义袭击
+
+本 Mod 提供了一套可自定义的袭击系统。原版袭击只能作用于村庄、只接受实现了 `Raider` 接口的实体，且胜利条件与奖励全部硬编码；ECA 的袭击可以指向任意结构、使用任意实体类型，并且能替换掉决定袭击如何推进与结束的每一条规则。
+
+注册袭击需要创建继承 `RaidDefinition` 的子类，并标注 `@RegisterRaid`。扫描排在阵营扫描之后，因此袭击定义可以自由引用阵营 ID。只有 `getId()`、`getDisplayName()` 和 `getWaves()` 必须覆写，其余全部带有仿原版的可用默认值。
+
+**目标锚定**：覆写 `getTargetStructure()` 指向单一结构，或覆写 `getTargetStructureTag()` 匹配带有某个标签的任意结构，使一个袭击适用于多种结构。锚定决定了默认的失败条件：当目标结构不再覆盖袭击中心时判定防守失败。两者都不声明则袭击不锚定结构，此时只能通过胜利、超时或主动结束来终止。
+
+**波次**：每个 `RaidWave` 可自由混用两种生成源——显式指定实体类型，以及通过 `addFaction(String factionId, int count, Map<EntityType<?>, Integer> typeWeights)` 在本波内部配置实体类型和权重的阵营抽取。同一阵营在不同波次可以使用完全不同的生成组合和权重，例如：`new RaidWave().addFaction("undead_legion", 10, Map.of(EntityType.ZOMBIE, 8, EntityType.SKELETON, 2))`。
+
+**袭击者**：通过 `addEntry(...)` 添加的显式条目绑定到 `getRaiderFactionId()`，每个 `addFaction(...)` 生成组则绑定到该条目自己的阵营 ID；波次首领同样使用 `getRaiderFactionId()`。生成的 `Mob` 实例还会被注入一个前往袭击中心的寻路 Goal。该 Goal 默认优先级为 3，与原版 `PathfindToRaidGoal` 一致——低于常见的近战攻击 Goal，因此袭击者会优先处理已经取得的敌对阵营目标，否则向中心推进。任意实体类型均可生成且不要求实现接口，但非 `Mob` 实体不会获得阵营索敌、导航 Goal 或生物回调。可覆写 `getRaiderGoalPriority()` 调整优先级，返回负数则禁用注入。
+
+**Boss**：波次可以通过 `RaidWave.setLeader(type)` 声明一名首领。生成的实体会被设为该袭击所属袭击者阵营的首领，从而使用阵营仇恨传导。默认只有已加载、符合目标权限且当前没有目标的生物会响应；开启 `Immediate Leader Protection` 后才会替换已有目标。声明首领需要 `getRaiderFactionId()`；没有阵营就没有可领导的对象，该条目会作为普通袭击者生成。
+
+需要注意传导遍历的是整张阵营成员表，而非仅本场袭击的参与者。若该袭击者阵营在世界其他地方还有成员，它们同样会响应。希望响应范围限定在本场袭击内，请为袭击使用专属阵营。
+
+**启动校验**：发起袭击时会校验其引用的阵营。非空但未注册的袭击者阵营会直接拒绝启动，因为所请求的友伤和求援规则无法应用。主动返回 `null` 则是允许的，此时每个生成实体完全由自身 AI 控制。波次抽取的阵营若未注册或本波没有正权重实体类型，则记录错误并跳过该组，袭击仍会启动。
+
+**流程控制**：`shouldAdvanceWave`、`checkVictory` 和 `checkDefeat` 均可覆写。默认实现复现原版语义：上一波清空后生成下一波，全部波次生成完毕且袭击者全灭时防守方获胜。
+
+**时间与回调**：`getMaxDurationTicks()` 默认 48000，`getWaveCooldownTicks()` 默认 300，`getParticipantRadius()` 默认 96 格，`getCelebrationTicks()` 默认 600。每个波次还可设置 `spawnDelay()` 和 `spawnRadius()`。生命周期回调包括 `onStart`、`onWaveStart`、`onWaveEnd`、`onVictory`、`onDefeat` 与 `onStop`；客户端 `bossBarExtension()` 可在保留服务端袭击状态同步的同时替换血条外观。
+
+**无限波次**：`isEndless()` 会循环使用波次列表且永远不满足默认胜利条件。此类袭击需要通过 `EcaAPI.endRaid` 收尾，该方法会清除全部仍存活的袭击者。
+
+袭击按维度独立运行，并会在重启后自动恢复最近一次周期检查点。永久减员和终止操作会立即保存，普通流程每秒保存一次。袭击期间只强制加载中心区块；走入其他未加载区块的袭击者不会随中心区块一起强制加载。
+
+注册定义本身不会启动任何东西。袭击需要通过 `EcaAPI.startRaid(...)` 或 `startRaidAt(...)` 显式发起，因此任何触发条件都可以驱动它——进入某个区域、使用某个物品、执行命令、定时事件等。
+
+### ECA Transformer 白名单
+
+尽管我尽可能的添加了常见的库和 Mod 作为 ECA Transformer 的白名单，但是仍然不排除有 mod 因为被 ECA 转换导致崩溃的问题，所以我准备了一个可供整合包开发者使用的 JSON 配置文件来添加包名白名单给 ECA Transformer。你可以在 `config/eca/` 文件夹下添加 JSON 文件来添加白名单，首次启动时如果文件夹为空会自动生成示例文件。
+
+只有 `type` 和 `packages` 字段是必须的，其他字段会被忽略：
+
+单个 mod 示例（`allreturn` — 仅跳过 AllReturn 转换，防御性 Hook 仍然生效）：
+```json
+{
+  "type": "allreturn",
+  "packages": [
+    "com.example.yourmod."
+  ]
+}
+```
+
+多个 mod 示例（`transform` — 跳过全部 ECA 转换）：
+```json
+{
+  "type": "transform",
+  "packages": [
+    "com.example.modA.",
+    "com.example.modB.",
+    "net.example.modC."
+  ]
+}
+```
+
+文件名随意，可以有多个文件。
+
+---
+
+**Author / 作者**: CJiangqiu
