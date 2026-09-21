@@ -47,6 +47,7 @@
     "PlayerMixin",
     "ServerPlayerMixin",
     "RangedAttributeMixin",
+    "ServerEntityAccessor",
     "ServerLevelMixin",
     "TransientEntitySectionManagerMixin",
     "TransientEntitySectionManagerMixin$CallbackMixin",

@@ -628,8 +628,8 @@ public final class EcaAPI {
 
     // 传送实体到指定位置
     /**
-     * Teleport an entity to the specified location using direct field access.
-     * This method directly modifies the entity's position fields and automatically syncs to clients.
+     * Teleport an entity with direct position control while preserving spatial indexes,
+     * interpolation history, collision bounds, and client tracking baselines.
      * @param entity the entity to teleport
      * @param x the target x coordinate
      * @param y the target y coordinate

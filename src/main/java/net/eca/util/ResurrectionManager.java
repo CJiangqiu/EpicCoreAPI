@@ -302,10 +302,7 @@ public final class ResurrectionManager {
 
             EntityUtil.teleport(entity, target.x, target.y, target.z);
             entity.setDeltaMovement(Vec3.ZERO);
-            /* teleport 直写坐标字段，不经过 setPosRaw，也就不会触发 levelCallback.onMove，
-               实体会留在远处那个 section 里。补一次重挂让 section 与新坐标一致。 */
             if (entity.level() instanceof ServerLevel serverLevel) {
-                EntityUtil.reattachEntitySection(serverLevel.entityManager, entity);
                 /* 与拉回同一次落地里把注册表补齐。位置对了但不在 entityTickList 就没有 AI，
                    byId 缺失则交互包解析不到目标，隔一轮再修等于把这个空窗留给玩家。 */
                 if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
@@ -405,7 +402,8 @@ public final class ResurrectionManager {
     /* 不读血量的活性判据。getHealth 要先过一遍血量锚点解析，够不上按位移频率调用的开销，
        而位置记录本来也只需要知道实体没在死亡/移除流程里。 */
     private static boolean isStructurallyAlive(Entity entity) {
-        if (entity.isRemoved() || entity.getRemovalReason() != null) return false;
+        // 先读移除原因，避免保护逻辑在清除流程中修正 isRemoved 结果后误记流放坐标
+        if (entity.getRemovalReason() != null || entity.isRemoved()) return false;
         if (entity instanceof LivingEntity living) {
             return !living.dead && living.deathTime <= 0;
         }

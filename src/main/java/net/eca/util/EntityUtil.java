@@ -6,6 +6,7 @@ import net.eca.network.ClientRemovePacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.network.SetHealthClientSyncPacket;
+import net.eca.mixin.ServerEntityAccessor;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
@@ -14,6 +15,8 @@ import net.eca.util.health.HealthReportManager;
 import net.eca.util.health.health_lock.HealthLockManager;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.core.BlockPos;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
@@ -36,6 +39,7 @@ import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
 import net.minecraft.server.network.ServerPlayerConnection;
 import net.minecraft.core.SectionPos;
+import net.minecraft.world.level.ChunkPos;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
 import net.minecraft.util.ClassInstanceMultiMap;
@@ -1363,8 +1367,9 @@ public class EntityUtil {
     // ==================== 传送模块 ====================
 
     /**
-     * Teleport an entity to the specified location using direct field access.
-     * This method directly modifies the entity's position fields and updates the bounding box.
+     * Teleport an entity while preserving all vanilla position bookkeeping and tracker state.
+     * This method retains direct position control while keeping spatial indexes, interpolation
+     * history, collision bounds, and client movement baselines consistent.
      * @param entity the entity to teleport
      * @param x the target x coordinate
      * @param y the target y coordinate
@@ -1375,19 +1380,25 @@ public class EntityUtil {
         if (entity == null) return false;
 
         try {
-            Vec3 newPosition = new Vec3(x, y, z);
+            updateTeleportPosition(entity, x, y, z);
 
-            //修改核心位置字段
-            entity.position = newPosition;
+            // 原版 moveTo 会把插值历史统一推进到传送后的坐标，避免渲染残留旧轨迹
+            entity.setYRot(entity.getYRot());
+            entity.setXRot(entity.getXRot());
+            entity.xo = x;
+            entity.yo = y;
+            entity.zo = z;
             entity.xOld = x;
             entity.yOld = y;
             entity.zOld = z;
+            entity.yRotO = entity.getYRot();
+            entity.xRotO = entity.getXRot();
 
-            //更新碰撞箱
-            AABB newBoundingBox = entity.getDimensions(entity.getPose()).makeBoundingBox(x, y, z);
-            entity.bb = newBoundingBox;
+            // 使用实体当前 dimensions，与原版 reapplyPosition 的碰撞箱来源一致
+            entity.bb = entity.dimensions.makeBoundingBox(entity.position);
+            ResurrectionManager.recordPosition(entity);
 
-            //同步到客户端
+            // 主动同步仍由 ECA 完成，同时推进原版追踪器的编码基准
             if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
                 syncTeleportToClient(entity, serverLevel);
             }
@@ -1399,6 +1410,30 @@ public class EntityUtil {
         }
     }
 
+    /* 镜像 setPosRaw 的全部位置副作用；直接控制坐标的同时不能让空间索引仍指向旧位置。 */
+    private static void updateTeleportPosition(Entity entity, double x, double y, double z) {
+        if (entity.position.x != x || entity.position.y != y || entity.position.z != z) {
+            entity.position = new Vec3(x, y, z);
+            int blockX = Mth.floor(x);
+            int blockY = Mth.floor(y);
+            int blockZ = Mth.floor(z);
+            if (blockX != entity.blockPosition.getX()
+                    || blockY != entity.blockPosition.getY()
+                    || blockZ != entity.blockPosition.getZ()) {
+                entity.blockPosition = new BlockPos(blockX, blockY, blockZ);
+                entity.feetBlockState = null;
+                if (SectionPos.blockToSectionCoord(blockX) != entity.chunkPosition.x
+                        || SectionPos.blockToSectionCoord(blockZ) != entity.chunkPosition.z) {
+                    entity.chunkPosition = new ChunkPos(entity.blockPosition);
+                }
+            }
+            entity.levelCallback.onMove();
+        }
+        if (entity.isAddedToWorld() && !entity.level().isClientSide && entity.getRemovalReason() == null) {
+            entity.level().getChunk(Mth.floor(x) >> 4, Mth.floor(z) >> 4);
+        }
+    }
+
     /**
      * Sync entity teleportation to clients.
      * @param entity the entity that was teleported
@@ -1406,9 +1441,7 @@ public class EntityUtil {
      */
     private static void syncTeleportToClient(Entity entity, ServerLevel serverLevel) {
         try {
-            ClientboundTeleportEntityPacket packet = new ClientboundTeleportEntityPacket(entity);
-
-            //玩家特殊处理
+            // 玩家连接还需要维护传送确认编号和服务端移动校验基准
             if (entity instanceof ServerPlayer player) {
                 player.connection.teleport(
                         entity.getX(),
@@ -1420,9 +1453,12 @@ public class EntityUtil {
                 return;
             }
 
-            //按 seenBy 发包，不依赖实体当前位置（避免传送到远处后 broadcast 覆盖范围为空）
+            ClientboundTeleportEntityPacket packet = new ClientboundTeleportEntityPacket(entity);
+
+            // 按 seenBy 发包前先同步追踪基准，保证下一次相对移动从本次绝对坐标开始编码
             ChunkMap.TrackedEntity trackedEntity = serverLevel.chunkSource.chunkMap.entityMap.get(entity.getId());
             if (trackedEntity != null) {
+                syncTeleportTracker(trackedEntity.serverEntity, entity);
                 for (ServerPlayerConnection connection : trackedEntity.seenBy) {
                     connection.getPlayer().connection.send(packet);
                 }
@@ -1432,6 +1468,17 @@ public class EntityUtil {
         } catch (Exception e) {
             EcaLogger.error("Failed to sync teleport to clients: {}", e.getMessage());
         }
+    }
+
+    /* 镜像 ServerEntity 发送绝对传送包后的状态提交，客户端和服务端必须使用同一编码基准。 */
+    private static void syncTeleportTracker(ServerEntity serverEntity, Entity entity) {
+        ServerEntityAccessor accessor = (ServerEntityAccessor) serverEntity;
+        accessor.eca$getPositionCodec().setBase(entity.trackingPosition());
+        accessor.eca$setYRotp(Mth.floor(entity.getYRot() * 256.0f / 360.0f));
+        accessor.eca$setXRotp(Mth.floor(entity.getXRot() * 256.0f / 360.0f));
+        accessor.eca$setTeleportDelay(0);
+        accessor.eca$setWasRiding(false);
+        accessor.eca$setWasOnGround(entity.onGround());
     }
 
     // ==================== 最大生命值模块 ====================
