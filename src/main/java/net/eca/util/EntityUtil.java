@@ -6,7 +6,6 @@ import net.eca.network.ClientRemovePacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.network.SetHealthClientSyncPacket;
-import net.eca.mixin.ServerEntityAccessor;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
@@ -1472,13 +1471,12 @@ public class EntityUtil {
 
     /* 镜像 ServerEntity 发送绝对传送包后的状态提交，客户端和服务端必须使用同一编码基准。 */
     private static void syncTeleportTracker(ServerEntity serverEntity, Entity entity) {
-        ServerEntityAccessor accessor = (ServerEntityAccessor) serverEntity;
-        accessor.eca$getPositionCodec().setBase(entity.trackingPosition());
-        accessor.eca$setYRotp(Mth.floor(entity.getYRot() * 256.0f / 360.0f));
-        accessor.eca$setXRotp(Mth.floor(entity.getXRot() * 256.0f / 360.0f));
-        accessor.eca$setTeleportDelay(0);
-        accessor.eca$setWasRiding(false);
-        accessor.eca$setWasOnGround(entity.onGround());
+        serverEntity.positionCodec.setBase(entity.trackingPosition());
+        serverEntity.yRotp = Mth.floor(entity.getYRot() * 256.0f / 360.0f);
+        serverEntity.xRotp = Mth.floor(entity.getXRot() * 256.0f / 360.0f);
+        serverEntity.teleportDelay = 0;
+        serverEntity.wasRiding = false;
+        serverEntity.wasOnGround = entity.onGround();
     }
 
     // ==================== 最大生命值模块 ====================
