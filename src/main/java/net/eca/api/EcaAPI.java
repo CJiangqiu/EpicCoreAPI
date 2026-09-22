@@ -171,18 +171,14 @@ public final class EcaAPI {
 
     // ==================== 禁疗系统 ====================
 
-    // 设置禁疗
+    // 设置固定恢复上限，普通掉血不会降低记录值。
     /**
-     * Ban healing for an entity.
-     * The entity cannot receive healing, but can still take damage.
-     * The heal ban value will be updated when the entity is damaged.
-     * Use cases:
-     * - Grievous Wounds effect
-     * - Poison with anti-heal
-     * - Boss phase mechanics
-     * The heal ban value is synchronized to clients via SynchedEntityData.
+     * Set a fixed healing ceiling for an entity without healing it.
+     * Healing below the ceiling is allowed, and damage does not lower the recorded value.
+     * The ceiling remains until explicitly replaced or removed. Health locks take priority.
+     * The recorded value is synchronized to clients via SynchedEntityData.
      * @param entity the living entity
-     * @param value the unrestricted heal ban value to maintain
+     * @param value the fixed health ceiling to maintain
      */
     public static void banHealing(LivingEntity entity, float value) {
         if (entity == null) {
@@ -199,8 +195,7 @@ public final class EcaAPI {
 
     // 解除禁疗
     /**
-     * Unban healing for an entity.
-     * After unbanning, the entity can receive healing normally.
+     * Remove the fixed healing ceiling for an entity without changing its current health.
      * @param entity the living entity
      */
     public static void unbanHealing(LivingEntity entity) {
@@ -212,9 +207,9 @@ public final class EcaAPI {
 
     // 获取当前禁疗值
     /**
-     * Get the current heal ban value for an entity.
+     * Get the recorded fixed healing ceiling for an entity.
      * @param entity the living entity
-     * @return the heal ban value, or null if healing is not banned
+     * @return the healing ceiling, or null if no ceiling is active
      */
     public static Float getHealBanValue(LivingEntity entity) {
         if (entity == null) {
@@ -225,9 +220,9 @@ public final class EcaAPI {
 
     // 检查是否被禁疗
     /**
-     * Check if an entity has healing banned.
+     * Check whether an entity has a fixed healing ceiling.
      * @param entity the living entity
-     * @return true if healing is banned, false otherwise
+     * @return true if a healing ceiling is active, false otherwise
      */
     public static boolean isHealingBanned(LivingEntity entity) {
         if (entity == null) {

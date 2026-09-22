@@ -26,6 +26,7 @@ import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
@@ -198,10 +199,7 @@ LivingEntityMixin {
             }
         } else if (healBanValue != null) {
             float currentHealth = EntityUtil.getHealth(self);
-            if (currentHealth < healBanValue) {
-                // 真实掉血会收紧禁疗上限，不依赖特定伤害入口
-                HealthLockManager.setHealBan(self, currentHealth);
-            } else if (currentHealth > healBanValue) {
+            if (currentHealth > healBanValue) {
                 EntityUtil.setHealth(self, healBanValue);
             }
         }
@@ -256,19 +254,6 @@ LivingEntityMixin {
         }
     }
 
-    @Inject(method = "hurt", at = @At("RETURN"))
-    private void onHurtUpdateHealBan(DamageSource source, float amount, CallbackInfoReturnable<Boolean> cir) {
-        LivingEntity self = (LivingEntity) (Object) this;
-        Float lockedValue = HealthLockManager.getLock(self);
-        Float healBanValue = HealthLockManager.getHealBan(self);
-        if (healBanValue != null && lockedValue == null && cir.getReturnValue()) {
-            float currentHealth = EntityUtil.getHealth(self);
-            if (currentHealth < healBanValue) {
-                HealthLockManager.setHealBan(self, currentHealth);
-            }
-        }
-    }
-
     // 阵营仇恨传导：伤害实际生效后，先做首领传导，再做附近成员求援
     @Inject(method = "hurt", at = @At("RETURN"))
     private void eca$factionAlertOnHurt(DamageSource source, float amount, CallbackInfoReturnable<Boolean> cir) {
@@ -317,14 +302,16 @@ LivingEntityMixin {
         }
     }
 
-    @Inject(method = "heal", at = @At("HEAD"), cancellable = true)
-    private void onHeal(float amount, CallbackInfo ci) {
+    // 在治疗事件计算后限制最终写入值，保留正常治疗流程与锁血优先级。
+    @ModifyArg(method = "heal", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/world/entity/LivingEntity;setHealth(F)V"), index = 0)
+    private float clampHealedHealth(float health) {
         LivingEntity self = (LivingEntity) (Object) this;
-        Float lockedValue = HealthLockManager.getLock(self);
-        Float healBanValue = HealthLockManager.getHealBan(self);
-        if (healBanValue != null) {
-            ci.cancel();
+        if (HealthLockManager.getLock(self) != null) {
+            return health;
         }
+        Float healBanValue = HealthLockManager.getHealBan(self);
+        return healBanValue == null ? health : Math.min(health, healBanValue);
     }
 
     @Inject(method = "die", at = @At("HEAD"), cancellable = true)
