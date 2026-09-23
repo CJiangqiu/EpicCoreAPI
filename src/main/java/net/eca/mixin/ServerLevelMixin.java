@@ -64,8 +64,6 @@ public class ServerLevelMixin {
         ServerLevel self = (ServerLevel) (Object) this;
         long currentTime = self.getGameTime();
 
-        SpawnBanHook.enforceBans(self);
-
         for (UUID uuid : InvulnerableEntityManager.getAllInvulnerableUUIDs(self)) {
             Entity entity = self.getEntities().get(uuid);
             if (entity == null || EntityUtil.isChangingDimension(entity)) {
