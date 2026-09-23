@@ -1,6 +1,6 @@
 package net.eca.coremod;
 
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 import net.eca.agent.EcaAgent;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
@@ -57,6 +57,11 @@ public final class EcaTransformerManager {
 
     public static Backend backend() {
         return backend;
+    }
+
+    public static boolean supportsExtendedRuntime() {
+        return (!isCoremodBackend() && EcaAgent.getInstrumentation() != null)
+                || NativeRuntimeBridge.isPackaged();
     }
 
     public static boolean applyLoadCompleteTransforms() {
@@ -138,7 +143,7 @@ public final class EcaTransformerManager {
                     backend = Backend.AGENT;
                     return new HealthTransformResult(Backend.AGENT, true);
                 }
-                AgentLogWriter.info("[EcaTransformerManager] Agent health transform not confirmed for "
+                EarlyLogWriter.info("[EcaTransformerManager] Agent health transform not confirmed for "
                         + clazz.getName());
             }
         }
@@ -174,7 +179,7 @@ public final class EcaTransformerManager {
                     }
                 }
             } catch (Throwable t) {
-                AgentLogWriter.info("[EcaTransformerManager] Agent target enumeration failed: "
+                EarlyLogWriter.info("[EcaTransformerManager] Agent target enumeration failed: "
                         + t.getMessage());
             }
             if (retransformClassesWithAgent(inst, targets)) {
@@ -196,7 +201,7 @@ public final class EcaTransformerManager {
             }
             return true;
         } catch (Throwable t) {
-            AgentLogWriter.info("[EcaTransformerManager] Agent loaded-class enumeration failed: "
+            EarlyLogWriter.info("[EcaTransformerManager] Agent loaded-class enumeration failed: "
                     + t.getMessage());
             return forEachNativeClass(consumer);
         }
@@ -216,7 +221,7 @@ public final class EcaTransformerManager {
                 }
                 return true;
             } catch (Throwable t) {
-                AgentLogWriter.info("[EcaTransformerManager] Agent internal-name enumeration failed: "
+                EarlyLogWriter.info("[EcaTransformerManager] Agent internal-name enumeration failed: "
                         + t.getMessage());
             }
         }
@@ -233,7 +238,7 @@ public final class EcaTransformerManager {
         try {
             return EcaClassTransformer.retransformLoadedClassesWithInstrumentation(inst);
         } catch (Throwable t) {
-            AgentLogWriter.info("[EcaTransformerManager] Agent load-complete transform failed: " + t.getMessage());
+            EarlyLogWriter.info("[EcaTransformerManager] Agent load-complete transform failed: " + t.getMessage());
             return false;
         }
     }
@@ -251,7 +256,7 @@ public final class EcaTransformerManager {
             }
             return true;
         } catch (Throwable t) {
-            AgentLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
+            EarlyLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
                     + clazz.getName() + ": " + t.getMessage());
             return false;
         }
@@ -288,11 +293,11 @@ public final class EcaTransformerManager {
                     }
                 }, true);
                 terminalTransformGeneration = generation;
-                AgentLogWriter.info("[EcaTransformerManager] Registered terminal health transformers generation="
+                EarlyLogWriter.info("[EcaTransformerManager] Registered terminal health transformers generation="
                         + generation);
                 return generation;
             } catch (Throwable t) {
-                AgentLogWriter.info("[EcaTransformerManager] Terminal health transformer registration failed: "
+                EarlyLogWriter.info("[EcaTransformerManager] Terminal health transformer registration failed: "
                         + t.getMessage());
                 return 0L;
             }
@@ -344,7 +349,7 @@ public final class EcaTransformerManager {
                             inst.retransformClasses(clazz);
                             successCount++;
                         } catch (Throwable classFailure) {
-                            AgentLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
+                            EarlyLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
                                     + clazz.getName() + ": " + classFailure.getMessage());
                         }
                     }
@@ -354,14 +359,14 @@ public final class EcaTransformerManager {
             RuntimeBytecodeProvider.endSelfRetransform();
         }
         if (successCount > 0) {
-            AgentLogWriter.info("[EcaTransformerManager] Retransformed " + successCount
+            EarlyLogWriter.info("[EcaTransformerManager] Retransformed " + successCount
                     + " selected mod classes via agent");
         }
         return successCount > 0;
     }
 
     // Explicit targets preserve ClassLoader identity when a bridge requires native confirmation.
-    public static boolean retransformClassesWithNative(List<? extends Class<?>> classes) {
+    public static boolean retransformExplicitClasses(List<? extends Class<?>> classes) {
         if (classes == null || classes.isEmpty()) return false;
         return requestNative(classes, false);
     }
@@ -423,7 +428,7 @@ public final class EcaTransformerManager {
                 });
                 return nativeActive;
             } catch (Throwable t) {
-                AgentLogWriter.info("[EcaTransformerManager] Native activation failed: " + t);
+                EarlyLogWriter.info("[EcaTransformerManager] Native activation failed: " + t);
                 return false;
             }
         }
@@ -461,7 +466,7 @@ public final class EcaTransformerManager {
             if (anyConfirmed) backend = Backend.JVMTI;
             return anyConfirmed;
         } catch (Throwable t) {
-            AgentLogWriter.info("[EcaTransformerManager] Native request failed: " + t);
+            EarlyLogWriter.info("[EcaTransformerManager] Native request failed: " + t);
             return false;
         }
     }
@@ -472,7 +477,7 @@ public final class EcaTransformerManager {
             try {
                 return inst.getAllLoadedClasses();
             } catch (Throwable t) {
-                AgentLogWriter.info("[EcaTransformerManager] Agent enumeration unavailable: " + t);
+                EarlyLogWriter.info("[EcaTransformerManager] Agent enumeration unavailable: " + t);
             }
         }
         return NativeRuntimeBridge.collectedClasses();
@@ -538,7 +543,7 @@ public final class EcaTransformerManager {
         try {
             EcaLogger.info("WARNING! ECA runtime transformation backend is unavailable");
         } catch (Throwable ignored) {
-            AgentLogWriter.info("WARNING! ECA runtime transformation backend is unavailable");
+            EarlyLogWriter.info("WARNING! ECA runtime transformation backend is unavailable");
         }
     }
 }

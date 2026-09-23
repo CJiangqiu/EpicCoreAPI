@@ -1,6 +1,6 @@
 package net.eca.coremod;
 
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -35,7 +35,7 @@ final class AllReturnTransformer {
             }
             return null;
         } catch (Throwable t) {
-            AgentLogWriter.error("[AllReturnTransformer] Failed: " + className, t);
+            EarlyLogWriter.error("[AllReturnTransformer] Failed: " + className, t);
             return null;
         }
     }

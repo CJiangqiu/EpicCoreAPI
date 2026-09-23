@@ -1,6 +1,6 @@
 package net.eca.coremod;
 
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 import net.eca.util.EcaLogger;
 
 import java.io.InputStream;
@@ -96,7 +96,7 @@ final class NativeRuntimeBridge {
                 loader = new URLClassLoader(new URL[]{archive.toUri().toURL()},
                         dependencyLoader);
                 Class<?> provider = Class.forName(PROVIDER, true, loader);
-                Consumer<String> logger = AgentLogWriter::info;
+                Consumer<String> logger = EarlyLogWriter::info;
                 handles = (Map<String, Object>) provider.getMethod("open", Consumer.class)
                         .invoke(null, logger);
                 // Retain the loader with the callback handles for the lifetime of the JVM.
@@ -184,7 +184,7 @@ final class NativeRuntimeBridge {
         try {
             EcaLogger.info("[NativeRuntimeBridge] " + message + ": " + failure);
         } catch (Throwable ignored) {
-            AgentLogWriter.info("[NativeRuntimeBridge] " + message + ": " + failure);
+            EarlyLogWriter.info("[NativeRuntimeBridge] " + message + ": " + failure);
         }
     }
 }

@@ -3,7 +3,7 @@ package net.eca.coremod;
 import cpw.mods.modlauncher.api.ITransformer;
 import cpw.mods.modlauncher.api.ITransformerVotingContext;
 import cpw.mods.modlauncher.api.TransformerVoteResult;
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
@@ -48,7 +48,7 @@ public final class EcaCoreTransformer implements ITransformer<ClassNode> {
                 transformContainer(classNode);
             }
         } catch (Throwable t) {
-            AgentLogWriter.error("[EcaCoreTransformer] Load-time transformation failed: " + classNode.name, t);
+            EarlyLogWriter.error("[EcaCoreTransformer] Load-time transformation failed: " + classNode.name, t);
         }
         return classNode;
     }
@@ -115,7 +115,7 @@ public final class EcaCoreTransformer implements ITransformer<ClassNode> {
             }
         }
         if (transformed > 0) {
-            AgentLogWriter.info("[EcaCoreTransformer] Installed base living hooks=" + transformed);
+            EarlyLogWriter.info("[EcaCoreTransformer] Installed base living hooks=" + transformed);
         }
     }
 
@@ -146,7 +146,7 @@ public final class EcaCoreTransformer implements ITransformer<ClassNode> {
                     || hasHook(method, ENTITY_HOOK, "processIsRemoved")) continue;
             injectBooleanHead(method, ENTITY_HOOK, "processIsRemoved",
                     "(Lnet/minecraft/world/entity/Entity;)I", ENTITY);
-            AgentLogWriter.info("[EcaCoreTransformer] Installed base removal hook");
+            EarlyLogWriter.info("[EcaCoreTransformer] Installed base removal hook");
             return;
         }
     }
@@ -243,7 +243,7 @@ public final class EcaCoreTransformer implements ITransformer<ClassNode> {
             default -> 0;
         };
         if (transformed > 0) {
-            AgentLogWriter.info("[EcaCoreTransformer] Installed protected containers=" + transformed
+            EarlyLogWriter.info("[EcaCoreTransformer] Installed protected containers=" + transformed
                     + " target=" + classNode.name);
         }
     }

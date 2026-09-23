@@ -20,6 +20,10 @@ jarJar.enable()
 // The native extension has no Minecraft references and is isolated from the standard artifact.
 sourceSets {
     jvmti
+    cf {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += output + compileClasspath
+    }
     pro {
         java.srcDir 'src/pro/java'
         compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
@@ -91,6 +95,14 @@ processResources {
     }
 }
 
+tasks.named('processCfResources') {
+    filteringCharset = 'UTF-8'
+    inputs.property 'mod_version', project.mod_version
+    filesMatching('META-INF/mods.toml') {
+        expand 'mod_version': project.mod_version
+    }
+}
+
 java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
@@ -112,7 +124,8 @@ tasks.jar {
 }
 
 tasks.named('jarJar') {
-    archiveFileName.set("${project.archives_name}-${project.version}_cf.jar")
+    archiveFileName.set("${project.archives_name}-${project.version}_base.jar")
+    destinationDirectory = layout.buildDirectory.dir('intermediates/base')
     exclude 'eca.mixins.dev.json'
 }
 
@@ -153,6 +166,33 @@ tasks.named('jar') {
     from(tasks.named('agentJar').flatMap { it.archiveFile }) {
         into 'net/eca/agent'
         rename { 'agent.jar' }
+    }
+}
+
+tasks.register('cfJar', Jar) {
+    group = 'build'
+    description = 'Builds the CoreMod and Mixin variant without the optional runtime backends.'
+    dependsOn tasks.named('reobfJarJar'), tasks.named('cfClasses')
+    archiveFileName.set("${project.archives_name}-${project.version}_cf.jar")
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from({ zipTree(tasks.named('jarJar').get().archiveFile.get().asFile) }) {
+        exclude 'META-INF/MANIFEST.MF', 'META-INF/mods.toml'
+        exclude 'net/eca/agent/**', 'net/eca/coremod/NativeRuntimeBridge*'
+        exclude 'net/eca/coremod/EcaClassTransformer*', 'net/eca/coremod/AllReturnTransformer*'
+        exclude 'net/eca/coremod/ContainerReplacementTransformer*', 'net/eca/coremod/LoadingScreenTransformer*'
+        exclude 'net/eca/EcaMod.class', 'net/eca/event/LoadCompleteHandler*'
+        exclude 'net/eca/coremod/EcaTransformationService*', 'net/eca/coremod/EcaTransformerManager*'
+        exclude 'net/eca/coremod/RuntimeBytecodeProvider*', 'net/eca/coremod/RuntimeExtensionBridge*'
+    }
+    from sourceSets.cf.output
+    doFirst {
+        def standardJar = tasks.named('jarJar').get().archiveFile.get().asFile
+        new JarFile(standardJar).withCloseable { archive ->
+            archive.manifest.mainAttributes.each { key, value ->
+                manifest.attributes([(key.toString()): value.toString()])
+            }
+        }
     }
 }
 
@@ -275,7 +315,7 @@ tasks.register('proJar', Jar) {
 }
 
 tasks.named('build') {
-    dependsOn tasks.named('mrJar'), tasks.named('devJar'), tasks.named('proJar')
+    dependsOn tasks.named('cfJar'), tasks.named('mrJar'), tasks.named('devJar'), tasks.named('proJar')
 }
 
 publishing {

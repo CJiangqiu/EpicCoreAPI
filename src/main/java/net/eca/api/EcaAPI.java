@@ -1404,6 +1404,10 @@ public final class EcaAPI {
      */
     public static boolean enableAllReturn(Entity entity) {
         if (entity == null) return false;
+        if (!EcaTransformerManager.supportsExtendedRuntime()) {
+            EcaLogger.warn("Your ECA build does not include this feature. Please use the latest version from Modrinth.");
+            return false;
+        }
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {
             EcaLogger.warn("AllReturn requires Attack Radical Logic to be enabled in config");
             return false;
@@ -1452,6 +1456,11 @@ public final class EcaAPI {
         if (!enable) {
             AllReturnToggle.clearAll();
             return true;
+        }
+
+        if (!EcaTransformerManager.supportsExtendedRuntime()) {
+            EcaLogger.warn("Your ECA build does not include this feature. Please use the latest version from Modrinth.");
+            return false;
         }
 
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()) {

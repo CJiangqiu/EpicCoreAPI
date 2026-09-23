@@ -1,7 +1,7 @@
 package net.eca.event;
 
 import net.eca.EcaMod;
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 import net.eca.agent.EcaAgent;
 import net.eca.coremod.EcaClassTransformer;
 import net.eca.coremod.RuntimeExtensionBridge;
@@ -120,18 +120,18 @@ public final class LoadCompleteHandler {
                 }
             }
 
-            AgentLogWriter.info("[EcaMod] Radical second-pass method report: Entity, LivingEntity and Player");
+            EarlyLogWriter.info("[EcaMod] Radical second-pass method report: Entity, LivingEntity and Player");
             logMethodReportForClass(entityClass, "Entity");
             logMethodReportForClass(livingClass, "LivingEntity");
             logMethodReportForClass(playerClass, "Player");
         } catch (Throwable t) {
-            AgentLogWriter.warn("[EcaMod] Failed to write radical second-pass method report: " + t.getMessage());
+            EarlyLogWriter.warn("[EcaMod] Failed to write radical second-pass method report: " + t.getMessage());
         }
     }
 
     private static void logMethodReportForClass(Class<?> clazz, String simpleName) {
         if (clazz == null) {
-            AgentLogWriter.warn("[EcaMod] " + simpleName + " class not loaded during radical second-pass");
+            EarlyLogWriter.warn("[EcaMod] " + simpleName + " class not loaded during radical second-pass");
             return;
         }
         for (String[] methodMeta : RADICAL_METHODS) {
@@ -139,7 +139,7 @@ public final class LoadCompleteHandler {
             String desc = methodMeta[1];
             String readableName = methodMeta[2];
             boolean declared = hasDeclaredMethod(clazz, srgName, desc);
-            AgentLogWriter.info("[EcaMod] " + clazz.getName() + "#" + srgName + desc + " (" + readableName + ") declared=" + declared);
+            EarlyLogWriter.info("[EcaMod] " + clazz.getName() + "#" + srgName + desc + " (" + readableName + ") declared=" + declared);
         }
     }
 
@@ -182,7 +182,7 @@ public final class LoadCompleteHandler {
     private static void logClassMethodsBytecode(String classInternalName, byte[] classBytes) {
         String className = classInternalName.replace('/', '.');
         if (classBytes == null) {
-            AgentLogWriter.warn("[EcaMod] No captured bytecode for " + className + " during radical second-pass");
+            EarlyLogWriter.warn("[EcaMod] No captured bytecode for " + className + " during radical second-pass");
             return;
         }
 
@@ -204,20 +204,20 @@ public final class LoadCompleteHandler {
                 }
 
                 if (target == null) {
-                    AgentLogWriter.warn("[EcaMod] " + className + "#" + methodName + methodDesc + " (" + readableName + ") not found in captured bytecode");
+                    EarlyLogWriter.warn("[EcaMod] " + className + "#" + methodName + methodDesc + " (" + readableName + ") not found in captured bytecode");
                     continue;
                 }
 
-                AgentLogWriter.info("[EcaMod] Bytecode dump start: " + className + "#" + methodName + methodDesc + " (" + readableName + ")");
+                EarlyLogWriter.info("[EcaMod] Bytecode dump start: " + className + "#" + methodName + methodDesc + " (" + readableName + ")");
                 int index = 0;
                 for (AbstractInsnNode insn = target.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-                    AgentLogWriter.info("[EcaMod]   " + index + ": " + formatInstruction(insn));
+                    EarlyLogWriter.info("[EcaMod]   " + index + ": " + formatInstruction(insn));
                     index++;
                 }
-                AgentLogWriter.info("[EcaMod] Bytecode dump end: " + className + "#" + methodName + methodDesc);
+                EarlyLogWriter.info("[EcaMod] Bytecode dump end: " + className + "#" + methodName + methodDesc);
             }
         } catch (Throwable t) {
-            AgentLogWriter.warn("[EcaMod] Failed to dump method bytecode for " + className + ": " + t.getMessage());
+            EarlyLogWriter.warn("[EcaMod] Failed to dump method bytecode for " + className + ": " + t.getMessage());
         }
     }
 

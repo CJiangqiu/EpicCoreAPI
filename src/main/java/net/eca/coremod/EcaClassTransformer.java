@@ -1,6 +1,6 @@
 package net.eca.coremod;
 
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.call_bridge.CallBridgeManager;
 import net.eca.util.call_bridge.CallBridgeRuntime;
@@ -147,7 +147,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
     static boolean retransformLoadedClassesWithInstrumentation(Instrumentation inst) {
         if (inst == null) {
-            AgentLogWriter.info("[EcaClassTransformer] No Instrumentation available, skipping init");
+            EarlyLogWriter.info("[EcaClassTransformer] No Instrumentation available, skipping init");
             return false;
         }
         if (!ensureRegistered(inst)) return false;
@@ -212,7 +212,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             inst.addTransformer(new EcaClassTransformer(), true);
             registered = true;
         } catch (Throwable t) {
-            AgentLogWriter.info("[EcaClassTransformer] Registration failed: " + t.getMessage());
+            EarlyLogWriter.info("[EcaClassTransformer] Registration failed: " + t.getMessage());
             return false;
         }
 
@@ -220,10 +220,10 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             // 捕获器必须排在核心转换器之后，才能缓存 ECA 处理后的字节码。
             RuntimeBytecodeProvider.registerPermanentCapture(inst);
         } catch (Throwable t) {
-            AgentLogWriter.info("[EcaClassTransformer] Runtime bytecode capture registration failed: "
+            EarlyLogWriter.info("[EcaClassTransformer] Runtime bytecode capture registration failed: "
                     + t.getMessage());
         }
-        AgentLogWriter.info("[EcaClassTransformer] Registered at load complete");
+        EarlyLogWriter.info("[EcaClassTransformer] Registered at load complete");
         return true;
     }
 
@@ -279,7 +279,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
                 }
             }
         } catch (Throwable t) {
-            AgentLogWriter.info("[EcaClassTransformer] Failed to read " + configPath + ": " + t.getMessage());
+            EarlyLogWriter.info("[EcaClassTransformer] Failed to read " + configPath + ": " + t.getMessage());
         }
         return false;
     }
@@ -326,7 +326,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             } catch (Throwable ignored) {}
         }
 
-        AgentLogWriter.info("[EcaClassTransformer] Retransforming " + toRetransform.size() + " loaded classes");
+        EarlyLogWriter.info("[EcaClassTransformer] Retransforming " + toRetransform.size() + " loaded classes");
 
         // 标记本线程为 ECA 自己的 retransform，使实体 hook 分支放行（他人触发的 retransform 无此标记，不参与）
         OWN_RETRANSFORM.set(Boolean.TRUE);
@@ -344,7 +344,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
                         try {
                             inst.retransformClasses(clazz);
                         } catch (Throwable t2) {
-                            AgentLogWriter.error("[EcaClassTransformer] Failed to retransform: " + clazz.getName(), t2);
+                            EarlyLogWriter.error("[EcaClassTransformer] Failed to retransform: " + clazz.getName(), t2);
                         }
                     }
                 }
@@ -402,7 +402,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             try {
                 return doHookTransform(className, classfileBuffer);
             } catch (Throwable t) {
-                AgentLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
+                EarlyLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
                 return null;
             }
         }
@@ -412,7 +412,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         try {
             return doTransform(className, classfileBuffer);
         } catch (Throwable t) {
-            AgentLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
+            EarlyLogWriter.error("[EcaClassTransformer] Failed: " + className, t);
             return null;
         }
     }
@@ -498,7 +498,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         if (!injector.transformed) return null;
 
         transformCount++;
-        AgentLogWriter.info("[EcaClassTransformer] Transformed: " + className + " (total: " + transformCount + ")");
+        EarlyLogWriter.info("[EcaClassTransformer] Transformed: " + className + " (total: " + transformCount + ")");
         return cw.toByteArray();
     }
 

@@ -1,6 +1,6 @@
 package net.eca.coremod;
 
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -322,7 +322,7 @@ public final class TransformerWhitelist {
                 loadJsonFile(file);
             }
         } catch (Throwable t) {
-            AgentLogWriter.error("[TransformerWhitelist] Failed to load config/eca/", t);
+            EarlyLogWriter.error("[TransformerWhitelist] Failed to load config/eca/", t);
         }
     }
 
@@ -351,10 +351,10 @@ public final class TransformerWhitelist {
             }
 
             if (count > 0) {
-                AgentLogWriter.info("[TransformerWhitelist] Loaded " + count + " prefixes (" + type + ") from " + file.getFileName());
+                EarlyLogWriter.info("[TransformerWhitelist] Loaded " + count + " prefixes (" + type + ") from " + file.getFileName());
             }
         } catch (Throwable t) {
-            AgentLogWriter.error("[TransformerWhitelist] Failed to parse: " + file.getFileName(), t);
+            EarlyLogWriter.error("[TransformerWhitelist] Failed to parse: " + file.getFileName(), t);
         }
     }
 
@@ -426,14 +426,14 @@ public final class TransformerWhitelist {
             "  ]\n" +
             "}\n"
         );
-        AgentLogWriter.info("[TransformerWhitelist] Generated example whitelist files in config/eca/");
+        EarlyLogWriter.info("[TransformerWhitelist] Generated example whitelist files in config/eca/");
     }
 
     private static void writeExample(Path path, String content) {
         try {
             Files.writeString(path, content, StandardCharsets.UTF_8);
         } catch (IOException e) {
-            AgentLogWriter.error("[TransformerWhitelist] Failed to write: " + path.getFileName(), e);
+            EarlyLogWriter.error("[TransformerWhitelist] Failed to write: " + path.getFileName(), e);
         }
     }
 

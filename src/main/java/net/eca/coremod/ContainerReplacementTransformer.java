@@ -1,6 +1,6 @@
 package net.eca.coremod;
 
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.tree.*;
@@ -70,7 +70,7 @@ final class ContainerReplacementTransformer {
                 default -> null;
             };
         } catch (Throwable t) {
-            AgentLogWriter.error("[ContainerReplacementTransformer] Failed: " + className, t);
+            EarlyLogWriter.error("[ContainerReplacementTransformer] Failed: " + className, t);
             return null;
         }
     }
@@ -91,7 +91,7 @@ final class ContainerReplacementTransformer {
 
         if (total == 0) return null;
 
-        AgentLogWriter.info("[ContainerReplacementTransformer] Replaced " + total + " containers in " + simpleName);
+        EarlyLogWriter.info("[ContainerReplacementTransformer] Replaced " + total + " containers in " + simpleName);
         ClassWriter cw = new EcaClassTransformer.SafeClassWriter(new ClassReader(classBytes), ClassWriter.COMPUTE_FRAMES);
         cn.accept(cw);
         return cw.toByteArray();

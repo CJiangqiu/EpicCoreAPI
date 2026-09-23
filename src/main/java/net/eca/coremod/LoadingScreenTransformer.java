@@ -1,6 +1,6 @@
 package net.eca.coremod;
 
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -57,12 +57,12 @@ public final class LoadingScreenTransformer implements ClassFileTransformer {
             cr.accept(cv, ClassReader.EXPAND_FRAMES);
 
             if (cv.transformed) {
-                AgentLogWriter.info("[LoadingScreenTransformer] Transformed early loading renderer");
+                EarlyLogWriter.info("[LoadingScreenTransformer] Transformed early loading renderer");
                 return cw.toByteArray();
             }
             return null;
         } catch (Throwable t) {
-            AgentLogWriter.error("[LoadingScreenTransformer] Failed to transform DisplayWindow", t);
+            EarlyLogWriter.error("[LoadingScreenTransformer] Failed to transform DisplayWindow", t);
             return null;
         }
     }

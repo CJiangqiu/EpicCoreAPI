@@ -1,6 +1,6 @@
 package net.eca.coremod;
 
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -47,7 +47,7 @@ public final class AllReturnToggle {
         Predicate<String> checker = AllReturnToggle::shouldReturn;
         System.getProperties().put(CHECKER_KEY, checker);
         checkerRegistered = true;
-        AgentLogWriter.info("[AllReturnToggle] Registered checker to System.getProperties()");
+        EarlyLogWriter.info("[AllReturnToggle] Registered checker to System.getProperties()");
     }
 
     private static boolean matchesPrefix(String internalClassName) {
@@ -65,7 +65,7 @@ public final class AllReturnToggle {
 
     public static void setEnabled(boolean value) {
         enabled = value;
-        AgentLogWriter.info("[AllReturnToggle] Enabled: " + value);
+        EarlyLogWriter.info("[AllReturnToggle] Enabled: " + value);
     }
 
     // ==================== 包前缀管理 ====================
@@ -76,7 +76,7 @@ public final class AllReturnToggle {
             allowedPrefixes.add(normalized);
             String modRoot = extractModRoot(normalized);
             if (modRoot != null && loggedModRoots.add(modRoot)) {
-                AgentLogWriter.info("[AllReturnToggle] Added mod: " + modRoot);
+                EarlyLogWriter.info("[AllReturnToggle] Added mod: " + modRoot);
             }
         }
     }

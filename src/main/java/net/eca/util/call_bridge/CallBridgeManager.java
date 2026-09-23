@@ -130,7 +130,7 @@ public final class CallBridgeManager {
             Set<String> confirmed = confirmedWatchdogs(watchdogs);
             Set<String> missing = new HashSet<>(watchdogs.keySet());
             missing.removeAll(confirmed);
-            if (!missing.isEmpty() && EcaTransformerManager.retransformClassesWithNative(
+            if (!missing.isEmpty() && EcaTransformerManager.retransformExplicitClasses(
                     missing.stream().map(watchdogs::get).toList())) {
                 confirmed.addAll(confirmedWatchdogs(watchdogs, missing));
                 missing.removeAll(confirmed);

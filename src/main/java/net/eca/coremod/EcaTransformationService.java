@@ -6,7 +6,7 @@ import cpw.mods.modlauncher.api.IModuleLayerManager;
 import cpw.mods.modlauncher.api.ITransformationService;
 import cpw.mods.modlauncher.api.ITransformer;
 import net.eca.agent.AgentLoader;
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 import net.eca.agent.EcaAgent;
 import org.jetbrains.annotations.NotNull;
 import sun.misc.Unsafe;
@@ -297,7 +297,7 @@ public class EcaTransformationService implements ITransformationService {
 
     private static void log(String message) {
         try {
-            AgentLogWriter.info("[CoreMod] " + message);
+            EarlyLogWriter.info("[CoreMod] " + message);
         } catch (Throwable ignored) {
         }
     }

@@ -1,6 +1,6 @@
 package net.eca.coremod;
 
-import net.eca.agent.AgentLogWriter;
+import net.eca.coremod.EarlyLogWriter;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
@@ -25,7 +25,7 @@ public final class RuntimeExtensionBridge {
     public static synchronized void prepareEarly() {
         if (earlyPrepared) return;
         earlyPrepared = true;
-        AgentLogWriter.resetForNewSession();
+        EarlyLogWriter.resetForNewSession();
         invoke("prepareEarly");
     }
 
@@ -57,9 +57,9 @@ public final class RuntimeExtensionBridge {
                 instrumentation.retransformClasses(loaded);
                 break;
             }
-            AgentLogWriter.info("[RuntimeExtensionBridge] Early display transformer registered");
+            EarlyLogWriter.info("[RuntimeExtensionBridge] Early display transformer registered");
         } catch (Throwable t) {
-            AgentLogWriter.info("[RuntimeExtensionBridge] Early display transformer failed: " + rootMessage(t));
+            EarlyLogWriter.info("[RuntimeExtensionBridge] Early display transformer failed: " + rootMessage(t));
         }
     }
 
@@ -71,7 +71,7 @@ public final class RuntimeExtensionBridge {
             Object result = method.invoke(null, (Object) classBytes);
             return result instanceof byte[] transformed ? transformed : null;
         } catch (Throwable t) {
-            AgentLogWriter.info("[RuntimeExtensionBridge] Early display transformation failed: " + rootMessage(t));
+            EarlyLogWriter.info("[RuntimeExtensionBridge] Early display transformation failed: " + rootMessage(t));
             return null;
         }
     }
@@ -87,7 +87,7 @@ public final class RuntimeExtensionBridge {
             Method method = type.getMethod(methodName, parameterTypes);
             return method.invoke(null, arguments);
         } catch (Throwable t) {
-            AgentLogWriter.info("[RuntimeExtensionBridge] " + methodName + " failed: " + rootMessage(t));
+            EarlyLogWriter.info("[RuntimeExtensionBridge] " + methodName + " failed: " + rootMessage(t));
             return null;
         }
     }
@@ -101,7 +101,7 @@ public final class RuntimeExtensionBridge {
             } catch (ClassNotFoundException ignored) {
                 provider = null;
             } catch (Throwable t) {
-                AgentLogWriter.info("[RuntimeExtensionBridge] Provider initialization failed: " + rootMessage(t));
+                EarlyLogWriter.info("[RuntimeExtensionBridge] Provider initialization failed: " + rootMessage(t));
             }
             resolved = true;
             return provider;
@@ -118,7 +118,7 @@ public final class RuntimeExtensionBridge {
             } catch (ClassNotFoundException ignored) {
                 earlyDisplayTransformer = null;
             } catch (Throwable t) {
-                AgentLogWriter.info("[RuntimeExtensionBridge] Early display provider failed: " + rootMessage(t));
+                EarlyLogWriter.info("[RuntimeExtensionBridge] Early display provider failed: " + rootMessage(t));
             }
             earlyDisplayResolved = true;
             return earlyDisplayTransformer;

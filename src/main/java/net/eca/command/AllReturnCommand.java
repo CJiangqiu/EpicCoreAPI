@@ -5,6 +5,7 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.eca.api.EcaAPI;
+import net.eca.coremod.EcaTransformerManager;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
@@ -23,6 +24,9 @@ import java.util.Set;
  * Will return all void and boolean methods of the attacked entity's mod.
  */
 public class AllReturnCommand {
+    private static final String EDITION_MESSAGE =
+            "Your ECA build does not include this feature. Please use the latest version from Modrinth.";
+
     public static LiteralArgumentBuilder<CommandSourceStack> registerSubCommand() {
         return Commands.literal("allReturn")
             .then(Commands.argument("targets", EntityArgument.entities())
@@ -38,6 +42,10 @@ public class AllReturnCommand {
     }
 
     private static int setGlobalAllReturn(CommandContext<CommandSourceStack> context) {
+        if (!EcaTransformerManager.supportsExtendedRuntime()) {
+            context.getSource().sendFailure(Component.literal(EDITION_MESSAGE));
+            return 0;
+        }
         boolean enable = BoolArgumentType.getBool(context, "enable");
         boolean success = EcaAPI.setGlobalAllReturn(enable);
 
@@ -50,13 +58,17 @@ public class AllReturnCommand {
         } else {
             context.getSource().sendFailure(Component.literal(
                 "§cFailed to enable global AllReturn. " +
-                "Check if Attack Radical Logic is enabled and Agent is initialized."
+                "Check if Attack Radical Logic is enabled and the runtime backend is available."
             ));
             return 0;
         }
     }
 
     private static int applyAllReturnToTargets(CommandContext<CommandSourceStack> context) {
+        if (!EcaTransformerManager.supportsExtendedRuntime()) {
+            context.getSource().sendFailure(Component.literal(EDITION_MESSAGE));
+            return 0;
+        }
         boolean enable = BoolArgumentType.getBool(context, "enable");
 
         Collection<? extends Entity> targets;
