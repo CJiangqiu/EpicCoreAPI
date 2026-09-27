@@ -4,9 +4,6 @@ import net.eca.coremod.EcaContainers;
 import net.eca.network.EntityContainerCheckResponsePacket;
 import net.eca.network.EntityTeleportAckPacket;
 import net.eca.network.NetworkHandler;
-import net.eca.mixin.BoatTeleportAccessor;
-import net.eca.mixin.LivingEntityTeleportAccessor;
-import net.eca.mixin.MinecartTeleportAccessor;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.util.selector.EcaEntitySelector;
@@ -353,31 +350,31 @@ public final class ClientEntityUtil {
     private static void clearTeleportInterpolation(Entity entity, double x, double y, double z,
                                                    float yRot, float xRot) {
         if (entity instanceof LivingEntity) {
-            LivingEntityTeleportAccessor accessor = (LivingEntityTeleportAccessor) entity;
-            accessor.eca$setLerpSteps(0);
-            accessor.eca$setLerpX(x);
-            accessor.eca$setLerpY(y);
-            accessor.eca$setLerpZ(z);
-            accessor.eca$setLerpYRot(yRot);
-            accessor.eca$setLerpXRot(xRot);
+            LivingEntity livingEntity = (LivingEntity) entity;
+            livingEntity.lerpSteps = 0;
+            livingEntity.lerpX = x;
+            livingEntity.lerpY = y;
+            livingEntity.lerpZ = z;
+            livingEntity.lerpYRot = yRot;
+            livingEntity.lerpXRot = xRot;
         }
         if (entity instanceof Boat) {
-            BoatTeleportAccessor accessor = (BoatTeleportAccessor) entity;
-            accessor.eca$setLerpSteps(0);
-            accessor.eca$setLerpX(x);
-            accessor.eca$setLerpY(y);
-            accessor.eca$setLerpZ(z);
-            accessor.eca$setLerpYRot(yRot);
-            accessor.eca$setLerpXRot(xRot);
+            Boat boat = (Boat) entity;
+            boat.lerpSteps = 0;
+            boat.lerpX = x;
+            boat.lerpY = y;
+            boat.lerpZ = z;
+            boat.lerpYRot = yRot;
+            boat.lerpXRot = xRot;
         }
         if (entity instanceof AbstractMinecart) {
-            MinecartTeleportAccessor accessor = (MinecartTeleportAccessor) entity;
-            accessor.eca$setLerpSteps(0);
-            accessor.eca$setLerpX(x);
-            accessor.eca$setLerpY(y);
-            accessor.eca$setLerpZ(z);
-            accessor.eca$setLerpYRot(yRot);
-            accessor.eca$setLerpXRot(xRot);
+            AbstractMinecart minecart = (AbstractMinecart) entity;
+            minecart.lSteps = 0;
+            minecart.lx = x;
+            minecart.ly = y;
+            minecart.lz = z;
+            minecart.lyr = yRot;
+            minecart.lxr = xRot;
         }
     }
 

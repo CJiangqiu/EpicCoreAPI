@@ -9,7 +9,6 @@ import net.eca.network.EntityTeleportSyncPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.network.SetHealthClientSyncPacket;
 import net.eca.mixin.bridge.ServerTeleportConnectionBridge;
-import net.eca.mixin.EntityTeleportInvoker;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
@@ -1495,7 +1494,7 @@ public class EntityUtil {
 
     private static void positionPassengerTree(Entity vehicle, List<Entity> movedEntities) {
         for (Entity passenger : List.copyOf(vehicle.passengers)) {
-            ((EntityTeleportInvoker) vehicle).eca$positionRider(passenger, (rider, passengerX, passengerY, passengerZ) ->
+            vehicle.positionRider(passenger, (rider, passengerX, passengerY, passengerZ) ->
                     applyTeleportState(
                             rider,
                             passengerX,

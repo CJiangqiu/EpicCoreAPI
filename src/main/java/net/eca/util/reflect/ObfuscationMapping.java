@@ -34,6 +34,30 @@ public final class ObfuscationMapping {
         fields.put("Entity.removalReason", "f_146795_");
         fields.put("Entity.levelCallback", "f_146801_");
 
+        // LivingEntity teleport interpolation
+        fields.put("LivingEntity.lerpSteps", "f_20903_");
+        fields.put("LivingEntity.lerpX", "f_20904_");
+        fields.put("LivingEntity.lerpY", "f_20905_");
+        fields.put("LivingEntity.lerpZ", "f_20906_");
+        fields.put("LivingEntity.lerpYRot", "f_20907_");
+        fields.put("LivingEntity.lerpXRot", "f_20908_");
+
+        // Boat teleport interpolation
+        fields.put("Boat.lerpSteps", "f_38267_");
+        fields.put("Boat.lerpX", "f_38268_");
+        fields.put("Boat.lerpY", "f_38269_");
+        fields.put("Boat.lerpZ", "f_38270_");
+        fields.put("Boat.lerpYRot", "f_38271_");
+        fields.put("Boat.lerpXRot", "f_38272_");
+
+        // AbstractMinecart teleport interpolation
+        fields.put("AbstractMinecart.lSteps", "f_38070_");
+        fields.put("AbstractMinecart.lx", "f_38071_");
+        fields.put("AbstractMinecart.ly", "f_38072_");
+        fields.put("AbstractMinecart.lz", "f_38073_");
+        fields.put("AbstractMinecart.lyr", "f_38074_");
+        fields.put("AbstractMinecart.lxr", "f_38075_");
+
         // ServerLevel
         fields.put("ServerLevel.players", "f_8546_");
         fields.put("ServerLevel.chunkSource", "f_8547_");
@@ -122,6 +146,7 @@ public final class ObfuscationMapping {
         methods.put("Entity.tick", "m_8119_");
         methods.put("Entity.baseTick", "m_6075_");
         methods.put("Entity.onSyncedDataUpdated", "m_7350_");
+        methods.put("Entity.positionRider", "m_19956_");
 
         // Entity storage
         methods.put("EntityLookup.add", "m_156814_");
