@@ -623,8 +623,9 @@ public final class EcaAPI {
 
     // 传送实体到指定位置
     /**
-     * Teleport an entity with direct position control while preserving spatial indexes,
-     * interpolation history, collision bounds, and client tracking baselines.
+     * Teleport an entity in its current server level through ECA-owned position and network
+     * state. This bypasses overridable entity teleport and movement entry points while preserving
+     * spatial indexes, passengers, collision bounds, and client confirmation state.
      * @param entity the entity to teleport
      * @param x the target x coordinate
      * @param y the target y coordinate

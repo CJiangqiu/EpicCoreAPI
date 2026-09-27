@@ -11,6 +11,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.common.util.ITeleporter;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -120,21 +121,26 @@ public class EntityMixin {
         ResurrectionManager.recordPosition((Entity) (Object) this);
     }
 
-    @Inject(method = "changeDimension*", at = @At("HEAD"))
+    @Inject(method = "changeDimension(Lnet/minecraft/server/level/ServerLevel;)Lnet/minecraft/world/entity/Entity;", at = @At("HEAD"))
     private void beforeChangeDimension(ServerLevel destination, CallbackInfoReturnable<Entity> cir) {
-        EntityUtil.markDimensionChanging((Entity) (Object) this);
+        EntityUtil.beginDimensionChange((Entity) (Object) this);
     }
 
-    @Inject(method = "changeDimension*", at = @At("RETURN"))
+    @Inject(method = "changeDimension(Lnet/minecraft/server/level/ServerLevel;)Lnet/minecraft/world/entity/Entity;", at = @At("RETURN"))
     private void afterChangeDimension(ServerLevel destination, CallbackInfoReturnable<Entity> cir) {
-        Entity oldEntity = (Entity) (Object) this;
-        // End→Overworld 的终末之诗流程中，changeDimension 返回 this 但实体仍为 CHANGED_DIMENSION 状态
-        // 此时不应 unmark，否则无敌保护会重新激活，阻止后续 respawn 的清理操作
-        // 延迟到 addPlayer TAIL 中 unmark
-        if (oldEntity.getRemovalReason() == Entity.RemovalReason.CHANGED_DIMENSION) {
-            return;
-        }
-        EntityUtil.unmarkDimensionChanging(oldEntity);
+        EntityUtil.finishDimensionChange((Entity) (Object) this);
+    }
+
+    @Inject(method = "changeDimension(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraftforge/common/util/ITeleporter;)Lnet/minecraft/world/entity/Entity;",
+            at = @At("HEAD"), remap = false)
+    private void eca$beforeCustomDimensionChange(ServerLevel destination, ITeleporter teleporter, CallbackInfoReturnable<Entity> cir) {
+        EntityUtil.beginDimensionChange((Entity) (Object) this);
+    }
+
+    @Inject(method = "changeDimension(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraftforge/common/util/ITeleporter;)Lnet/minecraft/world/entity/Entity;",
+            at = @At("RETURN"), remap = false)
+    private void eca$afterCustomDimensionChange(ServerLevel destination, ITeleporter teleporter, CallbackInfoReturnable<Entity> cir) {
+        EntityUtil.finishDimensionChange((Entity) (Object) this);
     }
 
     @Inject(method = "shouldBeSaved", at = @At("HEAD"), cancellable = true)

@@ -3,14 +3,22 @@ package net.eca.util.spawn_ban;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Map;
 
 // 禁生成管理器
 public class SpawnBanManager {
+
+    private static final Map<ServerLevel, SpawnBanData> DATA_CACHE = new IdentityHashMap<>();
+
+    private static SpawnBanData getData(ServerLevel level) {
+        return DATA_CACHE.computeIfAbsent(level, SpawnBanData::get);
+    }
 
     // 添加禁生成
     public static boolean addBan(ServerLevel level, EntityType<?> type, int timeInSeconds) {
@@ -23,8 +31,8 @@ public class SpawnBanManager {
             return false;
         }
 
-        SpawnBanData data = SpawnBanData.get(level);
-        data.addBan(typeId, timeInSeconds);
+        SpawnBanData data = getData(level);
+        data.addBan(typeId, type, timeInSeconds);
         return true;
     }
 
@@ -34,13 +42,8 @@ public class SpawnBanManager {
             return false;
         }
 
-        ResourceLocation typeId = BuiltInRegistries.ENTITY_TYPE.getKey(type);
-        if (typeId == null) {
-            return false;
-        }
-
-        SpawnBanData data = SpawnBanData.get(level);
-        return data.hasBan(typeId);
+        SpawnBanData data = getData(level);
+        return data.hasAnyBans() && data.hasBan(type);
     }
 
     // 获取禁生成剩余时间
@@ -54,7 +57,7 @@ public class SpawnBanManager {
             return 0;
         }
 
-        SpawnBanData data = SpawnBanData.get(level);
+        SpawnBanData data = getData(level);
         return data.getTime(typeId);
     }
 
@@ -69,8 +72,8 @@ public class SpawnBanManager {
             return false;
         }
 
-        SpawnBanData data = SpawnBanData.get(level);
-        return data.removeBan(typeId);
+        SpawnBanData data = getData(level);
+        return data.removeBan(typeId, type);
     }
 
     // 获取所有禁生成
@@ -79,7 +82,7 @@ public class SpawnBanManager {
             return Collections.emptyMap();
         }
 
-        SpawnBanData data = SpawnBanData.get(level);
+        SpawnBanData data = getData(level);
         Map<ResourceLocation, Integer> rawBans = data.getAllBans();
 
         Map<EntityType<?>, Integer> result = new HashMap<>();
@@ -97,7 +100,7 @@ public class SpawnBanManager {
     public static void clearAllBans(ServerLevel level) {
         if (level == null) return;
 
-        SpawnBanData data = SpawnBanData.get(level);
+        SpawnBanData data = getData(level);
         data.clearAll();
     }
 
@@ -105,8 +108,19 @@ public class SpawnBanManager {
     public static void tickBans(ServerLevel level) {
         if (level == null) return;
 
-        SpawnBanData data = SpawnBanData.get(level);
+        SpawnBanData data = getData(level);
         data.tick();
+    }
+
+    // 实体入口先检查空禁令，避免普通生成路径读取类型与注册表。
+    public static boolean isEntityBanned(ServerLevel level, Entity entity) {
+        if (level == null || entity == null) return false;
+        SpawnBanData data = getData(level);
+        return data.hasAnyBans() && data.hasBan(entity.getType());
+    }
+
+    public static void clearRuntimeCache() {
+        DATA_CACHE.clear();
     }
 
     // 检查实体是否可以生成

@@ -29,7 +29,7 @@ public final class ForceLoadingManager {
 
     private static final Map<UUID, TrackedChunk> TRACKED = new ConcurrentHashMap<>();
     private static final Set<UUID> FORCE_LOADED_MANUAL = ConcurrentHashMap.newKeySet();
-    private static final Map<EntityType<?>, Boolean> FORCE_LOADED_TYPE_CACHE = new ConcurrentHashMap<>();
+    private static final Set<EntityType<?>> FORCE_LOADED_TYPES = ConcurrentHashMap.newKeySet();
 
     /* 票据申请推迟到主线程任务队列执行，落地之前实体不在可见存储里、按 UUID 查不到。
        陈旧清理必须容忍这段窗口，否则会把尚未生效的条目当成"实体已消失"收走，
@@ -197,12 +197,12 @@ public final class ForceLoadingManager {
     public static boolean shouldProtect(Entity entity) {
         return (entity instanceof LivingEntity && EcaAPI.isInvulnerable(entity))
                 || isForceLoadedType(entity.getType())
-                || FORCE_LOADED_MANUAL.contains(entity.getUUID());
+                || isManualForceLoaded(entity);
     }
 
     // 强加载专属：超视距渲染、追踪距离扩大、区块票据、防despawn
     public static boolean shouldForceLoad(Entity entity) {
-        return isForceLoadedType(entity.getType()) || FORCE_LOADED_MANUAL.contains(entity.getUUID());
+        return isForceLoadedType(entity.getType()) || isManualForceLoaded(entity);
     }
 
     public static void enableForceLoading(LivingEntity entity, ServerLevel level) {
@@ -280,16 +280,20 @@ public final class ForceLoadingManager {
     }
 
     public static boolean isForceLoadedType(EntityType<?> type) {
-        if (type == null) {
-            return false;
-        }
-        return FORCE_LOADED_TYPE_CACHE.computeIfAbsent(type, ForceLoadingManager::resolveForceLoadedType);
+        return type != null && FORCE_LOADED_TYPES.contains(type);
     }
 
-    static void clearForceLoadedTypeCache(EntityType<?> type) {
-        if (type != null) {
-            FORCE_LOADED_TYPE_CACHE.remove(type);
+    static void refreshForceLoadedType(EntityType<?> type) {
+        if (type == null) return;
+        if (resolveForceLoadedType(type)) {
+            FORCE_LOADED_TYPES.add(type);
+        } else {
+            FORCE_LOADED_TYPES.remove(type);
         }
+    }
+
+    private static boolean isManualForceLoaded(Entity entity) {
+        return !FORCE_LOADED_MANUAL.isEmpty() && FORCE_LOADED_MANUAL.contains(entity.getUUID());
     }
 
     private static boolean resolveForceLoadedType(EntityType<?> type) {

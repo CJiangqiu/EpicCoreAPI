@@ -17,7 +17,7 @@ import net.minecraftforge.network.simple.SimpleChannel;
 @SuppressWarnings("removal")
 public class NetworkHandler {
 
-    private static final String PROTOCOL_VERSION = "1";
+    private static final String PROTOCOL_VERSION = "2";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(EcaMod.MOD_ID, "main"),
@@ -174,6 +174,18 @@ public class NetworkHandler {
                 .encoder(BlenderAnimationSyncPacket::encode)
                 .decoder(BlenderAnimationSyncPacket::decode)
                 .consumerMainThread(BlenderAnimationSyncPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(EntityTeleportSyncPacket.class, id(), NetworkDirection.PLAY_TO_CLIENT)
+                .encoder(EntityTeleportSyncPacket::encode)
+                .decoder(EntityTeleportSyncPacket::decode)
+                .consumerMainThread(EntityTeleportSyncPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(EntityTeleportAckPacket.class, id(), NetworkDirection.PLAY_TO_SERVER)
+                .encoder(EntityTeleportAckPacket::encode)
+                .decoder(EntityTeleportAckPacket::decode)
+                .consumerMainThread(EntityTeleportAckPacket::handle)
                 .add();
     }
 

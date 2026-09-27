@@ -21,6 +21,7 @@ import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.health.health_lock.HealthLockManager;
 import net.eca.util.raid.RaidManager;
+import net.eca.util.spawn_ban.SpawnBanManager;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -57,8 +58,10 @@ public class EcaEventHandler {
 
     @SubscribeEvent
     public void onEntityJoinLevel(EntityJoinLevelEvent event) {
-        if (event.getLevel() instanceof ServerLevel serverLevel &&
-            event.getEntity() instanceof LivingEntity living) {
+        if (!(event.getLevel() instanceof ServerLevel serverLevel)) return;
+        Entity entity = event.getEntity();
+        FactionManager.onEntityJoined(serverLevel, entity);
+        if (entity instanceof LivingEntity living) {
             EntityExtensionManager.onEntityJoin(living, serverLevel);
             ForceLoadingManager.onEntityJoin(living, serverLevel);
             EcaSetHealthManager.onEntityJoinLevel(living);
@@ -76,7 +79,7 @@ public class EcaEventHandler {
         }
         // 必须排在 EntityExtensionManager 之后：后者依赖 getFactionId 匹配才决定是否退营
         Entity.RemovalReason reason = entity.getRemovalReason();
-        FactionManager.onEntityRemoved(entity, reason);
+        FactionManager.onEntityRemoved(serverLevel, entity, reason);
 
         // 只有永久移除才算袭击者减员，区块卸载的袭击者会随区块一起回来
         if (reason != null && reason.shouldDestroy()) {
@@ -258,6 +261,7 @@ public class EcaEventHandler {
         RaidManager.clearAll(event.getServer().getAllLevels());
         EcaSetHealthManager.clear();
         HealthLockManager.clearAll();
+        SpawnBanManager.clearRuntimeCache();
         //实体 id 重启后重排，残留复查条目会拿旧目标值比对新实体，必须清空
         DelayedHealthVerifier.clear();
         EntityRemovalQuarantine.clear();

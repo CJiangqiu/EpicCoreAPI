@@ -64,6 +64,9 @@ public class FactionManager {
     // 首领仇恨传导节流记录（factionId → 上次传导的目标与时刻）
     private static final Map<String, Propagation> LAST_PROPAGATION = new ConcurrentHashMap<>();
 
+    // 已加载 Mob 按维度错峰登记，避免目标扫描每 tick 遍历全部实体。
+    private static final Map<ServerLevel, List<Set<Mob>>> HOSTILE_TARGET_MOBS = new IdentityHashMap<>();
+
     // 是否已从 SavedData 加载
     private static volatile boolean loaded = false;
 
@@ -176,6 +179,7 @@ public class FactionManager {
             FACTION_MEMBER_IDS.clear();
             ENTITY_FACTION_CACHE.clear();
             LAST_PROPAGATION.clear();
+            HOSTILE_TARGET_MOBS.clear();
             loaded = false;
         }
     }
@@ -959,6 +963,29 @@ public class FactionManager {
         return rel != FactionRelation.SAME_FACTION && rel != FactionRelation.FRIENDLY;
     }
 
+    // 登记已加载 Mob，由错峰目标扫描按槽处理。
+    public static void onEntityJoined(ServerLevel level, Entity entity) {
+        if (level == null || !(entity instanceof Mob mob)) return;
+        List<Set<Mob>> buckets = HOSTILE_TARGET_MOBS.computeIfAbsent(
+                level, ignored -> createHostileTargetBuckets());
+        buckets.get(Math.floorMod(mob.getId(), HOSTILE_TARGET_SCAN_INTERVAL_TICKS)).add(mob);
+    }
+
+    private static List<Set<Mob>> createHostileTargetBuckets() {
+        List<Set<Mob>> buckets = new ArrayList<>(HOSTILE_TARGET_SCAN_INTERVAL_TICKS);
+        for (int index = 0; index < HOSTILE_TARGET_SCAN_INTERVAL_TICKS; index++) {
+            buckets.add(Collections.newSetFromMap(new IdentityHashMap<>()));
+        }
+        return buckets;
+    }
+
+    private static void removeHostileTargetMob(ServerLevel level, Entity entity) {
+        if (level == null || !(entity instanceof Mob mob)) return;
+        List<Set<Mob>> buckets = HOSTILE_TARGET_MOBS.get(level);
+        if (buckets == null) return;
+        buckets.get(Math.floorMod(mob.getId(), HOSTILE_TARGET_SCAN_INTERVAL_TICKS)).remove(mob);
+    }
+
     // 周期性为有阵营且空闲的 Mob 分配附近敌对阵营目标
     /**
      * Assign the nearest hostile faction member to idle faction-bound mobs in one level.
@@ -969,17 +996,24 @@ public class FactionManager {
     public static void tickHostileTargeting(ServerLevel level) {
         if (level == null) return;
 
+        List<Set<Mob>> buckets = HOSTILE_TARGET_MOBS.get(level);
+        if (buckets == null) return;
+
         int range = EcaConfiguration.getFactionAlertRangeSafely();
         double rangeSq = (double) range * range;
-        for (Entity entity : level.getAllEntities()) {
-            if (!(entity instanceof Mob mob) || !mob.isAlive()) continue;
+        int bucketIndex = Math.floorMod((int) level.getGameTime(), HOSTILE_TARGET_SCAN_INTERVAL_TICKS);
+        Iterator<Mob> iterator = buckets.get(bucketIndex).iterator();
+        while (iterator.hasNext()) {
+            Mob mob = iterator.next();
+            if (mob.isRemoved() || mob.level() != level || level.getEntity(mob.getId()) != mob) {
+                iterator.remove();
+                continue;
+            }
+            if (!mob.isAlive()) continue;
             if (getFactionId(mob) == null) continue;
 
             LivingEntity current = mob.getTarget();
             if (current != null && current.isAlive() && FactionUtil.canTarget(mob, current)) {
-                continue;
-            }
-            if (Math.floorMod(mob.tickCount + mob.getId(), HOSTILE_TARGET_SCAN_INTERVAL_TICKS) != 0) {
                 continue;
             }
 
@@ -1234,11 +1268,13 @@ public class FactionManager {
      * Chunk unloads and dimension changes keep the binding so the entity rejoins its
      * faction on reload. Players always keep theirs — a player UUID survives respawn.
      *
+     * @param level the server level the entity is leaving
      * @param entity the entity leaving the level
      * @param reason why the entity was removed; null is treated as a temporary unload
      */
-    public static void onEntityRemoved(Entity entity, Entity.RemovalReason reason) {
+    public static void onEntityRemoved(ServerLevel level, Entity entity, Entity.RemovalReason reason) {
         if (entity == null) return;
+        removeHostileTargetMob(level, entity);
         FACTION_MEMBER_IDS.remove(entity.getId());
         ENTITY_FACTION_CACHE.remove(entity);
 

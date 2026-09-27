@@ -2,7 +2,11 @@ package net.eca.client;
 
 import net.eca.coremod.EcaContainers;
 import net.eca.network.EntityContainerCheckResponsePacket;
+import net.eca.network.EntityTeleportAckPacket;
 import net.eca.network.NetworkHandler;
+import net.eca.mixin.BoatTeleportAccessor;
+import net.eca.mixin.LivingEntityTeleportAccessor;
+import net.eca.mixin.MinecartTeleportAccessor;
 import net.eca.util.EcaLogger;
 import net.eca.util.EntityUtil;
 import net.eca.util.selector.EcaEntitySelector;
@@ -13,6 +17,8 @@ import net.minecraft.core.SectionPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.vehicle.AbstractMinecart;
+import net.minecraft.world.entity.vehicle.Boat;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.entity.EntityInLevelCallback;
 import net.minecraft.world.level.entity.EntitySection;
@@ -315,6 +321,63 @@ public final class ClientEntityUtil {
         Entity entity = level.getEntity(entityId);
         if (entity instanceof LivingEntity living) {
             EntityUtil.setHealthFromSync(living, health);
+        }
+    }
+
+    // 服务端传送包直接覆盖客户端空间状态，避免本地控制判断和插值继续保留旧位置。
+    public static void syncTeleportFromServer(int entityId, double x, double y, double z,
+                                              float yRot, float xRot, boolean onGround, int teleportId) {
+        ClientLevel level = Minecraft.getInstance().level;
+        if (level == null) {
+            return;
+        }
+        Entity entity = getEntityById(level, entityId);
+        if (entity == null) {
+            return;
+        }
+
+        EntityUtil.applyTeleportState(entity, x, y, z, yRot, xRot);
+        entity.onGround = onGround;
+        clearTeleportInterpolation(entity, x, y, z, yRot, xRot);
+
+        if (teleportId >= 0 && entity == Minecraft.getInstance().player) {
+            NetworkHandler.sendToServer(new EntityTeleportAckPacket(
+                    teleportId,
+                    entity.getX(),
+                    entity.getY(),
+                    entity.getZ()
+            ));
+        }
+    }
+
+    private static void clearTeleportInterpolation(Entity entity, double x, double y, double z,
+                                                   float yRot, float xRot) {
+        if (entity instanceof LivingEntity) {
+            LivingEntityTeleportAccessor accessor = (LivingEntityTeleportAccessor) entity;
+            accessor.eca$setLerpSteps(0);
+            accessor.eca$setLerpX(x);
+            accessor.eca$setLerpY(y);
+            accessor.eca$setLerpZ(z);
+            accessor.eca$setLerpYRot(yRot);
+            accessor.eca$setLerpXRot(xRot);
+        }
+        if (entity instanceof Boat) {
+            BoatTeleportAccessor accessor = (BoatTeleportAccessor) entity;
+            accessor.eca$setLerpSteps(0);
+            accessor.eca$setLerpX(x);
+            accessor.eca$setLerpY(y);
+            accessor.eca$setLerpZ(z);
+            accessor.eca$setLerpYRot(yRot);
+            accessor.eca$setLerpXRot(xRot);
+        }
+        if (entity instanceof AbstractMinecart) {
+            MinecartTeleportAccessor accessor = (MinecartTeleportAccessor) entity;
+            accessor.eca$setLerpSteps(0);
+            accessor.eca$setLerpX(x);
+            accessor.eca$setLerpY(y);
+            accessor.eca$setLerpZ(z);
+            accessor.eca$setLerpYRot(yRot);
+            accessor.eca$setLerpXRot(xRot);
         }
     }
 

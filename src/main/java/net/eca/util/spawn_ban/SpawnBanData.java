@@ -1,14 +1,18 @@
 package net.eca.util.spawn_ban;
 
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.saveddata.SavedData;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 
 // 禁生成数据存储
 public class SpawnBanData extends SavedData {
@@ -17,6 +21,7 @@ public class SpawnBanData extends SavedData {
     private static final String NBT_BANS = "bans";
 
     private final Map<ResourceLocation, Integer> bans = new HashMap<>();
+    private final Set<EntityType<?>> bannedTypes = Collections.newSetFromMap(new IdentityHashMap<>());
 
     public SpawnBanData() {
         // Default constructor
@@ -33,6 +38,10 @@ public class SpawnBanData extends SavedData {
                     int seconds = bansTag.getInt(key);
                     if (seconds > 0) {
                         data.bans.put(typeId, seconds);
+                        EntityType<?> type = BuiltInRegistries.ENTITY_TYPE.get(typeId);
+                        if (type != null) {
+                            data.bannedTypes.add(type);
+                        }
                     }
                 }
             }
@@ -59,19 +68,29 @@ public class SpawnBanData extends SavedData {
         );
     }
 
-    public void addBan(ResourceLocation typeId, int seconds) {
-        if (typeId == null || seconds <= 0) return;
+    public void addBan(ResourceLocation typeId, EntityType<?> type, int seconds) {
+        if (typeId == null || type == null || seconds <= 0) return;
         bans.put(typeId, seconds);
+        bannedTypes.add(type);
         setDirty();
     }
 
-    public boolean removeBan(ResourceLocation typeId) {
-        if (typeId == null) return false;
+    public boolean removeBan(ResourceLocation typeId, EntityType<?> type) {
+        if (typeId == null || type == null) return false;
         boolean removed = bans.remove(typeId) != null;
         if (removed) {
+            bannedTypes.remove(type);
             setDirty();
         }
         return removed;
+    }
+
+    public boolean hasAnyBans() {
+        return !bans.isEmpty();
+    }
+
+    public boolean hasBan(EntityType<?> type) {
+        return type != null && bannedTypes.contains(type);
     }
 
     public boolean hasBan(ResourceLocation typeId) {
@@ -100,6 +119,10 @@ public class SpawnBanData extends SavedData {
             int newTime = entry.getValue() - 1;
 
             if (newTime <= 0) {
+                EntityType<?> type = BuiltInRegistries.ENTITY_TYPE.get(entry.getKey());
+                if (type != null) {
+                    bannedTypes.remove(type);
+                }
                 iterator.remove();
                 modified = true;
             } else {
@@ -116,6 +139,7 @@ public class SpawnBanData extends SavedData {
     public void clearAll() {
         if (!bans.isEmpty()) {
             bans.clear();
+            bannedTypes.clear();
             setDirty();
         }
     }

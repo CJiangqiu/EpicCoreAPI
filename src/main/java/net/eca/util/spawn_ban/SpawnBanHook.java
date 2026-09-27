@@ -2,7 +2,6 @@ package net.eca.util.spawn_ban;
 
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 
 // 禁生成钩子（供Mixin调用）
@@ -18,8 +17,7 @@ public class SpawnBanHook {
             return false;
         }
 
-        EntityType<?> type = entity.getType();
-        return SpawnBanManager.isBanned(serverLevel, type);
+        return SpawnBanManager.isEntityBanned(serverLevel, entity);
     }
 
     // 为底层容器入口解析实体所属的服务端世界

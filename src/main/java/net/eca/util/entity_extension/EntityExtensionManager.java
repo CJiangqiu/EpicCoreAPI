@@ -74,7 +74,7 @@ public final class EntityExtensionManager {
         }
 
         REGISTRY.put(type, extension);
-        ForceLoadingManager.clearForceLoadedTypeCache(type);
+        ForceLoadingManager.refreshForceLoadedType(type);
         return true;
     }
 

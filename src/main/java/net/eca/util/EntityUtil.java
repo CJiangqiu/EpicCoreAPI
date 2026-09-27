@@ -1,11 +1,15 @@
 package net.eca.util;
 
+import com.google.common.collect.ImmutableList;
 import net.eca.api.EcaAPI;
 import net.eca.config.EcaConfiguration;
 import net.eca.network.ClientRemovePacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
+import net.eca.network.EntityTeleportSyncPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.network.SetHealthClientSyncPacket;
+import net.eca.mixin.bridge.ServerTeleportConnectionBridge;
+import net.eca.mixin.EntityTeleportInvoker;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
@@ -34,8 +38,8 @@ import net.minecraft.world.level.gameevent.DynamicGameEventListener;
 import net.minecraft.advancements.CriteriaTriggers;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.AABB;
-import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket;
+import net.minecraft.network.protocol.game.ClientboundSetPassengersPacket;
 import net.minecraft.server.network.ServerPlayerConnection;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.ChunkPos;
@@ -45,6 +49,8 @@ import net.minecraft.util.ClassInstanceMultiMap;
 import net.minecraft.world.level.entity.EntityTickList;
 import net.minecraftforge.entity.PartEntity;
 import net.eca.util.selector.EcaEntitySelector;
+import net.minecraft.server.level.TicketType;
+import net.minecraft.world.entity.PathfinderMob;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -72,6 +78,8 @@ public class EntityUtil {
 
     //正在切换维度的实体UUID集合（线程安全）
     private static final Set<UUID> DIMENSION_CHANGING_ENTITIES = ConcurrentHashMap.newKeySet();
+    // 调用栈内的放行与跨帧等待重生的标记分离，加入世界不能提前结束外层传送。
+    private static final Map<UUID, Integer> DIMENSION_CHANGE_SCOPES = new ConcurrentHashMap<>();
 
     private static final StackWalker STACK_WALKER = StackWalker.getInstance();
     private static final List<String> VANILLA_ALLOWED_PREFIXES = List.of(
@@ -124,11 +132,9 @@ public class EntityUtil {
     //检查实体是否正在切换维度
     /**
      * Check if an entity is currently changing dimensions.
-     * This method checks the entity's removal reason to determine if it's being removed due to dimension change.
-     * Used internally by Mixins to allow dimension change operations even for invulnerable entities.
-     *
+     * Checks active transfer scopes and deferred respawn markers used by removal guards.
      * @param entity the entity to check
-     * @return true if the entity's removal reason is CHANGED_DIMENSION, false otherwise
+     * @return true while a transfer scope or deferred respawn marker is active
      */
     public static boolean isChangingDimension(Entity entity) {
         if (entity == null) {
@@ -138,12 +144,33 @@ public class EntityUtil {
         // 使用UUID集合判断，避免字段读取的时序问题和残留问题
         // 本方法挂在 isRemoved 高频路径上，跳过构造器创建的实体 UUID 可能为 null，集合查询不接受 null 键
         UUID uuid = entity.getUUID();
-        return uuid != null && DIMENSION_CHANGING_ENTITIES.contains(uuid);
+        return isChangingDimension(uuid);
     }
 
     //通过UUID检查实体是否正在切换维度（供容器层使用）
     public static boolean isChangingDimension(UUID uuid) {
-        return uuid != null && DIMENSION_CHANGING_ENTITIES.contains(uuid);
+        return uuid != null && (DIMENSION_CHANGING_ENTITIES.contains(uuid)
+                || DIMENSION_CHANGE_SCOPES.containsKey(uuid));
+    }
+
+    // 每个传送入口只释放自身的层级，允许单参数入口委托给双参数入口。
+    public static void beginDimensionChange(Entity entity) {
+        if (entity == null || entity.getUUID() == null) return;
+        DIMENSION_CHANGE_SCOPES.merge(entity.getUUID(), 1, Integer::sum);
+    }
+
+    public static void endDimensionChange(Entity entity) {
+        if (entity == null || entity.getUUID() == null) return;
+        DIMENSION_CHANGE_SCOPES.computeIfPresent(entity.getUUID(), (uuid, depth) -> depth > 1 ? depth - 1 : null);
+    }
+
+    // 只有玩家的终末之诗流程需要跨帧放行；普通实体的旧实例移除不应影响新实例。
+    public static void finishDimensionChange(Entity entity) {
+        if (entity instanceof ServerPlayer
+                && entity.getRemovalReason() == Entity.RemovalReason.CHANGED_DIMENSION) {
+            markDimensionChanging(entity);
+        }
+        endDimensionChange(entity);
     }
 
     public static Entity getEntity(Level level, int entityId) {
@@ -1366,9 +1393,9 @@ public class EntityUtil {
     // ==================== 传送模块 ====================
 
     /**
-     * Teleport an entity while preserving all vanilla position bookkeeping and tracker state.
-     * This method retains direct position control while keeping spatial indexes, interpolation
-     * history, collision bounds, and client movement baselines consistent.
+     * Teleport an entity through ECA-owned position and network state without invoking entity
+     * teleport or movement entry points. The operation is restricted to the authoritative server
+     * thread and preserves the entity's passenger tree.
      * @param entity the entity to teleport
      * @param x the target x coordinate
      * @param y the target y coordinate
@@ -1376,30 +1403,48 @@ public class EntityUtil {
      * @return true if teleportation succeeded, false otherwise
      */
     public static boolean teleport(Entity entity, double x, double y, double z) {
-        if (entity == null) return false;
+        if (entity == null || !(entity.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (!serverLevel.getServer().isSameThread()) {
+            EcaLogger.info("Teleport rejected outside the server thread, uuid={}", entity.getUUID());
+            return false;
+        }
+        if (!isValidTeleportPosition(x, y, z)) {
+            EcaLogger.info("Teleport rejected for invalid position, uuid={}, x={}, y={}, z={}",
+                    entity.getUUID(), x, y, z);
+            return false;
+        }
 
         try {
-            updateTeleportPosition(entity, x, y, z);
+            ChunkPos targetChunk = new ChunkPos(BlockPos.containing(x, y, z));
+            if (entity instanceof ServerPlayer) {
+                serverLevel.getChunkSource().addRegionTicket(
+                        TicketType.POST_TELEPORT, targetChunk, 1, entity.getId());
+            }
+            serverLevel.getChunk(targetChunk.x, targetChunk.z);
 
-            // 原版 moveTo 会把插值历史统一推进到传送后的坐标，避免渲染残留旧轨迹
-            entity.setYRot(entity.getYRot());
-            entity.setXRot(entity.getXRot());
-            entity.xo = x;
-            entity.yo = y;
-            entity.zo = z;
-            entity.xOld = x;
-            entity.yOld = y;
-            entity.zOld = z;
-            entity.yRotO = entity.getYRot();
-            entity.xRotO = entity.getXRot();
+            Entity previousVehicle = detachFromVehicle(entity);
+            if (previousVehicle != null) {
+                serverLevel.getChunkSource().broadcast(
+                        previousVehicle, new ClientboundSetPassengersPacket(previousVehicle));
+            }
+            if (entity instanceof ServerPlayer player && player.isSleeping()) {
+                player.stopSleepInBed(true, true);
+            }
 
-            // 使用实体当前 dimensions，与原版 reapplyPosition 的碰撞箱来源一致
-            entity.bb = entity.dimensions.makeBoundingBox(entity.position);
-            ResurrectionManager.recordPosition(entity);
+            List<Entity> movedEntities = new ArrayList<>();
+            applyTeleportState(entity, x, y, z, entity.getYRot(), entity.getXRot());
+            movedEntities.add(entity);
+            positionPassengerTree(entity, movedEntities);
 
-            // 主动同步仍由 ECA 完成，同时推进原版追踪器的编码基准
-            if (!entity.level().isClientSide && entity.level() instanceof ServerLevel serverLevel) {
-                syncTeleportToClient(entity, serverLevel);
+            if (entity instanceof PathfinderMob pathfinderMob) {
+                pathfinderMob.getNavigation().stop();
+            }
+
+            for (Entity movedEntity : movedEntities) {
+                ResurrectionManager.recordPosition(movedEntity);
+                syncTeleportToClient(movedEntity, serverLevel);
             }
 
             return true;
@@ -1409,7 +1454,62 @@ public class EntityUtil {
         }
     }
 
-    /* 镜像 setPosRaw 的全部位置副作用；直接控制坐标的同时不能让空间索引仍指向旧位置。 */
+    // 同步服务端和客户端都使用同一条原始提交路径，避免任一侧进入可覆写的位置方法。
+    public static void applyTeleportState(Entity entity, double x, double y, double z, float yRot, float xRot) {
+        if (entity.level() instanceof ServerLevel serverLevel
+                && entity.isAddedToWorld() && entity.getRemovalReason() == null) {
+            serverLevel.getChunk(Mth.floor(x) >> 4, Mth.floor(z) >> 4);
+        }
+        updateTeleportPosition(entity, x, y, z);
+        entity.yRot = yRot % 360.0f;
+        entity.xRot = xRot % 360.0f;
+        entity.xo = x;
+        entity.yo = y;
+        entity.zo = z;
+        entity.xOld = x;
+        entity.yOld = y;
+        entity.zOld = z;
+        entity.yRotO = entity.yRot;
+        entity.xRotO = entity.xRot;
+        entity.bb = entity.dimensions.makeBoundingBox(entity.position);
+        entity.packetPositionCodec.setBase(new Vec3(x, y, z));
+    }
+
+    private static boolean isValidTeleportPosition(double x, double y, double z) {
+        return Double.isFinite(x) && Double.isFinite(y) && Double.isFinite(z)
+                && Math.abs(x) <= 3.0E7 && Math.abs(y) <= 2.0E7 && Math.abs(z) <= 3.0E7;
+    }
+
+    private static Entity detachFromVehicle(Entity entity) {
+        Entity vehicle = entity.vehicle;
+        if (vehicle == null) {
+            return null;
+        }
+        List<Entity> remainingPassengers = new ArrayList<>(vehicle.passengers);
+        remainingPassengers.removeIf(passenger -> passenger == entity);
+        vehicle.passengers = ImmutableList.copyOf(remainingPassengers);
+        entity.vehicle = null;
+        entity.boardingCooldown = 60;
+        return vehicle;
+    }
+
+    private static void positionPassengerTree(Entity vehicle, List<Entity> movedEntities) {
+        for (Entity passenger : List.copyOf(vehicle.passengers)) {
+            ((EntityTeleportInvoker) vehicle).eca$positionRider(passenger, (rider, passengerX, passengerY, passengerZ) ->
+                    applyTeleportState(
+                            rider,
+                            passengerX,
+                            passengerY,
+                            passengerZ,
+                            rider.getYRot(),
+                            rider.getXRot()
+                    ));
+            movedEntities.add(passenger);
+            positionPassengerTree(passenger, movedEntities);
+        }
+    }
+
+    /* 镜像空间索引所需的副作用；直接控制坐标时不能让实体 section 仍指向旧位置。 */
     private static void updateTeleportPosition(Entity entity, double x, double y, double z) {
         if (entity.position.x != x || entity.position.y != y || entity.position.z != z) {
             entity.position = new Vec3(x, y, z);
@@ -1428,9 +1528,6 @@ public class EntityUtil {
             }
             entity.levelCallback.onMove();
         }
-        if (entity.isAddedToWorld() && !entity.level().isClientSide && entity.getRemovalReason() == null) {
-            entity.level().getChunk(Mth.floor(x) >> 4, Mth.floor(z) >> 4);
-        }
     }
 
     /**
@@ -1440,29 +1537,36 @@ public class EntityUtil {
      */
     private static void syncTeleportToClient(Entity entity, ServerLevel serverLevel) {
         try {
-            // 玩家连接还需要维护传送确认编号和服务端移动校验基准
             if (entity instanceof ServerPlayer player) {
-                player.connection.teleport(
+                ((ServerTeleportConnectionBridge) player.connection).eca$beginTeleport(
                         entity.getX(),
                         entity.getY(),
                         entity.getZ(),
                         entity.getYRot(),
-                        entity.getXRot()
+                        entity.getXRot(),
+                        entity.onGround()
                 );
-                return;
             }
 
-            ClientboundTeleportEntityPacket packet = new ClientboundTeleportEntityPacket(entity);
-
-            // 按 seenBy 发包前先同步追踪基准，保证下一次相对移动从本次绝对坐标开始编码
             ChunkMap.TrackedEntity trackedEntity = serverLevel.chunkSource.chunkMap.entityMap.get(entity.getId());
             if (trackedEntity != null) {
-                syncTeleportTracker(trackedEntity.serverEntity, entity);
+                EntityTeleportSyncPacket packet = new EntityTeleportSyncPacket(
+                        entity.getId(),
+                        entity.getX(),
+                        entity.getY(),
+                        entity.getZ(),
+                        entity.getYRot(),
+                        entity.getXRot(),
+                        entity.onGround(),
+                        -1
+                );
                 for (ServerPlayerConnection connection : trackedEntity.seenBy) {
-                    connection.getPlayer().connection.send(packet);
+                    if (connection.getPlayer() != entity) {
+                        NetworkHandler.sendToPlayer(packet, connection.getPlayer());
+                    }
                 }
-            } else {
-                serverLevel.getChunkSource().broadcast(entity, packet);
+                // 只有发包完成后才能推进编码基准，否则客户端丢失更新后服务端不会再纠正。
+                syncTeleportTracker(trackedEntity.serverEntity, entity);
             }
         } catch (Exception e) {
             EcaLogger.error("Failed to sync teleport to clients: {}", e.getMessage());

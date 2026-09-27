@@ -346,12 +346,33 @@ public final class EcaContainers {
 
         @Override
         public Iterator<E> iterator() {
-            return readableValues().iterator();
+            if (EntityRemovalQuarantine.hasActiveRemovals()) {
+                return readableValues().iterator();
+            }
+            Iterator<E> delegate = super.iterator();
+            return new Iterator<>() {
+                @Override
+                public boolean hasNext() {
+                    return delegate.hasNext();
+                }
+
+                @Override
+                public E next() {
+                    return delegate.next();
+                }
+
+                @Override
+                public void remove() {
+                    throw new UnsupportedOperationException();
+                }
+            };
         }
 
         @Override
         public Spliterator<E> spliterator() {
-            return readableValues().spliterator();
+            return EntityRemovalQuarantine.hasActiveRemovals()
+                    ? readableValues().spliterator()
+                    : super.spliterator();
         }
 
         @Override

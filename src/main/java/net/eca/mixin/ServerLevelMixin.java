@@ -95,11 +95,11 @@ public class ServerLevelMixin {
             // 针对无敌玩家被第三方模组强制 respawn 的场景：
             // 在新实例加入前，先移除旧实例，避免 knownUuids/lookup 里出现同 UUID 冲突
             if (eca$duplicateWasInvulnerable) {
-                EntityUtil.markDimensionChanging(sp);
+                EntityUtil.beginDimensionChange(sp);
                 try {
                     EntityUtil.remove(sp, Entity.RemovalReason.CHANGED_DIMENSION);
                 } finally {
-                    EntityUtil.unmarkDimensionChanging(sp);
+                    EntityUtil.endDimensionChange(sp);
                 }
             }
         } else {
@@ -110,8 +110,7 @@ public class ServerLevelMixin {
 
     @Inject(method = "addPlayer", at = @At("TAIL"))
     private void eca$cleanupOldDuplicate(ServerPlayer newPlayer, CallbackInfo ci) {
-        // 新玩家已正确添加到目标维度，清除维度切换标记
-        // 对于 End→Overworld 终末之诗流程，标记在 changeDimension 返回时被延迟，此处完成清除
+        // 只清除跨帧等待重生的标记，外层传送仍由入口自身持有放行层级。
         EntityUtil.unmarkDimensionChanging(newPlayer);
 
         // End→Overworld 终末之诗流程中不存在旧重复实例（旧实体在 End，新实体在 Overworld）
@@ -127,11 +126,11 @@ public class ServerLevelMixin {
         ServerLevel self = (ServerLevel)(Object)this;
         Entity current = self.getEntities().get(eca$oldDuplicate.getUUID());
         if (current == eca$oldDuplicate) {
-            EntityUtil.markDimensionChanging(eca$oldDuplicate);
+            EntityUtil.beginDimensionChange(eca$oldDuplicate);
             try {
                 EntityUtil.remove(eca$oldDuplicate, Entity.RemovalReason.CHANGED_DIMENSION);
             } finally {
-                EntityUtil.unmarkDimensionChanging(eca$oldDuplicate);
+                EntityUtil.endDimensionChange(eca$oldDuplicate);
             }
         }
 
