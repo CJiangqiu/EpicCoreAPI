@@ -8,7 +8,6 @@ import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.EntityTeleportSyncPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.network.SetHealthClientSyncPacket;
-import net.eca.mixin.bridge.ServerTeleportConnectionBridge;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
@@ -63,6 +62,13 @@ import java.util.function.Predicate;
 @SuppressWarnings({"unchecked", "rawtypes"})
 //实体工具类
 public class EntityUtil {
+
+    public interface ServerTeleportConnectionBridge {
+
+        int eca$beginTeleport(double x, double y, double z, float yRot, float xRot, boolean onGround);
+
+        void eca$completeTeleport(int teleportId, double x, double y, double z);
+    }
 
     //EntityDataAccessor 血量锁定（三字段加密）+ 禁疗 + 无敌状态 + 最大生命值锁定（三字段加密）
     public static EntityDataAccessor<String> HEALTH_LOCK_VALUE;
@@ -824,60 +830,6 @@ public class EntityUtil {
         }
     }
 
-    // ECA 注册的 accessor ID 缓存，运行时填充
-    private static final Set<Integer> ECA_DATA_IDS = ConcurrentHashMap.newKeySet();
-    private static volatile boolean ecaDataIdsInitialized = false;
-
-    private static void ensureEcaDataIds() {
-        if (ecaDataIdsInitialized) return;
-        ecaDataIdsInitialized = true;
-        registerEcaDataId(HEALTH_LOCK_VALUE);
-        registerEcaDataId(HEALTH_LOCK_KEY);
-        registerEcaDataId(HEALTH_LOCK_CHECK);
-        registerEcaDataId(HEAL_BAN_VALUE);
-        registerEcaDataId(INVULNERABLE);
-        registerEcaDataId(RESURRECTION_TRACKED);
-        registerEcaDataId(MAX_HEALTH_LOCK_VALUE);
-        registerEcaDataId(MAX_HEALTH_LOCK_KEY);
-        registerEcaDataId(MAX_HEALTH_LOCK_CHECK);
-    }
-
-    // 同时登记到 EcaOwnedState，使改血分析把这些单元排除在候选存储之外
-    private static void registerEcaDataId(EntityDataAccessor<?> accessor) {
-        if (accessor == null) return;
-        ECA_DATA_IDS.add(accessor.getId());
-        EcaOwnedState.registerSynchedDataId(accessor.getId());
-    }
-
-    // 清除外部 mod 注入的 Float 类型实体数据（ID > vanillaMaxId ）
-    @SuppressWarnings("rawtypes")
-    public static void clearForeignEntityData(LivingEntity entity) {
-        if (entity == null) return;
-        ensureEcaDataIds();
-        try {
-            SynchedEntityData entityData = entity.getEntityData();
-            Int2ObjectMap<?> itemsById = (Int2ObjectMap<?>) entityData.itemsById;
-            if (itemsById == null) return;
-            for (Int2ObjectMap.Entry<?> entry : itemsById.int2ObjectEntrySet()) {
-                int id = entry.getIntKey();
-                // 跳过 vanilla 范围
-                if (id <= 15) continue;
-                // 跳过 ECA 自己注册的
-                if (ECA_DATA_IDS.contains(id)) continue;
-                SynchedEntityData.DataItem dataItem = (SynchedEntityData.DataItem) entry.getValue();
-                if (dataItem == null) continue;
-                // 只清除 Float 类型
-                if (dataItem.value instanceof Float) {
-                    dataItem.value = 0.0f;
-                    dataItem.dirty = true;
-                }
-            }
-            entityData.isDirty = true;
-        } catch (Throwable t) {
-            EcaLogger.info("[EntityUtil] clearForeignEntityData failed: {}", t.getMessage());
-        }
-    }
-
     //获取DataItem（返回 raw type 以便直接赋值 value 字段）
     @SuppressWarnings("rawtypes")
     private static SynchedEntityData.DataItem getDataItem(SynchedEntityData entityData, int id) {
@@ -1013,6 +965,18 @@ public class EntityUtil {
             entity.onSyncedDataUpdated(LivingEntity.DATA_HEALTH_ID);
             dataItem.dirty = true;
             entityData.isDirty = true;
+        } catch (Exception ignored) {}
+    }
+
+    // 锁血读取路径只修复原版存储，不调用 getHealth，避免在返回 Hook 内递归。
+    public static void repairBasicHealth(LivingEntity entity, float expectedHealth) {
+        if (entity == null) return;
+        try {
+            SynchedEntityData.DataItem dataItem = getDataItem(
+                    entity.getEntityData(), LivingEntity.DATA_HEALTH_ID.getId());
+            if (dataItem == null || !(dataItem.value instanceof Float current)) return;
+            if (Math.abs(current - expectedHealth) <= 0.001f) return;
+            setBasicHealth(entity, expectedHealth);
         } catch (Exception ignored) {}
     }
 

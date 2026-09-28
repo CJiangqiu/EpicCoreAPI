@@ -1,6 +1,7 @@
 package net.eca.coremod;
 
 import net.eca.coremod.EarlyLogWriter;
+import net.eca.agent.AgentLoader;
 import net.eca.agent.EcaAgent;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
@@ -60,18 +61,22 @@ public final class EcaTransformerManager {
     }
 
     public static boolean supportsExtendedRuntime() {
-        return (!isCoremodBackend() && EcaAgent.getInstrumentation() != null)
-                || NativeRuntimeBridge.isPackaged();
+        return EcaAgent.getInstrumentation() != null || NativeRuntimeBridge.isPackaged();
     }
 
     public static boolean applyLoadCompleteTransforms() {
         if (isCoremodBackend()) {
+            if (tryAgentHealthLoadComplete()) {
+                backend = Backend.COREMOD;
+                return true;
+            }
             if (tryNativeLoadComplete()) return true;
             backend = Backend.COREMOD;
             return true;
         }
         boolean agentOk = tryAgentLoadComplete();
         if (agentOk) {
+            tryAgentHealthLoadComplete();
             backend = Backend.AGENT;
             return true;
         }
@@ -95,7 +100,6 @@ public final class EcaTransformerManager {
 
     public static HealthTransformResult retransformHealthClass(Class<?> clazz, boolean refreshTerminal) {
         if (clazz == null) return new HealthTransformResult(Backend.NONE, false);
-        if (isCoremodBackend() && !nativeAllowed()) return new HealthTransformResult(Backend.COREMOD, false);
         if (EcaConfiguration.getForceCompatibilityModeSafely()) {
             return new HealthTransformResult(Backend.NONE, false);
         }
@@ -132,7 +136,7 @@ public final class EcaTransformerManager {
     private static HealthTransformResult retransformHealthClassLocked(
             Class<?> clazz, String internalName, boolean refreshTerminal) {
         Instrumentation inst = EcaAgent.getInstrumentation();
-        if (!isCoremodBackend() && inst != null && isModifiable(inst, clazz)) {
+        if (inst != null && isModifiable(inst, clazz)) {
             long generation = ensureTerminalAgentTransformers(inst, refreshTerminal);
             if (generation > 0L) {
                 long epoch = beginReceipt(internalName, generation);
@@ -243,6 +247,43 @@ public final class EcaTransformerManager {
         }
     }
 
+    private static boolean tryAgentHealthLoadComplete() {
+        Instrumentation inst = acquireInstrumentation();
+        if (inst == null || !inst.isRetransformClassesSupported()) return false;
+        List<Class<?>> targets = new ArrayList<>();
+        try {
+            for (Class<?> type : inst.getAllLoadedClasses()) {
+                if (!isModifiable(inst, type) || classifyEntity(type) == 0) continue;
+                targets.add(type);
+            }
+            EcaClassTransformer.prepareNativeTargets(targets);
+            long generation = ensureTerminalAgentTransformers(inst, true);
+            if (generation <= 0L) return false;
+            int confirmed = 0;
+            for (Class<?> type : targets) {
+                HealthTransformResult result = retransformHealthClass(type, false);
+                if (result.confirmed()) confirmed++;
+            }
+            EarlyLogWriter.info("[EcaTransformerManager] Terminal health handoff targets="
+                    + targets.size() + ", confirmed=" + confirmed);
+            return !targets.isEmpty() && confirmed == targets.size();
+        } catch (Throwable t) {
+            EarlyLogWriter.info("[EcaTransformerManager] Terminal health handoff failed: " + t.getMessage());
+            return false;
+        }
+    }
+
+    private static Instrumentation acquireInstrumentation() {
+        Instrumentation inst = EcaAgent.getInstrumentation();
+        if (inst != null) return inst;
+        EcaAgent.adoptSystemInstrumentation();
+        inst = EcaAgent.getInstrumentation();
+        if (inst != null) return inst;
+        AgentLoader.enableSelfAttach();
+        AgentLoader.loadAgent();
+        return EcaAgent.getInstrumentation();
+    }
+
     private static boolean tryAgentRetransform(Class<?> clazz) {
         Instrumentation inst = EcaAgent.getInstrumentation();
         if (inst == null || clazz == null) return false;
@@ -280,7 +321,7 @@ public final class EcaTransformerManager {
                     public byte[] transform(ClassLoader loader, String name, Class<?> beingRedefined,
                                             ProtectionDomain domain, byte[] bytes) {
                         if (NativeRuntimeBridge.isTransforming()) return null;
-                        return EcaClassTransformer.transformHealthTail(name, bytes);
+                        return EcaClassTransformer.normalizeHealthTail(name, bytes);
                     }
                 }, true);
                 inst.addTransformer(new ClassFileTransformer() {
@@ -316,7 +357,7 @@ public final class EcaTransformerManager {
         String normalized = internalName.replace('.', '/');
         PendingReceipt pending = PENDING_RECEIPTS.get(normalized);
         if (pending == null || pending.generation() != generation) return;
-        if (EcaClassTransformer.verifyHealthTail(normalized, bytes)) {
+        if (EcaClassTransformer.verifyNormalizedHealthTail(normalized, bytes)) {
             CONFIRMED_RECEIPTS.put(normalized, new ConfirmedReceipt(pending.epoch(), Backend.AGENT));
         }
     }
@@ -420,7 +461,7 @@ public final class EcaTransformerManager {
                         if (request == null || type == null || !request.targets().contains(type)) return null;
                         String internalName = type.getName().replace('.', '/');
                         request.outputs().put(type, bytes.clone());
-                        if (request.health() && EcaClassTransformer.verifyHealthTail(internalName, bytes)) {
+                        if (request.health() && EcaClassTransformer.verifyNormalizedHealthTail(internalName, bytes)) {
                             request.healthConfirmed().add(type);
                         }
                         return null;

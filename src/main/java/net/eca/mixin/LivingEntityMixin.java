@@ -188,10 +188,6 @@ LivingEntityMixin {
         Float healBanValue = HealthLockManager.getHealBan(self);
 
         if (lockedValue != null) {
-            // 激进防御：清除外部 mod 注入的数值类型实体数据
-            if (EcaConfiguration.getDefenceEnableRadicalLogicSafely()) {
-                EntityUtil.clearForeignEntityData(self);
-            }
             float currentHealth = EntityUtil.getHealth(self);
             if (Math.abs(currentHealth - lockedValue) > 0.001f) {
                 EntityUtil.revive(self);

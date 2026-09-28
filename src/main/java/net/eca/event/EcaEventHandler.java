@@ -90,6 +90,7 @@ public class EcaEventHandler {
     @SubscribeEvent
     public void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
+            BossShowPlaybackTracker.recoverStaleSession(player);
             BossShowEditorSessionManager.recoverStaleSession(player);
             EntityExtensionManager.syncActiveType(player);
             GlobalEffectOverrideManager.syncToPlayer(player);
@@ -105,8 +106,8 @@ public class EcaEventHandler {
     @SubscribeEvent
     public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
-            BossShowEditorSessionManager.end(player);
             BossShowPlaybackTracker.onPlayerLogout(player);
+            BossShowEditorSessionManager.end(player);
         }
     }
 
@@ -265,6 +266,7 @@ public class EcaEventHandler {
         //实体 id 重启后重排，残留复查条目会拿旧目标值比对新实体，必须清空
         DelayedHealthVerifier.clear();
         EntityRemovalQuarantine.clear();
+        BossShowPlaybackTracker.clearAll();
         BossShowEditorSessionManager.clear();
         NEXT_GLOW_SCAN.clear();
     }

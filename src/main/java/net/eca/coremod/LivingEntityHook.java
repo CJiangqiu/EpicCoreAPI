@@ -1,6 +1,7 @@
 package net.eca.coremod;
 
 import net.eca.api.EcaAPI;
+import net.eca.util.EntityUtil;
 import net.eca.util.health.health_lock.HealthLockManager;
 import net.minecraft.world.entity.LivingEntity;
 
@@ -59,6 +60,7 @@ public final class LivingEntityHook {
         // 锁血：直接返回锁定值
         Float locked = HealthLockManager.getLock(entity);
         if (locked != null) {
+            EntityUtil.repairBasicHealth(entity, locked);
             return locked;
         }
 

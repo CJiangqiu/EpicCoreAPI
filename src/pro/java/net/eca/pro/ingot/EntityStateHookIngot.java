@@ -22,12 +22,12 @@ final class EntityStateHookIngot implements ProIngot {
 
     @Override
     public byte[] transform(String internalName, byte[] classBytes) {
-        byte[] transformed = EcaClassTransformer.transformHealthTail(internalName, classBytes);
+        byte[] transformed = EcaClassTransformer.normalizeHealthTail(internalName, classBytes);
         return transformed == null ? classBytes : transformed;
     }
 
     @Override
     public boolean verify(String internalName, byte[] classBytes) {
-        return EcaClassTransformer.verifyHealthTail(internalName, classBytes);
+        return EcaClassTransformer.verifyNormalizedHealthTail(internalName, classBytes);
     }
 }

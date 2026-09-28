@@ -1,6 +1,6 @@
 package net.eca.network;
 
-import net.eca.mixin.bridge.ServerTeleportConnectionBridge;
+import net.eca.util.EntityUtil.ServerTeleportConnectionBridge;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.network.NetworkEvent;

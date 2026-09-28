@@ -9,11 +9,14 @@ import net.eca.util.EcaLogger;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowDefinition.EventCue;
 import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.GameType;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -31,6 +34,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class BossShowPlaybackTracker {
 
+    private static final String NBT_PLAYBACK_MODE = "eca_bossshow_playback";
+    private static final String NBT_PREVIOUS_GAME_MODE = "previous_game_mode";
     private static final Map<UUID, BossShowSession> ACTIVE = new ConcurrentHashMap<>();
     private static int rangeScanTickCounter = 0;
 
@@ -46,6 +51,7 @@ public final class BossShowPlaybackTracker {
             return false;
         }
         if (def.isEmpty()) return false;
+        if (!enterPlaybackMode(viewer)) return false;
 
         double ax = target.getX();
         double ay = target.getY();
@@ -72,19 +78,26 @@ public final class BossShowPlaybackTracker {
     public static void stop(ServerPlayer viewer, boolean skipped) {
         if (viewer == null) return;
         BossShowSession session = ACTIVE.remove(viewer.getUUID());
-        if (session == null) return;
+        if (session == null) {
+            restorePlaybackMode(viewer);
+            return;
+        }
         session.finished = true;
 
-        BossShowHistory.markPlayed(viewer, session.definition, session.target);
-        NetworkHandler.sendToPlayer(new BossShowStopPacket(session.definition.id(), skipped), viewer);
+        try {
+            BossShowHistory.markPlayed(viewer, session.definition, session.target);
+            NetworkHandler.sendToPlayer(new BossShowStopPacket(session.definition.id(), skipped), viewer);
 
-        BossShow hook = BossShowManager.getCodeHook(session.definition.id());
-        if (hook != null) {
-            try {
-                hook.onEnd(session, skipped);
-            } catch (Throwable t) {
-                EcaLogger.error("BossShow {} onEnd hook threw: {}", session.definition.id(), t.getMessage());
+            BossShow hook = BossShowManager.getCodeHook(session.definition.id());
+            if (hook != null) {
+                try {
+                    hook.onEnd(session, skipped);
+                } catch (Throwable t) {
+                    EcaLogger.error("BossShow {} onEnd hook threw: {}", session.definition.id(), t.getMessage());
+                }
             }
+        } finally {
+            restorePlaybackMode(viewer);
         }
     }
 
@@ -93,7 +106,18 @@ public final class BossShowPlaybackTracker {
     }
 
     public static void onPlayerLogout(ServerPlayer viewer) {
-        ACTIVE.remove(viewer.getUUID());
+        BossShowSession session = ACTIVE.remove(viewer.getUUID());
+        if (session != null) {
+            session.finished = true;
+        }
+        restorePlaybackMode(viewer);
+    }
+
+    // 登录时残留标记说明上次播放未正常结束，必须恢复进入播放前的模式。
+    public static void recoverStaleSession(ServerPlayer viewer) {
+        if (viewer != null && viewer.getPersistentData().contains(NBT_PLAYBACK_MODE, Tag.TAG_COMPOUND)) {
+            restorePlaybackMode(viewer);
+        }
     }
 
     public static boolean isPlaying(ServerPlayer viewer) {
@@ -213,6 +237,48 @@ public final class BossShowPlaybackTracker {
     }
 
     public static void clearAll() {
+        for (BossShowSession session : ACTIVE.values()) {
+            session.finished = true;
+            restorePlaybackMode(session.viewer);
+        }
         ACTIVE.clear();
+    }
+
+    // 播放模式使用独立快照，使编辑器内试播结束后仍回到编辑器的旁观状态。
+    private static boolean enterPlaybackMode(ServerPlayer viewer) {
+        CompoundTag persistent = viewer.getPersistentData();
+        boolean createdSnapshot = !persistent.contains(NBT_PLAYBACK_MODE, Tag.TAG_COMPOUND);
+        if (createdSnapshot) {
+            CompoundTag root = new CompoundTag();
+            root.putString(NBT_PREVIOUS_GAME_MODE, viewer.gameMode.getGameModeForPlayer().getName());
+            persistent.put(NBT_PLAYBACK_MODE, root);
+        }
+        if (viewer.gameMode.getGameModeForPlayer() == GameType.SPECTATOR) {
+            return true;
+        }
+        if (viewer.setGameMode(GameType.SPECTATOR)) {
+            return true;
+        }
+        if (createdSnapshot) {
+            persistent.remove(NBT_PLAYBACK_MODE);
+        }
+        EcaLogger.info("BossShow start rejected because spectator mode could not be applied, uuid={}",
+                viewer.getUUID());
+        return false;
+    }
+
+    private static void restorePlaybackMode(ServerPlayer viewer) {
+        if (viewer == null) return;
+        CompoundTag persistent = viewer.getPersistentData();
+        if (!persistent.contains(NBT_PLAYBACK_MODE, Tag.TAG_COMPOUND)) return;
+
+        CompoundTag root = persistent.getCompound(NBT_PLAYBACK_MODE);
+        GameType previous = GameType.byName(
+                root.getString(NBT_PREVIOUS_GAME_MODE), GameType.SURVIVAL);
+        persistent.remove(NBT_PLAYBACK_MODE);
+        if (viewer.gameMode.getGameModeForPlayer() != previous && !viewer.setGameMode(previous)) {
+            EcaLogger.info("BossShow could not restore game mode, uuid={}, mode={}",
+                    viewer.getUUID(), previous.getName());
+        }
     }
 }

@@ -13,6 +13,16 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
@@ -99,6 +109,34 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         }
     }
 
+    public static byte[] normalizeHealthTail(String className, byte[] classfileBuffer) {
+        if (className == null || classfileBuffer == null) return null;
+        if (FORCE_COMPATIBILITY_MODE) return null;
+        byte[] result = classfileBuffer;
+        boolean changed = false;
+        try {
+            byte[] normalized = normalizeHealthHooks(className, result);
+            if (normalized != null) {
+                result = normalized;
+                changed = true;
+            }
+            byte[] bridgeResult = MethodProbe.transform(className, result);
+            if (bridgeResult != null) {
+                result = bridgeResult;
+                changed = true;
+            }
+            byte[] constantResult = ConstOverride.transform(className, result);
+            if (constantResult != null) {
+                result = constantResult;
+                changed = true;
+            }
+            return changed ? result : null;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return null;
+        }
+    }
+
     public static boolean verifyHealthTail(String className, byte[] bytes) {
         if (className == null || bytes == null) return false;
         if (FORCE_COMPATIBILITY_MODE) return false;
@@ -116,6 +154,15 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             if (!ConstOverride.verifyTransform(className, bytes)) return false;
         }
         return requested;
+    }
+
+    public static boolean verifyNormalizedHealthTail(String className, byte[] bytes) {
+        if (!verifyNormalizedHealthHooks(className, bytes)) return false;
+        if (verifyHealthTail(className, bytes)) return true;
+        return isHealthHookTarget(className)
+                && !hasHealthHookTarget(className, bytes)
+                && !MethodProbe.hasTransformSpecs(className)
+                && !ConstOverride.hasSites(className);
     }
 
     // 实体健康 hook 目标：基类 LivingEntity/Entity 恒为目标（不依赖 KNOWN_* 预填充），子类由收集阶段填入 KNOWN_*
@@ -195,7 +242,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         try {
             byte[] transformed = SINGLETON.transformInternal(name, type, bytes);
             if (!health) return transformed;
-            byte[] tail = transformHealthTail(name, transformed == null ? bytes : transformed);
+            byte[] tail = normalizeHealthTail(name, transformed == null ? bytes : transformed);
             return tail == null ? transformed : tail;
         } finally {
             if (previous) OWN_RETRANSFORM.set(true);
@@ -625,6 +672,179 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         String getHealthKey = methodKey(GET_HEALTH, "()F");
         return !scanner.targetMethods.contains(getHealthKey)
                 || scanner.resultHookedMethods.contains(getHealthKey);
+    }
+
+    private static byte[] normalizeHealthHooks(String className, byte[] bytes) {
+        boolean living = LIVING_ENTITY.equals(className) || KNOWN_LIVING_ENTITY_CLASSES.contains(className);
+        boolean entity = !living && (ENTITY.equals(className) || KNOWN_ENTITY_ONLY_CLASSES.contains(className));
+        if (!living && !entity) return null;
+
+        ClassReader reader = new ClassReader(bytes);
+        ClassNode node = new ClassNode(Opcodes.ASM9);
+        reader.accept(node, ClassReader.EXPAND_FRAMES);
+        boolean changed = false;
+        for (MethodNode method : node.methods) {
+            String owner = expectedHookOwner(living, method.name, method.desc);
+            String hook = expectedHookName(living, method.name, method.desc);
+            if (owner == null || (method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) continue;
+            if (!hasCanonicalHead(method, owner, hook)) {
+                injectCanonicalHead(method, owner, hook, living);
+                changed = true;
+            }
+            if (living && GET_HEALTH.equals(method.name) && "()F".equals(method.desc)) {
+                changed |= finalizeFloatReturns(method);
+            }
+        }
+        if (!changed) return null;
+        SafeClassWriter writer = new SafeClassWriter(reader, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        node.accept(writer);
+        transformCount++;
+        return writer.toByteArray();
+    }
+
+    private static boolean verifyNormalizedHealthHooks(String className, byte[] bytes) {
+        boolean living = LIVING_ENTITY.equals(className) || KNOWN_LIVING_ENTITY_CLASSES.contains(className);
+        boolean entity = !living && (ENTITY.equals(className) || KNOWN_ENTITY_ONLY_CLASSES.contains(className));
+        if (!living && !entity) return true;
+        ClassNode node = new ClassNode(Opcodes.ASM9);
+        new ClassReader(bytes).accept(node, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+        boolean requested = false;
+        for (MethodNode method : node.methods) {
+            String owner = expectedHookOwner(living, method.name, method.desc);
+            String hook = expectedHookName(living, method.name, method.desc);
+            if (owner == null || (method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) continue;
+            requested = true;
+            if (!hasCanonicalHead(method, owner, hook)) return false;
+            if (living && GET_HEALTH.equals(method.name) && "()F".equals(method.desc)) {
+                for (AbstractInsnNode instruction : method.instructions.toArray()) {
+                    if (instruction.getOpcode() == Opcodes.FRETURN
+                            && !isFinalHealthResult(previousCode(instruction))) return false;
+                }
+            }
+        }
+        return requested || living || entity;
+    }
+
+    private static boolean hasCanonicalHead(MethodNode method, String owner, String hook) {
+        AbstractInsnNode cursor = nextCode(method.instructions.getFirst());
+        if (!isVar(cursor, Opcodes.ALOAD, 0)) return false;
+        cursor = nextCode(cursor.getNext());
+        String castType = ENTITY_HOOK.equals(owner) ? ENTITY : LIVING_ENTITY;
+        if (!(cursor instanceof TypeInsnNode type) || cursor.getOpcode() != Opcodes.CHECKCAST
+                || !castType.equals(type.desc)) return false;
+        cursor = nextCode(cursor.getNext());
+        if (!isCall(cursor, owner, hook)) return false;
+        cursor = nextCode(cursor.getNext());
+
+        if (method.desc.endsWith("F")) {
+            if (cursor == null || cursor.getOpcode() != Opcodes.DUP) return false;
+            cursor = nextCode(cursor.getNext());
+            if (cursor == null || cursor.getOpcode() != Opcodes.DUP) return false;
+            cursor = nextCode(cursor.getNext());
+            if (cursor == null || cursor.getOpcode() != Opcodes.FCMPL) return false;
+            cursor = nextCode(cursor.getNext());
+            if (!(cursor instanceof JumpInsnNode) || cursor.getOpcode() != Opcodes.IFLT) return false;
+            cursor = nextCode(cursor.getNext());
+            if (GET_HEALTH.equals(method.name)) {
+                if (!isVar(cursor, Opcodes.ALOAD, 0)) return false;
+                cursor = nextCode(cursor.getNext());
+                if (!(cursor instanceof TypeInsnNode resultCast) || cursor.getOpcode() != Opcodes.CHECKCAST
+                        || !LIVING_ENTITY.equals(resultCast.desc)) return false;
+                cursor = nextCode(cursor.getNext());
+                if (cursor == null || cursor.getOpcode() != Opcodes.SWAP) return false;
+                cursor = nextCode(cursor.getNext());
+                if (!isFinalHealthResult(cursor)) return false;
+                cursor = nextCode(cursor.getNext());
+            }
+            return cursor != null && cursor.getOpcode() == Opcodes.FRETURN;
+        }
+
+        if (cursor == null || cursor.getOpcode() != Opcodes.DUP) return false;
+        cursor = nextCode(cursor.getNext());
+        if (cursor == null || cursor.getOpcode() != Opcodes.ICONST_M1) return false;
+        cursor = nextCode(cursor.getNext());
+        if (!(cursor instanceof JumpInsnNode) || cursor.getOpcode() != Opcodes.IF_ICMPEQ) return false;
+        cursor = nextCode(cursor.getNext());
+        return cursor != null && cursor.getOpcode() == Opcodes.IRETURN;
+    }
+
+    private static void injectCanonicalHead(MethodNode method, String owner, String hook, boolean living) {
+        String castType = ENTITY_HOOK.equals(owner) ? ENTITY : LIVING_ENTITY;
+        LabelNode passthrough = new LabelNode();
+        InsnList instructions = new InsnList();
+        instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        instructions.add(new TypeInsnNode(Opcodes.CHECKCAST, castType));
+        instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, hook,
+                expectedHookDescriptor(owner, hook), false));
+        if (method.desc.endsWith("F")) {
+            instructions.add(new InsnNode(Opcodes.DUP));
+            instructions.add(new InsnNode(Opcodes.DUP));
+            instructions.add(new InsnNode(Opcodes.FCMPL));
+            instructions.add(new JumpInsnNode(Opcodes.IFLT, passthrough));
+            if (living && GET_HEALTH.equals(method.name)) appendHealthResult(instructions);
+            instructions.add(new InsnNode(Opcodes.FRETURN));
+        } else {
+            instructions.add(new InsnNode(Opcodes.DUP));
+            instructions.add(new InsnNode(Opcodes.ICONST_M1));
+            instructions.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, passthrough));
+            instructions.add(new InsnNode(Opcodes.IRETURN));
+        }
+        instructions.add(passthrough);
+        instructions.add(new InsnNode(Opcodes.POP));
+        method.instructions.insert(instructions);
+    }
+
+    private static boolean finalizeFloatReturns(MethodNode method) {
+        boolean changed = false;
+        for (AbstractInsnNode instruction : method.instructions.toArray()) {
+            if (instruction.getOpcode() != Opcodes.FRETURN || isFinalHealthResult(previousCode(instruction))) continue;
+            InsnList resultHook = new InsnList();
+            appendHealthResult(resultHook);
+            method.instructions.insertBefore(instruction, resultHook);
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static void appendHealthResult(InsnList instructions) {
+        instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        instructions.add(new TypeInsnNode(Opcodes.CHECKCAST, LIVING_ENTITY));
+        instructions.add(new InsnNode(Opcodes.SWAP));
+        instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, LIVING_HOOK,
+                "processGetHealthResult", "(Lnet/minecraft/world/entity/LivingEntity;F)F", false));
+    }
+
+    private static String expectedHookDescriptor(String owner, String hook) {
+        if (ENTITY_HOOK.equals(owner)) return "(Lnet/minecraft/world/entity/Entity;)I";
+        if ("processGetHealth".equals(hook) || "processGetMaxHealth".equals(hook)) {
+            return "(Lnet/minecraft/world/entity/LivingEntity;)F";
+        }
+        return "(Lnet/minecraft/world/entity/LivingEntity;)I";
+    }
+
+    private static boolean isFinalHealthResult(AbstractInsnNode instruction) {
+        return isCall(instruction, LIVING_HOOK, "processGetHealthResult");
+    }
+
+    private static boolean isCall(AbstractInsnNode instruction, String owner, String name) {
+        return instruction instanceof MethodInsnNode call && instruction.getOpcode() == Opcodes.INVOKESTATIC
+                && owner.equals(call.owner) && name.equals(call.name);
+    }
+
+    private static boolean isVar(AbstractInsnNode instruction, int opcode, int variable) {
+        return instruction instanceof VarInsnNode var && instruction.getOpcode() == opcode && var.var == variable;
+    }
+
+    private static AbstractInsnNode nextCode(AbstractInsnNode instruction) {
+        AbstractInsnNode cursor = instruction;
+        while (cursor != null && cursor.getOpcode() < 0) cursor = cursor.getNext();
+        return cursor;
+    }
+
+    private static AbstractInsnNode previousCode(AbstractInsnNode instruction) {
+        AbstractInsnNode cursor = instruction == null ? null : instruction.getPrevious();
+        while (cursor != null && cursor.getOpcode() < 0) cursor = cursor.getPrevious();
+        return cursor;
     }
 
     private static String expectedHookOwner(boolean isLivingEntity, String name, String desc) {
