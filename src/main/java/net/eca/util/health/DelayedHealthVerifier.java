@@ -15,6 +15,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 
 /*
  * 改血延迟复查：写入当场校验只能证明"这一刻写进去了"。挂在实体 tick 上的防护会在下一 tick 把值改回去，
@@ -47,6 +48,7 @@ public final class DelayedHealthVerifier {
        put 覆盖即可完成去重，同时使上限检查不必遍历链表。
        id 取自 Entity.ENTITY_COUNTER，单次服务器运行内跨维度唯一；重启后会重排，故须在停服时清空。 */
     private static final Map<Integer, Pending> PENDING = new ConcurrentHashMap<>();
+    private static final Map<Ticket, BiConsumer<HealthReportText, Float>> OBSERVERS = new ConcurrentHashMap<>();
     private static final Map<Integer, DeathConvergence> DEATH_CONVERGENCE = new ConcurrentHashMap<>();
     private static final Set<String> ROLLBACK_DUMPED = ConcurrentHashMap.newKeySet();
     private static final AtomicBoolean SATURATION_DUMPED = new AtomicBoolean();
@@ -78,13 +80,33 @@ public final class DelayedHealthVerifier {
         if (previous != null) {
             if (previous.ticket().entityUuid().equals(ticket.entityUuid())) {
                 ExternalMirrorWriter.supersede(previous.ticket(), ticket);
-                HealthReportManager.completeDelayed(previous.ticket(), tr("delay.superseded"), Float.NaN);
+                complete(previous.ticket(), tr("delay.superseded"), Float.NaN);
             } else {
                 ExternalMirrorWriter.revert(previous.ticket());
-                HealthReportManager.completeDelayed(previous.ticket(), tr("delay.cancelled"), Float.NaN);
+                complete(previous.ticket(), tr("delay.cancelled"), Float.NaN);
             }
         }
         return ticket;
+    }
+
+    // 反馈绑定票据代次，避免下一次命令收到上一次写入的结论。
+    public static boolean observe(LivingEntity entity, BiConsumer<HealthReportText, Float> observer) {
+        if (entity == null || observer == null) return false;
+        Pending pending = PENDING.get(entity.getId());
+        if (pending == null || !pending.ticket().entityUuid().equals(entity.getUUID())) return false;
+        OBSERVERS.put(pending.ticket(), observer);
+        return true;
+    }
+
+    private static void complete(Ticket ticket, HealthReportText status, float actual) {
+        HealthReportManager.completeDelayed(ticket, status, actual);
+        BiConsumer<HealthReportText, Float> observer = OBSERVERS.remove(ticket);
+        if (observer == null) return;
+        try {
+            observer.accept(status, actual);
+        } catch (Exception e) {
+            EcaLogger.info("[DelayedVerify] feedback failed: {}", e.toString());
+        }
     }
 
     /* 多阶段实体会在阶段转换中回复已归零的内部生命。零目标来自生命周期阈值时，
@@ -123,6 +145,7 @@ public final class DelayedHealthVerifier {
     //停服时清空：实体 id 会在下次启动重排，残留条目会拿旧目标值去比对新实体
     public static void clear() {
         PENDING.clear();
+        OBSERVERS.clear();
         DEATH_CONVERGENCE.clear();
         ExternalMirrorWriter.clear();
         HealthReportManager.clear();
@@ -137,25 +160,25 @@ public final class DelayedHealthVerifier {
         // 已卸载或已移除的实体无从复查；目标为死亡时实体消失本身就是写入生效
         if (entity == null || entity.isRemoved()) {
             ExternalMirrorWriter.commit(ticket);
-            HealthReportManager.completeDelayed(ticket, tr("delay.removed"), Float.NaN);
+            complete(ticket, tr("delay.removed"), Float.NaN);
             return;
         }
         if (entity.getId() != entityId || !entity.getUUID().equals(ticket.entityUuid())) {
             ExternalMirrorWriter.revert(ticket);
-            HealthReportManager.completeDelayed(ticket, tr("delay.identity_changed"), Float.NaN);
+            complete(ticket, tr("delay.identity_changed"), Float.NaN);
             return;
         }
         /* 锚点已被证明与真实存储解耦时，它读回什么都不构成"被改回去了"的证据。
            此处据它判失败会把诱饵型目标上的每次成功都揭成假成功，并误启外部镜像。 */
         if (EcaSetHealthManager.isAnchorUntrusted(entity)) {
             ExternalMirrorWriter.commit(ticket);
-            HealthReportManager.completeDelayed(ticket, tr("delay.untrusted"), Float.NaN);
+            complete(ticket, tr("delay.untrusted"), Float.NaN);
             return;
         }
         float actual = EcaSetHealthManager.readHealthAnchor(entity);
         if (!Float.isFinite(actual)) {
             ExternalMirrorWriter.commit(ticket);
-            HealthReportManager.completeDelayed(ticket, tr("delay.unavailable"), actual);
+            complete(ticket, tr("delay.unavailable"), actual);
             return;
         }
         /* 只认向上偏离：血量自行回升是回滚与强制回血的特征。向下偏离可能只是这一 tick 内的
@@ -163,7 +186,7 @@ public final class DelayedHealthVerifier {
         if (HealthValueSemantics.retainedAfterDelay(actual, pending.target())) {
             EcaSetHealthManager.onDelayedRetained(pending.entityClass());
             ExternalMirrorWriter.commit(ticket);
-            HealthReportManager.completeDelayed(ticket, tr("delay.retained"), actual);
+            complete(ticket, tr("delay.retained"), actual);
             return;
         }
 
@@ -174,7 +197,7 @@ public final class DelayedHealthVerifier {
         }
         ExternalMirrorWriter.revert(ticket);
         EcaSetHealthManager.onDelayedRollback(cls);
-        HealthReportManager.completeDelayed(ticket, tr("delay.rolled_back"), actual);
+        complete(ticket, tr("delay.rolled_back"), actual);
     }
 
     private static void convergeDeaths(int now) {

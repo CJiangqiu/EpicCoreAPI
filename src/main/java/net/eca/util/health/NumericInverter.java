@@ -199,10 +199,17 @@ public final class NumericInverter {
     // ==================== 对象图遍历：收集可扰动原始 cell ====================
 
     private static void walk(Object obj, List<Cell> cells, Set<Object> visited, long deadline, int depth, int cellCap) {
+        walk(obj, cells, visited, deadline, depth, cellCap, HealthMutationContext.allowNumericDescent(obj));
+    }
+
+    private static void walk(Object obj, List<Cell> cells, Set<Object> visited, long deadline, int depth,
+                             int cellCap, boolean descend) {
         if (obj == null || depth > MAX_WALK_DEPTH || System.nanoTime() > deadline || cells.size() >= cellCap) return;
         if (obj instanceof Enum<?>) return;
         if (HealthMutationContext.current() != null && obj instanceof Entity) return;
-        if (!HealthMutationContext.allowNumericObject(obj)) return;
+        if (!HealthMutationContext.allowNumericObject(obj)
+                && (!descend || obj instanceof Map<?, ?>
+                    || obj instanceof Iterable<?> && !(obj instanceof List<?>))) return;
         if (obj instanceof Number || obj instanceof Boolean || obj instanceof Character || obj instanceof String) return;
         if (!visited.add(obj)) return;
         Class<?> cls = obj.getClass();
@@ -215,7 +222,7 @@ public final class NumericInverter {
                 if (System.nanoTime() > deadline || cells.size() >= cellCap) return;
                 Object value = entry.getValue();
                 if (value instanceof Number) cells.add(new MapValueCell(map, entry.getKey()));
-                else walk(value, cells, visited, deadline, depth + 1, cellCap);
+                else walk(value, cells, visited, deadline, depth + 1, cellCap, descend);
             }
             return;
         }
@@ -224,14 +231,14 @@ public final class NumericInverter {
                 if (System.nanoTime() > deadline || cells.size() >= cellCap) return;
                 Object value = list.get(i);
                 if (value instanceof Number) cells.add(new ListValueCell(list, i));
-                else walk(value, cells, visited, deadline, depth + 1, cellCap);
+                else walk(value, cells, visited, deadline, depth + 1, cellCap, descend);
             }
             return;
         }
         if (obj instanceof Collection<?> collection) {
             for (Object value : collection) {
                 if (System.nanoTime() > deadline || cells.size() >= cellCap) return;
-                if (!(value instanceof Number)) walk(value, cells, visited, deadline, depth + 1, cellCap);
+                if (!(value instanceof Number)) walk(value, cells, visited, deadline, depth + 1, cellCap, descend);
             }
             return;
         }
@@ -246,7 +253,7 @@ public final class NumericInverter {
                     if (System.nanoTime() > deadline || cells.size() >= cellCap) return;
                     Object el = Array.get(obj, i);
                     if (el instanceof Number) cells.add(new ArrayCell(obj, i));
-                    else walk(el, cells, visited, deadline, depth + 1, cellCap);
+                    else walk(el, cells, visited, deadline, depth + 1, cellCap, descend);
                 }
             }
             return;
@@ -265,7 +272,7 @@ public final class NumericInverter {
                         Object v = f.get(obj);
                         if (v == null) continue;
                         if (v instanceof Number) cells.add(new FieldCell(obj, f));
-                        else walk(v, cells, visited, deadline, depth + 1, cellCap);
+                        else walk(v, cells, visited, deadline, depth + 1, cellCap, descend);
                     }
                 } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
             }

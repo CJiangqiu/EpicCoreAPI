@@ -41,6 +41,10 @@ final class HealthMutationContext implements AutoCloseable {
     private final List<HealthSolveResult> failures = new ArrayList<>();
     private final Set<Object> runtimeRoots = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<Object> allowedNumericRoots = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Map<Object, Set<Object>> readObjects = new IdentityHashMap<>();
+    private final List<Expr> boundedReadExpressions = new ArrayList<>();
+    private final List<Expr> numericExpressions = new ArrayList<>();
+    private final Set<Object> numericDescentRoots = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<Attempt> attempts = new LinkedHashSet<>();
     private final List<HealthReportText> events = new ArrayList<>();
     private String channel = "channel.initial";
@@ -48,9 +52,18 @@ final class HealthMutationContext implements AutoCloseable {
     private HealthReportText stopReason;
     private int revision;
     private final Set<Source> readStorage = new LinkedHashSet<>();
+    private final Set<Source> writtenStorage = new LinkedHashSet<>();
     private Expr primaryRead;
+    private boolean inheritedReadCandidate;
     private boolean storageSearchPending;
     private final Map<Source, Submission> submissions = new LinkedHashMap<>();
+
+    static void recordWrittenStorage(Source source) {
+        HealthMutationContext context = current();
+        if (context != null && source != null) context.writtenStorage.add(source);
+    }
+
+    boolean wroteStorage(Source source) { return writtenStorage.contains(source); }
 
     void rememberSubmission(Source source, Object candidate, BooleanSupplier validate, Runnable consume) {
         submissions.put(source, new Submission(candidate, validate, consume));
@@ -85,6 +98,8 @@ final class HealthMutationContext implements AutoCloseable {
         slice.removeIf(source -> source.read(entity) == null);
         if (slice.isEmpty()) return;
         primaryRead = tree.returnExpr;
+        inheritedReadCandidate = entity.getClass().isHidden() && tree.definingClass != entity.getClass();
+        if (inheritedReadCandidate) note(tr("slice.inherited_candidate"));
         readStorage.addAll(slice);
         for (Source source : slice) sources.putIfAbsent(source, "origin.health_read");
         note(tr("slice.read", readStorage.size()));
@@ -103,6 +118,40 @@ final class HealthMutationContext implements AutoCloseable {
     }
 
     boolean hasReadSlice() { return !readStorage.isEmpty(); }
+
+    boolean allowsEffectiveModel(HealthDataflowAnalyzer.EffectiveHealthModel model) {
+        if (allowsStorage(model.storage())) return true;
+        // A successful write is stronger evidence than a competing, unverified model.
+        if (readStorage.stream().anyMatch(writtenStorage::contains)) return false;
+        HealthModel observation = HealthModel.forClass(entity.getClass());
+        return observation.effectiveObservationConfirmed()
+                || (model.origin() == HealthDataflowAnalyzer.ComparisonOrigin.LIFECYCLE
+                    || inheritedReadCandidate && model.origin() == HealthDataflowAnalyzer.ComparisonOrigin.TERMINAL_OBSERVER)
+                    && EcaSetHealthManager.isHealthReadDecoupled(entity.getClass());
+    }
+
+    EffectiveSlice openEffectiveSlice(HealthDataflowAnalyzer.EffectiveHealthModel model) {
+        return new EffectiveSlice(model);
+    }
+
+    final class EffectiveSlice implements AutoCloseable {
+        private final Set<Source> previousStorage = new LinkedHashSet<>(readStorage);
+        private final Expr previousRead = primaryRead;
+
+        private EffectiveSlice(HealthDataflowAnalyzer.EffectiveHealthModel model) {
+            readStorage.clear();
+            readStorage.add(model.storage());
+            primaryRead = model.readExpr();
+            if (sources.putIfAbsent(model.storage(), "channel.effective") == null) revision++;
+            note(tr("slice.effective"));
+        }
+
+        @Override public void close() {
+            readStorage.clear();
+            readStorage.addAll(previousStorage);
+            primaryRead = previousRead;
+        }
+    }
 
     void deferStorageSearch(Source source) {
         if (readStorage.contains(source)) {
@@ -156,6 +205,14 @@ final class HealthMutationContext implements AutoCloseable {
         }
     }
 
+    static void analysisPending() {
+        HealthMutationContext context = current();
+        if (context == null) return;
+        context.stopped = true;
+        context.stopReason = tr("analysis.pending");
+        context.note(context.stopReason);
+    }
+
     static void recordEvidence(HealthReportText detail) {
         if (current() != null) current().note(detail);
     }
@@ -173,6 +230,13 @@ final class HealthMutationContext implements AutoCloseable {
 
     void publish(String origin, AnalysisResult tree) {
         if (tree == null || tree.returnExpr == null) return;
+        if (numericExpressions.size() < MAX_EVIDENCE
+                && numericExpressions.stream().noneMatch(expression -> expression == tree.returnExpr)) {
+            numericExpressions.add(tree.returnExpr);
+        }
+        if (HealthDataflowAnalyzer.hasBoundedReadBoundary(tree.returnExpr)
+                && boundedReadExpressions.size() < MAX_EVIDENCE
+                && !boundedReadExpressions.contains(tree.returnExpr)) boundedReadExpressions.add(tree.returnExpr);
         String expressionKey = HealthDataflowAnalyzer.evidenceKey(tree.returnExpr);
         if (expressions.size() < MAX_EVIDENCE && !expressions.containsKey(expressionKey)) {
             expressions.put(expressionKey, origin);
@@ -259,10 +323,46 @@ final class HealthMutationContext implements AutoCloseable {
     }
 
     List<Object> numericRoots() {
-        List<Object> roots = roots("channel.numeric");
-        roots.removeIf(value -> value instanceof Map<?, ?> || value instanceof Iterable<?>);
+        List<Object> roots = new ArrayList<>();
+        Set<Object> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Expr expression : boundedReadExpressions) {
+            for (Object root : HealthDataflowAnalyzer.boundedReadRoots(expression, HealthDataflowAnalyzer.newContext(entity))) {
+                if (seen.add(root)) roots.add(root);
+            }
+        }
+        List<Object> candidates = roots("channel.numeric");
+        for (Expr expression : numericExpressions) {
+            candidates.addAll(HealthDataflowAnalyzer.collectDeadEndRoots(
+                    expression, HealthDataflowAnalyzer.newContext(entity)));
+        }
+        for (Object root : candidates) {
+            if (roots.size() >= MAX_EVIDENCE) break;
+            if (root == null || root instanceof Entity || root instanceof Class<?>
+                    || root instanceof Map<?, ?> || root instanceof Iterable<?> && !(root instanceof List<?>)) continue;
+            if (seen.add(root)) roots.add(root);
+            // A located opaque value may have no read trace; its private object graph remains searchable.
+            if (!readObjects.containsKey(root)) numericDescentRoots.add(root);
+        }
         allowedNumericRoots.addAll(roots);
+        for (Object root : roots) allowedNumericRoots.addAll(readObjects.getOrDefault(root, Set.of()));
         return roots;
+    }
+
+    static boolean allowNumericDescent(Object root) {
+        HealthMutationContext context = current();
+        return context == null || context.numericDescentRoots.contains(root);
+    }
+
+    boolean hasBoundedNumericRead() {
+        return boundedReadExpressions.stream().anyMatch(HealthDataflowAnalyzer::hasBoundedNumericReadBoundary);
+    }
+
+    static void recordReadObjects(Object root, Set<Object> objects) {
+        HealthMutationContext context = current();
+        if (context == null || root == null || context.readObjects.size() >= MAX_EVIDENCE) return;
+        Set<Object> copy = Collections.newSetFromMap(new IdentityHashMap<>());
+        copy.addAll(objects);
+        context.readObjects.put(root, copy);
     }
 
     static boolean allowNumericObject(Object value) {

@@ -72,6 +72,11 @@ public final class HealthMutationPipeline {
             HealthReportManager.recordSkipped(entity, channel, tr("slice.skip_unrelated"));
             return false;
         }
+        if (context.hasBoundedNumericRead() && channel.equals("channel.probe")
+                && EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely()) {
+            HealthReportManager.recordSkipped(entity, channel, tr("analysis.bounded_read"));
+            return false;
+        }
         if (context.hasReadSlice() && channel.equals("channel.probe")) {
             HealthReportManager.recordSkipped(entity, channel, tr("slice.skip_probe"));
             return false;

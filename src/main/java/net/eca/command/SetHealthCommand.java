@@ -5,6 +5,7 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import net.eca.api.EcaAPI;
 import net.eca.config.EcaConfiguration;
+import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.HealthReportManager;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
@@ -61,6 +62,20 @@ public class SetHealthCommand {
                     success = EcaAPI.setHealth(livingEntity, health);
                     if (success) {
                         successCount++;
+                        Component displayName = livingEntity.getDisplayName().copy();
+                        DelayedHealthVerifier.observe(livingEntity, (status, actual) -> {
+                            if (status.key().equals("delay.rolled_back")) {
+                                source.sendFailure(Component.translatable(
+                                        "command.eca.set_health.rolled_back", displayName, health, actual));
+                            } else if (status.key().equals("delay.retained")) {
+                                source.sendSuccess(() -> Component.translatable(
+                                        "command.eca.set_health.retained", displayName, actual), false);
+                            } else {
+                                source.sendSuccess(() -> Component.translatable(
+                                        "command.eca.set_health.unconfirmed", displayName,
+                                        Component.translatable("health_report.eca." + status.key())), false);
+                            }
+                        });
                     } else {
                         source.sendFailure(Component.translatable(
                                 "command.eca.set_health.failed", entity.getDisplayName())
