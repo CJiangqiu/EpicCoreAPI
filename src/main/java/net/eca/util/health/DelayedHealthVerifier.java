@@ -1,5 +1,7 @@
 package net.eca.util.health;
 
+import static net.eca.util.health.HealthReportText.tr;
+
 import net.eca.util.EcaLogger;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.LivingEntity;
@@ -76,10 +78,10 @@ public final class DelayedHealthVerifier {
         if (previous != null) {
             if (previous.ticket().entityUuid().equals(ticket.entityUuid())) {
                 ExternalMirrorWriter.supersede(previous.ticket(), ticket);
-                HealthReportManager.completeDelayed(previous.ticket(), "后续改血取代本次延迟复查", Float.NaN);
+                HealthReportManager.completeDelayed(previous.ticket(), tr("delay.superseded"), Float.NaN);
             } else {
                 ExternalMirrorWriter.revert(previous.ticket());
-                HealthReportManager.completeDelayed(previous.ticket(), "实体身份变化，本次延迟复查已撤销", Float.NaN);
+                HealthReportManager.completeDelayed(previous.ticket(), tr("delay.cancelled"), Float.NaN);
             }
         }
         return ticket;
@@ -104,6 +106,7 @@ public final class DelayedHealthVerifier {
        登记时若已在实体 tick 之后，到期判定会顺延一轮，因此复查前必然至少经过一次实体 tick。 */
     public static void onServerTick(MinecraftServer server) {
         if (server == null) return;
+        HealthReportManager.expireClientSync();
         int now = server.getTickCount();
         /* 先重新施加零目标，再做延迟复查。阶段转换同 tick 的合法回复不能先被误报为回滚。 */
         convergeDeaths(now);
@@ -134,25 +137,25 @@ public final class DelayedHealthVerifier {
         // 已卸载或已移除的实体无从复查；目标为死亡时实体消失本身就是写入生效
         if (entity == null || entity.isRemoved()) {
             ExternalMirrorWriter.commit(ticket);
-            HealthReportManager.completeDelayed(ticket, "实体已移除，按目标已生效处理", Float.NaN);
+            HealthReportManager.completeDelayed(ticket, tr("delay.removed"), Float.NaN);
             return;
         }
         if (entity.getId() != entityId || !entity.getUUID().equals(ticket.entityUuid())) {
             ExternalMirrorWriter.revert(ticket);
-            HealthReportManager.completeDelayed(ticket, "实体身份发生变化，无法复查", Float.NaN);
+            HealthReportManager.completeDelayed(ticket, tr("delay.identity_changed"), Float.NaN);
             return;
         }
         /* 锚点已被证明与真实存储解耦时，它读回什么都不构成"被改回去了"的证据。
            此处据它判失败会把诱饵型目标上的每次成功都揭成假成功，并误启外部镜像。 */
         if (EcaSetHealthManager.isAnchorUntrusted(entity)) {
             ExternalMirrorWriter.commit(ticket);
-            HealthReportManager.completeDelayed(ticket, "观测出口不可信，无法据此否定写入", Float.NaN);
+            HealthReportManager.completeDelayed(ticket, tr("delay.untrusted"), Float.NaN);
             return;
         }
         float actual = EcaSetHealthManager.readHealthAnchor(entity);
         if (!Float.isFinite(actual)) {
             ExternalMirrorWriter.commit(ticket);
-            HealthReportManager.completeDelayed(ticket, "延迟观测值不可用，保留已提交写入", actual);
+            HealthReportManager.completeDelayed(ticket, tr("delay.unavailable"), actual);
             return;
         }
         /* 只认向上偏离：血量自行回升是回滚与强制回血的特征。向下偏离可能只是这一 tick 内的
@@ -160,7 +163,7 @@ public final class DelayedHealthVerifier {
         if (HealthValueSemantics.retainedAfterDelay(actual, pending.target())) {
             EcaSetHealthManager.onDelayedRetained(pending.entityClass());
             ExternalMirrorWriter.commit(ticket);
-            HealthReportManager.completeDelayed(ticket, "目标值在下一 tick 后保留", actual);
+            HealthReportManager.completeDelayed(ticket, tr("delay.retained"), actual);
             return;
         }
 
@@ -171,7 +174,7 @@ public final class DelayedHealthVerifier {
         }
         ExternalMirrorWriter.revert(ticket);
         EcaSetHealthManager.onDelayedRollback(cls);
-        HealthReportManager.completeDelayed(ticket, "目标值在下一 tick 被回滚", actual);
+        HealthReportManager.completeDelayed(ticket, tr("delay.rolled_back"), actual);
     }
 
     private static void convergeDeaths(int now) {

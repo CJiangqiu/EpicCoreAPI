@@ -1,5 +1,7 @@
 package net.eca.util.health;
 
+import static net.eca.util.health.HealthReportText.tr;
+
 import net.eca.config.EcaConfiguration;
 import net.eca.coremod.EcaTransformerManager;
 import net.eca.coremod.LivingEntityHook;
@@ -24,6 +26,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 数据流逆向分析交给 HealthDataflowAnalyzer，写入交给 HealthDataFlow，本类只负责编排表 + warmup + verify。
  */
 public final class EcaSetHealthManager {
+    private static final Map<Class<?>, Map<String, String>> PROBE_EVIDENCE = new ConcurrentHashMap<>();
+
+    private static void publishEvidence(LivingEntity entity) {
+        HealthMutationContext context = HealthMutationContext.current();
+        if (context == null) return;
+        context.publish("origin.health_read", HealthDataflowAnalyzer.analyze(entity.getClass()));
+        context.publish("channel.external", HealthDataflowAnalyzer.peekExternalScanResult(entity.getClass()));
+    }
 
     private EcaSetHealthManager() {}
 
@@ -113,16 +123,19 @@ public final class EcaSetHealthManager {
         if (target == null) return false;
         if (!EcaConfiguration.getAttackSetHealthEnableDataflowSafely()) return false;
         HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(target.getClass());
+        publishEvidence(target);
         if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) return false;
+        if (HealthMutationContext.current() != null) HealthMutationContext.current().establishReadSlice(tree);
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
+        if (!snapshot.readyForWrite()) return false;
         boolean success = HealthDataFlow.write(tree, target, targetHealth);
         if (!success) snapshot.restore();
         /* dataflow 写实体存储成功后，追加写实体外的 SavedData 真实权威。
            dataflow 可能只覆盖实体内同步单元镜像，当场 verify 通过，但真实血量
            (SavedData) 未写，下一 tick 被钳制回。ExternalScan(tick 收集)能定位 SavedData 写源，
            追加写入使真实权威与实体镜像一致。外部扫描关闭或未就绪时不阻塞 dataflow 的成功结果。 */
-        tryExternalScanCoWrite(target, targetHealth);
+        if (success && !HealthMutationContext.stopped()) tryExternalScanCoWrite(target, targetHealth);
         return success;
     }
 
@@ -175,25 +188,30 @@ public final class EcaSetHealthManager {
         HealthDataflowAnalyzer.AnalysisResult tree = HealthDataflowAnalyzer.peekExternalScanResult(cls);
         if (tree == null) {
             submitExternalScanAnalysis(cls);
+            HealthReportManager.recordSkipped(target, "channel.external", tr("analysis.not_ready"));
+            HealthReportManager.recordSkipped(target, "channel.effective", tr("analysis.waiting"));
             return false;
         }
+        publishEvidence(target);
         List<Object> rollbackRoots = collectRollbackRoots(tree, target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
+        if (!snapshot.readyForWrite()) return false;
         boolean success = HealthDataFlow.writeExternal(tree, target, targetHealth);
         if (success) {
-            HealthReportManager.recordAttempt(target, "外部语义扫描", true,
-                    "语义存储直接写入并通过校验");
-            HealthReportManager.recordSkipped(target, "有效血量反演", "外部语义存储已直接写入成功");
+            HealthReportManager.recordAttempt(target, "channel.external", true,
+                    tr("write.semantic_verified"));
+            HealthReportManager.recordSkipped(target, "channel.effective", tr("write.semantic_done"));
             return true;
         }
-        HealthReportManager.recordAttempt(target, "外部语义扫描", false,
-                "直接写入未通过校验，继续尝试有效血量反演");
+        HealthReportManager.recordAttempt(target, "channel.external", false,
+                tr("write.try_effective"));
         snapshot.restore();
+        if (HealthMutationContext.stopped()) return false;
         /* 外部扫描按存储即血量处理，存储经换算才得到血量时写入值方向不对，且校验读 getHealth 也不反映。
            此处承接同一批存储，改用有效血量表达式求逆与校验；证据正是上面写入尝试刚记录下来的。 */
         boolean effective = applyEffectiveHealth(target, targetHealth);
-        HealthReportManager.recordAttempt(target, "有效血量反演", effective,
-                effective ? "有效血量表达式求逆与校验通过" : "模型未就绪或写入未通过校验");
+        HealthReportManager.recordAttempt(target, "channel.effective", effective,
+                effective ? tr("write.effective_verified") : tr("write.model_unready"));
         return effective;
     }
 
@@ -244,6 +262,12 @@ public final class EcaSetHealthManager {
         // 缓存表达式的匹配仍可能遍历巨型树，游戏线程只消费后台已经完成的模型
         if (model == null) return false;
 
+        HealthMutationContext shared = HealthMutationContext.current();
+        if (shared != null && !shared.allowsStorage(model.storage())) {
+            HealthReportManager.recordSkipped(target, "channel.effective", tr("slice.model_excluded"));
+            return false;
+        }
+
         HealthDataflowAnalyzer.EffectiveHealthModel resolved = model;
         /* 依赖当次伤害量的式子不是血量读取，误选它做锚点会因求解与校验共用同一表达式而恒真。
            此时必须连同已确认状态一并撤销：错误锚点一旦留下，改血将永久假成功。 */
@@ -287,6 +311,7 @@ public final class EcaSetHealthManager {
         });
         List<Object> rollbackRoots = collectRollbackRoots(target);
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
+        if (!snapshot.readyForWrite()) return false;
         boolean success = HealthDataFlow.writeEffective(oriented, target, targetHealth);
         if (success) {
             if (targetHealth <= 0.0f
@@ -567,16 +592,19 @@ public final class EcaSetHealthManager {
         if (!EcaConfiguration.getAttackEnableRadicalLogicSafely()
                 || !EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) return false;
         Class<?> cls = target.getClass();
+        publishEvidence(target);
         List<Object> rollbackRoots = collectRollbackRoots(target);
 
         // 第一阶段：基础 DirectCall 候选
         if (runDirectProbe(target, cls, targetHealth, rollbackRoots, LEGACY_DIRECT_KINDS,
                 DIRECT_PROBE_RETRY_LEGACY, DIRECT_WRITER_LEGACY)) return true;
+        if (HealthMutationContext.stopped()) return false;
 
         installMethodBridgeOnce(cls);
         String classInternal = cls.getName().replace('.', '/');
         if (MethodProbe.invokeProtocolBridges(target, MethodProbe.getProtocolSpecs(classInternal),
                 targetHealth, rollbackRoots)) return true;
+        if (HealthMutationContext.stopped()) return false;
         MethodProbe.BridgeSpec spec = MethodProbe.getSpec(classInternal);
         if (spec != null) {
             if (MethodProbe.invokeTrustedBridge(target, spec, targetHealth)) return true;
@@ -594,12 +622,20 @@ public final class EcaSetHealthManager {
                                           List<Object> rollbackRoots, Set<MethodProbe.WriterKind> kinds,
                                           Map<Class<?>, Long> probeRetryAfter,
                                           Map<Class<?>, MethodProbe.DirectWriter> writerCache) {
+        if (HealthMutationContext.stopped()) return false;
         MethodProbe.DirectWriter writer = writerCache.get(cls);
         if (writer == null) {
             Long retryAfter = probeRetryAfter.get(cls);
-            if (retryAfter == null || System.nanoTime() - retryAfter >= 0L) {
+            HealthMutationContext context = HealthMutationContext.current();
+            String evidence = context == null ? "" : context.evidenceKey();
+            Map<String, String> evidenceByKind = PROBE_EVIDENCE.computeIfAbsent(cls, ignored -> new ConcurrentHashMap<>());
+            String evidenceSlot = kinds.toString();
+            boolean newEvidence = !evidence.equals(evidenceByKind.get(evidenceSlot));
+            if (retryAfter == null || System.nanoTime() - retryAfter >= 0L || newEvidence) {
+                evidenceByKind.put(evidenceSlot, evidence);
                 List<MethodProbe.DirectCandidate> candidates =
                         filterByKinds(MethodProbe.findDirectCandidates(cls), kinds);
+                if (context != null) candidates.sort((left, right) -> Integer.compare(context.priority(left), context.priority(right)));
                 writer = MethodProbe.resolveDirect(target, candidates, targetHealth, rollbackRoots);
                 if (writer != null) {
                     writerCache.put(cls, writer);
@@ -612,13 +648,17 @@ public final class EcaSetHealthManager {
             }
         }
         if (writer == null) return false;
+        if (HealthMutationContext.stopped()) return false;
+        if (HealthMutationContext.current() != null) rollbackRoots = HealthMutationContext.current().roots("origin.selected_writer");
         ObjectGraphSnapshot snapshot = ObjectGraphSnapshot.captureProbe(target, rollbackRoots);
+        if (!snapshot.readyForWrite()) return false;
         // 带死亡语义：target≤0 是斩杀意图，writer 会把血量 clamp 到≥0(实际写成 0)，故实读≤0 即成功，
         // 不能拿负 target 做容差匹配(实读被 clamp 到 0，与负目标的差恒超容差，斩杀永远误判失败)。
         // 快速改血时存储写入/读值可能瞬时偏差，重试几次再判失败，避免一次偏差就丢缓存进冷却。
         boolean wrote = false;
         float actual = Float.NaN;
         for (int attempt = 0; attempt < 3; attempt++) {
+            if (HealthMutationContext.stopped()) break;
             wrote = writer.write(target, targetHealth);
             actual = readHealthAnchor(target);
             if (wrote && HealthValueSemantics.matchesWithDeathSemantics(actual, targetHealth)) {
@@ -665,14 +705,17 @@ public final class EcaSetHealthManager {
             dumpNumericInversionSkip(cls, "gate closed (radical=" + radical + " numericInversion=" + enabled + ")");
             return false;
         }
+        publishEvidence(target);
         HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(cls);
-        if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
+        HealthMutationContext context = HealthMutationContext.current();
+        if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED && context == null) {
             dumpNumericInversionSkip(cls, "dataflow tree unavailable (no writable structure to frame dead-ends)");
             return false;
         }
-        List<Object> roots = HealthDataflowAnalyzer.collectDeadEndRoots(
-                tree.returnExpr, HealthDataflowAnalyzer.newContext(target));
-        if (roots.isEmpty()) {
+        List<Object> roots = context == null ? HealthDataflowAnalyzer.collectDeadEndRoots(
+                tree.returnExpr, HealthDataflowAnalyzer.newContext(target)) : context.numericRoots();
+        if (roots.isEmpty() && (context == null || context.numericSources().isEmpty())) {
+            HealthReportManager.recordFailureDetail(target, "channel.numeric", tr("numeric.no_roots"));
             dumpNumericInversionSkip(cls, "no dead-end roots (nothing non-invertible to descend into)");
             return false;
         }
@@ -689,6 +732,7 @@ public final class EcaSetHealthManager {
 
     // 无现成分析树时的重载：先解析分析树，再收集回滚根
     private static List<Object> collectRollbackRoots(LivingEntity target) {
+        if (HealthMutationContext.current() != null) return HealthMutationContext.current().roots("origin.probe_snapshot");
         HealthDataflowAnalyzer.AnalysisResult tree = resolveTree(target.getClass());
         if (tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) return List.of();
         return collectRollbackRoots(tree, target);
@@ -696,6 +740,7 @@ public final class EcaSetHealthManager {
 
     private static List<Object> collectRollbackRoots(HealthDataflowAnalyzer.AnalysisResult tree,
                                                      LivingEntity target) {
+        if (HealthMutationContext.current() != null) return HealthMutationContext.current().roots("origin.write_snapshot");
         if (tree == null || tree == HealthDataflowAnalyzer.AnalysisResult.DATA_FLOW_ANALYZER_FAILED) {
             return List.of();
         }
@@ -1113,6 +1158,7 @@ public final class EcaSetHealthManager {
 
     /* 服务器停止时清除所有缓存与状态，确保热重载后从干净状态开始。 */
     public static void clear() {
+        PROBE_EVIDENCE.clear();
         DATAFLOW_TABLE.clear();
         EXTERNAL_SCAN_PENDING.clear();
         TICK_SCAN_PENDING.clear();

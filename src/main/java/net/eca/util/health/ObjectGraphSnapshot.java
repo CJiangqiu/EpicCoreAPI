@@ -1,5 +1,7 @@
 package net.eca.util.health;
 
+import static net.eca.util.health.HealthReportText.tr;
+
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.util.EcaLogger;
 import net.eca.util.reflect.UnsafeUtil;
@@ -16,8 +18,10 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -42,7 +46,7 @@ final class ObjectGraphSnapshot {
         if (roots != null) {
             for (Object root : roots) snapshot.walk(root);
         }
-        if (!snapshot.complete) snapshot.diag("snapshot incomplete");
+        if (!snapshot.complete) snapshot.diag(tr("snapshot.incomplete"));
         return snapshot;
     }
 
@@ -53,19 +57,29 @@ final class ObjectGraphSnapshot {
         snapshot.captureSynchedData(entity);
         snapshot.captureStaticFieldsShallow(entity == null ? null : entity.getClass());
         if (roots != null) for (Object root : roots) snapshot.captureRootShallow(root);
-        if (!snapshot.complete) snapshot.diag("probe snapshot incomplete");
+        if (!snapshot.complete) snapshot.diag(tr("snapshot.probe_incomplete"));
         return snapshot;
     }
 
     void restore() {
+        if (!complete) HealthMutationContext.rollbackFailed(tr("snapshot.incomplete_restore"));
         for (int i = slots.size() - 1; i >= 0; i--) {
             try {
-                slots.get(i).restore();
+                if (!slots.get(i).restore()) {
+                    diag(tr("snapshot.restore_rejected"));
+                    HealthMutationContext.rollbackFailed(tr("snapshot.rejected", i, slots.get(i).getClass().getSimpleName()));
+                }
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                diag("restore failed: " + t.getClass().getSimpleName());
+                diag(tr("snapshot.restore_error", t.getClass().getSimpleName()));
+                HealthMutationContext.rollbackFailed(tr("snapshot.error", i, slots.get(i).getClass().getSimpleName(), t.getClass().getSimpleName()));
             }
         }
+    }
+
+    boolean readyForWrite() {
+        if (!complete) HealthMutationContext.recordEvidence(tr("snapshot.incomplete_write"));
+        return complete;
     }
 
     private void captureEntityFields(LivingEntity entity) {
@@ -87,7 +101,7 @@ final class ObjectGraphSnapshot {
                     addSlot(new FieldSlot(entity, field, field.get(entity)));
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
-                    diag("probe field capture failed: " + c.getName() + "." + field.getName());
+                    captureFailed(tr("snapshot.probe_field", c.getName() + "." + field.getName()));
                 }
             }
         }
@@ -106,7 +120,7 @@ final class ObjectGraphSnapshot {
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("probe SynchedEntityData capture failed: " + t.getClass().getSimpleName());
+            captureFailed(tr("snapshot.probe_synced", t.getClass().getSimpleName()));
         }
     }
 
@@ -121,7 +135,7 @@ final class ObjectGraphSnapshot {
                     walk(value);
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
-                    diag("static field capture failed: " + c.getName() + "." + field.getName());
+                    captureFailed(tr("snapshot.static_field", c.getName() + "." + field.getName()));
                 }
             }
         }
@@ -136,7 +150,7 @@ final class ObjectGraphSnapshot {
                     addSlot(new FieldSlot(null, field, field.get(null)));
                 } catch (Throwable t) {
                     if (t instanceof VirtualMachineError e) throw e;
-                    diag("probe static field capture failed: " + c.getName() + "." + field.getName());
+                    captureFailed(tr("snapshot.probe_static_field", c.getName() + "." + field.getName()));
                 }
             }
         }
@@ -164,7 +178,7 @@ final class ObjectGraphSnapshot {
                 addSlot(new FieldSlot(owner, field, field.get(owner)));
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                diag("probe root field capture failed: " + cls.getName() + "." + field.getName());
+                captureFailed(tr("snapshot.root_field", cls.getName() + "." + field.getName()));
             }
         }
     }
@@ -181,7 +195,7 @@ final class ObjectGraphSnapshot {
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("probe root array capture failed");
+            captureFailed(tr("snapshot.root_array"));
         }
     }
 
@@ -196,7 +210,7 @@ final class ObjectGraphSnapshot {
             addSlot(new MapSlot(map, copy));
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("probe root map capture failed: " + map.getClass().getName());
+            captureFailed(tr("snapshot.root_map", map.getClass().getName()));
         }
     }
 
@@ -209,7 +223,7 @@ final class ObjectGraphSnapshot {
             addSlot(new CollectionSlot(collection, new ArrayList<>(collection)));
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("probe root collection capture failed: " + collection.getClass().getName());
+            captureFailed(tr("snapshot.root_collection", collection.getClass().getName()));
         }
     }
 
@@ -248,7 +262,7 @@ final class ObjectGraphSnapshot {
                 walk(value);
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                diag("field capture failed: " + cls.getName() + "." + field.getName());
+                captureFailed(tr("snapshot.field", cls.getName() + "." + field.getName()));
             }
         }
     }
@@ -259,7 +273,7 @@ final class ObjectGraphSnapshot {
             length = Array.getLength(array);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("array capture failed");
+            captureFailed(tr("snapshot.array"));
             return;
         }
         for (int i = 0; i < length; i++) {
@@ -270,7 +284,7 @@ final class ObjectGraphSnapshot {
                 walk(value);
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                diag("array slot capture failed");
+                captureFailed(tr("snapshot.array_slot"));
             }
         }
     }
@@ -288,7 +302,7 @@ final class ObjectGraphSnapshot {
             }
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("map capture failed: " + map.getClass().getName());
+            captureFailed(tr("snapshot.map", map.getClass().getName()));
         }
     }
 
@@ -300,7 +314,7 @@ final class ObjectGraphSnapshot {
             for (Object value : copy) walk(value);
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag("collection capture failed: " + collection.getClass().getName());
+            captureFailed(tr("snapshot.collection", collection.getClass().getName()));
         }
     }
 
@@ -340,50 +354,78 @@ final class ObjectGraphSnapshot {
                 || name.startsWith("org.apache.logging.");
     }
 
-    private void diag(String reason) {
-        if (DIAG_DUMPED.add(reason)) EcaLogger.info("[ObjectGraphSnapshot] {}", reason);
+    private void captureFailed(HealthReportText reason) {
+        complete = false;
+        diag(reason);
+    }
+
+    private void diag(HealthReportText reason) {
+        HealthMutationContext.recordEvidence(tr("snapshot.diagnostic", reason));
+        String raw = HealthReportText.render(reason, "en_us");
+        if (DIAG_DUMPED.add(raw)) EcaLogger.info("[ObjectGraphSnapshot] {}", raw);
     }
 
     private interface Slot {
-        void restore();
+        boolean restore();
     }
 
     private record FieldSlot(Object owner, Field field, Object value) implements Slot {
-        @Override public void restore() {
+        @Override public boolean restore() {
             try {
+                Object current = field.get(owner);
+                if (field.getType().isPrimitive() ? Objects.equals(current, value) : current == value) return true;
                 field.set(owner, value);
+                return true;
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError e) throw e;
-                if (owner == null || !UnsafeUtil.unsafePutField(owner, field, value)) throw new IllegalStateException(t);
+                boolean restored = owner != null && UnsafeUtil.unsafePutField(owner, field, value);
+                if (!restored) EcaLogger.info("[HealthMutation] field restore failed: {}", t.getClass().getSimpleName());
+                return restored;
             }
         }
     }
 
     private record ArraySlot(Object array, int index, Object value) implements Slot {
-        @Override public void restore() {
+        @Override public boolean restore() {
             Array.set(array, index, value);
+            return true;
         }
     }
 
     @SuppressWarnings("rawtypes")
     private record SynchedDataItemSlot(SynchedEntityData.DataItem item, Object value, boolean dirty) implements Slot {
-        @Override public void restore() {
+        @Override public boolean restore() {
             item.value = value;
             item.dirty = dirty;
+            return true;
         }
     }
 
     private record SynchedDataDirtySlot(SynchedEntityData entityData, boolean dirty) implements Slot {
-        @Override public void restore() {
+        @Override public boolean restore() {
             entityData.isDirty = dirty;
+            return true;
         }
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     private record MapSlot(Map map, List<MapEntry> copy) implements Slot {
-        @Override public void restore() {
-            map.clear();
-            for (MapEntry entry : copy) map.put(entry.key(), entry.value());
+        @Override public boolean restore() {
+            boolean unchanged = map.size() == copy.size();
+            if (unchanged) for (MapEntry entry : copy) {
+                if (!map.containsKey(entry.key()) || map.get(entry.key()) != entry.value()) { unchanged = false; break; }
+            }
+            if (unchanged) return true;
+            Set<Object> savedKeys = map instanceof IdentityHashMap
+                    ? Collections.newSetFromMap(new IdentityHashMap<>()) : new HashSet<>();
+            for (MapEntry entry : copy) savedKeys.add(entry.key());
+            List<Object> removed = new ArrayList<>();
+            for (Object key : map.keySet()) if (!savedKeys.contains(key)) removed.add(key);
+            for (Object key : removed) map.remove(key);
+            for (MapEntry entry : copy) if (!map.containsKey(entry.key()) || map.get(entry.key()) != entry.value()) map.put(entry.key(), entry.value());
+            if (map.size() != copy.size()) return false;
+            for (MapEntry entry : copy) if (!map.containsKey(entry.key()) || map.get(entry.key()) != entry.value()) return false;
+            return true;
         }
     }
 
@@ -391,9 +433,25 @@ final class ObjectGraphSnapshot {
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     private record CollectionSlot(Collection collection, List<Object> copy) implements Slot {
-        @Override public void restore() {
+        @Override public boolean restore() {
+            if (collection.size() == copy.size()) {
+                int index = 0;
+                boolean unchanged = true;
+                for (Object value : collection) if (value != copy.get(index++)) { unchanged = false; break; }
+                if (unchanged) return true;
+            }
             collection.clear();
             collection.addAll(copy);
+            if (collection.size() != copy.size()) return false;
+            if (collection instanceof Set) {
+                Set<Object> identities = Collections.newSetFromMap(new IdentityHashMap<>());
+                identities.addAll(copy);
+                for (Object value : collection) if (!identities.contains(value)) return false;
+                return true;
+            }
+            int index = 0;
+            for (Object value : collection) if (value != copy.get(index++)) return false;
+            return true;
         }
     }
 }

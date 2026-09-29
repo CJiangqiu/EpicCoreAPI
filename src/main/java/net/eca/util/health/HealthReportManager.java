@@ -1,9 +1,12 @@
 package net.eca.util.health;
 
+import static net.eca.util.health.HealthReportText.tr;
+
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.minecraft.world.entity.LivingEntity;
-import org.objectweb.asm.Opcodes;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -16,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -36,6 +40,7 @@ public final class HealthReportManager {
     private static final ThreadLocal<Session> ACTIVE = new ThreadLocal<>();
     private static final ThreadLocal<List<Session>> BACKGROUND = new ThreadLocal<>();
     private static final Map<Long, Session> DELAYED = new ConcurrentHashMap<>();
+    private static final Map<UUID, SyncRequest> CLIENT_SYNC = new ConcurrentHashMap<>();
     private static final Map<Class<?>, Set<Session>> TRACKED = new ConcurrentHashMap<>();
     private static final int MAX_DIAGNOSTIC_LINES = 10_000;
     private static final DateTimeFormatter DETAIL_TIME = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
@@ -47,8 +52,12 @@ public final class HealthReportManager {
     private HealthReportManager() {}
 
     public static void begin(LivingEntity entity, float target) {
+        begin(entity, target, EcaConfiguration.getHealthReportLanguageSafely());
+    }
+
+    public static void begin(LivingEntity entity, float target, String language) {
         if (entity == null) return;
-        Session session = new Session(entity, target);
+        Session session = new Session(entity, target, language);
         ACTIVE.set(session);
         TRACKED.computeIfAbsent(entity.getClass(), ignored -> ConcurrentHashMap.newKeySet()).add(session);
         EcaLogger.setDiagnosticCapture(session::captureLog);
@@ -59,28 +68,104 @@ public final class HealthReportManager {
         if (session != null) session.before = value;
     }
 
-    public static void recordAttempt(LivingEntity entity, String channel, boolean success, String detail) {
-        recordAttempt(entity, channel, success, detail, true);
+    public static void recordAlreadySatisfied(LivingEntity entity) {
+        Session session = active(entity);
+        if (session != null) session.alreadySatisfied = true;
+        recordSkipped(entity, "channel.vanilla", tr("write.already_satisfied"));
     }
 
-    public static void recordAttempt(LivingEntity entity, String channel, boolean success, String detail,
-                                     boolean selectWinner) {
+    public static UUID beginClientSync(LivingEntity entity) {
+        UUID request = UUID.randomUUID();
         Session session = active(entity);
-        if (session == null) return;
-        session.attempts.put(channel, new Attempt(success ? "成功" : "未成功", safeDetail(detail)));
-        if (success && selectWinner) {
-            session.winningChannel = channel;
-            if ("原版同步数据直写".equals(channel)) session.winningStorageKind = "原版同步实体数据";
+        if (session != null) {
+            expireClientSync();
+            if (CLIENT_SYNC.size() < 256) {
+                session.clientSync = tr("sync.pending");
+                CLIENT_SYNC.put(request, new SyncRequest(session, System.nanoTime() + 10_000_000_000L));
+            } else session.clientSync = tr("sync.untracked");
+        }
+        return request;
+    }
+
+    public static void clientSyncSendFailed(UUID request) {
+        SyncRequest pending = CLIENT_SYNC.remove(request);
+        if (pending != null) pending.session.clientSync = tr("sync.send_failed");
+    }
+
+    public static void completeClientSync(UUID request, UUID entityUuid, ServerPlayer sender,
+                                          boolean verified, float actual) {
+        SyncRequest pending = CLIENT_SYNC.get(request);
+        if (pending == null || System.nanoTime() >= pending.expires || !pending.session.entityUuid.equals(entityUuid)) return;
+        Session session = pending.session;
+        Entity entity = sender.level().getEntity(session.entityId);
+        if (entity == null || !entity.getUUID().equals(entityUuid)) return;
+        synchronized (session) {
+            if (!pending.responders.add(sender.getUUID())) return;
+            if (verified && HealthValueSemantics.matches(actual, session.target)) pending.accepted++;
+            else pending.failed++;
+            session.clientSync = tr("sync.responses", pending.accepted, pending.failed, formatFloat(actual));
+            if (session.finished) write(session);
         }
     }
 
-    public static void recordSkipped(LivingEntity entity, String channel, String reason) {
+    public static void expireClientSync() {
+        long now = System.nanoTime();
+        CLIENT_SYNC.forEach((request, pending) -> {
+            if (now < pending.expires || !CLIENT_SYNC.remove(request, pending)) return;
+            synchronized (pending.session) {
+                if (pending.responders.isEmpty()) pending.session.clientSync = tr("sync.no_response");
+                if (pending.session.finished) write(pending.session);
+            }
+        });
+    }
+
+    private static final class SyncRequest {
+        final Session session;
+        final long expires;
+        final Set<UUID> responders = new LinkedHashSet<>();
+        int accepted;
+        int failed;
+
+        SyncRequest(Session session, long expires) { this.session = session; this.expires = expires; }
+    }
+
+    public static void recordAttempt(LivingEntity entity, String channel, boolean success, HealthReportText detail) {
+        recordAttempt(entity, channel, success, detail, true);
+    }
+
+    public static void recordAttempt(LivingEntity entity, String channel, boolean success, HealthReportText detail,
+                                     boolean selectWinner) {
         Session session = active(entity);
-        if (session != null) session.attempts.put(channel, new Attempt("跳过", safeDetail(reason)));
+        if (session == null) return;
+        Set<HealthReportText> failures = session.failureDetails.get(channel);
+        List<HealthReportText> details = !success && failures != null && !failures.isEmpty()
+                ? List.copyOf(failures) : detail == null ? List.of() : List.of(detail);
+        session.attempts.put(channel, new Attempt(success ? tr("status.success") : tr("status.unsuccessful"), details));
+        if (success && selectWinner) {
+            session.winningChannel = channel;
+            if ("channel.vanilla".equals(channel)) session.winningStorageKind = tr("storage.vanilla");
+        }
+    }
+
+    public static void recordSkipped(LivingEntity entity, String channel, HealthReportText reason) {
+        Session session = active(entity);
+        if (session != null) session.attempts.put(channel,
+                new Attempt(tr("status.skipped"), reason == null ? List.of() : List.of(reason)));
+    }
+
+    static void recordFailureDetail(LivingEntity entity, String channel, HealthReportText detail) {
+        Session session = active(entity);
+        if (session == null || detail == null) return;
+        session.failureDetails.computeIfAbsent(channel, ignored -> new LinkedHashSet<>()).add(detail);
+    }
+
+    static void recordSharedEvidence(LivingEntity entity, List<HealthReportText> events) {
+        Session session = active(entity);
+        if (session != null) session.sharedEvidence = events;
     }
 
     public static void recordExternalMirror(LivingEntity entity, boolean success) {
-        recordAttempt(entity, "实体外镜像联写", success, success ? "已写入候选权威并等待延迟复查" : "本次未启用或未命中");
+        recordAttempt(entity, "channel.mirror", success, success ? tr("mirror.pending") : tr("mirror.unused"));
     }
 
     public static void recordSuccessfulStorage(LivingEntity entity, HealthDataflowAnalyzer.Source source,
@@ -99,7 +184,6 @@ public final class HealthReportManager {
         session.winningStorageKind = sourceKinds(sources);
         session.winningConstantOverride = sources.stream().anyMatch(
                 HealthDataflowAnalyzer.ConstOverrideSource.class::isInstance);
-        session.winningMultiSource = sources.size() > 1;
     }
 
     public static void attachDelayedTicket(LivingEntity entity, DelayedHealthVerifier.Ticket ticket) {
@@ -107,7 +191,7 @@ public final class HealthReportManager {
         if (session == null || ticket == null) return;
         session.ticketRevision = ticket.revision();
         session.delayedPending = true;
-        session.delayedStatus = "等待下一 tick 复查";
+        session.delayedStatus = tr("delay.waiting");
         DELAYED.put(ticket.revision(), session);
     }
 
@@ -119,7 +203,7 @@ public final class HealthReportManager {
         session.success = success;
         session.finished = true;
         session.after = EcaSetHealthManager.readHealthAnchor(entity);
-        if (session.ticketRevision == 0L) session.delayedStatus = "无需或无法登记延迟复查";
+        if (session.ticketRevision == 0L) session.delayedStatus = tr("delay.not_needed");
         collectAnalysis(session, entity);
         write(session);
         cleanup(session);
@@ -129,10 +213,10 @@ public final class HealthReportManager {
     public static void finishWithError(LivingEntity entity, Throwable throwable) {
         Session session = active(entity);
         if (session == null) return;
-        session.error = throwable == null ? "未知错误" : throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
+        session.error = throwable == null ? tr("error.unknown") : throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
     }
 
-    public static void completeDelayed(DelayedHealthVerifier.Ticket ticket, String status, float actual) {
+    public static void completeDelayed(DelayedHealthVerifier.Ticket ticket, HealthReportText status, float actual) {
         if (ticket == null) return;
         Session session = DELAYED.remove(ticket.revision());
         if (session == null) return;
@@ -195,6 +279,7 @@ public final class HealthReportManager {
         BACKGROUND.remove();
         EcaLogger.clearDiagnosticCapture();
         DELAYED.clear();
+        CLIENT_SYNC.clear();
         TRACKED.clear();
     }
 
@@ -223,68 +308,59 @@ public final class HealthReportManager {
         try {
             HealthDataflowAnalyzer.AnalysisResult result = HealthDataflowAnalyzer.analyze(entityClass);
             if (result == null || result.isEmpty()) {
-                session.analysisKind = "无法解析";
+                session.analysisKind = tr("analysis.unresolved");
             } else {
                 session.analysisKind = switch (result.classify()) {
-                    case REAL_HEALTH -> "真实血量读取";
-                    case NOT_REAL_HEALTH -> "非真实血量或诱饵读取";
-                    case UNRESOLVED -> "包含无法解析的计算";
+                    case REAL_HEALTH -> tr("analysis.real");
+                    case NOT_REAL_HEALTH -> tr("analysis.decoy");
+                    case UNRESOLVED -> tr("analysis.partial");
                 };
                 session.primaryExpression = expressionShape(result.returnExpr);
                 session.primarySources = sourceKinds(result.sources);
                 session.primarySourceCount = result.sources.size();
-                session.hasConstantOverride = containsSource(result.sources,
-                        HealthDataflowAnalyzer.ConstOverrideSource.class);
-                session.hasSynchedData = containsSource(result.sources,
-                        HealthDataflowAnalyzer.SynchedDataSource.class);
-                session.hasMapStorage = containsSource(result.sources,
-                        HealthDataflowAnalyzer.MapEntrySource.class);
-                session.hasNestedStorage = containsSource(result.sources,
-                        HealthDataflowAnalyzer.ChainedFieldSource.class)
-                        || containsSource(result.sources, HealthDataflowAnalyzer.CapabilityDataSource.class)
-                        || containsSource(result.sources, HealthDataflowAnalyzer.ArrayElementSource.class);
-                session.hasEncodedStorage = result.sources.stream().anyMatch(source -> source.valueType == String.class);
+                session.readCalculation = hasCalculation(result.returnExpr);
+                session.staticStorage = result.sources.stream().anyMatch(source -> hasStaticOrigin(source, 0));
+                session.storageContents = storageContents(result.sources, entity);
             }
         } catch (Throwable throwable) {
             if (throwable instanceof VirtualMachineError error) throw error;
-            session.analysisKind = "分析异常：" + throwable.getClass().getSimpleName();
+            session.analysisKind = tr("analysis.error", throwable.getClass().getSimpleName());
         }
 
+        refreshBackgroundAnalysis(session);
+
+        HealthModel model = HealthModel.forClass(entityClass);
+        session.anchorStatus = EcaSetHealthManager.isAnchorUntrusted(entity)
+                ? tr("anchor.untrusted")
+                : model.observation() == null
+                    ? tr("anchor.default")
+                    : tr("anchor.alternative", model.observationOrigin());
+        session.delayedRollbackKnown = model.delayedRollbackObserved();
+    }
+
+    private static void refreshBackgroundAnalysis(Session session) {
+        Class<?> entityClass = session.entityClass;
         HealthDataflowAnalyzer.AnalysisResult external =
                 HealthDataflowAnalyzer.peekExternalScanResult(entityClass);
         session.externalStatus = external == null
-                ? "尚无结果（可能仍在后台分析）"
-                : "已解析，来源数=" + external.sources.size() + "，结构=" + sourceKinds(external.sources);
+                ? tr("analysis.background")
+                : tr("analysis.external", external.sources.size(), sourceKinds(external.sources));
 
         HealthDataflowAnalyzer.EffectiveHealthModel effective =
                 HealthDataflowAnalyzer.peekEffectiveHealthModel(entityClass);
         if (effective != null) {
-            session.effectiveStatus = "已建立，表达式=" + expressionShape(effective.readExpr())
-                    + "，存储结构=" + sourceKind(effective.storage());
-            session.hasEffectiveModel = true;
-            session.hasReverseAccumulator = containsSubtract(effective.readExpr(),
-                    Collections.newSetFromMap(new IdentityHashMap<>()));
+            session.effectiveStatus = tr("analysis.effective", expressionShape(effective.readExpr()), sourceKind(effective.storage()));
         } else {
-            session.effectiveStatus = "尚未建立";
+            session.effectiveStatus = tr("analysis.not_established");
         }
 
         HealthDataflowAnalyzer.MaintenancePlan maintenance =
                 HealthDataflowAnalyzer.peekMaintenancePlan(entityClass);
         session.maintenanceStatus = HealthDataflowAnalyzer.isMaintenancePlanResolved(entityClass)
-                ? "已解析，分支=" + maintenance.branches().size()
-                    + "，周期写入=" + maintenance.maintenanceWriteCount()
-                    + "，实体外事务源=" + yesNo(maintenance.hasExternalTransactionSource())
-                : "尚未完成";
+                ? tr("analysis.maintenance", maintenance.branches().size(), maintenance.maintenanceWriteCount(), yesNo(maintenance.hasExternalTransactionSource()))
+                : tr("analysis.incomplete");
         session.hasExternalAuthority = maintenance.hasExternalTransactionSource();
         session.hasMirrorAuthority = HealthDataflowAnalyzer.hasMirrorAuthority(entityClass);
-
-        HealthModel model = HealthModel.forClass(entityClass);
-        session.anchorStatus = EcaSetHealthManager.isAnchorUntrusted(entity)
-                ? "默认观测出口已判定不可信"
-                : model.observation() == null
-                    ? "使用默认观测出口"
-                    : "使用替代观测锚点（" + model.observationOrigin() + "）";
-        session.delayedRollbackKnown = model.delayedRollbackObserved();
     }
 
     private static void write(Session session) {
@@ -308,214 +384,213 @@ public final class HealthReportManager {
     }
 
     private static String render(Session session) {
+        refreshBackgroundAnalysis(session);
         Judgment judgment = judge(session);
-        StringBuilder report = new StringBuilder(4096);
-        report.append("ECA 血量分析报告\n")
-                .append("生成时间: ").append(session.createdAt.format(DISPLAY_TIME)).append('\n')
-                .append("实体名称: ").append(session.entityName).append('\n')
-                .append("实体 UUID: ").append(session.entityUuid).append('\n')
-                .append("实体运行 ID: ").append(session.entityId).append("\n\n")
-                .append("=== 智能判断 ===\n")
-                .append("主类型: ").append(judgment.primaryType()).append('\n')
-                .append("附加特征: ").append(judgment.features()).append('\n')
-                .append("有效修改模块: ").append(judgment.module()).append('\n')
-                .append("结果: ").append(judgment.result()).append('\n')
-                .append("置信度: ").append(judgment.confidence()).append('\n')
-                .append("判断依据:\n");
-        for (String evidence : judgment.evidence()) report.append("- ").append(evidence).append('\n');
-
-        report.append("\n=== 本次改血 ===\n")
-                .append("目标值: ").append(session.target).append('\n')
-                .append("改前观测值: ").append(formatFloat(session.before)).append('\n')
-                .append("当场改后观测值: ").append(formatFloat(session.after)).append('\n')
-                .append("当场结果: ").append(session.success ? "成功" : "失败").append('\n')
-                .append("成功存储结构: ").append(session.winningStorageKind).append('\n')
-                .append("延迟复查: ").append(session.delayedStatus).append('\n');
-        if (Float.isFinite(session.delayedActual)) {
-            report.append("延迟观测值: ").append(formatFloat(session.delayedActual)).append('\n');
+        HealthReportText.Builder report = new HealthReportText.Builder(session.language);
+        report.append(tr("title"))
+                .append(tr("label.created")).append(session.createdAt.format(DISPLAY_TIME)).append('\n')
+                .append(tr("label.name")).append(session.entityName).append('\n')
+                .append(tr("label.uuid")).append(session.entityUuid).append('\n')
+                .append(tr("label.id")).append(session.entityId).append("\n\n")
+                .append(tr("section.storage"));
+        for (Finding finding : judgment.findings()) {
+            report.append(finding.subject()).append(": ").append(finding.value()).append('\n')
+                    .append(tr("label.confidence")).append(finding.confidence()).append('\n')
+                    .append(tr("label.evidence")).append(finding.evidence()).append("\n\n");
         }
-        if (session.error != null) report.append("异常: ").append(session.error).append('\n');
+        report
+                .append(tr("label.module")).append(judgment.module()).append('\n')
+                .append(tr("label.result")).append(judgment.result()).append('\n');
 
-        report.append("\n=== 通道执行记录 ===\n");
-        appendAttempt(report, session, "原版同步数据直写", true);
-        appendAttempt(report, session, "数据流逆向", EcaConfiguration.getAttackSetHealthEnableDataflowSafely());
-        appendAttempt(report, session, "外部语义扫描", EcaConfiguration.getAttackSetHealthEnableExternalScanSafely());
-        appendAttempt(report, session, "有效血量反演", EcaConfiguration.getAttackSetHealthEnableExternalScanSafely());
-        appendAttempt(report, session, "方法探针", EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely());
-        appendAttempt(report, session, "数值反演", EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely());
-        appendAttempt(report, session, "实体外镜像联写", EcaConfiguration.getAttackSetHealthEnableExternalScanSafely());
+        report.append(tr("section.mutation"))
+                .append(tr("label.target")).append(session.target).append('\n')
+                .append(tr("label.before")).append(formatFloat(session.before)).append('\n')
+                .append(tr("label.after")).append(formatFloat(session.after)).append('\n')
+                .append(tr("label.immediate")).append(session.success ? tr("status.success") : tr("status.failed")).append('\n')
+                .append(tr("label.winning_storage")).append(session.winningStorageKind).append('\n')
+                .append(tr("label.delayed")).append(session.delayedStatus).append('\n');
+        report.append(tr("label.client_sync")).append(session.clientSync).append('\n');
+        if (Float.isFinite(session.delayedActual)) {
+            report.append(tr("label.delayed_actual")).append(formatFloat(session.delayedActual)).append('\n');
+        }
+        if (session.error != null) report.append(tr("label.error")).append(session.error).append('\n');
 
-        report.append("\n=== 结构分析 ===\n")
-                .append("getHealth 分类: ").append(session.analysisKind).append('\n')
-                .append("返回表达式结构: ").append(session.primaryExpression).append('\n')
-                .append("可写来源数: ").append(session.primarySourceCount).append('\n')
-                .append("来源结构: ").append(session.primarySources).append('\n')
-                .append("观测锚点: ").append(session.anchorStatus).append('\n')
-                .append("外部扫描: ").append(session.externalStatus).append('\n')
-                .append("有效血量模型: ").append(session.effectiveStatus).append('\n')
-                .append("周期维护模型: ").append(session.maintenanceStatus).append('\n')
-                .append("已知延迟回滚: ").append(yesNo(session.delayedRollbackKnown)).append('\n')
-                .append("\n=== 配置门控 ===\n")
-                .append("强制兼容模式: ").append(onOff(EcaConfiguration.getForceCompatibilityModeSafely())).append('\n')
-                .append("激进逻辑: ").append(onOff(EcaConfiguration.getAttackEnableRadicalLogicSafely())).append('\n')
-                .append("常数覆写: ").append(onOff(EcaConfiguration.getAttackSetHealthEnableConstOverrideSafely())).append('\n')
-                .append("数据流逆向: ").append(onOff(EcaConfiguration.getAttackSetHealthEnableDataflowSafely())).append('\n')
-                .append("外部扫描: ").append(onOff(EcaConfiguration.getAttackSetHealthEnableExternalScanSafely())).append('\n')
-                .append("方法探针: ").append(onOff(EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely())).append('\n')
-                .append("数值反演: ").append(onOff(EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely())).append('\n');
-        report.append("\n=== 详细数据流逆向过程 ===\n");
+        report.append(tr("section.channels"));
+        appendAttempt(report, session, "channel.vanilla", true);
+        appendAttempt(report, session, "channel.dataflow", EcaConfiguration.getAttackSetHealthEnableDataflowSafely());
+        appendAttempt(report, session, "channel.external", EcaConfiguration.getAttackSetHealthEnableExternalScanSafely());
+        appendAttempt(report, session, "channel.effective", EcaConfiguration.getAttackSetHealthEnableExternalScanSafely());
+        appendAttempt(report, session, "channel.probe", EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely());
+        appendAttempt(report, session, "channel.numeric", EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely());
+        appendAttempt(report, session, "channel.mirror", EcaConfiguration.getAttackSetHealthEnableExternalScanSafely());
+
+        report.append(tr("section.analysis"))
+                .append(tr("label.classification")).append(session.analysisKind).append('\n')
+                .append(tr("label.expression")).append(session.primaryExpression).append('\n')
+                .append(tr("label.sources_count")).append(session.primarySourceCount).append('\n')
+                .append(tr("label.sources")).append(session.primarySources).append('\n')
+                .append(tr("label.anchor")).append(session.anchorStatus).append('\n')
+                .append(tr("label.external")).append(session.externalStatus).append('\n')
+                .append(tr("label.effective")).append(session.effectiveStatus).append('\n')
+                .append(tr("label.maintenance")).append(session.maintenanceStatus).append('\n')
+                .append(tr("label.known_rollback")).append(yesNo(session.delayedRollbackKnown)).append('\n')
+                .append(tr("section.config"))
+                .append(tr("label.compatibility")).append(onOff(EcaConfiguration.getForceCompatibilityModeSafely())).append('\n')
+                .append(tr("label.radical")).append(onOff(EcaConfiguration.getAttackEnableRadicalLogicSafely())).append('\n')
+                .append(tr("label.constant")).append(onOff(EcaConfiguration.getAttackSetHealthEnableConstOverrideSafely())).append('\n')
+                .append(tr("label.dataflow")).append(onOff(EcaConfiguration.getAttackSetHealthEnableDataflowSafely())).append('\n')
+                .append(tr("label.external")).append(onOff(EcaConfiguration.getAttackSetHealthEnableExternalScanSafely())).append('\n')
+                .append(tr("label.probe")).append(onOff(EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely())).append('\n')
+                .append(tr("label.numeric")).append(onOff(EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely())).append('\n');
+        report.append(tr("section.shared"));
+        if (session.sharedEvidence.isEmpty()) report.append(tr("shared.empty"));
+        else for (HealthReportText event : session.sharedEvidence) report.append("- ").append(event).append('\n');
+        report.append(tr("background.notice"));
+        report.append(tr("section.raw"));
         List<String> diagnostics = session.diagnosticSnapshot();
-        if (diagnostics.isEmpty()) report.append("本次未产生血量诊断日志。\n");
+        if (diagnostics.isEmpty()) report.append(tr("diagnostics.empty"));
         else for (String diagnostic : diagnostics) report.append(diagnostic).append('\n');
         return report.toString();
     }
 
-    private static void appendAttempt(StringBuilder report, Session session, String channel, boolean enabled) {
+    private static void appendAttempt(HealthReportText.Builder report, Session session, String channel, boolean enabled) {
         Attempt attempt = session.attempts.get(channel);
         if (attempt != null) {
-            report.append(channel).append(": ").append(attempt.status());
-            if (!attempt.detail().isEmpty()) report.append(" — ").append(attempt.detail());
+            report.append(tr(channel)).append(": ").append(attempt.status());
+            for (int i = 0; i < attempt.details().size(); i++) {
+                report.append(i == 0 ? " — " : tr("detail.separator")).append(attempt.details().get(i));
+            }
         } else if (!enabled) {
-            report.append(channel).append(": 跳过 — 配置未启用");
+            report.append(tr(channel)).append(tr("channel.disabled"));
         } else {
-            report.append(channel).append(": 未执行 — 前序通道已结束流程");
+            report.append(tr(channel)).append(tr("channel.not_entered"));
         }
         report.append('\n');
     }
 
     private static Judgment judge(Session session) {
-        List<String> features = new ArrayList<>();
-        List<String> evidence = new ArrayList<>();
-        String primary;
-
-        if (session.hasConstantOverride || session.analysisKind.startsWith("非真实")) {
-            primary = "诱饵观测出口型";
-            evidence.add("getHealth 分析未直接指向可信的真实血量存储");
-        } else if (session.hasReverseAccumulator) {
-            primary = "反向累加器型自定义存储";
-            evidence.add("有效血量表达式包含减法方向的存储换算");
-        } else if (session.hasEffectiveModel) {
-            primary = "换算型有效血量存储";
-            evidence.add("已从生死语义建立可逆的有效血量表达式");
-        } else if ("原版同步数据直写".equals(session.winningChannel)) {
-            primary = "原版同步血量型";
-            evidence.add("写入原版同步血量后，观测锚点立即匹配目标值");
-        } else if (session.hasSynchedData) {
-            primary = "自定义同步数据存储型";
-            evidence.add("数据流来源包含同步实体数据单元");
-        } else if (session.hasMapStorage || session.hasExternalAuthority) {
-            primary = "外部权威存储型";
-            evidence.add("分析发现映射存储或实体外事务来源");
-        } else if (session.hasNestedStorage) {
-            primary = "深层对象存储型";
-            evidence.add("血量来源位于嵌套字段、能力容器或数组结构中");
-        } else if (session.analysisKind.startsWith("真实")) {
-            primary = "直接自定义存储型";
-            evidence.add("getHealth 数据流可到达可写存储");
-        } else {
-            primary = "无法可靠判定型";
-            evidence.add("现有结构证据不足以确定唯一血量模型");
-        }
-
-        if (session.primarySourceCount > 1) features.add("多来源候选");
-        if (session.winningMultiSource) features.add("多源联合写入");
-        if (session.hasEncodedStorage) features.add("编码值存储");
-        if (session.hasMirrorAuthority || session.winningMirrorRedirect) features.add("实体内镜像覆盖");
-        if (session.hasExternalAuthority) features.add("实体外权威");
-        if (session.delayedRollbackKnown || session.delayedStatus.contains("回滚")) features.add("周期回写");
-        if (features.isEmpty()) features.add("未发现额外防护特征");
-
-        if (session.winningChannel != null) {
-            evidence.add("本次最终由“" + session.winningChannel + "”通过当场校验");
-        } else {
-            evidence.add("本次没有通道通过当场校验");
-        }
-        if (session.delayedStatus.contains("保留") || session.delayedStatus.contains("移除")) {
-            evidence.add("延迟复查确认目标值在实体 tick 后仍然有效");
-        } else if (session.delayedStatus.contains("回滚")) {
-            evidence.add("延迟复查发现目标值被周期逻辑改回");
-        } else if (session.delayedStatus.contains("等待")) {
-            evidence.add("最终持久性仍等待下一 tick 复查");
-        }
-
-        String result;
-        if (!session.success) result = "修改失败或分析尚未完成";
-        else if (session.delayedStatus.contains("回滚")) result = "当场成功，但下一 tick 被回滚";
-        else if (session.delayedStatus.contains("等待")) result = "当场成功，等待延迟复查";
-        else if (session.delayedStatus.contains("无法") || session.delayedStatus.contains("取代")
-                || session.delayedStatus.contains("撤销")) result = "当场成功，但延迟复查无法给出确定结论";
-        else result = "修改成功，结果已完成复查或无需复查";
-
-        String confidence;
-        if (primary.equals("无法可靠判定型")) confidence = "低";
-        else if (session.delayedStatus.contains("等待") || session.delayedStatus.contains("无法")
-                || session.delayedStatus.contains("取代") || session.delayedStatus.contains("撤销")) confidence = "中";
-        else if (session.success) confidence = "高";
-        else confidence = "中";
-
-        String module = session.winningChannel;
-        if (session.winningConstantOverride && "数据流逆向".equals(module)) module = "常数覆写";
-        return new Judgment(primary, String.join("、", features),
-                module == null ? "未确定" : module,
-                result, confidence, evidence);
+        List<Finding> findings = new ArrayList<>();
+        boolean verifiedStorage = session.success && !session.winningStorageKind.equals(tr("status.undetermined"))
+                && !session.winningConstantOverride;
+        findings.add(new Finding(tr("finding.location"),
+                verifiedStorage ? session.winningStorageKind
+                        : session.primarySourceCount > 0 ? tr("storage.candidates", session.primarySources) : tr("status.not_determined"),
+                verifiedStorage ? tr("confidence.high") : session.primarySourceCount > 0 ? tr("confidence.medium") : tr("status.unknown"),
+                verifiedStorage ? tr("evidence.verified")
+                        : tr("evidence.candidate")));
+        findings.add(new Finding(tr("finding.contents"), session.storageContents,
+                session.storageContents.equals(tr("status.not_determined")) ? tr("status.unknown") : tr("confidence.high"),
+                tr("evidence.contents")));
+        findings.add(new Finding(tr("finding.external"),
+                session.staticStorage ? tr("storage.external_candidate") : tr("status.not_determined"),
+                session.staticStorage ? tr("confidence.medium") : tr("status.unknown"),
+                session.staticStorage ? tr("evidence.static")
+                        : tr("evidence.ownership")));
+        boolean mirror = session.hasMirrorAuthority || session.hasExternalAuthority || session.winningMirrorRedirect;
+        findings.add(new Finding(tr("finding.copy"), mirror ? tr("mirror.clues") : tr("status.not_determined"),
+                mirror ? tr("confidence.medium") : tr("status.unknown"), mirror ? tr("evidence.mirror")
+                        : tr("evidence.no_copy")));
+        findings.add(new Finding(tr("finding.calculation"), session.readCalculation ? tr("bool.yes") : tr("status.not_determined"),
+                session.readCalculation ? tr("confidence.high") : tr("status.unknown"),
+                session.readCalculation ? tr("evidence.calculation") : tr("evidence.no_calculation")));
+        boolean rolledBack = session.delayedStatus.equals(tr("delay.rolled_back"));
+        boolean retained = session.delayedStatus.equals(tr("delay.retained"));
+        findings.add(new Finding(tr("finding.restoration"),
+                rolledBack ? tr("restore.observed") : retained ? tr("restore.not_observed")
+                        : session.delayedRollbackKnown ? tr("restore.previously_observed") : tr("status.unverified"),
+                rolledBack || retained ? tr("confidence.high") : session.delayedRollbackKnown ? tr("confidence.medium") : tr("status.unknown"),
+                rolledBack || retained ? session.delayedStatus
+                        : tr("evidence.delayed")));
+        HealthReportText result = !session.success ? tr("result.failed")
+                : session.alreadySatisfied ? tr("result.already_satisfied")
+                : rolledBack ? tr("result.restored")
+                : retained ? tr("result.retained")
+                : session.delayedStatus.equals(tr("delay.removed")) ? tr("result.removed")
+                : tr("result.pending");
+        HealthReportText module = session.winningConstantOverride ? tr("module.constant")
+                : session.alreadySatisfied ? tr("status.none")
+                : session.winningChannel == null ? tr("status.undetermined") : tr(session.winningChannel);
+        return new Judgment(module == null ? tr("status.undetermined") : module, result, findings);
     }
 
-    private static boolean containsSubtract(HealthDataflowAnalyzer.Expr expression,
-                                            Set<HealthDataflowAnalyzer.Expr> visited) {
-        if (expression == null || !visited.add(expression)) return false;
-        if (expression instanceof HealthDataflowAnalyzer.Op op) {
-            if (op.opcode() == Opcodes.ISUB || op.opcode() == Opcodes.LSUB
-                    || op.opcode() == Opcodes.FSUB || op.opcode() == Opcodes.DSUB) return true;
-            for (HealthDataflowAnalyzer.Expr arg : op.args()) {
-                if (containsSubtract(arg, visited)) return true;
-            }
-        } else if (expression instanceof HealthDataflowAnalyzer.Choice choice) {
-            for (HealthDataflowAnalyzer.Expr alternative : choice.alternatives()) {
-                if (containsSubtract(alternative, visited)) return true;
-            }
-        } else if (expression instanceof HealthDataflowAnalyzer.StoreWrite write) {
-            return containsSubtract(write.valueExpr(), visited);
-        } else if (expression instanceof HealthDataflowAnalyzer.Call call) {
-            for (HealthDataflowAnalyzer.Expr arg : call.args()) {
-                if (containsSubtract(arg, visited)) return true;
-            }
+    private static boolean hasCalculation(HealthDataflowAnalyzer.Expr expression) {
+        Set<HealthDataflowAnalyzer.Expr> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        List<HealthDataflowAnalyzer.Expr> pending = new ArrayList<>();
+        if (expression != null) pending.add(expression);
+        while (!pending.isEmpty() && visited.size() < 50_000) {
+            HealthDataflowAnalyzer.Expr current = pending.remove(pending.size() - 1);
+            if (!visited.add(current)) continue;
+            if (current instanceof HealthDataflowAnalyzer.Op) return true;
+            if (current instanceof HealthDataflowAnalyzer.Call call) {
+                if (call.owner().equals("java/lang/Math") || call.owner().equals("java/lang/StrictMath")) return true;
+                pending.addAll(call.args());
+            } else if (current instanceof HealthDataflowAnalyzer.Choice choice) pending.addAll(choice.alternatives());
         }
         return false;
     }
 
-    private static String expressionShape(HealthDataflowAnalyzer.Expr expression) {
-        if (expression == null) return "无";
+    private static boolean hasStaticOrigin(HealthDataflowAnalyzer.Expr expression, int depth) {
+        if (expression == null || depth > 64) return false;
+        if (expression instanceof HealthDataflowAnalyzer.StaticFieldSource) return true;
+        if (expression instanceof HealthDataflowAnalyzer.MapEntrySource map) return hasStaticOrigin(map.containerExpr, depth + 1);
+        if (expression instanceof HealthDataflowAnalyzer.ChainedFieldSource field) return hasStaticOrigin(field.root, depth + 1);
+        if (expression instanceof HealthDataflowAnalyzer.Call call)
+            return call.args().stream().anyMatch(arg -> hasStaticOrigin(arg, depth + 1));
+        if (expression instanceof HealthDataflowAnalyzer.Choice choice)
+            return choice.alternatives().stream().anyMatch(arg -> hasStaticOrigin(arg, depth + 1));
+        return false;
+    }
+
+    private static Object storageContents(List<HealthDataflowAnalyzer.Source> sources, LivingEntity entity) {
+        Set<HealthReportText> contents = new LinkedHashSet<>();
+        HealthDataflowAnalyzer.EvalContext context = HealthDataflowAnalyzer.newContext(entity);
+        for (HealthDataflowAnalyzer.Source source : sources) {
+            Object value;
+            if (source instanceof HealthDataflowAnalyzer.MapEntrySource entry) {
+                value = entry.read(entity);
+            } else if (source instanceof HealthDataflowAnalyzer.FieldChainSource
+                    || source instanceof HealthDataflowAnalyzer.ChainedFieldSource
+                    || source instanceof HealthDataflowAnalyzer.StaticFieldSource
+                    || source instanceof HealthDataflowAnalyzer.SynchedDataSource) {
+                value = source.read(entity);
+            } else continue;
+            if (value instanceof Enum<?>) contents.add(tr("value.enum_shared"));
+            else if (value instanceof Number) contents.add(tr("value.number"));
+            else if (value instanceof String) contents.add(tr("value.text"));
+            else if (value instanceof Boolean) contents.add(tr("value.boolean"));
+            else if (value != null) contents.add(tr("value.reference"));
+        }
+        return contents.isEmpty() ? tr("status.not_determined") : List.copyOf(contents);
+    }
+
+    private static Object expressionShape(HealthDataflowAnalyzer.Expr expression) {
+        if (expression == null) return tr("status.none");
         return expression.getClass().getSimpleName();
     }
 
-    private static String sourceKinds(List<HealthDataflowAnalyzer.Source> sources) {
-        if (sources == null || sources.isEmpty()) return "无";
-        Map<String, Integer> counts = new LinkedHashMap<>();
+    private static Object sourceKinds(List<HealthDataflowAnalyzer.Source> sources) {
+        if (sources == null || sources.isEmpty()) return tr("status.none");
+        Map<HealthReportText, Integer> counts = new LinkedHashMap<>();
         for (HealthDataflowAnalyzer.Source source : sources) {
             counts.merge(sourceKind(source), 1, Integer::sum);
         }
-        List<String> values = new ArrayList<>();
-        counts.forEach((kind, count) -> values.add(kind + (count > 1 ? "×" + count : "")));
-        return String.join("、", values);
+        List<HealthReportText> values = new ArrayList<>();
+        counts.forEach((kind, count) -> values.add(count > 1 ? tr("list.count", kind, count) : kind));
+        return List.copyOf(values);
     }
 
-    private static String sourceKind(HealthDataflowAnalyzer.Source source) {
-        if (source instanceof HealthDataflowAnalyzer.ConstOverrideSource) return "常量覆写点";
-        if (source instanceof HealthDataflowAnalyzer.SynchedDataSource) return "同步实体数据";
-        if (source instanceof HealthDataflowAnalyzer.MapEntrySource) return "映射表条目";
-        if (source instanceof HealthDataflowAnalyzer.CapabilityDataSource) return "能力容器数据";
-        if (source instanceof HealthDataflowAnalyzer.ArrayElementSource) return "数组元素";
-        if (source instanceof HealthDataflowAnalyzer.StaticFieldSource) return "静态字段";
-        if (source instanceof HealthDataflowAnalyzer.ChainedFieldSource) return "外部对象字段链";
-        if (source instanceof HealthDataflowAnalyzer.FieldChainSource) return "实体字段链";
-        if (source instanceof HealthDataflowAnalyzer.MethodCallSource) return "方法调用写点";
-        if (source instanceof HealthDataflowAnalyzer.MethodPropertySource) return "方法属性";
-        return "其他可写来源";
-    }
-
-    private static boolean containsSource(List<HealthDataflowAnalyzer.Source> sources,
-                                          Class<? extends HealthDataflowAnalyzer.Source> type) {
-        return sources.stream().anyMatch(type::isInstance);
+    private static HealthReportText sourceKind(HealthDataflowAnalyzer.Source source) {
+        if (source instanceof HealthDataflowAnalyzer.ConstOverrideSource) return tr("storage.constant");
+        if (source instanceof HealthDataflowAnalyzer.SynchedDataSource) return tr("storage.synced");
+        if (source instanceof HealthDataflowAnalyzer.MapEntrySource) return tr("storage.map");
+        if (source instanceof HealthDataflowAnalyzer.CapabilityDataSource) return tr("storage.capability");
+        if (source instanceof HealthDataflowAnalyzer.ArrayElementSource) return tr("storage.array");
+        if (source instanceof HealthDataflowAnalyzer.StaticFieldSource) return tr("storage.static");
+        if (source instanceof HealthDataflowAnalyzer.ChainedFieldSource) return tr("storage.field");
+        if (source instanceof HealthDataflowAnalyzer.FieldChainSource) return tr("storage.entity_chain");
+        if (source instanceof HealthDataflowAnalyzer.MethodCallSource) return tr("storage.method_write");
+        if (source instanceof HealthDataflowAnalyzer.MethodPropertySource) return tr("storage.property");
+        return tr("storage.other");
     }
 
     private static String sanitizeFileName(String value) {
@@ -525,26 +600,23 @@ public final class HealthReportManager {
         return sanitized;
     }
 
-    private static String safeDetail(String detail) {
-        return detail == null ? "" : detail.replace('\n', ' ').replace('\r', ' ');
+    private static Object formatFloat(float value) {
+        return Float.isFinite(value) ? Float.toString(value) : tr("status.unavailable");
     }
 
-    private static String formatFloat(float value) {
-        return Float.isFinite(value) ? Float.toString(value) : "不可用";
+    private static HealthReportText yesNo(boolean value) {
+        return value ? tr("bool.yes") : tr("bool.no");
     }
 
-    private static String yesNo(boolean value) {
-        return value ? "是" : "否";
+    private static HealthReportText onOff(boolean value) {
+        return value ? tr("config.on") : tr("config.off");
     }
 
-    private static String onOff(boolean value) {
-        return value ? "开启" : "关闭";
-    }
+    private record Attempt(HealthReportText status, List<HealthReportText> details) {}
 
-    private record Attempt(String status, String detail) {}
+    private record Finding(HealthReportText subject, Object value, HealthReportText confidence, HealthReportText evidence) {}
 
-    private record Judgment(String primaryType, String features, String module,
-                            String result, String confidence, List<String> evidence) {}
+    private record Judgment(HealthReportText module, HealthReportText result, List<Finding> findings) {}
 
     private static final class Session {
         private final LocalDateTime createdAt = LocalDateTime.now();
@@ -552,51 +624,52 @@ public final class HealthReportManager {
         private final UUID entityUuid;
         private final Class<?> entityClass;
         private final String entityName;
+        private final String language;
         private final float target;
         private final Map<String, Attempt> attempts = new LinkedHashMap<>();
+        private final Map<String, Set<HealthReportText>> failureDetails = new LinkedHashMap<>();
+        private List<HealthReportText> sharedEvidence = List.of();
         private float before = Float.NaN;
         private float after = Float.NaN;
         private float delayedActual = Float.NaN;
         private boolean success;
-        private String error;
+        private boolean alreadySatisfied;
+        private HealthReportText clientSync = tr("sync.not_requested");
+        private Object error;
         private String winningChannel;
-        private String delayedStatus = "尚未登记";
+        private HealthReportText delayedStatus = tr("delay.unregistered");
         private long ticketRevision;
         private Path path;
-        private String analysisKind = "尚未分析";
-        private String primaryExpression = "无";
-        private String primarySources = "无";
+        private HealthReportText analysisKind = tr("analysis.not_started");
+        private Object primaryExpression = tr("status.none");
+        private Object primarySources = tr("status.none");
         private int primarySourceCount;
-        private String externalStatus = "尚无结果";
-        private String effectiveStatus = "尚未建立";
-        private String maintenanceStatus = "尚未完成";
-        private String anchorStatus = "未知";
-        private boolean hasConstantOverride;
-        private boolean hasSynchedData;
-        private boolean hasMapStorage;
-        private boolean hasNestedStorage;
-        private boolean hasEncodedStorage;
-        private boolean hasEffectiveModel;
-        private boolean hasReverseAccumulator;
+        private HealthReportText externalStatus = tr("analysis.no_result");
+        private HealthReportText effectiveStatus = tr("analysis.not_established");
+        private HealthReportText maintenanceStatus = tr("analysis.incomplete");
+        private HealthReportText anchorStatus = tr("status.unknown");
+        private boolean readCalculation;
+        private boolean staticStorage;
+        private Object storageContents = tr("status.not_determined");
         private boolean hasExternalAuthority;
         private boolean hasMirrorAuthority;
         private boolean delayedRollbackKnown;
         private boolean winningConstantOverride;
-        private boolean winningMultiSource;
         private boolean winningMirrorRedirect;
-        private String winningStorageKind = "未确定";
+        private Object winningStorageKind = tr("status.undetermined");
         private final AtomicInteger backgroundTasks = new AtomicInteger();
         private final List<String> diagnostics = Collections.synchronizedList(new ArrayList<>());
         private volatile boolean finished;
         private volatile boolean delayedPending;
         private volatile boolean diagnosticLimitReached;
 
-        private Session(LivingEntity entity, float target) {
+        private Session(LivingEntity entity, float target, String language) {
             this.entityId = entity.getId();
             this.entityUuid = entity.getUUID();
             this.entityClass = entity.getClass();
             this.entityName = entity.getName().getString();
             this.target = target;
+            this.language = HealthReportText.normalizeLanguage(language);
         }
 
         private void captureLog(String message) {
@@ -605,7 +678,7 @@ public final class HealthReportManager {
                 if (diagnostics.size() >= MAX_DIAGNOSTIC_LINES) {
                     if (!diagnosticLimitReached) {
                         diagnosticLimitReached = true;
-                        diagnostics.add("[HealthReport] 详细诊断已达到行数上限，后续内容省略");
+                        diagnostics.add(HealthReportText.render(tr("diagnostics.limit"), language));
                     }
                     return;
                 }

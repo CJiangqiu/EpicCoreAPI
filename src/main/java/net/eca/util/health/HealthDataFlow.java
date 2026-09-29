@@ -1,5 +1,7 @@
 package net.eca.util.health;
 
+import static net.eca.util.health.HealthReportText.tr;
+
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.util.EcaLogger;
@@ -121,7 +123,7 @@ public final class HealthDataFlow {
     private static final int MAX_RUNTIME_SOURCES = 32;
     private static final int MAX_DIAGNOSTIC_SOURCES = 32;
     private static final int MAX_RUNTIME_EXPRESSION_NODES = 50_000;
-    private static final long RUNTIME_WRITE_BUDGET_NANOS = 100_000_000L;
+    private static final long RUNTIME_WRITE_BUDGET_NANOS = 900_000_000L;
 
     /* 数据流改血主入口：拿已分析的可写树把目标血量写进目标真实存储，verify 通过返回 true。
        REAL_HEALTH 与 NOT_REAL_HEALTH(带可写源)由本入口处理；无源 NOT_REAL_HEALTH/UNRESOLVED 在表层就被拦掉。 */
@@ -330,6 +332,14 @@ public final class HealthDataFlow {
        逐个探测单一存储会造出非法中间态。 */
     public static boolean writeAssociated(AnalysisResult tree, LivingEntity entity, float target) {
         if (tree == null || entity == null || tree.sources.size() < 2) return false;
+        HealthMutationContext shared = HealthMutationContext.current();
+        boolean related = shared != null && shared.hasReadSlice()
+                ? shared.allowsJointWrite(tree.sources)
+                : HealthDataflowAnalyzer.sharesReadConstraint(tree.returnExpr, tree.sources);
+        if (!related) {
+            HealthMutationContext.recordEvidence(tr("joint.no_relation"));
+            return false;
+        }
         EvalContext context = HealthDataflowAnalyzer.newContext(entity);
         List<AssociatedSourceCandidates> groups = new ArrayList<>();
         for (Source sink : tree.sources) {
@@ -367,7 +377,7 @@ public final class HealthDataFlow {
                                                      List<PreparedSourceWrite> selected,
                                                      LivingEntity entity, float target,
                                                      AssociatedSearch search) {
-        if (search.attempts >= MAX_ASSOCIATED_COMBINATIONS) return false;
+        if (search.attempts >= MAX_ASSOCIATED_COMBINATIONS || HealthMutationContext.stopped()) return false;
         if (depth == groups.size()) {
             search.attempts++;
             search.last = attemptAssociatedTransaction(selected, entity, target);
@@ -386,6 +396,14 @@ public final class HealthDataFlow {
     private static AssociatedAttempt attemptAssociatedTransaction(List<PreparedSourceWrite> selected,
                                                                   LivingEntity entity, float target) {
         List<PreparedSourceWrite> writes = List.copyOf(selected);
+        if (HealthMutationContext.stopped()) return new AssociatedAttempt(false, false, true, List.of());
+        if (writes.stream().anyMatch(write -> write.snapshot() == null)) {
+            HealthMutationContext.recordEvidence(tr("joint.unreadable"));
+            return new AssociatedAttempt(false, false, true, List.of());
+        }
+        if (!HealthMutationContext.attempt(writes.stream().map(PreparedSourceWrite::sink).toList(),
+                writes.stream().map(PreparedSourceWrite::value).toList()))
+            return new AssociatedAttempt(false, false, true, List.of());
         float anchorBefore = EcaSetHealthManager.readHealthAnchor(entity);
         boolean wroteAll = true;
         for (PreparedSourceWrite write : writes) {
@@ -416,7 +434,7 @@ public final class HealthDataFlow {
         boolean restored = true;
         for (int i = writes.size() - 1; i >= 0; i--) {
             PreparedSourceWrite write = writes.get(i);
-            if (!dispatchWrite(write.sink(), entity, write.snapshot())) restored = false;
+            if (!restoreChangedSource(write.sink(), write.snapshot(), entity)) restored = false;
         }
         return new AssociatedAttempt(false, wroteAll, restored, states);
     }
@@ -503,7 +521,16 @@ public final class HealthDataFlow {
         long deadline = System.nanoTime() + RUNTIME_WRITE_BUDGET_NANOS;
         int examined = 0;
         boolean candidateScanComplete = true;
-        for (Source sink : withoutEcaOwnedSources(ar.sources)) {
+        List<Source> orderedSources = withoutEcaOwnedSources(ar.sources);
+        HealthMutationContext shared = HealthMutationContext.current();
+        int discoveredCount = orderedSources.size();
+        Set<Source> readSlice = HealthDataflowAnalyzer.healthReadSlice(ar.returnExpr);
+        orderedSources.removeIf(source -> shared != null && shared.hasReadSlice()
+                ? !shared.allowsStorage(source) : !readSlice.contains(source));
+        HealthMutationContext.recordEvidence(tr("slice.writers", discoveredCount, orderedSources.size()));
+        if (shared != null) orderedSources.sort((left, right) -> Integer.compare(shared.sourcePriority(left), shared.sourcePriority(right)));
+        for (Source sink : orderedSources) {
+            if (HealthMutationContext.stopped()) return false;
             if (isSharedStaticScalar(sink)) {
                 diag.add("    [" + sink.label + "] skipped=SHARED_STATIC_SCALAR");
                 continue;
@@ -526,17 +553,47 @@ public final class HealthDataFlow {
             List<Object> candidates = HealthDataflowAnalyzer.buildWriteCandidates(
                     ar.returnExpr, sink, Float.valueOf(expected), ctx, MAX_RUNTIME_CANDIDATES_PER_SOURCE);
             if (candidates.isEmpty()) {
+                if (sink.read(entity) instanceof Enum<?>) {
+                    HealthReportManager.recordFailureDetail(entity,
+                            diagnosticChannel.equals("external") ? "channel.external" : "channel.dataflow",
+                            tr("enum.no_candidate"));
+                    diag.add("    [" + sink.label + "] no verified object reference in current search");
+                    continue;
+                }
                 HealthSolveResult solved = HealthDataflowAnalyzer.buildWritePath(
                         ar.returnExpr, sink, Float.valueOf(expected), ctx);
+                HealthReportText failureDetail = switch (solved.failure()) {
+                    case LOCATION_NOT_FOUND -> tr("solve.no_location");
+                    case INVERTER_MISSING -> tr("solve.no_inverse");
+                    case CALL_NOT_RESOLVED -> tr("solve.unresolved");
+                    case MULTI_LOCATION_UNSUPPORTED -> tr("solve.joint_unsupported");
+                    case BUDGET_EXHAUSTED -> tr("solve.budget");
+                    case VALUE_NOT_REPRESENTABLE -> tr("solve.no_value");
+                    default -> tr("solve.failed");
+                };
+                HealthReportManager.recordFailureDetail(entity,
+                        diagnosticChannel.equals("external") ? "channel.external" : "channel.dataflow", failureDetail);
                 diag.add("    [" + sink.label + "] solve=FAIL " + solved.failure()
                         + " (" + solved.detail() + ")");
                 continue;
             }
 
             Object snapshot = sink.read(entity);
+            if (snapshot == null) {
+                HealthMutationContext.recordEvidence(tr("write.unreadable", sink.label));
+                continue;
+            }
+            boolean objectSubmission = snapshot instanceof Enum<?>;
+            long submissionDeadline = objectSubmission
+                    ? (shared == null ? System.nanoTime() + 25_000_000L : shared.submissionDeadline()) : deadline;
             boolean jointCandidateRecorded = false;
             for (Object candidate : candidates) {
-                if (System.nanoTime() > deadline) {
+                if (!HealthMutationContext.attempt(sink, candidate)) continue;
+                if (System.nanoTime() > submissionDeadline) {
+                    if (objectSubmission && shared != null) {
+                        shared.deferStorageSearch(sink);
+                        HealthMutationContext.recordEvidence(tr("submit.budget"));
+                    }
                     candidateScanComplete = false;
                     break;
                 }
@@ -550,11 +607,30 @@ public final class HealthDataFlow {
                 }
                 float readBefore = evaluateReadExpression(ar.returnExpr, entity);
                 float anchorBefore = EcaSetHealthManager.readHealthAnchor(entity);
+                if (shared != null && !shared.validateSubmission(sink, candidate)) {
+                    candidateScanComplete = false;
+                    break;
+                }
+                if (objectSubmission && System.nanoTime() > submissionDeadline) {
+                    if (shared != null) shared.deferStorageSearch(sink);
+                    HealthMutationContext.recordEvidence(tr("submit.preparation_timeout"));
+                    candidateScanComplete = false;
+                    break;
+                }
                 if (mirrorWrite != null && !dispatchWrite(mirrorWrite.authority(), entity, mirrorWrite.value())) {
+                    if (!restoreChangedSource(mirrorWrite.authority(), mirrorWrite.snapshot(), entity)) return false;
                     diag.add("    [" + sink.label + "] mirror authority=" + mirrorWrite.authority().label
                             + " solved=" + mirrorWrite.value() + " write=FAIL");
                     mirrorWrite = null;
                 }
+                if (objectSubmission && System.nanoTime() > submissionDeadline) {
+                    if (mirrorWrite != null) restoreChangedSource(mirrorWrite.authority(), mirrorWrite.snapshot(), entity);
+                    if (shared != null) shared.deferStorageSearch(sink);
+                    HealthMutationContext.recordEvidence(tr("submit.mirror_timeout"));
+                    candidateScanComplete = false;
+                    break;
+                }
+                if (shared != null) shared.beginSubmission(sink, candidate);
                 if (!dispatchWrite(sink, entity, candidate)) {
                     boolean restored = restoreSinkWithMirror(sink, snapshot, mirrorWrite, entity);
                     diag.add("    [" + sink.label + "] solved=" + candidate
@@ -605,6 +681,9 @@ public final class HealthDataFlow {
                 EcaSetHealthManager.recordUnobservedWrite(cls, sink, sink.label);
                 diag.add("    [" + sink.label + "] solved=" + candidate
                         + " verify=" + verdict + " restore=" + (restored ? "OK" : "FAIL"));
+                HealthReportManager.recordFailureDetail(entity,
+                        diagnosticChannel.equals("external") ? "channel.external" : "channel.dataflow",
+                        tr("write.unverified"));
             }
         }
 
@@ -668,10 +747,40 @@ public final class HealthDataFlow {
 
     private static boolean restoreSinkWithMirror(Source sink, Object snapshot, MirrorWrite mirrorWrite,
                                                  LivingEntity entity) {
-        boolean restored = dispatchWrite(sink, entity, snapshot);
+        boolean restored = restoreChangedSource(sink, snapshot, entity);
         if (mirrorWrite != null
-                && !dispatchWrite(mirrorWrite.authority(), entity, mirrorWrite.snapshot())) restored = false;
+                && !restoreChangedSource(mirrorWrite.authority(), mirrorWrite.snapshot(), entity)) restored = false;
         return restored;
+    }
+
+    private static boolean restoreChangedSource(Source source, Object before, LivingEntity entity) {
+        Object after = source.read(entity);
+        boolean readableNull = source instanceof MapEntrySource map
+                && map.resolveLocation(HealthDataflowAnalyzer.newContext(entity)) != null;
+        HealthReportText position = tr("storage.position", source.label);
+        if ((before != null || readableNull) && sameStoredValue(before, after)) {
+            HealthMutationContext.recordEvidence(tr("restore.unchanged", position));
+            return true;
+        }
+        boolean accepted = dispatchWrite(source, entity, before);
+        Object restored = source.read(entity);
+        boolean verified = (before != null || readableNull) && sameStoredValue(before, restored);
+        HealthMutationContext.recordEvidence(tr("restore.result", position, storedSummary(before), storedSummary(after), storedSummary(restored), accepted, verified));
+        if (!verified) HealthMutationContext.rollbackFailed(tr("restore.unverified", position));
+        return verified;
+    }
+
+    private static boolean sameStoredValue(Object left, Object right) {
+        if (left == right) return true;
+        return left != null && (left instanceof Number || left instanceof String || left instanceof Boolean
+                || left instanceof Character) && left.equals(right);
+    }
+
+    private static Object storedSummary(Object value) {
+        if (value == null) return tr("value.null");
+        if (value instanceof Number || value instanceof Boolean || value instanceof Character) return value.toString();
+        if (value instanceof String text) return tr("value.text_length", text.length());
+        return tr(value instanceof Enum<?> ? "value.enum_identity" : "value.object_identity", System.identityHashCode(value));
     }
 
     /* 权威可能同时是候选落点，重复入列会在联合写入里对同一单元下两次不同的值。 */
@@ -766,7 +875,18 @@ public final class HealthDataFlow {
        writes 由单源循环收集，其 snapshot 均为原值(循环对每次尝试都已回滚)，故回滚即复原。 */
     private static boolean writeAllSources(List<PreparedSourceWrite> writes, LivingEntity entity, float expected,
                                            List<String> diag, HealthVerifier verifier, boolean logSuccess) {
-        if (writes.size() < 2) return false;
+        if (writes.size() < 2 || HealthMutationContext.stopped()) return false;
+        HealthMutationContext context = HealthMutationContext.current();
+        if (context == null || !context.allowsJointWrite(writes.stream().map(PreparedSourceWrite::sink).toList())) {
+            HealthMutationContext.recordEvidence(tr("joint.no_constraint"));
+            return false;
+        }
+        if (writes.stream().anyMatch(write -> write.snapshot() == null)) {
+            HealthMutationContext.recordEvidence(tr("joint.null_snapshot"));
+            return false;
+        }
+        if (!HealthMutationContext.attempt(writes.stream().map(PreparedSourceWrite::sink).toList(),
+                writes.stream().map(PreparedSourceWrite::value).toList())) return false;
 
         float anchorBefore = EcaSetHealthManager.readHealthAnchor(entity);
         boolean wroteAll = true;
@@ -805,7 +925,7 @@ public final class HealthDataFlow {
         boolean restoredAll = true;
         for (int i = writes.size() - 1; i >= 0; i--) {
             PreparedSourceWrite write = writes.get(i);
-            if (!dispatchWrite(write.sink(), entity, write.snapshot())) restoredAll = false;
+            if (!restoreChangedSource(write.sink(), write.snapshot(), entity)) restoredAll = false;
         }
         diag.add("    [all sources] write=" + (wroteAll ? "OK" : "FAIL")
                 + " verify=FAIL restore=" + (restoredAll ? "OK" : "FAIL"));
@@ -839,7 +959,7 @@ public final class HealthDataFlow {
                 return HealthDataflowAnalyzer.evaluate(s.containerExpr, context) != null;
             }
             if (sink instanceof MapEntrySource s) {
-                return HealthDataflowAnalyzer.evaluate(s.containerExpr, context) != null;
+                return s.resolveLocation(context) != null;
             }
             if (sink instanceof ArrayElementSource s) {
                 return HealthDataflowAnalyzer.evaluate(s.arrayExpr, context) != null;
@@ -1092,47 +1212,18 @@ public final class HealthDataFlow {
         } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; return false; }
     }
 
-    private static boolean writeMapEntry(MapEntrySource s, LivingEntity entity, Object value) {
-        boolean any = false;
-        Set<Object> writtenMaps = Collections.newSetFromMap(new IdentityHashMap<>());
-
+    private static boolean writeMapEntry(MapEntrySource source, LivingEntity entity, Object value) {
         try {
-            Object obj = HealthDataflowAnalyzer.evaluate(s.containerExpr, HealthDataflowAnalyzer.newContext(entity));
-            if (obj instanceof Map<?, ?> map && writtenMaps.add(map)) {
-                Object key = matchKey(map, entity, s.keyKind);
-                if (key != null && unsafeModifyMapEntry(map, key, value)) any = true;
-            }
-        } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
-
-    // 同时更新 owner 类及其嵌套类的静态 Map，保持相关记录表一致
-        if (s.ownerClassInternal != null) {
-            Class<?> ownerClass = HealthDataflowAnalyzer.loadClass(s.ownerClassInternal);
-            if (ownerClass != null && writeSiblingMaps(ownerClass, entity, s, value, writtenMaps)) any = true;
+            EvalContext context = HealthDataflowAnalyzer.newContext(entity);
+            MapEntrySource.ResolvedMapEntry location = source.resolveLocation(context);
+            if (location == null) return false;
+            // 同名键不能证明其他表也是血量镜像；联写由已解析的关联关系负责。
+            return unsafeModifyMapEntry(location.map(), location.key(), value);
+        } catch (Throwable exception) {
+            if (exception instanceof VirtualMachineError error) throw error;
+            EcaLogger.info("[HealthDataflow] map entry write failed: {}", exception.getClass().getSimpleName());
+            return false;
         }
-        return any;
-    }
-
-    /* 写入 cls 及其嵌套类中已经包含本实体键的静态 Map 字段，保持多表一致。
-       仅改动 matchKey 命中(以本实体为键)的 Map，故对无关静态表安全；writtenMaps 身份集防重复写。 */
-    private static boolean writeSiblingMaps(Class<?> cls, LivingEntity entity, MapEntrySource s, Object value, Set<Object> writtenMaps) {
-        boolean any = false;
-        for (Field f : cls.getDeclaredFields()) {
-            if (!Modifier.isStatic(f.getModifiers())) continue;
-            if (!Map.class.isAssignableFrom(f.getType())) continue;
-            try {
-                f.setAccessible(true);
-                Object obj = f.get(null);
-                if (!(obj instanceof Map<?, ?> map)) continue;
-                if (!writtenMaps.add(map)) continue;
-                Object key = matchKey(map, entity, s.keyKind);
-                if (key == null) continue;
-                if (unsafeModifyMapEntry(map, key, value)) any = true;
-            } catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
-        }
-        for (Class<?> nested : cls.getDeclaredClasses()) {
-            if (writeSiblingMaps(nested, entity, s, value, writtenMaps)) any = true;
-        }
-        return any;
     }
 
     private static boolean writeArrayElement(ArrayElementSource s, LivingEntity entity, Object value) {
@@ -1323,22 +1414,10 @@ public final class HealthDataFlow {
 
     private record CompositeMapState(Map<Object, Object> map, Object key, Object entry) {}
 
-    /* ==================== Map 写入：兄弟表 + entrySet 遍历 + Unsafe ==================== */
+    /* ==================== Map 写入：精确表项 + entrySet 遍历 + Unsafe ==================== */
 
     private static final Map<Class<?>, Long> ENTRY_VALUE_OFFSET_CACHE = new ConcurrentHashMap<>();
 
-    private static Object matchKey(Map<?, ?> map, LivingEntity entity, MapEntrySource.KeyKind kind) {
-        Object primary = switch (kind) {
-            case ENTITY -> entity;
-            case ENTITY_UUID -> entity.getUUID();
-            case ENTITY_ID -> entity.getId();
-            case UNKNOWN -> entity;
-        };
-        if (primary != null && map.containsKey(primary)) return primary;
-        Object[] fb = {entity, entity.getUUID(), entity.getId()};
-        for (Object k : fb) if (k != null && map.containsKey(k)) return k;
-        return null;
-    }
 
     /* 遍历 entrySet 写所有 key 匹配的 entry(WeakHashMap 多 entry 同 key 的坑),
      * 用 Entry.setValue 绕过 Map.put(常见 mixin 拦截点),失败走 Unsafe 写字段偏移

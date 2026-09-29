@@ -13,6 +13,7 @@ public class EcaConfiguration {
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_EXTERNAL_SCAN;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_METHOD_PROBE;
     public static ForgeConfigSpec.ConfigValue<Boolean> ATTACK_SETHEALTH_ENABLE_NUMERIC_INVERSION;
+    public static ForgeConfigSpec.ConfigValue<String> HEALTH_REPORT_LANGUAGE;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_ENABLE_RADICAL_LOGIC;
     public static ForgeConfigSpec.ConfigValue<Boolean> DEFENCE_INVULNERABLE_UNTARGETABLE;
     public static ForgeConfigSpec.IntValue RESURRECTION_MAX_DISPLACEMENT;
@@ -66,6 +67,10 @@ public class EcaConfiguration {
         // setHealth 子配置：改血模块各自开关。数据流逆向与玩家/原版直写一样是基础能力（常开，仅受强制兼容模式控制，
         // 见 getAttackSetHealthEnableDataflowSafely），不在此列；本子段只容纳以激进逻辑为共同前提的模块。
         BUILDER.push("setHealth");
+
+        HEALTH_REPORT_LANGUAGE = BUILDER
+            .comment("Language for health reports requested without a player. Player requests use the player's language; missing translations fall back to en_us.")
+            .define("Report Language", "en_us");
 
         ATTACK_SETHEALTH_ENABLE_CONST_OVERRIDE = BUILDER
             .comment("Enable constant-override channel: patch getHealth bytecode to return the target value directly."
@@ -335,6 +340,10 @@ public class EcaConfiguration {
 
     public static boolean getBossShowRecordingFlightInertiaSafely() {
         return safeGet(BOSSSHOW_RECORDING_FLIGHT_INERTIA, false);
+    }
+
+    public static String getHealthReportLanguageSafely() {
+        return safeGet(HEALTH_REPORT_LANGUAGE, "en_us");
     }
 
     // Faction Configuration Safe Access Methods | 阵营系统安全访问方法

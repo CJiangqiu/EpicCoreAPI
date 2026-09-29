@@ -13,6 +13,7 @@ import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.EcaSetHealthManager;
 import net.eca.util.health.HealthReportManager;
+import net.eca.util.health.HealthMutationPipeline;
 import net.eca.util.health.health_lock.HealthLockManager;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -851,71 +852,14 @@ public class EntityUtil {
             boolean client = entity.level() != null && entity.level().isClientSide;
             //客户端仅允许被同步包驱动改血(否则客户端会与服务端各自为政)
             if (client && !IS_FROM_SYNC.get()) return false;
-            //锚点可信度探测自身要写原版血量，必须先于所有通道完成，否则会污染通道的回滚快照
-            EcaSetHealthManager.warmAnchorTrust(entity);
-            float beforeHealth = EcaSetHealthManager.safeGetHealth(entity);
-            HealthReportManager.recordInitialValue(entity, beforeHealth);
-
-            //第一步：写原版 DATA_HEALTH_ID。若目标 getHealth 就是读这里(原版实体多数如此)，验证已通过则直接成功，
-            //  避免每次都触发数据流逆向分析。Player 跳过(原版自带保护)，非 Player 走完整链。
-            setBasicHealth(entity, expectedHealth);
-            boolean vanillaVerified = EcaSetHealthManager.verify(entity, expectedHealth);
-            HealthReportManager.recordAttempt(entity, "原版同步数据直写", vanillaVerified,
-                    vanillaVerified ? "观测锚点匹配目标值" : "观测锚点未匹配目标值");
-            boolean ok;
-            if (entity instanceof Player) {
-                ok = vanillaVerified;
-                HealthReportManager.recordSkipped(entity, "数据流逆向", "玩家仅使用原版直写");
-            } else if (vanillaVerified) {
-                ok = true;                                                         //原版同步即生效
-            } else {
-                boolean dataflow = EcaSetHealthManager.applyDataflow(entity, expectedHealth);
-                if (EcaConfiguration.getAttackSetHealthEnableDataflowSafely()) {
-                    HealthReportManager.recordAttempt(entity, "数据流逆向", dataflow,
-                            dataflow ? "数据流定位与回读校验通过" : "未定位可提交的写入");
-                } else {
-                    HealthReportManager.recordSkipped(entity, "数据流逆向", "配置未启用");
-                }
-                if (dataflow) {
-                    ok = true;
-                } else {
-                    boolean external = EcaSetHealthManager.applyExternalScan(entity, expectedHealth);
-                    if (!EcaConfiguration.getAttackSetHealthEnableExternalScanSafely()) {
-                        HealthReportManager.recordSkipped(entity, "外部语义扫描", "配置未启用");
-                        HealthReportManager.recordSkipped(entity, "有效血量反演", "与外部扫描共用配置门控");
-                    } else {
-                        HealthReportManager.recordAttempt(entity, "外部语义扫描", external,
-                                external ? "语义存储或有效血量模型写入成功" : "本次未成功", false);
-                    }
-                    if (external) {
-                        ok = true;
-                    } else {
-                        boolean methodProbe = EcaSetHealthManager.applyMethodProbe(entity, expectedHealth);
-                        if (EcaConfiguration.getAttackSetHealthEnableMethodProbeSafely()) {
-                            HealthReportManager.recordAttempt(entity, "方法探针", methodProbe,
-                                    methodProbe ? "实体自身 writer 写入并通过校验" : "本次未找到可用 writer");
-                        } else {
-                            HealthReportManager.recordSkipped(entity, "方法探针", "配置未启用");
-                        }
-                        if (methodProbe) {
-                            ok = true;
-                        } else {
-                            ok = EcaSetHealthManager.applyNumericInversion(entity, expectedHealth);
-                            if (EcaConfiguration.getAttackSetHealthEnableNumericInversionSafely()) {
-                                HealthReportManager.recordAttempt(entity, "数值反演", ok,
-                                        ok ? "运行期数值单元扰动定位成功" : "本次未定位可写数值单元");
-                            } else {
-                                HealthReportManager.recordSkipped(entity, "数值反演", "配置未启用");
-                            }
-                            if (!ok) EcaSetHealthManager.scheduleEffectiveModelAnalysis(entity);
-                        }
-                    }
-                }
-            }
+            HealthMutationPipeline.Result result = HealthMutationPipeline.apply(entity, expectedHealth);
+            float beforeHealth = result.before();
+            boolean ok = result.success();
 
             //服务端改血成功 → 广播给追踪客户端，令自定义存储型实体客户端显示同步(客户端重跑同一条链)
             if (ok && !client) {
-                syncHealthToClients(entity, expectedHealth, beforeHealth);
+                syncHealthToClients(entity, expectedHealth);
+                if (result.alreadySatisfied()) return true;
                 /* 当场校验只能证明这一刻写进去了，tick 内的防护会把值改回去，故登记延迟复查。
                    已知会被改回的类再追加联写实体之外的血量镜像(外部扫描第三阶段)——
                    须登记成功才写，那批世界数据的提交与撤销全靠这次复查裁定。 */
@@ -937,22 +881,31 @@ public class EntityUtil {
 
     //由同步包在客户端调用：标记来源后走同一条链改本地实体(setHealth 的客户端分支据 IS_FROM_SYNC 放行，且不再回发包)
     public static void setHealthFromSync(LivingEntity entity, float expectedHealth) {
+        setHealthFromSyncChecked(entity, expectedHealth);
+    }
+
+    public static boolean setHealthFromSyncChecked(LivingEntity entity, float expectedHealth) {
+        boolean previous = IS_FROM_SYNC.get();
         IS_FROM_SYNC.set(true);
         try {
-            setHealth(entity, expectedHealth);
+            return setHealth(entity, expectedHealth);
         } finally {
-            IS_FROM_SYNC.set(false);
+            IS_FROM_SYNC.set(previous);
         }
     }
 
-    //服务端改血成功后同步到追踪客户端；同步驱动/客户端/无实质变化时不发
-    private static void syncHealthToClients(LivingEntity entity, float expectedHealth, float beforeHealth) {
+    // 服务端值未变化时客户端仍可能滞后，不能据此省略同步。
+    private static void syncHealthToClients(LivingEntity entity, float expectedHealth) {
         if (IS_FROM_SYNC.get()) return;
         if (entity.level() == null || entity.level().isClientSide) return;
-        if (Math.abs(expectedHealth - beforeHealth) <= 0.001f) return;
+        UUID request = HealthReportManager.beginClientSync(entity);
         try {
-            NetworkHandler.sendToTrackingClients(new SetHealthClientSyncPacket(entity.getId(), expectedHealth), entity);
-        } catch (Exception ignored) {}
+            NetworkHandler.sendToTrackingClients(new SetHealthClientSyncPacket(
+                    entity.getId(), entity.getUUID(), request, expectedHealth), entity);
+        } catch (Exception exception) {
+            HealthReportManager.clientSyncSendFailed(request);
+            EcaLogger.info("[HealthSync] send failed: {}", exception.getClass().getSimpleName());
+        }
     }
 
     //设置原版血量数据（DATA_HEALTH_ID）

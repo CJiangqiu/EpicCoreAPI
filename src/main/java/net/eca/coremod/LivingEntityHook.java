@@ -75,10 +75,12 @@ public final class LivingEntityHook {
         }
         ProvisionalHealth provisional = PROVISIONAL_HEALTH.get();
         if (provisional != null && provisional.entity == entity) {
-            return health;
+            return provisional.health;
         }
-        if (HealthLockManager.getLock(entity) != null) {
-            return health;
+        Float locked = HealthLockManager.getLock(entity);
+        if (locked != null) {
+            EntityUtil.repairBasicHealth(entity, locked);
+            return locked;
         }
         Float healBan = HealthLockManager.getHealBan(entity);
         return healBan == null ? health : Math.min(health, healBan);

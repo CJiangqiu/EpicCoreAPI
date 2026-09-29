@@ -4,12 +4,14 @@ import com.mojang.brigadier.arguments.FloatArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import net.eca.api.EcaAPI;
+import net.eca.config.EcaConfiguration;
 import net.eca.util.health.HealthReportManager;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 
@@ -50,7 +52,11 @@ public class SetHealthCommand {
                 }
 
                 boolean success = false;
-                if (createReport) HealthReportManager.begin(livingEntity, health);
+                if (createReport) {
+                    String language = source.getEntity() instanceof ServerPlayer player
+                            ? player.getLanguage() : EcaConfiguration.getHealthReportLanguageSafely();
+                    HealthReportManager.begin(livingEntity, health, language);
+                }
                 try {
                     success = EcaAPI.setHealth(livingEntity, health);
                     if (success) {

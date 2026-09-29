@@ -1,7 +1,13 @@
 package net.eca.util.health;
 
+import static net.eca.util.health.HealthReportText.tr;
+
 import net.eca.util.EcaLogger;
 import net.eca.util.reflect.UnsafeUtil;
+import net.eca.util.health.HealthDataflowAnalyzer.Source;
+import net.eca.util.health.HealthDataflowAnalyzer.FieldChainSource;
+import net.eca.util.health.HealthDataflowAnalyzer.SynchedDataSource;
+import net.eca.util.health.HealthDataflowAnalyzer.MapEntrySource;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
@@ -19,6 +25,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -40,7 +47,8 @@ public final class NumericInverter {
     /* 搜索结局诊断去重：每类每原因只打一次，避免每-tick 改血刷屏 */
     private static final Set<String> DIAG_DUMPED = ConcurrentHashMap.newKeySet();
 
-    private static void diag(LivingEntity entity, String reason) {
+    private static void diag(LivingEntity entity, String reason, HealthReportText reportDetail) {
+        HealthReportManager.recordFailureDetail(entity, "channel.numeric", reportDetail);
         boolean firstDump = DIAG_DUMPED.add(entity.getClass().getName() + "|" + reason);
         if (firstDump || HealthReportManager.isCapturing(entity))
             EcaLogger.info("[NumericInverter] {} entity={}", reason, entity.getClass().getName());
@@ -48,10 +56,23 @@ public final class NumericInverter {
 
     /* 从无法反演节点的运行期对象开始搜索；校验失败时恢复所有改动。 */
     public static boolean search(LivingEntity entity, float target, List<Object> roots) {
-        if (entity == null || roots == null || roots.isEmpty()) return false;
+        if (entity == null || roots == null) return false;
         long deadline = System.nanoTime() + TIME_BUDGET_NANOS;
 
         List<Cell> cells = new ArrayList<>();
+        HealthMutationContext shared = HealthMutationContext.current();
+        if (shared != null) {
+            for (Source source : shared.numericSources()) {
+                if (source instanceof MapEntrySource entry) {
+                    MapEntrySource.ResolvedMapEntry location = entry.resolveLocation(HealthDataflowAnalyzer.newContext(entity));
+                    if (location != null && location.map().get(location.key()) instanceof Number)
+                        cells.add(new MapValueCell(location.map(), location.key()));
+                } else if ((source instanceof FieldChainSource field && field.chain.size() == 1
+                        || source instanceof SynchedDataSource) && source.read(entity) instanceof Number) {
+                    cells.add(new SourceCell(source, entity));
+                }
+            }
+        }
         Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         // 优先遍历数据流定位的容器根，再限制实体对象图的候选数量，避免无关对象耗尽搜索预算
         for (Object root : roots) {
@@ -62,7 +83,7 @@ public final class NumericInverter {
             if (root instanceof Entity) walk(root, cells, visited, deadline, 0, entityCellCap);
         }
         if (cells.isEmpty()) {
-            diag(entity, "no perturbable numeric cells reachable from dead-end roots (roots=" + roots.size() + ")");
+            diag(entity, "no perturbable numeric cells reachable from dead-end roots (roots=" + roots.size() + ")", tr("numeric.no_cells"));
             return false;
         }
 
@@ -72,7 +93,7 @@ public final class NumericInverter {
         try {
             float baseline = EcaSetHealthManager.readHealthAnchor(entity);
             if (!Float.isFinite(baseline)) {
-                diag(entity, "baseline health anchor non-finite");
+                diag(entity, "baseline health anchor non-finite", tr("numeric.invalid_anchor"));
                 rollback(cells, snapshot);
                 return false;
             }
@@ -81,19 +102,21 @@ public final class NumericInverter {
             List<Cell> relevant = new ArrayList<>();
             List<Double> slopes = new ArrayList<>();
             for (Cell cell : cells) {
+                if (HealthMutationContext.stopped()) break;
                 if (System.nanoTime() > deadline) break;
                 double cur = cell.read();
                 if (!Double.isFinite(cur)) continue;
                 Object exact = cell.snapshot();   // 保留原始类型和值，避免 long 与 double 转换造成精度损失
+                if (!HealthMutationContext.attempt(cell.location(), cur + PERTURB)) continue;
                 if (!cell.write(cur + PERTURB)) continue;
                 float h = EcaSetHealthManager.readHealthAnchor(entity);
-                cell.restore(exact);              // 使用快照恢复，避免数值类型转换
+                restoreCell(cell, exact);
                 if (!Float.isFinite(h)) continue;
                 double slope = (h - baseline) / PERTURB;
                 if (Math.abs(slope) > 1e-9) { relevant.add(cell); slopes.add(slope); }
             }
             if (relevant.isEmpty()) {
-                diag(entity, "no cell influences health anchor (all slopes ~0, cells=" + cells.size() + ")");
+                diag(entity, "no cell influences health anchor (all slopes ~0, cells=" + cells.size() + ")", tr("numeric.no_influence"));
                 rollback(cells, snapshot);
                 return false;
             }
@@ -102,6 +125,7 @@ public final class NumericInverter {
             EcaSetHealthManager.promoteAnchorTrust(entity.getClass());
 
             for (int pass = 0; pass < MAX_PASSES; pass++) {
+                if (HealthMutationContext.stopped()) break;
                 if (System.nanoTime() > deadline) break;
                 float h = EcaSetHealthManager.readHealthAnchor(entity);
                 if (hit(h, target)) break;
@@ -116,16 +140,16 @@ public final class NumericInverter {
                 }
             }
 
-            boolean ok = EcaSetHealthManager.verify(entity, target);
+            boolean ok = !HealthMutationContext.stopped() && EcaSetHealthManager.verify(entity, target);
             if (!ok) {
-                diag(entity, "descent did not reach target (cells=" + cells.size() + " relevant=" + relevant.size() + ")");
+                diag(entity, "descent did not reach target (cells=" + cells.size() + " relevant=" + relevant.size() + ")", tr("numeric.not_converged"));
                 rollback(cells, snapshot);
             } else EcaLogger.info("[NumericInverter] hit entity={} target={} cells={} relevant={}",
                     entity.getClass().getName(), target, cells.size(), relevant.size());
             return ok;
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
-            diag(entity, "aborted by exception: " + t.getClass().getSimpleName());
+            diag(entity, "aborted by exception: " + t.getClass().getSimpleName(), tr("numeric.exception"));
             rollback(cells, snapshot);
             return false;
         }
@@ -142,21 +166,33 @@ public final class NumericInverter {
         double beforeError = Math.abs((double) target - before);
         double scale = 1.0;
         for (int attempt = 0; attempt < 12; attempt++, scale *= 0.5) {
-            cell.restore(exact);
+            restoreCell(cell, exact);
+            if (HealthMutationContext.stopped()) break;
+            if (!HealthMutationContext.attempt(cell.location(), current + delta * scale)) continue;
             if (!cell.write(current + delta * scale)) continue;
             float after = EcaSetHealthManager.readHealthAnchor(entity);
             if (!Float.isFinite(after)) continue;
             double afterError = Math.abs((double) target - after);
             if (hit(after, target) || afterError < beforeError) return after;
         }
-        cell.restore(exact);
+        restoreCell(cell, exact);
         return before;
     }
 
     private static void rollback(List<Cell> cells, Object[] snapshot) {
         for (int i = cells.size() - 1; i >= 0; i--) {
-            try { cells.get(i).restore(snapshot[i]); }
-            catch (Throwable t) { if (t instanceof VirtualMachineError e) throw e; }
+            restoreCell(cells.get(i), snapshot[i]);
+        }
+    }
+
+    private static void restoreCell(Cell cell, Object value) {
+        try {
+            cell.restore(value);
+            if (!Objects.equals(value, cell.snapshot())) HealthMutationContext.rollbackFailed();
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            EcaLogger.info("[NumericInverter] restore failed: {}", t.getClass().getSimpleName());
+            HealthMutationContext.rollbackFailed();
         }
     }
 
@@ -164,6 +200,9 @@ public final class NumericInverter {
 
     private static void walk(Object obj, List<Cell> cells, Set<Object> visited, long deadline, int depth, int cellCap) {
         if (obj == null || depth > MAX_WALK_DEPTH || System.nanoTime() > deadline || cells.size() >= cellCap) return;
+        if (obj instanceof Enum<?>) return;
+        if (HealthMutationContext.current() != null && obj instanceof Entity) return;
+        if (!HealthMutationContext.allowNumericObject(obj)) return;
         if (obj instanceof Number || obj instanceof Boolean || obj instanceof Character || obj instanceof String) return;
         if (!visited.add(obj)) return;
         Class<?> cls = obj.getClass();
@@ -266,7 +305,34 @@ public final class NumericInverter {
         Object snapshot();
         void restore(Object snap);
         String label();
+        default Object location() { return this; }
         default int associationScore(LivingEntity entity) { return 0; }
+    }
+
+    private record CellLocation(Object owner, Object slot) {
+        @Override public boolean equals(Object other) {
+            return other instanceof CellLocation location && owner == location.owner && Objects.equals(slot, location.slot);
+        }
+        @Override public int hashCode() {
+            return 31 * System.identityHashCode(owner) + Objects.hashCode(slot);
+        }
+    }
+
+    private record SourceCell(Source source, LivingEntity entity) implements Cell {
+        @Override public Object location() { return source; }
+        @Override public double read() {
+            return source.read(entity) instanceof Number number ? number.doubleValue() : Double.NaN;
+        }
+        @Override public boolean write(double value) {
+            Object before = snapshot();
+            Object converted = coerceLike(before, source.valueType, value);
+            return converted != null && HealthDataFlow.dispatchWrite(source, entity, converted);
+        }
+        @Override public Object snapshot() { return source.read(entity); }
+        @Override public void restore(Object value) {
+            if (!HealthDataFlow.dispatchWrite(source, entity, value)) HealthMutationContext.rollbackFailed();
+        }
+        @Override public String label() { return "located_numeric_cell"; }
     }
 
     /* 从给定根收集可写数值 cell，不做斜率筛选。
@@ -288,6 +354,7 @@ public final class NumericInverter {
         private final Field field;
 
         private FieldCell(Object owner, Field field) { this.owner = owner; this.field = field; }
+        @Override public Object location() { return new CellLocation(owner, field); }
 
         @Override public double read() {
             try { return field.get(owner) instanceof Number n ? n.doubleValue() : Double.NaN; }
@@ -325,6 +392,7 @@ public final class NumericInverter {
         private final int index;
 
         private ArrayCell(Object array, int index) { this.array = array; this.index = index; }
+        @Override public Object location() { return new CellLocation(array, index); }
 
         @Override public double read() {
             try { return Array.get(array, index) instanceof Number n ? n.doubleValue() : Double.NaN; }
@@ -362,6 +430,7 @@ public final class NumericInverter {
             this.map = map;
             this.key = key;
         }
+        @Override public Object location() { return new CellLocation(map, key); }
 
         @Override public double read() {
             try { return map.get(key) instanceof Number number ? number.doubleValue() : Double.NaN; }
@@ -410,6 +479,7 @@ public final class NumericInverter {
             this.list = list;
             this.index = index;
         }
+        @Override public Object location() { return new CellLocation(list, index); }
 
         @Override public double read() {
             try { return list.get(index) instanceof Number number ? number.doubleValue() : Double.NaN; }
