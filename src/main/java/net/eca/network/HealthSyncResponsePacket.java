@@ -1,6 +1,6 @@
 package net.eca.network;
 
-import net.eca.util.health.HealthReportManager;
+import net.eca.util.health.report.HealthReportManager;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.network.NetworkEvent;

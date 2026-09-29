@@ -1,4 +1,4 @@
-package net.eca.util.health;
+package net.eca.util.health.report;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -18,7 +18,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Immutable translation keys and arguments; localization happens only when a report is rendered. */
+/*
+ * 报告文案的延迟翻译载体：采集证据时保留翻译键和参数，输出时再按报告语言统一渲染，
+ * 避免分析与写入模块提前拼接固定语言的诊断文字。
+ * 支持嵌套文案和列表，从语言资源读取模板，缺项回退到英文；服务端生成报告不依赖客户端语言单例。
+ */
 public record HealthReportText(String key, List<Object> arguments) {
     private static final String PREFIX = "health_report.eca.";
     private static final Map<String, Map<String, String>> LANGUAGES = new ConcurrentHashMap<>();

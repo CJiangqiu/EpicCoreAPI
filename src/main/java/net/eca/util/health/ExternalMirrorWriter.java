@@ -1,5 +1,7 @@
 package net.eca.util.health;
 
+import net.eca.util.health.report.HealthReportManager;
+
 import net.eca.util.EcaLogger;
 import net.eca.util.reflect.ReflectUtil;
 import net.minecraft.server.MinecraftServer;

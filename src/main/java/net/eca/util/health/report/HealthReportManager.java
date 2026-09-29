@@ -1,9 +1,14 @@
-package net.eca.util.health;
+package net.eca.util.health.report;
 
-import static net.eca.util.health.HealthReportText.tr;
+import static net.eca.util.health.report.HealthReportText.tr;
 
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
+import net.eca.util.health.DelayedHealthVerifier;
+import net.eca.util.health.EcaSetHealthManager;
+import net.eca.util.health.HealthDataflowAnalyzer;
+import net.eca.util.health.HealthModel;
+import net.eca.util.health.HealthValueSemantics;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -29,8 +34,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Collects one command-triggered health mutation trace and writes a standalone diagnostic report.
+/*
+ * 单次命令改血的报告管理器：归集通道尝试、求解证据、存储判断和诊断日志，生成独立报告文件。
+ * 将后台分析、延迟复查和客户端同步反馈关联回原会话，分别呈现当场写入与后续保持情况，
+ * 避免仅凭通道返回成功就宣称血量已持久修改。
+ * 文案通过 HealthReportText 按会话语言渲染；本类负责记录与展示，不参与血量求解和存储写入。
  */
 public final class HealthReportManager {
 
@@ -153,13 +161,13 @@ public final class HealthReportManager {
                 new Attempt(tr("status.skipped"), reason == null ? List.of() : List.of(reason)));
     }
 
-    static void recordFailureDetail(LivingEntity entity, String channel, HealthReportText detail) {
+    public static void recordFailureDetail(LivingEntity entity, String channel, HealthReportText detail) {
         Session session = active(entity);
         if (session == null || detail == null) return;
         session.failureDetails.computeIfAbsent(channel, ignored -> new LinkedHashSet<>()).add(detail);
     }
 
-    static void recordSharedEvidence(LivingEntity entity, List<HealthReportText> events) {
+    public static void recordSharedEvidence(LivingEntity entity, List<HealthReportText> events) {
         Session session = active(entity);
         if (session != null) session.sharedEvidence = events;
     }

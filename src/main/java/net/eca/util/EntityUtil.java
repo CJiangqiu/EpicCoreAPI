@@ -12,7 +12,7 @@ import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.health.DelayedHealthVerifier;
 import net.eca.util.health.EcaOwnedState;
 import net.eca.util.health.EcaSetHealthManager;
-import net.eca.util.health.HealthReportManager;
+import net.eca.util.health.report.HealthReportManager;
 import net.eca.util.health.HealthMutationPipeline;
 import net.eca.util.health.health_lock.HealthLockManager;
 import net.minecraft.network.syncher.EntityDataAccessor;

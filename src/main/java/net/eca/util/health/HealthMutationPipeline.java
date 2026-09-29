@@ -1,13 +1,22 @@
 package net.eca.util.health;
 
-import static net.eca.util.health.HealthReportText.tr;
+import net.eca.util.health.report.HealthReportText;
+
+import net.eca.util.health.report.HealthReportManager;
+
+import static net.eca.util.health.report.HealthReportText.tr;
 
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EntityUtil;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 
-/** Runs all immediate mutation channels with one operation-local evidence context. */
+/*
+ * 即时改血的统一入口：在同一个 HealthMutationContext 中依次协调原版写入、数据流、外部扫描、
+ * 方法探针和数值反演，使各通道共享证据，并受配置、存储范围和剩余预算约束。
+ * 探针发现新证据后只回访一次前置通道，避免失败路径循环互调；具体求解和写入仍交给对应模块。
+ * 返回的是当场校验结果，跨 tick 是否保持由 DelayedHealthVerifier 另行复查。
+ */
 public final class HealthMutationPipeline {
     private HealthMutationPipeline() {}
 

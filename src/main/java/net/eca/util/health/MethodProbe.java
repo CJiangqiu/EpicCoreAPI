@@ -56,7 +56,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 三种策略：
  *  DirectCall：静态枚举单参数数值 setter、函数式字段及其多步调用协议，通过写入、读取与回滚确定有效 writer。
  *  HeadBridge：扫 void(float) 方法体识别 token(entity):long + writer(entity,float,long):void 授权写模式，
- *              warmup 在方法 HEAD 注入授权调用(惰性)，运行期借实体自身可信帧发起、绕过后续栈守护/门控。
+ *  warmup 在方法 HEAD 注入授权调用(惰性)，运行期借实体自身可信帧发起、绕过后续栈守护/门控。
  *  ProtocolBridge：识别数值编码、命令生成与命令提交的连续事务，在原始方法帧内重放完整写入协议。
  * 发现只读字节码/反射签名；注入/retransform/激活态/反射调用等副作用亦收拢于本类，模块自成一体。
  * 字节码经注入式 provider 取(与 HealthDataflowAnalyzer 同源运行期字节码)。

@@ -1,7 +1,9 @@
 package net.eca.util.health;
 
-/**
- * Centralizes scalar health comparison rules shared by immediate and delayed verification.
+/*
+ * 血量数值校验的公共规则，避免即时写入和延迟复查各自使用不一致的误差标准。
+ * 普通比较使用绝对与相对容差，死亡目标可单独按非正值判断，并统一拒绝非有限数值。
+ * 延迟保持检查允许血量继续下降，防止后续伤害被误判为写入回滚。
  */
 public final class HealthValueSemantics {
 

@@ -1,6 +1,10 @@
 package net.eca.util.health;
 
-import static net.eca.util.health.HealthReportText.tr;
+import net.eca.util.health.report.HealthReportText;
+
+import net.eca.util.health.report.HealthReportManager;
+
+import static net.eca.util.health.report.HealthReportText.tr;
 
 import net.eca.util.EcaLogger;
 import net.eca.util.health.HealthDataflowAnalyzer.AnalysisResult;
@@ -27,7 +31,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 
-/** Shares evidence only within one entity mutation; no live objects enter class caches. */
+/*
+ * 单次改血的共享上下文：让数据流、方法探针和数值反演复用存储来源、求解失败位置与运行期对象，
+ * 避免各通道重复搜索，也避免把分析发现的候选直接当成允许写入的存储。
+ * 统一管理本次操作的预算、尝试去重和提交校验；回滚失败时停止后续通道，防止继续污染实体状态。
+ * 运行期对象只在本次上下文内持有，不放入类级缓存；关闭时汇总报告证据并恢复外层上下文。
+ */
 final class HealthMutationContext implements AutoCloseable {
     private static final ThreadLocal<HealthMutationContext> ACTIVE = new ThreadLocal<>();
     private static final int MAX_EVIDENCE = 256;

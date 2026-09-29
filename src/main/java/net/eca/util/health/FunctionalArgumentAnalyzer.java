@@ -24,7 +24,12 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Recovers bounded argument plans from actual array stores, without executing candidate calls. */
+/*
+ * 函数式调用的参数来源分析：从字节码中的实际数组写入恢复标记参数、数值位置和令牌获取步骤，
+ * 为 MethodProbe 提供有依据的调用协议，避免盲目枚举参数组合。
+ * 仅在受限范围内追踪可确定的来源；遇到分支、数组逃逸或含糊来源时放弃该候选，
+ * 本类不执行候选调用，实际调用及效果校验由方法探针负责。
+ */
 final class FunctionalArgumentAnalyzer {
     private static final Object UNKNOWN = new Object();
 

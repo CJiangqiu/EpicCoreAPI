@@ -1,6 +1,8 @@
 package net.eca.util.health;
 
-import static net.eca.util.health.HealthReportText.tr;
+import net.eca.util.health.report.HealthReportText;
+
+import static net.eca.util.health.report.HealthReportText.tr;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.util.EcaLogger;
@@ -25,6 +27,12 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+/*
+ * 试探性写入的对象图快照：保存实体字段、静态锚点及相关对象的可恢复状态，供探针和反演失败后回滚。
+ * 常规捕获沿相关根展开，行为探针使用较浅的捕获范围，避免把一次尝试变成世界级对象扫描。
+ * 捕获受时间和槽位数量限制，不完整时拒绝作为写入保障；恢复失败通知 HealthMutationContext 停止后续尝试。
+ * 快照只覆盖已捕获的存储，不保证撤销任意外部副作用。
+ */
 final class ObjectGraphSnapshot {
     private static final long TIME_BUDGET_NANOS = 50_000_000L;
     private static final int MAX_SLOTS = 100_000;

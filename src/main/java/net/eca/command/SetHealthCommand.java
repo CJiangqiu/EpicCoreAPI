@@ -6,7 +6,7 @@ import com.mojang.brigadier.context.CommandContext;
 import net.eca.api.EcaAPI;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.health.DelayedHealthVerifier;
-import net.eca.util.health.HealthReportManager;
+import net.eca.util.health.report.HealthReportManager;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;

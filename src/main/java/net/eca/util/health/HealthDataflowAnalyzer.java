@@ -1,6 +1,8 @@
 package net.eca.util.health;
 
-import static net.eca.util.health.HealthReportText.tr;
+import net.eca.util.health.report.HealthReportText;
+
+import static net.eca.util.health.report.HealthReportText.tr;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.config.EcaConfiguration;

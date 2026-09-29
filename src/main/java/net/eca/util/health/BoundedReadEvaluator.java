@@ -25,7 +25,12 @@ import java.util.IdentityHashMap;
 import java.util.UUID;
 import java.util.function.Function;
 
-/** Interprets read-only lookup and numeric loops without invoking arbitrary application methods. */
+/*
+ * 有界只读字节码求值器：为查找和数值循环提供运行期求值，避免符号展开循环时表达式膨胀。
+ * 使用分析器提供的字节码与类解析入口解释受支持的指令，不直接调用任意应用方法，
+ * 并通过指令步数、递归深度和时间预算限制工作量；无法安全解释时返回未解析结果。
+ * 读取过程中发现的对象交给 HealthMutationContext，供后续数值反演复用实际读取路径。
+ */
 final class BoundedReadEvaluator {
     private final Function<Class<?>, ClassNode> bytecode;
     private final Function<String, Class<?>> classes;

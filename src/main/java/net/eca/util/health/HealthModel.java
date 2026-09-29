@@ -5,8 +5,10 @@ import net.minecraft.world.entity.LivingEntity;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Runtime model of the verified observation, mutation capability and persistence behavior of one entity class.
+/*
+ * 按实体类共享血量观测方式及其可信状态，供读取锚点选择和后续改血判断复用。
+ * 区分外部观测与有效血量模型，单独记录模型是否已确认、是否出现过延迟回滚，
+ * 避免把找到读取方式等同于写入能够持久生效；本类不负责求解或写入实体存储。
  */
 public final class HealthModel {
 
