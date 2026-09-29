@@ -12,7 +12,7 @@ import net.minecraft.world.entity.Entity;
 
 import java.util.Collection;
 
-//使用LWJGL相关API清除实体命令（需要开启激进攻击逻辑配置）
+// 通过 LWJGL 的内部 Unsafe 实例清除实体，需要开启激进攻击逻辑配置
 public class MemoryRemoveCommand {
 
     //注册子命令
@@ -55,7 +55,7 @@ public class MemoryRemoveCommand {
 
             if (finalSuccessCount > 0) {
                 source.sendSuccess(() -> Component.literal(
-                    String.format("§aRemoved %d %s via LWJGL API",
+                    String.format("§aRemoved %d %s using LWJGL's internal Unsafe instance",
                         finalSuccessCount,
                         finalSuccessCount == 1 ? "entity" : "entities")
                 ), true);

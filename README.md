@@ -21,7 +21,7 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
  - `/eca hurt <targets> <amount>` - Force entity damage (vanilla hurt first, forced write when the health loss does not land; kill credit goes to the executor when run by a living entity)
  - `/eca kill <targets>` - Kill entities
 - `/eca remove <targets> [reason]` - Remove entities from world
-- `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities via LWJGL internal channel
+- `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities using LWJGL's internal Unsafe instance
 - `/eca teleport <targets> <x> <y> <z>` - Teleport entities
 - `/eca lockLocation <targets> <true|false> [x y z]` - Lock/unlock entity location
 - `/eca cleanBossBar <targets>` - Clean up boss bars
@@ -146,7 +146,7 @@ side="BOTH"
 - `isLocationLocked(entity)` - Check if entity location is locked
 - `getLockedLocation(entity)` - Get locked position (null if not locked)
 - `remove(entity, reason)` - Complete removal (AI, boss bars, containers, passengers)
-- `memoryRemove(entity, reason)` - DANGER! Requires Attack Radical Logic config. Remove entity via LWJGL internal channel
+- `memoryRemove(entity, reason)` - DANGER! Requires Attack Radical Logic config. Remove entity using LWJGL's internal Unsafe instance
 - `cleanupBossBar(entity)` - Remove boss bars without removing entity
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
 - `setInvulnerable(entity, invulnerable)` - Set invulnerability (enable: revive + lock health + block damage + remove harmful effects per tick + prevent mob targeting + protect player inventory; disable: clear all protections)
@@ -337,7 +337,7 @@ boolean locationLocked = EcaAPI.isLocationLocked(entity);
 Vec3 lockedPos = EcaAPI.getLockedLocation(entity);
 EcaAPI.unlockLocation(entity);
 EcaAPI.remove(entity, Entity.RemovalReason.KILLED);
-EcaAPI.memoryRemove(entity, Entity.RemovalReason.CHANGED_DIMENSION);  // Remove using LWJGL internal Unsafe instance
+EcaAPI.memoryRemove(entity, Entity.RemovalReason.CHANGED_DIMENSION);  // Remove using LWJGL's internal Unsafe instance
 EcaAPI.cleanupBossBar(entity);
 
 // ECA Entity Selector API
@@ -1361,7 +1361,7 @@ Any `.json` filename works, and you can have multiple files.
  - `/eca hurt <目标> <伤害值>` - 强制实体受伤（先走原版 hurt，血没扣对时强制写入；由生物执行时掉落与经验归属给执行者）
  - `/eca kill <目标>` - 击杀实体
 - `/eca remove <目标> [原因]` - 从世界中移除实体
-- `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 内部通道清除实体
+- `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 的内部 Unsafe 实例清除实体
 - `/eca teleport <目标> <x> <y> <z>` - 传送实体
 - `/eca lockLocation <目标> <true|false> [x y z]` - 锁定/解除实体位置
 - `/eca cleanBossBar <目标>` - 清理 Boss 血条
@@ -1486,7 +1486,7 @@ side="BOTH"
 - `isLocationLocked(entity)` - 检查实体位置是否锁定
 - `getLockedLocation(entity)` - 获取锁定位置（未锁定返回 null）
 - `remove(entity, reason)` - 完整移除（AI、Boss 血条、容器、乘客等）
-- `memoryRemove(entity, reason)` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 内部通道清除实体
+- `memoryRemove(entity, reason)` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 的内部 Unsafe 实例清除实体
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
 - `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活、锁血、阻断伤害、每 tick 清除有害效果、阻止怪物锁定、保护玩家物品栏；关闭：清除所有保护）
@@ -1677,7 +1677,7 @@ boolean locationLocked = EcaAPI.isLocationLocked(entity);
 Vec3 lockedPos = EcaAPI.getLockedLocation(entity);
 EcaAPI.unlockLocation(entity);
 EcaAPI.remove(entity, Entity.RemovalReason.KILLED);
-EcaAPI.memoryRemove(entity, Entity.RemovalReason.CHANGED_DIMENSION);  // 提供使用 LWJGL 内部 Unsafe 实例进行清除
+EcaAPI.memoryRemove(entity, Entity.RemovalReason.CHANGED_DIMENSION);  // 通过 LWJGL 的内部 Unsafe 实例清除实体
 EcaAPI.cleanupBossBar(entity);
 
 // ECA 实体选择 API

@@ -504,9 +504,9 @@ public final class EcaAPI {
         EntityUtil.remove(entity, reason);
     }
 
-    // 清除实体（使用Unsafe实现，需要开启激进攻击逻辑配置）
+    // 通过 LWJGL 的内部 Unsafe 实例清除实体，需要开启激进攻击逻辑配置
     /**
-     * Remove an entity using Unsafe API, bypassing call-stack interception.
+     * Remove an entity using LWJGL's internal Unsafe instance, bypassing call-stack interception.
      * DANGER! Requires "Enable Radical Logic" in Attack config.
      * @param entity the entity to remove
      * @param reason the removal reason

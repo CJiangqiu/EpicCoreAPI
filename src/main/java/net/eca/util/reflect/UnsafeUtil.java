@@ -31,11 +31,11 @@ import java.util.*;
 
 /**
  * 内存操作工具类
- * 通过LWJGL内部的Unsafe通道进行内存操作，绕过字节码级别的拦截
+ * 通过反射调用 LWJGL 的内部 Unsafe 实例进行内存操作，绕过字节码级别的拦截
  * 原理：
- * 1. LWJGL是Minecraft核心依赖，其内部类不会被第三方修改
- * 2. 通过反射获取LWJGL内部的Unsafe实例
- * 3. 通过Method.invoke()调用Unsafe方法，字节码中不会出现直接的Unsafe调用
+ * 1. LWJGL 是 Minecraft 核心依赖，其内部类不会被第三方修改
+ * 2. 通过反射获取 LWJGL 的内部 Unsafe 实例
+ * 3. 通过 Method.invoke() 调用 Unsafe 方法，字节码中不会出现直接的 Unsafe 调用
  */
 @SuppressWarnings("unchecked")
 public class UnsafeUtil {
@@ -62,7 +62,7 @@ public class UnsafeUtil {
         }
     }
 
-    // ==================== LWJGL Unsafe 通道 ====================
+    // ==================== LWJGL 内部 Unsafe 实例 ====================
 
     private static Object LWJGL_UNSAFE;
     private static Method PUT_OBJECT_METHOD;
@@ -133,7 +133,7 @@ public class UnsafeUtil {
             available = true;
         } catch (Exception e) {
             available = false;
-            EcaLogger.info("[UnsafeUtil] Failed to initialize LWJGL Unsafe channel: {}", e.getMessage());
+            EcaLogger.info("[UnsafeUtil] Failed to initialize LWJGL internal Unsafe instance: {}", e.getMessage());
         }
     }
 
@@ -329,9 +329,9 @@ public class UnsafeUtil {
         }
     }
 
-    // 通过 LWJGL Unsafe 通道写字段（绕过 final、access 检查、VarHandle 限制）
+    // 通过 LWJGL 的内部 Unsafe 实例写字段，绕过 final、access 检查和 VarHandle 限制
     /**
-     * Write a value to a field through the LWJGL Unsafe channel.
+     * Write a value to a field using LWJGL's internal Unsafe instance.
      * Bypasses final / access modifier / VarHandle restrictions, allowing writes to
      * record components and other read-only fields. Auto-dispatches by field type
      * and unboxes {@link Number} for primitive targets.
@@ -385,8 +385,8 @@ public class UnsafeUtil {
     /**
      * Forcefully remove an entity, bypassing invulnerability and health lock protections.
      * Uses CHANGED_DIMENSION as removal reason to skip vanilla protection checks.
-     * All container removal operations go through the Unsafe channel to bypass call-stack interception.
-     *
+     * Uses LWJGL's internal Unsafe instance to read fields and obtain container references,
+     * then removes the entity from those containers while bypassing call-stack interception.
      * @param entity the entity to remove
      * @return true if removal succeeded, false otherwise
      */
