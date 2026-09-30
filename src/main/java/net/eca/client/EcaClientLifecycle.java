@@ -2,10 +2,11 @@ package net.eca.client;
 
 import net.eca.EcaMod;
 import net.eca.client.render.BlockExtensionRenderer;
-import net.eca.client.render.blender.BlenderModelManager;
+import net.eca.blender.client.resource.BlenderModelManager;
 import net.eca.client.render.preset.ShaderPresetRegistry;
 import net.eca.compat.GeckoLibCompat;
 import net.eca.util.block_extension.BlockExtensionManager;
+import net.eca.util.entity_extension.BlenderExtensionAdapter;
 import net.eca.util.item_extension.ItemExtensionManager;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -26,6 +27,7 @@ public final class EcaClientLifecycle {
     @SubscribeEvent
     public static void onClientSetup(FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
+            BlenderExtensionAdapter.register();
             BlockExtensionRenderer.register();
             if (ModList.get().isLoaded("geckolib")) {
                 GeckoLibCompat.register();

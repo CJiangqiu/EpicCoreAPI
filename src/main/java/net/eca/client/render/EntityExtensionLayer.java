@@ -9,7 +9,7 @@ import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.EntityExtensionSafeAccess;
 import net.eca.util.entity_extension.EntityLayerExtension;
-import net.eca.util.entity_extension.BlenderModelExtension;
+import net.eca.blender.client.entity.BlenderEntityBindings;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
@@ -41,8 +41,7 @@ public class EntityExtensionLayer<T extends LivingEntity, M extends net.minecraf
             return;
         }
 
-        BlenderModelExtension blender = EntityExtensionSafeAccess.blenderModelExtension(extension, entity);
-        if (EntityExtensionSafeAccess.usesBlenderReplacement(blender)) {
+        if (BlenderEntityBindings.replacesBody(BlenderEntityBindings.resolve(entity))) {
             return;
         }
 

@@ -1,6 +1,8 @@
 # EpicCoreAPI
 
-This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, Blender GLB models and animation, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
+See [ECA Blender Model](#eca-blender-model) for native `.blend` and GLB resources, entity rendering, animation controllers and supported-node limits; [中文指南](#eca-blender-model-1).
+
+This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, ECA Blender Model, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
 
 The original intent of this mod is to provide developers with simplified entity manipulation APIs while achieving a certain level of strength under the premise of ensuring performance and compatibility. Therefore, please do not use this mod for mod power comparisons or endless code arms races. Additionally, in modpack survival environments, it is best to ensure that the Attack and Defence Radical Logic config options are disabled.
 
@@ -166,12 +168,16 @@ side="BOTH"
 - `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
 - `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
 - `clearActiveEntityExtensionTable(level)` - Clear active entity extension table in current dimension
-- `playAnimation(entity, animation)` - Start a named GLB animation from the beginning at normal speed without looping (logical server only)
-- `playAnimation(entity, animation, speed, loop)` - Start or restart a named GLB animation with explicit playback settings (logical server only)
-- `stopAnimation(entity)` - Stop explicit playback and return to the extension-selected or model-default animation
-- `pauseAnimation(entity)` - Pause explicit playback while holding its current position
-- `resumeAnimation(entity)` - Resume explicit playback from its preserved position
-- `isAnimationPlaying(entity[, animation])` - Query explicit playback, optionally matching an exact animation name
+- `playAnimation(entity, animation)` - Manually take control and start a named model action at speed 1 without looping (logical server thread)
+- `playAnimation(entity, animation, speed, loop)` - Manually start/restart a named model action with speed and looping (logical server thread)
+- `stopAnimation(entity)` - Stop managed playback, cancel an active skill if present, and release control to the controller/fallback
+- `pauseAnimation(entity)` - Pause managed action/skill timing, without freezing lifecycle decisions
+- `resumeAnimation(entity)` - Resume managed action/skill timing from its preserved position
+- `isAnimationPlaying(entity[, animation])` - Query managed playback including paused/held poses, optionally matching the action name
+- `triggerBlenderSkill(entity, skillId)` - Start a configured skill through its interruption policy
+- `cancelBlenderSkill(entity)` - Cancel the active skill without a completion callback
+- `isBlenderSkillActive(entity)` - Query active skill execution, including pauses
+- `getBlenderSkillExecution(entity)` - Get the current execution snapshot, or null
 - `setGlobalFog(level, fogData)` - Set global fog effect override for a dimension (does not change effect priority)
 - `clearGlobalFog(level)` - Clear global fog effect override
 - `setGlobalSkybox(level, skyboxData)` - Set global skybox effect override for a dimension (does not change effect priority)
@@ -614,108 +620,439 @@ public class MyBossExtension extends EntityExtension {
 }
 ```
 
-### Blender GLB Models and Animation
+### ECA Blender Model
 
-ECA can attach a Blender model to an entity or use it to replace the entity's normal model. Export the model from Blender as **glTF Binary (.glb)**, then place the model and its definition in your resources:
+ECA Blender Model lets you use native `.blend` files or exported GLB files for entity models and animations. The following example shows how to set up a model and its animations.
+
+#### Resources and model configuration
 
 ```text
-assets/<namespace>/eca/blender/<model-path>/model.glb
-assets/<namespace>/eca/blender/<model-path>/definition.json
+assets/example/eca/blender/guardian/
+  definition.json
+  model.blend
+  textures/body.png
 ```
-
-The directory `assets/example/eca/blender/guardian/` defines the model id `example:guardian`. Subdirectories are supported, so `assets/example/eca/blender/bosses/guardian/` becomes `example:bosses/guardian`.
-
-Use `definition.json` to select the GLB file, adjust its transform, and choose its default animation:
 
 ```json
 {
-  "model": "model.glb",
+  "model": "model.blend",
   "scale": 1.0,
   "translation": [0.0, 0.0, 0.0],
   "rotation": [0.0, 0.0, 0.0],
   "default_animation": "Idle",
   "loop": true,
-  "hidden_nodes": ["PresentationGround"]
+  "hidden_nodes": ["PresentationGround"],
+  "node_time_source": "entity",
+  "parameters": {}
 }
 ```
 
-- `model`: GLB filename in the same directory; defaults to `model.glb`.
-- `scale`: overall model scale.
-- `translation`: X/Y/Z position offset.
-- `rotation`: X/Y/Z rotation in degrees.
-- `default_animation`: animation to play when the entity extension does not select one.
-- `loop`: whether the default animation loops.
-- `hidden_nodes`: node names to hide together with their children.
+The model ID consists of the resource namespace and the model directory path relative to `blender/`. For example, `assets/example/eca/blender/guardian/` has the ID `example:guardian`. You can organize models into subfolders: a model in `assets/example/eca/blender/bosses/guardian/` has the ID `example:bosses/guardian`.
 
-Recommended Blender export workflow:
+| Field | Meaning |
+| --- | --- |
+| `model` | Relative model filename; defaults to `model.glb`, so explicitly select `model.blend` |
+| `scale` | Overall scale, default 1 |
+| `translation` / `rotation` | Three-component XYZ offset / rotation in degrees, default zero |
+| `default_animation` / `loop` | Fallback action / looping, default no action / true |
+| `hidden_nodes` | Named objects/nodes hidden with their children |
+| `collection` / `object` | Native .blend collection plus descendants / single object selection; mutually exclusive, default current scene master collection |
+| `node_time_source` | Native node clock: `entity` (default) or `animation` |
+| `parameters` | Native numeric geometry-group inputs keyed by socket identifier |
 
-1. Finish the model, UVs, materials and animations in Blender.
-2. Give every animation a stable, unique name such as `Idle`, `Walk` or `Attack`.
-3. Export as **glTF Binary (.glb)** with normals, UVs and animations enabled. Pack the textures into the GLB when possible.
-4. Put the exported file beside `definition.json` and use the folder path as the model id.
-5. Reload resources after changing the model files. Load failures are written to the game log with the affected resource path.
+Use the Action names from Blender for animation names. `__scene__` plays each object's currently assigned Action over the scene frame range. Replace the example names, such as `Idle` and `Walk`, with names from your model.
 
-Bind a model through the entity's existing `EntityExtension`:
+Textures may be packed into the model or referenced relative to its directory, such as `//textures/body.png`. To use GLB, export your model as glTF Binary and set `model` to `"model.glb"`.
+
+Adjust `rotation`, `scale` and `translation` to fit the entity. Reload game resources after changing model files.
+
+#### Binding through an entity extension
+
+You can use an entity extension to enable ECA Blender Model for an existing entity:
 
 ```java
+package example;
+
+import net.eca.api.RegisterEntityExtension;
 import net.eca.util.entity_extension.BlenderModelExtension;
 import net.eca.util.entity_extension.BlenderRenderMode;
+import net.eca.util.entity_extension.BossBarExtension;
+import net.eca.util.entity_extension.EntityExtension;
+import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.entity_extension.EntityLayerExtension;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.EntityType;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
+
+@RegisterEntityExtension
+public final class GuardianExtension extends EntityExtension {
+    static {
+        EntityExtensionManager.register(new GuardianExtension());
+    }
+
+    private GuardianExtension() {
+        super(EntityType.GUARDIAN, 0);
+    }
+
+    @Override
+    @OnlyIn(Dist.CLIENT)
+    public BossBarExtension bossBarExtension() { return null; }
+
+    @Override
+    @OnlyIn(Dist.CLIENT)
+    public EntityLayerExtension entityLayerExtension() { return null; }
+
+    @Override
+    @OnlyIn(Dist.CLIENT)
+    protected String getModId() { return "example"; }
+
+    @Override
+    @OnlyIn(Dist.CLIENT)
+    public BlenderModelExtension blenderModelExtension() { return Client.MODEL; }
+
+    @OnlyIn(Dist.CLIENT)
+    private static final class Client {
+        private static final BlenderModelExtension MODEL = new BlenderModelExtension() {
+            @Override
+            public ResourceLocation modelId() {
+                return new ResourceLocation("example", "guardian");
+            }
+
+            @Override
+            public BlenderRenderMode renderMode() {
+                return BlenderRenderMode.REPLACE;
+            }
+        };
+    }
+}
+```
+
+This example binds the model to guardians. Replace `EntityType.GUARDIAN` with your entity type and `example:guardian` with your model ID. If the entity already has an extension, add the model configuration to it.
+
+`BlenderRenderMode.REPLACE` replaces the entity model; `ADDITIVE` displays both models together. Replacement also hides the original model's additional layers, including armor and held items. If the model fails to load, the original model remains visible.
+
+Override `shouldRender(entity)`, `scale(entity)` or `offsetX/Y/Z(entity)` to adjust the model for individual entities. Override `blenderModelExtension(LivingEntity)` to select different models for instances of the same entity type.
+
+#### Animation controllers
+
+The lifecycle controller selects idle, movement, hurt and death animations. The skill controller handles actions triggered by gameplay, such as attacks or spells. This `GuardianAnimations` class defines four lifecycle actions and a heavy attack with a hit marker:
+
+```java
+package example;
+
+import net.eca.blender.animation.controller.BlenderAnimationClip;
+import net.eca.blender.animation.controller.BlenderControllerContext;
+import net.eca.blender.animation.controller.BlenderControllerSet;
+import net.eca.blender.animation.controller.BlenderSkillDefinition;
+import net.eca.blender.animation.controller.BlenderSkillMarker;
+import net.eca.blender.animation.controller.DefaultBlenderLifecycleController;
+import net.eca.blender.animation.controller.DefaultBlenderSkillController;
+
+import java.util.List;
+
+public final class GuardianAnimations {
+    public static final BlenderControllerSet CONTROLLERS = new BlenderControllerSet(
+        new DefaultBlenderLifecycleController(
+            BlenderAnimationClip.looping("Idle"),
+            BlenderAnimationClip.looping("Walk"),
+            BlenderAnimationClip.once("Hurt", 8),
+            BlenderAnimationClip.once("Death", 20)
+        ),
+        new DefaultBlenderSkillController(List.of(
+            new BlenderSkillDefinition(
+                "heavy_attack",
+                BlenderAnimationClip.once("Attack_Heavy", 30),
+                10, true, true, false,
+                List.of(new BlenderSkillMarker("hit", 12))
+            )
+        )) {
+            @Override
+            public void onSkillMarker(BlenderControllerContext context, BlenderSkillMarker marker) {
+                if ("hit".equals(marker.name())) {
+                    // Apply your hit logic here; context.entity() is the entity using the skill.
+                }
+            }
+        }
+    );
+
+    private GuardianAnimations() { }
+}
+```
+
+Return this configuration from `GuardianExtension`:
+
+```java
+import net.eca.blender.animation.controller.BlenderControllerSet;
 import net.minecraft.world.entity.LivingEntity;
 
+// Method in GuardianExtension
 @Override
-public BlenderModelExtension blenderModelExtension() {
-    return new BlenderModelExtension() {
+public BlenderControllerSet blenderAnimationControllers(LivingEntity entity) {
+    return GuardianAnimations.CONTROLLERS;
+}
+```
+
+Model configuration runs on the client; animation controllers run on the server. Keep the client annotations shown in the example and reuse the same `CONTROLLERS` configuration. Returning new controllers on every call interrupts the current skill.
+
+`looping("Walk")` loops an action. `once("Hurt", 8)` plays an eight-tick hurt action. There are 20 ticks per second; match durations to your model's animations. Use `null` for lifecycle actions you do not need. Movement is detected from horizontal entity velocity by default and can be customized.
+
+The skill ID `heavy_attack` is used in API calls, while `Attack_Heavy` names the model action. This skill lasts 30 ticks and invokes the `hit` marker at tick 12.
+
+| Skill parameter | Example | Meaning |
+| --- | --- | --- |
+| `priority` | `10` | Skill priority |
+| `interruptible` | `true` | Other skills may interrupt this skill |
+| `interruptOnHurt` | `true` | A hurt animation may interrupt this skill |
+| `restartable` | `false` | Triggering the same skill cannot restart it |
+| `markers` | `hit: 12` | Invoke a callback at animation tick 12 |
+
+By default, an incoming skill needs at least the current skill's priority, and the current skill must allow interruption. Hurt interruption also requires a hurt action. Marker names must be unique and their times within the skill duration. Playback speed scales both the action and its markers.
+
+#### Skill callbacks and custom controllers
+
+Extend `DefaultBlenderLifecycleController` or `DefaultBlenderSkillController` to override individual methods. You can also implement `BlenderLifecycleController` and `BlenderSkillController` directly.
+
+For example, change movement detection or require a strictly higher priority to interrupt a skill:
+
+```java
+import net.eca.blender.animation.controller.BlenderControllerContext;
+import net.eca.blender.animation.controller.BlenderSkillDefinition;
+
+// Override in a DefaultBlenderLifecycleController subclass.
+@Override
+public boolean isMoving(BlenderControllerContext context) {
+    return context.entity().getDeltaMovement().horizontalDistanceSqr() > 0.0004;
+}
+
+// Override in a DefaultBlenderSkillController subclass to require higher priority.
+@Override
+public boolean canInterrupt(BlenderControllerContext context,
+                            BlenderSkillDefinition current,
+                            BlenderSkillDefinition incoming) {
+    return current.interruptible() && incoming.priority() > current.priority();
+}
+```
+
+The skill controller provides these server-side callbacks:
+
+| Callback | Use |
+| --- | --- |
+| `onSkillStarted(context)` | Apply costs or prepare effects when a skill starts |
+| `onSkillMarker(context, marker)` | Apply hit logic, spawn projectiles or perform other timed actions |
+| `onSkillCompleted(context)` | Handle normal completion |
+| `onSkillCancelled(context, reason)` | Clean up after interruption or cancellation |
+
+`context.entity()` is the entity using the skill, `context.skill()` is its definition, and `context.elapsedTicks()` is its animation progress. Cancellation does not invoke completion. Each marker runs once per execution; tick-zero markers follow the start callback, and endpoint markers precede completion.
+
+Callbacks cannot immediately change the same entity's playback. For combos, record the next action and trigger it from a later server tick. Controllers may be shared by multiple entities, so keep entity-specific skill data on the entity or in your own data manager.
+
+#### Playback and skill API
+
+Use `EcaAPI` from server-side gameplay code to trigger a skill or play a model action directly:
+
+```java
+import net.eca.api.EcaAPI;
+import net.eca.blender.animation.controller.BlenderControllerContext;
+
+// Call these operations as needed inside your server-side gameplay methods.
+EcaAPI.triggerBlenderSkill(entity, "heavy_attack");
+
+boolean attacking = EcaAPI.isBlenderSkillActive(entity);
+BlenderControllerContext execution = EcaAPI.getBlenderSkillExecution(entity);
+
+EcaAPI.cancelBlenderSkill(entity);
+
+// Play an action directly, without a skill definition.
+EcaAPI.playAnimation(entity, "Attack_Heavy");
+EcaAPI.playAnimation(entity, "Walk", 1.25f, true);
+EcaAPI.pauseAnimation(entity);
+EcaAPI.resumeAnimation(entity);
+EcaAPI.stopAnimation(entity);
+```
+
+`triggerBlenderSkill` follows the skill's definition and interruption policy. `cancelBlenderSkill` cancels the active skill. `getBlenderSkillExecution` returns null when no skill is active. Trigger skills from gameplay events such as attacks or casting; repeated calls attempt to trigger them again.
+
+`playAnimation` interrupts the current skill and takes manual control. Replaying the same action restarts it. Non-looping actions hold their final pose until stopped or replaced. `stopAnimation` returns control to the controller; without a controller, playback returns to the binding's selected action or `default_animation`.
+
+`pauseAnimation` and `resumeAnimation` pause/resume the action and skill timer. Hurt or death can still switch actions while paused. `isAnimationPlaying(entity)` checks for a playback state, including pauses and held final poses; use `isBlenderSkillActive` to check whether a skill is still running.
+
+Call these APIs on the logical server thread. Death takes priority over other actions and blocks manual playback operations. Death animations do not delay entity removal, so match their duration to the entity's death sequence.
+
+#### Node animation and parameters
+
+Use `node_time_source` to select the clock for geometry nodes and material time drivers:
+
+| Value | Behavior |
+| --- | --- |
+| `entity` (default) | Nodes continue across action loops, switches and pauses |
+| `animation` | Nodes follow the current action's time, speed and pause state |
+
+Use `entity` for effects such as a continuously rotating ring. Its time follows the client entity's age and may reset when the entity unloads and returns. Override `BlenderModelExtension.nodeTimeSource(entity, resourceDefault)` to select a clock per entity.
+
+Set numeric geometry-group inputs with `parameters` in `definition.json`, for example `"parameters": {"Socket_2": 1.0}`, or return them dynamically from `BlenderModelExtension`:
+
+```java
+import net.minecraft.world.entity.LivingEntity;
+import java.util.Map;
+
+// Method in BlenderModelExtension; replace Socket_2 with the input identifier.
+@Override
+public Map<String, Float> nodeParameters(LivingEntity entity) {
+    return Map.of("Socket_2", 1.0f);
+}
+```
+
+Use the input's socket identifier rather than its display label. Scalar inputs are supported, and method values override resource values. Parameters are read on the client; your mod must synchronize values that originate in server gameplay.
+
+#### Registering without entity extensions
+
+You can register model bindings and controllers directly instead of using an entity extension. These two classes reuse `GuardianAnimations`; replace the example mod ID with your own.
+
+Register the model during client initialization:
+
+```java
+package example;
+
+import net.eca.blender.client.entity.BlenderEntityBindings;
+import net.eca.blender.entity.BlenderEntityBinding;
+import net.eca.blender.entity.BlenderRenderPolicy;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.EntityType;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
+
+@Mod.EventBusSubscriber(modid = "example", bus = Mod.EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
+public final class GuardianClientBindings {
+    private static final BlenderEntityBinding BINDING = new BlenderEntityBinding() {
         @Override
         public ResourceLocation modelId() {
             return new ResourceLocation("example", "guardian");
         }
 
         @Override
-        public BlenderRenderMode renderMode() {
-            return BlenderRenderMode.REPLACE;
-        }
-
-        @Override
-        public String animation(LivingEntity entity) {
-            return entity.getDeltaMovement().horizontalDistanceSqr() > 0.001 ? "Walk" : "Idle";
-        }
-
-        @Override
-        public float scale(LivingEntity entity) {
-            return 1.0f;
+        public BlenderRenderPolicy renderPolicy() {
+            return BlenderRenderPolicy.REPLACE;
         }
     };
+
+    @SubscribeEvent
+    public static void setup(FMLClientSetupEvent event) {
+        event.enqueueWork(() -> BlenderEntityBindings.register(EntityType.GUARDIAN, BINDING));
+    }
 }
 ```
 
-Use `ADDITIVE` to draw the GLB together with the normal entity model, or `REPLACE` to use the GLB as the entity's main model. `BlenderModelExtension` can also control whether the model is visible, select an animation from the current entity state, change animation speed, adjust scale, and apply X/Y/Z offsets. Override `blenderModelExtension(LivingEntity)` when different instances of the same entity type need different models or settings.
-
-`animation(LivingEntity)` is suitable for state-driven animations such as idle and movement. Return the exact animation name exported from Blender, or return `null` to use `default_animation` from `definition.json`.
-
-Use the animation API when gameplay needs to start a specific animation. Call it on the logical server; ECA synchronizes playback to clients:
+Register the controllers during common initialization:
 
 ```java
-EcaAPI.playAnimation(entity, "Attack");
-EcaAPI.playAnimation(entity, "Run", 1.25f, true);
+package example;
 
-EcaAPI.pauseAnimation(entity);
-EcaAPI.resumeAnimation(entity);
+import net.eca.blender.animation.BlenderControllers;
+import net.minecraft.world.entity.EntityType;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 
-if (EcaAPI.isAnimationPlaying(entity, "Attack")) {
-    EcaAPI.stopAnimation(entity);
+@Mod.EventBusSubscriber(modid = "example", bus = Mod.EventBusSubscriber.Bus.MOD)
+public final class GuardianControllerBindings {
+    @SubscribeEvent
+    public static void setup(FMLCommonSetupEvent event) {
+        event.enqueueWork(() ->
+            BlenderControllers.register(EntityType.GUARDIAN, GuardianAnimations.CONTROLLERS));
+    }
 }
 ```
 
-Playing the same animation again restarts it. `pauseAnimation` holds the current position, `resumeAnimation` continues from that position, and `stopAnimation` returns control to the animation selected by the entity extension or `definition.json`. Explicit playback is temporary and should be started again when required after the entity is unloaded and later returns.
+`BlenderEntityBindings` registers the model binding; `BlenderControllers` registers animation controllers. Duplicate registrations for a type return false. Explicit registrations take precedence over entity-extension settings. Remove a registration with `unregister(type, binding)` or `unregister(type, controllers)` on the corresponding registry.
 
-Animation selection uses the following priority:
+#### Supported features and limitations
 
-```text
-BlenderModelExtension.animation(entity)
-→ definition.json default_animation
-→ the model's unanimated pose
-```
+The following applies to native `.blend` files in the format used by Blender 5.2.1. Native support is experimental. GLB uses exported models and animations rather than Blender node graphs.
+
+##### Models, rigging and animation
+
+| Feature | Supported modes and conditions |
+| --- | --- |
+| Meshes | Vertices, UVs, material slots, polygon triangulation, object hierarchy and transforms; selecting between multiple UV sets is not supported |
+| Bones | Basic hierarchy and default inheritance, including bone-parented objects; segmented bone deformation is unsupported |
+| Armature | One modifier using vertex-group weights, up to four effective bone influences per vertex; no bone envelopes or Preserve Volume |
+| Actions | Object and pose-bone location, rotation and scale; Euler, quaternion and axis-angle rotation |
+| Keyframes | Constant, Linear and Bezier interpolation; values hold at endpoints outside the curve range; no linear extrapolation or curve modifiers |
+| Action layout | One layer with one keyframe strip, no strip time offset and layer influence of 1; no layer blending, NLA or Delta Transform |
+| Bevel | Convex edges and planar faces, Edges/Offset/Angle, circular profile 0.5; requires Loop Slide; no custom profiles, material overrides, edge marks or Harden Normals |
+
+Place geometry nodes and Bevel before Armature. Bevel does not support skinned meshes; realize instances before applying it. If bevels overlap, enable Clamp Overlap or reduce the width.
+
+##### Geometry nodes
+
+| Node or feature | Supported modes and conditions |
+| --- | --- |
+| Node groups | Group Input, Group Output, nested groups and Reroute; numeric group parameters |
+| Inputs and conversions | Position, Normal, Index, Scene Time, numeric/vector/boolean inputs, Combine/Separate XYZ, Euler to Rotation and Rotation to Euler |
+| Transform | Translation/Rotation/Scale components, not matrix mode |
+| Set Position | Mesh vertices and points; no curves; realize instances first |
+| Join Geometry | Combines supported geometry inputs |
+| Instance on Points | Placement with selection, rotation and scale; no Pick Instance; convert curves first |
+| Realize Instances | Full realization only, not partial realization by Selection or Depth |
+| Set Material | Fixed material reference and uniform Selection; no per-point or per-face material selection |
+| Curve Circle | Radius mode |
+| Curve to Points | Count mode, Points output only; no Length mode or Tangent/Rotation outputs |
+| Curve to Mesh | Closed planar polyline profiles with uniform Scale; no open-curve caps; Fill Caps has no effect on closed curves |
+| Icosphere | Mesh output, not UV Map output |
+
+Curves are limited to closed polylines generated by Curve Circle and their transforms; Bezier/NURBS curves are unsupported. Radius and Curve to Mesh Scale must be positive.
+
+The following math operations are available in both geometry and material nodes:
+
+| Node | Supported operations |
+| --- | --- |
+| Math | Add, Subtract, Multiply, Divide, Multiply Add, Power, Logarithm, Exponent, Square Root, Inverse Square Root, Absolute, Sign, Minimum, Maximum, Less Than, Greater Than, Compare, Round, Floor, Ceil, Truncate, Fraction, Modulo, Floored Modulo, Snap, Sine, Cosine, Tangent, their inverse functions, Atan2, Radians and Degrees |
+| Vector Math | Add, Subtract, Multiply, Divide, Cross Product, Dot Product, Distance, Length, Scale, Normalize, Floor, Ceil, Absolute, Minimum and Maximum |
+
+##### Material and texture nodes
+
+| Node or feature | Supported modes and conditions |
+| --- | --- |
+| Basic inputs | Value, RGB, Combine/Separate XYZ, node groups and Reroute |
+| Texture Coordinate | UV, Object and Generated outputs; referencing another object for coordinates is unsupported |
+| Mapping | Point and Vector modes |
+| Mix / Mix Color | Ordinary Mix blending; Float/Vector/Color with a uniform factor; no other blend modes or per-component factors |
+| Color Ramp | RGB color mode with Linear, Ease or Constant interpolation |
+| Image Texture | Flat projection, Linear/Closest interpolation, Repeat/Extend/Clip extension |
+| Gradient Texture | Linear, Quadratic, Easing, Diagonal, Radial, Quadratic Sphere and Spherical |
+| Noise Texture | 3D/4D fBM, Fac/Color outputs; Scale, Detail, Roughness, Lacunarity, Distortion and Normalize, plus W in 4D |
+| Emission | Color and Strength |
+| Diffuse | Basic Color; connected Roughness or Normal inputs are unsupported |
+| Principled BSDF | Base Color, Alpha, Emission Color/Strength, Metallic and Roughness; no normal inputs, subsurface, transmission, coat or sheen |
+| Mix Shader / Add Shader | Mixes or adds the supported surface shaders above |
+
+Textures can be packed or referenced relative to the model directory. External absolute paths and parent-directory paths are unavailable. Images must use formats readable by Minecraft.
+
+##### Material time drivers
+
+The following driver expressions are supported on **unlinked floating-point inputs of material nodes**:
+
+| Expression | Usage |
+| --- | --- |
+| `frame` | The frame number corresponding to the current node time |
+| `frame / constant` | Divide the frame number by a fixed value, such as `frame / 12.0`; the divisor must be nonzero |
+
+Use an expression driver in Blender and keep its default driver curve, without custom driver variables or curve modifiers. Only the two forms above are supported; expressions such as `frame * 2` and `sin(frame)` are not. An empty driver curve is also accepted. Edited curves must be a two-key identity mapping, where output equals input.
+
+Drivers follow the node clock selected by `node_time_source`. This support applies to material node inputs, not object transforms or geometry node inputs.
+
+##### Other limitations
+
+Constraints, multi-track animation blending, shape keys, linked libraries, collection instances, node-tree keyframes, geometry simulation/repeat zones, subdivision, cloth and fluid modifiers are unsupported. Armor and held-item bone attachments require additional integration.
+
+Materials use Minecraft lighting, so transparency, reflections and metallic surfaces can differ from Blender. Blender lights, volumes, displacement and color management are unsupported.
+
+Complex models and dynamic nodes increase memory use and rendering cost. Choose resources appropriate for your target hardware. ECA does not impose resource budgets, but file-format, renderer and hardware requirements still apply.
+
+For load failures, check the model ID and node error in the log, fix the resource and reload. Animation names and durations must match the model.
 
 ### Block Extensions
 
@@ -1340,7 +1677,7 @@ Any `.json` filename works, and you can have multiple files.
 
 # 中文
 
-本 Mod 提供了一些基于 CoreMod (ITransformationService)、Java Agent 和 Mixin 等技术所实现的实体操作 API 和相关命令，此外还提供一系列功能模块：BossShow、实体扩展、Blender GLB 模型与动画、方块扩展、物品扩展、屏幕滤镜、ECA 着色器生成器、自定义阵营与自定义袭击。注意，本 Mod 的实体操作方法虽然在命名上可能与原版一致，但本质上的实现完全不同。例如，设置生命值 API 可以修改部分使用自定义生命值（包括但不限于实体数据、数字类型字段、部分哈希表）的实体；清除 API 则是进行了 Minecraft 底层容器的相关清除；设置无敌 API 则是提供了比原版创造模式无敌更强大的实现。此外，本 Mod 还将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
+本 Mod 提供了一些基于 CoreMod (ITransformationService)、Java Agent 和 Mixin 等技术所实现的实体操作 API 和相关命令，此外还提供一系列功能模块：BossShow、实体扩展、ECA Blender Model、方块扩展、物品扩展、屏幕滤镜、ECA 着色器生成器、自定义阵营与自定义袭击。注意，本 Mod 的实体操作方法虽然在命名上可能与原版一致，但本质上的实现完全不同。例如，设置生命值 API 可以修改部分使用自定义生命值（包括但不限于实体数据、数字类型字段、部分哈希表）的实体；清除 API 则是进行了 Minecraft 底层容器的相关清除；设置无敌 API 则是提供了比原版创造模式无敌更强大的实现。此外，本 Mod 还将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
 
 本 Mod 的初衷是为开发者提供简化的实体操作 API，并在确保性能和兼容性的前提下获得一定的强度。因此，请不要将本 Mod 用于 Mod 战力对比和无休止的代码军火竞赛中。此外，在整合包生存环境下，最好确保攻击和防御逻辑的激进配置项处于关闭状态。
 
@@ -1506,12 +1843,16 @@ side="BOTH"
 - `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
 - `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）
 - `clearActiveEntityExtensionTable(level)` - 清空当前维度活跃扩展表
-- `playAnimation(entity, animation)` - 以正常速度从头播放指定 GLB 动画且不循环（仅逻辑服务端调用）
-- `playAnimation(entity, animation, speed, loop)` - 按指定速度和循环设置开始或重新播放 GLB 动画（仅逻辑服务端调用）
-- `stopAnimation(entity)` - 停止显式动画并回退到扩展选择或模型默认动画
-- `pauseAnimation(entity)` - 暂停显式动画并保持当前播放位置
-- `resumeAnimation(entity)` - 从保存的位置继续显式动画
-- `isAnimationPlaying(entity[, animation])` - 查询实体是否存在显式动画，可选择精确匹配动画名
+- `playAnimation(entity, animation)` - 手动接管并以速度 1 从头播放指定模型动作，不循环（逻辑服务端线程）
+- `playAnimation(entity, animation, speed, loop)` - 按指定速度和循环设置手动开始／重启动作（逻辑服务端线程）
+- `stopAnimation(entity)` - 停止受管理动作，取消活跃技能并交回控制器／回退动作
+- `pauseAnimation(entity)` - 暂停受管理动作和技能计时，但不冻结生命周期决策
+- `resumeAnimation(entity)` - 从保存的位置继续受管理动作与技能计时
+- `isAnimationPlaying(entity[, animation])` - 查询受管理动作状态，包含暂停和末尾保持，可匹配动作名
+- `triggerBlenderSkill(entity, skillId)` - 按技能 ID 和打断策略触发技能
+- `cancelBlenderSkill(entity)` - 取消当前技能，不执行完成回调
+- `isBlenderSkillActive(entity)` - 查询活跃技能，包含暂停状态
+- `getBlenderSkillExecution(entity)` - 获取当前技能执行快照，无执行时返回 null
 - `setGlobalFog(level, fogData)` - 设置维度全局雾气效果覆盖（不改变效果优先级）
 - `clearGlobalFog(level)` - 清除全局雾气效果覆盖
 - `setGlobalSkybox(level, skyboxData)` - 设置维度全局天空盒效果覆盖（不改变效果优先级）
@@ -1953,108 +2294,439 @@ public class MyBossExtension extends EntityExtension {
 }
 ```
 
-### Blender GLB 模型与动画
+### ECA Blender Model
 
-ECA 可以把 Blender 模型附加到实体上，也可以用它替换实体原有模型。先在 Blender 中将模型导出为 **glTF Binary (.glb)**，再把模型及其定义文件放入资源目录：
+ECA Blender Model 使得您可以通过使用 ECA 读取原生 `.blend` 文件或导出的 GLB 文件，并将其用于实体模型、动画的渲染。以下为一个参考实例：
+
+#### 资源准备与模型配置
 
 ```text
-assets/<命名空间>/eca/blender/<模型路径>/model.glb
-assets/<命名空间>/eca/blender/<模型路径>/definition.json
+assets/example/eca/blender/guardian/
+  definition.json
+  model.blend
+  textures/body.png
 ```
-
-例如，`assets/example/eca/blender/guardian/` 对应模型 ID `example:guardian`。模型可以继续使用子目录，如 `assets/example/eca/blender/bosses/guardian/` 对应 `example:bosses/guardian`。
-
-使用 `definition.json` 指定 GLB 文件、调整整体变换并选择默认动画：
 
 ```json
 {
-  "model": "model.glb",
+  "model": "model.blend",
   "scale": 1.0,
   "translation": [0.0, 0.0, 0.0],
   "rotation": [0.0, 0.0, 0.0],
   "default_animation": "Idle",
   "loop": true,
-  "hidden_nodes": ["PresentationGround"]
+  "hidden_nodes": ["PresentationGround"],
+  "node_time_source": "entity",
+  "parameters": {}
 }
 ```
 
-- `model`：同目录下的 GLB 文件名，默认值为 `model.glb`。
-- `scale`：模型整体缩放倍率。
-- `translation`：模型在 X/Y/Z 方向的位置偏移。
-- `rotation`：模型绕 X/Y/Z 轴旋转的角度。
-- `default_animation`：实体扩展没有选择动画时播放的默认动画。
-- `loop`：默认动画是否循环。
-- `hidden_nodes`：需要连同子节点一起隐藏的节点名称。
+模型 ID 由资源命名空间和模型目录相对于 `blender/` 的路径组成。例如，`assets/example/eca/blender/guardian/` 对应 `example:guardian`。您也可以在 `blender` 文件夹下使用子文件夹分类存放模型：放在 `assets/example/eca/blender/bosses/guardian/` 中的模型，其 ID 为 `example:bosses/guardian`。
 
-推荐的 Blender 导出流程：
+| 字段 | 含义 |
+| --- | --- |
+| `model` | 相对模型文件名，默认 `model.glb`；原生文件应显式指定 `model.blend` |
+| `scale` | 整体缩放，默认 1 |
+| `translation`／`rotation` | XYZ 三分量偏移／角度制旋转，默认零 |
+| `default_animation`／`loop` | 回退动作／循环，默认无动作／true |
+| `hidden_nodes` | 隐藏指定对象／节点及其子级 |
+| `collection`／`object` | 原生 .blend 集合及子集合／单对象选择，不能同时配置；默认当前场景主集合 |
+| `node_time_source` | 原生节点时钟，`entity`（默认）或 `animation` |
+| `parameters` | 按 socket identifier 配置的原生几何节点组标量输入 |
 
-1. 在 Blender 中完成模型、UV、材质和动画。
-2. 为每个动画设置稳定且唯一的名称，例如 `Idle`、`Walk` 或 `Attack`。
-3. 导出为 **glTF Binary (.glb)**，并启用法线、UV 和动画；条件允许时将贴图打包进 GLB。
-4. 把导出的文件放在 `definition.json` 旁边，并使用文件夹路径作为模型 ID。
-5. 修改模型文件后重新加载资源。加载失败时，游戏日志会记录对应的资源路径。
+动画名称填写 Blender 中的 Action 名称。使用 `__scene__` 可按场景帧范围播放各对象当前绑定的动作。示例中的 `Idle`、`Walk` 等名称需要替换为您的模型实际使用的名称。
 
-通过已有的实体扩展绑定模型：
+纹理可打包进模型，也可放在模型目录下，通过 `//textures/body.png` 这样的相对路径引用。使用 GLB 时，将导出的 `model.glb` 放入同一目录，并修改 `model` 字段即可。
+
+模型朝向、大小或位置不合适时，可调整 `rotation`、`scale` 和 `translation`。修改资源后，通过游戏资源重载重新加载模型。
+
+#### 通过实体扩展绑定
+
+您可以通过实体扩展来为已经存在的实体启用 ECA Blender Model：
 
 ```java
+package example;
+
+import net.eca.api.RegisterEntityExtension;
 import net.eca.util.entity_extension.BlenderModelExtension;
 import net.eca.util.entity_extension.BlenderRenderMode;
+import net.eca.util.entity_extension.BossBarExtension;
+import net.eca.util.entity_extension.EntityExtension;
+import net.eca.util.entity_extension.EntityExtensionManager;
+import net.eca.util.entity_extension.EntityLayerExtension;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.EntityType;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
+
+@RegisterEntityExtension
+public final class GuardianExtension extends EntityExtension {
+    static {
+        EntityExtensionManager.register(new GuardianExtension());
+    }
+
+    private GuardianExtension() {
+        super(EntityType.GUARDIAN, 0);
+    }
+
+    @Override
+    @OnlyIn(Dist.CLIENT)
+    public BossBarExtension bossBarExtension() { return null; }
+
+    @Override
+    @OnlyIn(Dist.CLIENT)
+    public EntityLayerExtension entityLayerExtension() { return null; }
+
+    @Override
+    @OnlyIn(Dist.CLIENT)
+    protected String getModId() { return "example"; }
+
+    @Override
+    @OnlyIn(Dist.CLIENT)
+    public BlenderModelExtension blenderModelExtension() { return Client.MODEL; }
+
+    @OnlyIn(Dist.CLIENT)
+    private static final class Client {
+        private static final BlenderModelExtension MODEL = new BlenderModelExtension() {
+            @Override
+            public ResourceLocation modelId() {
+                return new ResourceLocation("example", "guardian");
+            }
+
+            @Override
+            public BlenderRenderMode renderMode() {
+                return BlenderRenderMode.REPLACE;
+            }
+        };
+    }
+}
+```
+
+示例将模型绑定到守卫者。将 `EntityType.GUARDIAN` 换为目标实体类型，`example:guardian` 换为您的模型 ID；目标实体已有扩展时，在已有扩展中添加模型配置。
+
+`BlenderRenderMode.REPLACE` 替换实体模型，`ADDITIVE` 则与原模型一起显示。替换模式会同时隐藏原模型的附加层，例如盔甲和手持物品；模型加载失败时保留原模型。
+
+通过覆写 `shouldRender(entity)`、`scale(entity)`、`offsetX/Y/Z(entity)` 等方法，可以按实体状态调整显示效果。`blenderModelExtension(LivingEntity)` 可用于为同一种实体的不同实例选择模型。
+
+#### 动画控制器
+
+生命周期控制器负责待机、移动、受伤和死亡动作；技能控制器用于管理攻击、施法等需要主动触发的动作。以下 `GuardianAnimations` 为模型配置四种生命周期动作，以及一个带伤害标记的重击技能：
+
+```java
+package example;
+
+import net.eca.blender.animation.controller.BlenderAnimationClip;
+import net.eca.blender.animation.controller.BlenderControllerContext;
+import net.eca.blender.animation.controller.BlenderControllerSet;
+import net.eca.blender.animation.controller.BlenderSkillDefinition;
+import net.eca.blender.animation.controller.BlenderSkillMarker;
+import net.eca.blender.animation.controller.DefaultBlenderLifecycleController;
+import net.eca.blender.animation.controller.DefaultBlenderSkillController;
+
+import java.util.List;
+
+public final class GuardianAnimations {
+    public static final BlenderControllerSet CONTROLLERS = new BlenderControllerSet(
+        new DefaultBlenderLifecycleController(
+            BlenderAnimationClip.looping("Idle"),
+            BlenderAnimationClip.looping("Walk"),
+            BlenderAnimationClip.once("Hurt", 8),
+            BlenderAnimationClip.once("Death", 20)
+        ),
+        new DefaultBlenderSkillController(List.of(
+            new BlenderSkillDefinition(
+                "heavy_attack",
+                BlenderAnimationClip.once("Attack_Heavy", 30),
+                10, true, true, false,
+                List.of(new BlenderSkillMarker("hit", 12))
+            )
+        )) {
+            @Override
+            public void onSkillMarker(BlenderControllerContext context, BlenderSkillMarker marker) {
+                if ("hit".equals(marker.name())) {
+                    // 在这里执行伤害判定，context.entity() 为释放技能的实体。
+                }
+            }
+        }
+    );
+
+    private GuardianAnimations() { }
+}
+```
+
+在前面的 `GuardianExtension` 中返回该配置：
+
+```java
+import net.eca.blender.animation.controller.BlenderControllerSet;
 import net.minecraft.world.entity.LivingEntity;
 
+// GuardianExtension 中的方法
 @Override
-public BlenderModelExtension blenderModelExtension() {
-    return new BlenderModelExtension() {
+public BlenderControllerSet blenderAnimationControllers(LivingEntity entity) {
+    return GuardianAnimations.CONTROLLERS;
+}
+```
+
+模型配置只在客户端使用，动画控制器则在服务端运行。请保留示例中的客户端标注，并复用同一份 `CONTROLLERS` 配置；每次返回新控制器会中断当前技能。
+
+`looping("Walk")` 表示循环播放，`once("Hurt", 8)` 表示播放 8 tick 的受伤动作。20 tick 为一秒，时长需要与模型动作对应。无需某个生命周期动作时可填 `null`。默认移动判定使用实体水平速度，也可以自行覆写。
+
+技能 ID `heavy_attack` 用于代码调用，`Attack_Heavy` 是模型中的动作名称。示例技能持续 30 tick，在第 12 tick 调用 `hit` 标记回调。
+
+| 技能参数 | 示例值 | 含义 |
+| --- | --- | --- |
+| `priority` | `10` | 技能优先级 |
+| `interruptible` | `true` | 允许其他技能打断 |
+| `interruptOnHurt` | `true` | 允许受伤动作打断 |
+| `restartable` | `false` | 不允许再次触发同一技能来重启动作 |
+| `markers` | `hit: 12` | 动作第 12 tick 的回调标记 |
+
+默认情况下，新技能的优先级不低于当前技能且当前技能允许打断时，才能切换。受伤打断还需要配置受伤动作。标记名称应唯一，时间在技能时长内；速度改变时，标记随动画进度一起加速或减速。
+
+#### 技能回调与自定义控制器
+
+您可以继承 `DefaultBlenderLifecycleController` 和 `DefaultBlenderSkillController`，覆写其中的方法；也可以直接实现 `BlenderLifecycleController`、`BlenderSkillController` 接口。
+
+例如，修改移动判定，或只允许更高优先级的技能打断当前技能：
+
+```java
+import net.eca.blender.animation.controller.BlenderControllerContext;
+import net.eca.blender.animation.controller.BlenderSkillDefinition;
+
+// 在 DefaultBlenderLifecycleController 子类中调整移动判定。
+@Override
+public boolean isMoving(BlenderControllerContext context) {
+    return context.entity().getDeltaMovement().horizontalDistanceSqr() > 0.0004;
+}
+
+// 在 DefaultBlenderSkillController 子类中只允许更高优先级的技能打断。
+@Override
+public boolean canInterrupt(BlenderControllerContext context,
+                            BlenderSkillDefinition current,
+                            BlenderSkillDefinition incoming) {
+    return current.interruptible() && incoming.priority() > current.priority();
+}
+```
+
+技能控制器提供以下回调，均在服务端执行：
+
+| 回调 | 用途 |
+| --- | --- |
+| `onSkillStarted(context)` | 技能开始时处理消耗、准备效果等逻辑 |
+| `onSkillMarker(context, marker)` | 在指定时间执行伤害判定、生成弹射物等逻辑 |
+| `onSkillCompleted(context)` | 技能正常结束 |
+| `onSkillCancelled(context, reason)` | 技能被打断或主动取消，按原因清理效果 |
+
+`context.entity()` 是释放技能的实体，`context.skill()` 是技能定义，`context.elapsedTicks()` 是当前动画进度。取消不会触发完成回调。每个标记在一次技能执行中只触发一次；0 tick 标记在开始后触发，结束时刻的标记先于完成回调。
+
+回调中不能立即重新操作同一实体的动画。需要连招时，可记录下一招，在后续服务端 tick 中触发。控制器可能被多个实体共用，请将实体专属的技能数据保存在实体或您自己的数据管理对象中。
+
+#### 播放与技能 API
+
+在服务端逻辑中使用 `EcaAPI` 触发技能，或直接播放模型动作：
+
+```java
+import net.eca.api.EcaAPI;
+import net.eca.blender.animation.controller.BlenderControllerContext;
+
+// 以下为服务端业务方法中的调用示例，各操作按需调用。
+EcaAPI.triggerBlenderSkill(entity, "heavy_attack");
+
+boolean attacking = EcaAPI.isBlenderSkillActive(entity);
+BlenderControllerContext execution = EcaAPI.getBlenderSkillExecution(entity);
+
+EcaAPI.cancelBlenderSkill(entity);
+
+// 直接播放资源中的动作，不经过技能定义。
+EcaAPI.playAnimation(entity, "Attack_Heavy");
+EcaAPI.playAnimation(entity, "Walk", 1.25f, true);
+EcaAPI.pauseAnimation(entity);
+EcaAPI.resumeAnimation(entity);
+EcaAPI.stopAnimation(entity);
+```
+
+`triggerBlenderSkill` 按技能定义和打断规则执行；`cancelBlenderSkill` 主动取消当前技能。`getBlenderSkillExecution` 在没有技能执行时返回 `null`。触发动作应放在攻击、施法等事件中，重复调用会尝试重新触发。
+
+直接调用 `playAnimation` 会中断当前技能，并接管动画播放。同名动作再次播放会从头开始，非循环动作播完后保持最后一帧，直到停止或切换。`stopAnimation` 将播放交还给控制器；没有控制器时，使用模型绑定选择的动作或 `default_animation`。
+
+`pauseAnimation` 和 `resumeAnimation` 暂停、恢复动作及技能计时。暂停期间，受伤或死亡仍可引起动作切换。`isAnimationPlaying(entity)` 查询当前是否存在播放状态，暂停和末尾保持也计入；判断技能是否结束应使用 `isBlenderSkillActive`。
+
+这些 API 需在逻辑服务端线程调用。死亡动作优先于其他动作，进入死亡状态后不再接受手动播放操作。死亡动画不会推迟实体移除，因此时长应与实体死亡流程匹配。
+
+#### 节点动画与参数
+
+通过 `node_time_source` 选择几何节点和材质时间驱动器使用的时间：
+
+| 值 | 效果 |
+| --- | --- |
+| `entity`（默认） | 节点持续播放，不随动作循环、切换或暂停而重置 |
+| `animation` | 节点跟随当前动作的时间、速度和暂停状态 |
+
+持续旋转的光环等效果适合使用 `entity`。该时间随客户端实体年龄计算，实体卸载后重新出现时可能重置。需要按实体选择时间来源时，可覆写 `BlenderModelExtension.nodeTimeSource(entity, resourceDefault)`。
+
+几何节点组的数值输入可以写在 `definition.json` 的 `parameters` 中，例如 `"parameters": {"Socket_2": 1.0}`。也可以在 `BlenderModelExtension` 中动态返回：
+
+```java
+import net.minecraft.world.entity.LivingEntity;
+import java.util.Map;
+
+// BlenderModelExtension 中的方法；Socket_2 替换为实际输入标识符。
+@Override
+public Map<String, Float> nodeParameters(LivingEntity entity) {
+    return Map.of("Socket_2", 1.0f);
+}
+```
+
+键名使用 Blender 节点组输入的 socket identifier，而非界面显示名称。当前支持标量输入，方法返回值覆盖资源配置。参数在客户端读取；如果数值来自服务端业务，需要由您的模组同步。
+
+#### 直接注册模型与控制器
+
+不使用实体扩展时，可以分别注册模型绑定和动画控制器。以下两个类沿用前面的 `GuardianAnimations`，`example` 替换为您的模组 ID。
+
+模型在客户端初始化时注册：
+
+```java
+package example;
+
+import net.eca.blender.client.entity.BlenderEntityBindings;
+import net.eca.blender.entity.BlenderEntityBinding;
+import net.eca.blender.entity.BlenderRenderPolicy;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.EntityType;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
+
+@Mod.EventBusSubscriber(modid = "example", bus = Mod.EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
+public final class GuardianClientBindings {
+    private static final BlenderEntityBinding BINDING = new BlenderEntityBinding() {
         @Override
         public ResourceLocation modelId() {
             return new ResourceLocation("example", "guardian");
         }
 
         @Override
-        public BlenderRenderMode renderMode() {
-            return BlenderRenderMode.REPLACE;
-        }
-
-        @Override
-        public String animation(LivingEntity entity) {
-            return entity.getDeltaMovement().horizontalDistanceSqr() > 0.001 ? "Walk" : "Idle";
-        }
-
-        @Override
-        public float scale(LivingEntity entity) {
-            return 1.0f;
+        public BlenderRenderPolicy renderPolicy() {
+            return BlenderRenderPolicy.REPLACE;
         }
     };
+
+    @SubscribeEvent
+    public static void setup(FMLClientSetupEvent event) {
+        event.enqueueWork(() -> BlenderEntityBindings.register(EntityType.GUARDIAN, BINDING));
+    }
 }
 ```
 
-使用 `ADDITIVE` 可以让 GLB 与实体原模型同时显示；使用 `REPLACE` 则会把 GLB 作为实体的主体模型。`BlenderModelExtension` 还可以控制模型是否显示、根据实体状态选择动画、调整动画速度和缩放，以及设置 X/Y/Z 偏移。如果同一种实体的不同实例需要使用不同模型或配置，可以重写 `blenderModelExtension(LivingEntity)`。
-
-`animation(LivingEntity)` 适合选择待机、移动等随实体状态变化的动画。返回 Blender 中导出的准确动画名称；返回 `null` 时使用 `definition.json` 中的 `default_animation`。
-
-需要由游戏逻辑主动播放指定动画时，可以使用动画 API。这些调用必须发生在逻辑服务端，ECA 会把播放状态同步到客户端：
+动画控制器在公共初始化阶段注册：
 
 ```java
-EcaAPI.playAnimation(entity, "Attack");
-EcaAPI.playAnimation(entity, "Run", 1.25f, true);
+package example;
 
-EcaAPI.pauseAnimation(entity);
-EcaAPI.resumeAnimation(entity);
+import net.eca.blender.animation.BlenderControllers;
+import net.minecraft.world.entity.EntityType;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 
-if (EcaAPI.isAnimationPlaying(entity, "Attack")) {
-    EcaAPI.stopAnimation(entity);
+@Mod.EventBusSubscriber(modid = "example", bus = Mod.EventBusSubscriber.Bus.MOD)
+public final class GuardianControllerBindings {
+    @SubscribeEvent
+    public static void setup(FMLCommonSetupEvent event) {
+        event.enqueueWork(() ->
+            BlenderControllers.register(EntityType.GUARDIAN, GuardianAnimations.CONTROLLERS));
+    }
 }
 ```
 
-重复播放同名动画会从头开始。`pauseAnimation` 会保持当前播放位置，`resumeAnimation` 会从该位置继续，`stopAnimation` 则把动画控制权交还给实体扩展或 `definition.json`。显式播放状态是临时状态；实体卸载后重新出现时，应在需要的情况下重新播放。
+`BlenderEntityBindings` 负责模型绑定，`BlenderControllers` 负责动画控制器。同一类型重复注册返回 `false`，显式注册的配置优先于实体扩展配置。取消注册使用各自的 `unregister(type, binding)` 或 `unregister(type, controllers)`。
 
-动画按以下优先级选择：
+#### 支持范围与使用限制
 
-```text
-BlenderModelExtension.animation(entity)
-→ definition.json 的 default_animation
-→ 模型未播放动画时的原始姿态
-```
+以下为原生 `.blend` 的支持范围，适用于 Blender 5.2.1 对应的文件格式，目前仍为实验性功能。GLB 使用导出后的模型和动画，不读取 Blender 节点网络。
+
+##### 模型、骨骼与动画
+
+| 功能 | 支持范围与使用条件 |
+| --- | --- |
+| 网格 | 顶点、UV、材质槽、多边形三角化、对象层级与变换；多套 UV 暂不支持选择 |
+| 骨骼 | 基础骨骼父子关系与默认继承方式，支持骨骼父级对象；不支持分段骨骼变形 |
+| Armature | 单个修改器，使用顶点组权重；每顶点最多四个有效骨骼权重，不支持骨骼包络和 Preserve Volume |
+| 动作 | 对象与姿态骨骼的位置、旋转、缩放；支持欧拉角、四元数和轴角旋转 |
+| 关键帧 | Constant、Linear、Bezier 插值；曲线范围外保持端点值，不支持线性外推和曲线修改器 |
+| Action | 单层、单个关键帧片段，无片段时间偏移，层影响为 1；不支持层混合、NLA 和 Delta Transform |
+| Bevel | 凸边和凸平面，Edges／Offset／Angle，圆形轮廓 0.5；需启用 Loop Slide，不支持自定义轮廓、材质覆盖、边标记和 Harden Normals |
+
+几何节点和 Bevel 必须位于 Armature 之前。Bevel 不支持带蒙皮权重的网格，实例需先经过 Realize Instances。倒角发生重叠时，请启用 Clamp Overlap 或减小宽度。
+
+##### 几何节点
+
+| 节点或功能 | 支持范围与使用条件 |
+| --- | --- |
+| 节点组 | Group Input、Group Output、嵌套节点组、Reroute；组参数支持数值输入 |
+| 输入与转换 | Position、Normal、Index、Scene Time，数值／向量／布尔输入，Combine／Separate XYZ，Euler to Rotation、Rotation to Euler |
+| Transform | Translation／Rotation／Scale 分量模式，不支持矩阵模式 |
+| Set Position | 网格顶点和点位置；不支持曲线，实例需先实体化 |
+| Join Geometry | 合并受支持的几何输入 |
+| Instance on Points | 按点放置实例，支持选择、旋转和缩放；不支持 Pick Instance，曲线需先转换 |
+| Realize Instances | 完整实体化；不支持按 Selection 或 Depth 部分实体化 |
+| Set Material | 固定材质引用，Selection 为统一值；不支持按点或面分别选择材质 |
+| Curve Circle | Radius 模式 |
+| Curve to Points | Count 模式，仅 Points 输出；不支持 Length 模式及 Tangent／Rotation 输出 |
+| Curve to Mesh | 闭合平面折线轮廓和统一 Scale；不支持开放曲线封口，Fill Caps 对闭合曲线不起作用 |
+| Icosphere | Mesh 输出，不支持 UV Map 输出 |
+
+曲线目前限于 Curve Circle 生成及变换后的闭合折线，不支持 Bezier／NURBS 曲线。半径和 Curve to Mesh 的 Scale 必须为正数。
+
+几何节点与材质节点中的数学运算支持：
+
+| 节点 | 支持的运算 |
+| --- | --- |
+| Math | 加减乘除、乘加、幂、对数、指数、平方根、平方根倒数、绝对值、符号、最小／最大值、小于／大于／比较、取整、向下／向上取整、截断、小数部分、取模、向下取模、吸附、正弦／余弦／正切及反函数、Atan2、角度／弧度转换 |
+| Vector Math | 加减乘除、叉积、点积、距离、长度、缩放、归一化、向下／向上取整、绝对值、最小／最大值 |
+
+##### 材质与纹理节点
+
+| 节点或功能 | 支持范围与使用条件 |
+| --- | --- |
+| 基础输入 | Value、RGB、Combine／Separate XYZ，节点组与 Reroute |
+| Texture Coordinate | UV、Object、Generated 输出；不支持指定其他对象作为坐标来源 |
+| Mapping | Point、Vector 模式 |
+| Mix／Mix Color | 普通 Mix 混合；Float／Vector／Color 类型使用统一系数，不支持其他混合模式或逐分量系数 |
+| Color Ramp | RGB 颜色模式，Linear／Ease／Constant 插值 |
+| Image Texture | 平面投影，Linear／Closest 插值，Repeat／Extend／Clip 扩展 |
+| Gradient Texture | Linear、Quadratic、Easing、Diagonal、Radial、Quadratic Sphere、Spherical |
+| Noise Texture | 3D／4D fBM，Fac／Color 输出；支持 Scale、Detail、Roughness、Lacunarity、Distortion、Normalize，4D 支持 W |
+| Emission | Color、Strength |
+| Diffuse | 基础 Color；不支持连接 Roughness 或 Normal 输入 |
+| Principled BSDF | Base Color、Alpha、Emission Color／Strength、Metallic、Roughness；不支持法线输入、次表面、透射、涂层和 Sheen |
+| Mix Shader／Add Shader | 混合或叠加上述受支持的表面着色器 |
+
+纹理可以打包进模型，或使用模型目录下的相对路径；外部绝对路径和上级目录路径不可用。图片需使用 Minecraft 可读取的格式。
+
+##### 材质时间驱动器
+
+支持在材质节点**未连线的浮点输入**上使用以下驱动表达式：
+
+| 表达式 | 用法 |
+| --- | --- |
+| `frame` | 使用当前节点时间对应的帧数 |
+| `frame / 常量` | 将帧数除以固定数值，例如 `frame / 12.0`；除数不能为零 |
+
+在 Blender 中使用表达式驱动器，保留默认驱动曲线，不添加自定义驱动变量或曲线修改器。目前仅支持上述表达式，不支持 `frame * 2`、`sin(frame)` 等其他运算或函数。驱动曲线也可为空；自行修改曲线时，只支持两点恒等映射，即输出与输入相同。
+
+驱动器使用 `node_time_source` 选择的节点时间。这项支持仅用于材质节点输入，不适用于对象变换或几何节点输入。
+
+##### 其他使用限制
+
+目前不支持约束、多轨动画混合、形态键、外部链接库、集合实例、节点树关键帧、几何节点模拟／重复区域，以及细分、布料、流体等修改器。盔甲和手持物品的骨骼挂点适配需要另行实现。
+
+材质使用 Minecraft 光照，透明度、反射和金属表面的效果可能与 Blender 不同。Blender 灯光、体积、置换和色彩管理不受支持。
+
+复杂模型和动态节点会增加内存占用与渲染开销，请根据目标设备自行评估。ECA 不设置资源预算，但资源仍需满足文件格式、渲染器和硬件的实际要求。
+
+加载失败时，可在日志中查看模型 ID 和对应节点的错误信息，修正后重载资源。动画名称和时长需要与模型对应。
 
 ### 方块扩展
 

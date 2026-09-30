@@ -1,6 +1,6 @@
 # EpicCoreAPI
 
-This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, Blender GLB models and animation, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
+This mod provides entity manipulation APIs and commands based on CoreMod (ITransformationService), Java Agent, and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, ECA Blender Model, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids. Note that while the entity-manipulation methods may share names with vanilla logic, the underlying implementation is completely different. For example, the set health API can modify entities using custom health values (including but not limited to entity data, numeric fields, and hash tables); the remove API performs low-level Minecraft container cleanup; the set invulnerable API provides a more powerful implementation than vanilla creative mode invulnerability. Additionally, this mod unlocks vanilla attribute limits to Double.MAX_VALUE by default. You can disable this in the config file with "Unlock Attribute Limits" option.
 
 The original intent of this mod is to provide developers with simplified entity manipulation APIs while achieving a certain level of strength under the premise of ensuring performance and compatibility. Therefore, please do not use this mod for mod power comparisons or endless code arms races. Additionally, in modpack survival environments, it is best to ensure that the Attack and Defence Radical Logic config options are disabled.
 
@@ -166,12 +166,16 @@ side="BOTH"
 - `getActiveEntityExtensionTypes(level)` - Get active entity extension types in current dimension (Map<EntityType, Integer>)
 - `getActiveEntityExtension(level)` - Get the currently effective entity extension (highest priority)
 - `clearActiveEntityExtensionTable(level)` - Clear active entity extension table in current dimension
-- `playAnimation(entity, animation)` - Start a named GLB animation from the beginning at normal speed without looping (logical server only)
-- `playAnimation(entity, animation, speed, loop)` - Start or restart a named GLB animation with explicit playback settings (logical server only)
-- `stopAnimation(entity)` - Stop explicit playback and return to the extension-selected or model-default animation
-- `pauseAnimation(entity)` - Pause explicit playback while holding its current position
-- `resumeAnimation(entity)` - Resume explicit playback from its preserved position
-- `isAnimationPlaying(entity[, animation])` - Query explicit playback, optionally matching an exact animation name
+- `playAnimation(entity, animation)` - Manually take control and start a named model action at speed 1 without looping (logical server thread)
+- `playAnimation(entity, animation, speed, loop)` - Manually start/restart a named model action with speed and looping (logical server thread)
+- `stopAnimation(entity)` - Stop managed playback, cancel an active skill if present, and release control to the controller/fallback
+- `pauseAnimation(entity)` - Pause managed action/skill timing, without freezing lifecycle decisions
+- `resumeAnimation(entity)` - Resume managed action/skill timing from its preserved position
+- `isAnimationPlaying(entity[, animation])` - Query managed playback including paused/held poses, optionally matching the action name
+- `triggerBlenderSkill(entity, skillId)` - Start a configured skill through its interruption policy
+- `cancelBlenderSkill(entity)` - Cancel the active skill without a completion callback
+- `isBlenderSkillActive(entity)` - Query active skill execution, including pauses
+- `getBlenderSkillExecution(entity)` - Get the current execution snapshot, or null
 - `setGlobalFog(level, fogData)` - Set global fog effect override for a dimension (does not change effect priority)
 - `clearGlobalFog(level)` - Clear global fog effect override
 - `setGlobalSkybox(level, skyboxData)` - Set global skybox effect override for a dimension (does not change effect priority)
@@ -283,15 +287,13 @@ Entity extensions can opt into a custom boss bar through `enableBossBar()`, cont
 
 Entity, item, and block shader overlays share the same `ShaderMaskPass` pipeline. Every pass supplies a RenderType, an optional UV-aligned mask texture, a target RGB color (black by default), a near-color tolerance, and opacity. An extension may return multiple passes so different colors in one mask use different shaders. Passes render in list order, and later passes draw over earlier passes where selected regions overlap. Transparent and non-matching mask pixels are discarded.
 
-### Blender GLB Models and Animation
+### ECA Blender Model
 
-Entity extensions can attach a Blender model to an entity or replace its normal model. Export the model from Blender as **glTF Binary (.glb)**, give each animation a stable name, and place the files under `assets/<namespace>/eca/blender/<model-path>/`.
+ECA Blender Model lets you use native `.blend` files or exported GLB files for entity models and animations. Models can replace an entity's original appearance or render alongside it.
 
-Each model directory contains the GLB file and a `definition.json`. The definition selects the file, configures scale, position and rotation, chooses a default animation, controls looping, and can hide named nodes. The directory `assets/example/eca/blender/guardian/` is referenced as model id `example:guardian`.
+You can configure idle, movement, hurt and death animations, trigger named skills, and use animation callbacks for timed effects or hit logic. Controllers can be customized by overriding their methods. Supported geometry and material nodes can also animate independently of character actions, making them useful for effects such as rotating rings.
 
-Bind the model through `BlenderModelExtension`. Use `ADDITIVE` to display it together with the normal entity model or `REPLACE` to use it as the entity's main model. The extension can select animations from entity state and adjust visibility, animation speed, scale and position for each entity.
-
-Gameplay code can start, stop, pause and resume named animations through `EcaAPI`. Animation calls run on the logical server and are synchronized to clients. Detailed resource configuration and Java examples are available in the project README.
+Native .blend support is experimental and targets Blender 5.2.1. See the [README](README.md#eca-blender-model) for setup examples, playback APIs and supported nodes.
 
 ### Block Extensions
 
@@ -642,7 +644,7 @@ Any `.json` filename works, and you can have multiple files.
 
 # 中文
 
-本 Mod 提供了一些基于 CoreMod (ITransformationService)、Java Agent 和 Mixin 等技术所实现的实体操作 API 和相关命令，此外还提供一系列功能模块：BossShow、实体扩展、Blender GLB 模型与动画、方块扩展、物品扩展、屏幕滤镜、ECA 着色器生成器、自定义阵营与自定义袭击。注意，本 Mod 的实体操作方法虽然在命名上可能与原版一致，但本质上的实现完全不同。例如，设置生命值 API 可以修改部分使用自定义生命值（包括但不限于实体数据、数字类型字段、部分哈希表）的实体；清除 API 则是进行了 Minecraft 底层容器的相关清除；设置无敌 API 则是提供了比原版创造模式无敌更强大的实现。此外，本 Mod 还将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
+本 Mod 提供了一些基于 CoreMod (ITransformationService)、Java Agent 和 Mixin 等技术所实现的实体操作 API 和相关命令，此外还提供一系列功能模块：BossShow、实体扩展、ECA Blender Model、方块扩展、物品扩展、屏幕滤镜、ECA 着色器生成器、自定义阵营与自定义袭击。注意，本 Mod 的实体操作方法虽然在命名上可能与原版一致，但本质上的实现完全不同。例如，设置生命值 API 可以修改部分使用自定义生命值（包括但不限于实体数据、数字类型字段、部分哈希表）的实体；清除 API 则是进行了 Minecraft 底层容器的相关清除；设置无敌 API 则是提供了比原版创造模式无敌更强大的实现。此外，本 Mod 还将原版属性上限解锁至 Double.MAX_VALUE。如不需要，可在配置文件 "Unlock Attribute Limits" 中关闭。
 
 本 Mod 的初衷是为开发者提供简化的实体操作 API，并在确保性能和兼容性的前提下获得一定的强度。因此，请不要将本 Mod 用于 Mod 战力对比和无休止的代码军火竞赛中。此外，在整合包生存环境下，最好确保攻击和防御逻辑的激进配置项处于关闭状态。
 
@@ -808,12 +810,16 @@ side="BOTH"
 - `getActiveEntityExtensionTypes(level)` - 获取当前维度活跃的扩展类型（Map<EntityType, Integer>）
 - `getActiveEntityExtension(level)` - 获取当前生效的实体扩展（最高优先级）
 - `clearActiveEntityExtensionTable(level)` - 清空当前维度活跃扩展表
-- `playAnimation(entity, animation)` - 以正常速度从头播放指定 GLB 动画且不循环（仅逻辑服务端调用）
-- `playAnimation(entity, animation, speed, loop)` - 按指定速度和循环设置开始或重新播放 GLB 动画（仅逻辑服务端调用）
-- `stopAnimation(entity)` - 停止显式动画并回退到扩展选择或模型默认动画
-- `pauseAnimation(entity)` - 暂停显式动画并保持当前播放位置
-- `resumeAnimation(entity)` - 从保存的位置继续显式动画
-- `isAnimationPlaying(entity[, animation])` - 查询实体是否存在显式动画，可选择精确匹配动画名
+- `playAnimation(entity, animation)` - 手动接管并以速度 1 从头播放指定模型动作，不循环（逻辑服务端线程）
+- `playAnimation(entity, animation, speed, loop)` - 按指定速度和循环设置手动开始／重启动作（逻辑服务端线程）
+- `stopAnimation(entity)` - 停止受管理动作，取消活跃技能并交回控制器／回退动作
+- `pauseAnimation(entity)` - 暂停受管理动作和技能计时，但不冻结生命周期决策
+- `resumeAnimation(entity)` - 从保存的位置继续受管理动作与技能计时
+- `isAnimationPlaying(entity[, animation])` - 查询受管理动作状态，包含暂停和末尾保持，可匹配动作名
+- `triggerBlenderSkill(entity, skillId)` - 按技能 ID 和打断策略触发技能
+- `cancelBlenderSkill(entity)` - 取消当前技能，不执行完成回调
+- `isBlenderSkillActive(entity)` - 查询活跃技能，包含暂停状态
+- `getBlenderSkillExecution(entity)` - 获取当前技能执行快照，无执行时返回 null
 - `setGlobalFog(level, fogData)` - 设置维度全局雾气效果覆盖（不改变效果优先级）
 - `clearGlobalFog(level)` - 清除全局雾气效果覆盖
 - `setGlobalSkybox(level, skyboxData)` - 设置维度全局天空盒效果覆盖（不改变效果优先级）
@@ -923,15 +929,13 @@ side="BOTH"
 
 自定义 Boss 血条可使用 `enableBossBar()`、`shouldShowBossBar(LivingEntity)` 和 `bossBarExtension()`。在 `BossBarExtension` 中，`showValueText()` 用于开启居中的“当前值/最大值”文本；覆写 `getDisplayCurrentValue(LivingEntity)` 与 `getDisplayMaxValue(LivingEntity)` 可以返回自定义显示数值，默认分别使用实体当前生命值和最大生命值。
 
-### Blender GLB 模型与动画
+### ECA Blender Model
 
-实体扩展可以把 Blender 模型附加到实体上，也可以用它替换实体原有模型。使用时，将模型从 Blender 导出为 **glTF Binary (.glb)**，为每个动画设置稳定的名称，并把文件放入 `assets/<命名空间>/eca/blender/<模型路径>/`。
+ECA Blender Model 使您可以将原生 `.blend` 文件或导出的 GLB 文件用于实体模型与动画，替换实体原有外观，或与原模型叠加显示。
 
-每个模型目录包含 GLB 文件和 `definition.json`。定义文件用于选择模型文件、设置缩放、位置与旋转、指定默认动画、控制循环，并可隐藏指定节点。例如，`assets/example/eca/blender/guardian/` 对应模型 ID `example:guardian`。
+您可以为实体配置待机、移动、受伤和死亡动画，触发命名技能，并通过动画回调实现定时特效和伤害判定。控制器支持覆写，方便按需自定义。受支持的几何节点与材质节点还可以独立于角色动作播放，用于持续旋转的光环等效果。
 
-通过 `BlenderModelExtension` 绑定模型。使用 `ADDITIVE` 可以让模型与实体原模型同时显示；使用 `REPLACE` 则会把它作为实体主体模型。扩展还可以根据实体状态选择动画，并分别控制每个实体的模型显示、动画速度、缩放和位置。
-
-游戏逻辑可以通过 `EcaAPI` 播放、停止、暂停或继续指定名称的动画。动画调用在逻辑服务端执行，并自动同步到客户端。完整资源配置和 Java 示例请查看项目 README。
+原生 .blend 支持目前为面向 Blender 5.2.1 的实验性功能。资源配置、播放 API、代码示例和支持的节点请参阅 [README](README.md#eca-blender-model-1)。
 
 ### 方块扩展
 

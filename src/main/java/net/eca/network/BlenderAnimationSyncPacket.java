@@ -1,14 +1,17 @@
 package net.eca.network;
 
-import net.eca.client.render.blender.BlenderAnimationClientState;
-import net.eca.util.entity_extension.BlenderAnimationState;
+import net.eca.blender.client.animation.BlenderAnimationClientState;
+import net.eca.blender.animation.BlenderPlaybackState;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
+import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.network.NetworkEvent;
 
 import java.util.UUID;
 import java.util.function.Supplier;
 
-public record BlenderAnimationSyncPacket(UUID entityId, long revision, BlenderAnimationState state) {
+public record BlenderAnimationSyncPacket(UUID entityId, long revision, BlenderPlaybackState state) {
     public static void encode(BlenderAnimationSyncPacket message, FriendlyByteBuf buffer) {
         buffer.writeUUID(message.entityId);
         buffer.writeLong(message.revision);
@@ -36,14 +39,21 @@ public record BlenderAnimationSyncPacket(UUID entityId, long revision, BlenderAn
         float speed = buffer.readFloat();
         boolean loop = buffer.readBoolean();
         boolean paused = buffer.readBoolean();
-        BlenderAnimationState state = new BlenderAnimationState(animation, revision, referenceGameTime,
+        BlenderPlaybackState state = new BlenderPlaybackState(animation, revision, referenceGameTime,
             elapsedSeconds, speed, loop, paused);
         return new BlenderAnimationSyncPacket(entityId, revision, state);
     }
 
     public static void handle(BlenderAnimationSyncPacket message, Supplier<NetworkEvent.Context> context) {
         NetworkEvent.Context ctx = context.get();
-        ctx.enqueueWork(() -> BlenderAnimationClientState.apply(message.entityId, message.revision, message.state));
+        ctx.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> ClientHandler.apply(message)));
         ctx.setPacketHandled(true);
+    }
+
+    @OnlyIn(Dist.CLIENT)
+    private static final class ClientHandler {
+        private static void apply(BlenderAnimationSyncPacket message) {
+            BlenderAnimationClientState.apply(message.entityId, message.revision, message.state);
+        }
     }
 }

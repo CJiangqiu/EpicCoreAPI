@@ -1,5 +1,6 @@
 package net.eca.util.entity_extension;
 
+import net.eca.blender.animation.controller.BlenderControllerSet;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
@@ -25,6 +26,16 @@ public abstract class EntityExtension {
 
     public int getPriority() {
         return priority;
+    }
+
+    // 返回可共享的服务端控制器定义；运行状态由核心按实体维护。
+    /**
+     * Supplies optional server-side animation controllers for this entity.
+     * @param entity the entity whose lifecycle and skills are controlled
+     * @return a stable controller definition, or null to retain manual playback only
+     */
+    public BlenderControllerSet blenderAnimationControllers(LivingEntity entity) {
+        return null;
     }
 
     public boolean enableForceLoading() {

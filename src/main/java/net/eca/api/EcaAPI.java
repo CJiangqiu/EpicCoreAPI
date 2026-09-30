@@ -18,6 +18,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import net.eca.util.entity_extension.EntityExtension;
 import net.eca.util.entity_extension.BlenderAnimationManager;
+import net.eca.blender.animation.BlenderControllers;
+import net.eca.blender.animation.controller.BlenderControllerContext;
 import net.eca.util.entity_extension.EntityExtensionManager;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.entity_extension.GlobalEffectOverrideManager;
@@ -2588,14 +2590,12 @@ public final class EcaAPI {
         return RaidManager.getAllDefinitions();
     }
 
-    // 从头播放实体 GLB 模型中的指定动画
+    // 从头播放模型动作并手动接管动画控制器。
     /**
-     * Start a named animation on an entity's GLB model from the beginning. The call must be made
-     * on the logical server. A non-looping animation holds its final pose until it is stopped or
-     * replaced.
-     *
+     * Starts a named model animation from the beginning on the logical server thread.
+     * Takes manual control until stopped or replaced; a non-looping action holds its final pose.
      * @param entity the entity whose model should animate
-     * @param animation the exact animation name exported in the GLB file
+     * @param animation the exact animation name in the model resource
      * @return true if the playback state was accepted and synchronized
      */
     public static boolean playAnimation(LivingEntity entity, String animation) {
@@ -2604,12 +2604,10 @@ public final class EcaAPI {
 
     // 以指定速度和循环方式从头播放实体动画
     /**
-     * Start a named animation on an entity's GLB model with explicit playback settings. The call
-     * must be made on the logical server. Calling this method again restarts the animation even
-     * when the animation name has not changed.
-     *
+     * Starts a named model animation with manual control on the logical server thread.
+     * Repeated calls restart even the same animation; active skills are cancelled.
      * @param entity the entity whose model should animate
-     * @param animation the exact animation name exported in the GLB file
+     * @param animation the exact animation name in the model resource
      * @param speed positive playback speed where {@code 1.0} is the exported speed
      * @param loop whether playback should wrap at the end of the animation
      * @return true if the playback state was accepted and synchronized
@@ -2618,25 +2616,24 @@ public final class EcaAPI {
         return BlenderAnimationManager.play(entity, animation, speed, loop);
     }
 
-    // 停止显式动画并回退到实体扩展或模型定义的默认动画
+    // 停止当前动作，释放手动接管或取消技能，交回控制器或资源默认动作。
     /**
-     * Stop the explicitly played animation and return rendering to the animation selected by the
-     * entity extension or the model definition. The call must be made on the logical server.
-     *
+     * Stops managed playback on the logical server thread, cancelling an active skill if present.
+     * Returns to controller selection on its next update, or to the binding/resource fallback.
+     * A death-locked controller rejects this operation.
      * @param entity the animated entity
-     * @return true if an active explicit animation was stopped
+     * @return true if an active managed animation was stopped
      */
     public static boolean stopAnimation(LivingEntity entity) {
         return BlenderAnimationManager.stop(entity);
     }
 
-    // 暂停实体当前的显式动画并保持当前姿态
+    // 暂停当前受管理动作及技能计时，但不暂停生命周期决策。
     /**
-     * Pause the entity's current explicit animation while preserving its playback position. The
-     * call must be made on the logical server.
-     *
+     * Pauses managed playback and skill timing on the logical server thread.
+     * Lifecycle decisions may still replace the paused action; death-locked playback rejects this call.
      * @param entity the animated entity
-     * @return true if a running explicit animation was paused
+     * @return true if a running managed animation was paused
      */
     public static boolean pauseAnimation(LivingEntity entity) {
         return BlenderAnimationManager.pause(entity);
@@ -2644,39 +2641,76 @@ public final class EcaAPI {
 
     // 从暂停位置继续播放实体动画
     /**
-     * Resume the entity's paused explicit animation from its preserved playback position. The call
-     * must be made on the logical server.
-     *
+     * Resumes paused managed playback from its preserved position on the logical server thread.
      * @param entity the animated entity
-     * @return true if a paused explicit animation was resumed
+     * @return true if a paused managed animation was resumed
      */
     public static boolean resumeAnimation(LivingEntity entity) {
         return BlenderAnimationManager.resume(entity);
     }
 
-    // 查询实体是否存在显式播放中的动画状态
+    // 查询实体是否存在受管理动作状态，包括控制器动作、暂停或末尾保持。
     /**
-     * Check whether an entity currently has an explicit animation playback state. A paused or
-     * completed non-looping animation remains active until it is stopped or replaced.
-     *
+     * Checks for managed playback, including controller actions, on the logical server thread.
+     * Paused and held-final-pose states count as active; this does not indicate an active skill.
      * @param entity the entity to inspect on the logical server
-     * @return true if the entity has an explicit animation playback state
+     * @return true if the entity has a managed animation playback state
      */
     public static boolean isAnimationPlaying(LivingEntity entity) {
         return BlenderAnimationManager.isPlaying(entity, null);
     }
 
-    // 查询实体当前是否显式播放指定名称的动画
+    // 查询实体当前受管理动作是否匹配指定名称。
     /**
-     * Check whether an entity's explicit playback state names a specific animation. A paused or
-     * completed non-looping animation still counts as active until it is stopped or replaced.
-     *
+     * Checks the managed animation name on the logical server thread, including controller actions.
+     * Paused and held-final-pose states still count as active.
      * @param entity the entity to inspect on the logical server
      * @param animation the exact animation name to compare
-     * @return true if the named animation is the entity's current explicit animation
+     * @return true if the named animation is the entity's current managed animation
      */
     public static boolean isAnimationPlaying(LivingEntity entity, String animation) {
         return animation != null && BlenderAnimationManager.isPlaying(entity, animation);
+    }
+
+    // 在服务端触发已定义的 Blender 技能动画。
+    /**
+     * Starts a named skill through the entity's server-side controller and interruption policy.
+     * @param entity the controlled entity on the logical server
+     * @param skillId the configured skill identifier, not the resource animation name
+     * @return true if execution started; false if rejected, unavailable, or called reentrantly
+     */
+    public static boolean triggerBlenderSkill(LivingEntity entity, String skillId) {
+        return BlenderControllers.triggerSkill(entity, skillId);
+    }
+
+    // 取消当前技能并在下一次控制器更新时恢复基础动作。
+    /**
+     * Cancels the active skill with the stopped reason without invoking its completion callback.
+     * @param entity the controlled entity on the logical server
+     * @return true if an active skill was cancelled
+     */
+    public static boolean cancelBlenderSkill(LivingEntity entity) {
+        return BlenderControllers.cancelSkill(entity);
+    }
+
+    // 查询服务端当前是否有尚未结束的技能执行实例。
+    /**
+     * Checks for an active skill execution, including a paused execution.
+     * @param entity the controlled entity on the logical server
+     * @return true if a skill is active, or false on the client or after termination
+     */
+    public static boolean isBlenderSkillActive(LivingEntity entity) {
+        return BlenderControllers.currentSkill(entity) != null;
+    }
+
+    // 获取当前技能执行快照，供服务端逻辑检查进度与执行编号。
+    /**
+     * Retrieves the current server-side skill execution snapshot.
+     * @param entity the controlled entity on the logical server
+     * @return the execution snapshot, or null if no skill is active
+     */
+    public static BlenderControllerContext getBlenderSkillExecution(LivingEntity entity) {
+        return BlenderControllers.currentSkill(entity);
     }
 
     private EcaAPI() {}

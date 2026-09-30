@@ -1106,7 +1106,10 @@ public class EntityUtil {
             entity.stopRiding();
             entity.getPassengers().forEach(Entity::stopRiding);
             entity.invalidateCaps();
-            teleport(entity, 102400, -102400, 102400);
+            // 玩家清除不建立连接级传送状态，避免移除后遗留等待确认的坐标同步。
+            if (!(entity instanceof ServerPlayer)) {
+                teleport(entity, 102400, -102400, 102400);
+            }
             broadcastRemovalToSeenBy(serverLevel, entity, bossEventUUIDs);
             removeFromServerContainers(serverLevel, entity);
 

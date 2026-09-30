@@ -1,5 +1,7 @@
 package net.eca.event;
 
+import net.eca.util.entity_extension.BlenderControllerAdapter;
+
 import net.eca.EcaMod;
 import net.eca.coremod.EarlyLogWriter;
 import net.eca.agent.EcaAgent;
@@ -63,6 +65,7 @@ public final class LoadCompleteHandler {
         // 袭击定义引用阵营 ID（袭击者绑定与按阵营抽取波次），必须排在阵营扫描之后
         event.enqueueWork(RaidManager::scanAndRegisterAll);
         event.enqueueWork(EntityExtensionManager::scanAndRegisterAll);
+        event.enqueueWork(BlenderControllerAdapter::register);
         event.enqueueWork(BossShowManager::scanAndRegisterAll);
 
         // 最终字节码必须先完成转换，协议分析才能避开尚未稳定的中间结果

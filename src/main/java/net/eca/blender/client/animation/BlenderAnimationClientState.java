@@ -1,6 +1,6 @@
-package net.eca.client.render.blender;
+package net.eca.blender.client.animation;
 
-import net.eca.util.entity_extension.BlenderAnimationState;
+import net.eca.blender.animation.BlenderPlaybackState;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
@@ -11,13 +11,13 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @OnlyIn(Dist.CLIENT)
 public final class BlenderAnimationClientState {
-    private static final Map<UUID, BlenderAnimationState> STATES = new ConcurrentHashMap<>();
+    private static final Map<UUID, BlenderPlaybackState> STATES = new ConcurrentHashMap<>();
     private static final Map<UUID, Long> REVISIONS = new ConcurrentHashMap<>();
 
     private BlenderAnimationClientState() {
     }
 
-    public static void apply(UUID entityId, long revision, BlenderAnimationState state) {
+    public static void apply(UUID entityId, long revision, BlenderPlaybackState state) {
         if (entityId == null || revision < REVISIONS.getOrDefault(entityId, Long.MIN_VALUE)) {
             return;
         }
@@ -29,7 +29,7 @@ public final class BlenderAnimationClientState {
         }
     }
 
-    public static BlenderAnimationState get(LivingEntity entity) {
+    public static BlenderPlaybackState get(LivingEntity entity) {
         return entity == null ? null : STATES.get(entity.getUUID());
     }
 

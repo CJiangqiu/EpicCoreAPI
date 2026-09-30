@@ -1,4 +1,8 @@
-package net.eca.client.render.blender;
+package net.eca.blender.client.resource;
+
+import net.eca.blender.client.model.BlenderModelAsset;
+import net.eca.blender.model.BlenderModelDefinition;
+import net.eca.blender.client.runtime.BlendModelLoader;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -36,7 +40,7 @@ public final class BlenderModelManager extends SimplePreparableReloadListener<Ma
     private BlenderModelManager() {
     }
 
-    BlenderModelAsset get(ResourceLocation id) {
+    public BlenderModelAsset get(ResourceLocation id) {
         return id == null ? null : models.get(id);
     }
 
@@ -66,7 +70,9 @@ public final class BlenderModelManager extends SimplePreparableReloadListener<Ma
                 String folder = path.substring(0, path.length() - "definition.json".length());
                 ResourceLocation modelLocation = new ResourceLocation(definitionLocation.getNamespace(),
                     folder + definition.modelFile());
-                BlenderModelAsset asset = GltfModelLoader.load(resourceManager, modelLocation, modelId, definition);
+                BlenderModelAsset asset = definition.modelFile().endsWith(".blend")
+                    ? BlendModelLoader.load(resourceManager, modelLocation, modelId, definition)
+                    : GltfModelLoader.load(resourceManager, modelLocation, modelId, definition);
                 loaded.put(modelId, asset);
             } catch (Exception exception) {
                 EcaLogger.error("Failed to load Blender model definition " + definitionLocation, exception);
@@ -79,6 +85,7 @@ public final class BlenderModelManager extends SimplePreparableReloadListener<Ma
     protected void apply(Map<ResourceLocation, BlenderModelAsset> prepared, ResourceManager resourceManager,
                          ProfilerFiller profiler) {
         var textureManager = Minecraft.getInstance().getTextureManager();
+        for (BlenderModelAsset asset : models.values()) closePrograms(asset);
         dynamicTextures.forEach(textureManager::release);
         dynamicTextures.clear();
 
@@ -97,10 +104,30 @@ public final class BlenderModelManager extends SimplePreparableReloadListener<Ma
                 }
             }
             if (valid) {
-                accepted.put(entry.getKey(), entry.getValue());
+                try {
+                    for (BlenderModelAsset.Material material : entry.getValue().materials) {
+                        if (material.program() != null) material.program().load();
+                    }
+                    accepted.put(entry.getKey(), entry.getValue());
+                } catch (Exception exception) {
+                    EcaLogger.error("Failed to compile blend material for " + entry.getKey(), exception);
+                    valid = false;
+                }
+            }
+            if (!valid) {
+                closePrograms(entry.getValue());
+                for (BlenderModelAsset.TextureData texture : entry.getValue().textures) {
+                    if (dynamicTextures.remove(texture.location())) textureManager.release(texture.location());
+                }
             }
         }
         models = Map.copyOf(accepted);
         EcaLogger.info("Loaded {} Blender model resource(s)", models.size());
+    }
+
+    private static void closePrograms(BlenderModelAsset asset) {
+        for (BlenderModelAsset.Material material : asset.materials) {
+            if (material.program() != null) material.program().close();
+        }
     }
 }

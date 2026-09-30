@@ -1,4 +1,7 @@
-package net.eca.client.render.blender;
+package net.eca.blender.client.resource;
+
+import net.eca.blender.client.model.BlenderModelAsset;
+import net.eca.blender.model.BlenderModelDefinition;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;

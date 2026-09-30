@@ -2,18 +2,16 @@ package net.eca.mixin;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
-import net.eca.client.render.blender.BlenderModelLayer;
-import net.eca.client.render.blender.BlenderModelRenderer;
+import net.eca.blender.client.render.BlenderModelLayer;
+import net.eca.blender.client.entity.BlenderEntityRenderer;
+import net.eca.blender.client.entity.BlenderEntityBindings;
+import net.eca.blender.entity.BlenderEntityBinding;
 import net.eca.client.render.EntityExtensionLayer;
 import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.EntityRendererProvider;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
-import net.eca.util.entity_extension.BlenderModelExtension;
-import net.eca.util.entity_extension.EntityExtension;
-import net.eca.util.entity_extension.EntityExtensionManager;
-import net.eca.util.entity_extension.EntityExtensionSafeAccess;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Entity;
 import net.minecraftforge.api.distmarker.Dist;
@@ -59,10 +57,9 @@ public abstract class LivingEntityRendererMixin<T extends LivingEntity, M extend
                                               float blue, float alpha, T entity, float entityYaw,
                                               float partialTick, PoseStack methodPoseStack,
                                               MultiBufferSource buffers, int methodPackedLight) {
-        EntityExtension extension = EntityExtensionManager.getExtension(entity.getType());
-        BlenderModelExtension blender = EntityExtensionSafeAccess.blenderModelExtension(extension, entity);
-        if (EntityExtensionSafeAccess.usesBlenderReplacement(blender)
-            && BlenderModelRenderer.render(entity, blender, poseStack, buffers, methodPackedLight,
+        BlenderEntityBinding blender = BlenderEntityBindings.resolve(entity);
+        if (BlenderEntityBindings.replacesBody(blender)
+            && BlenderEntityRenderer.render(entity, blender, poseStack, buffers, methodPackedLight,
                 packedOverlay, partialTick)) {
             eca$blenderReplacedBody = true;
             return;

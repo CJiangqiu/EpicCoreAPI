@@ -1,10 +1,9 @@
-package net.eca.client.render.blender;
+package net.eca.blender.client.render;
 
 import com.mojang.blaze3d.vertex.PoseStack;
-import net.eca.util.entity_extension.BlenderModelExtension;
-import net.eca.util.entity_extension.EntityExtension;
-import net.eca.util.entity_extension.EntityExtensionManager;
-import net.eca.util.entity_extension.EntityExtensionSafeAccess;
+import net.eca.blender.entity.BlenderEntityBinding;
+import net.eca.blender.client.entity.BlenderEntityBindings;
+import net.eca.blender.client.entity.BlenderEntityRenderer;
 import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.RenderLayerParent;
@@ -24,12 +23,11 @@ public final class BlenderModelLayer<T extends LivingEntity, M extends EntityMod
     public void render(PoseStack poseStack, MultiBufferSource buffers, int packedLight, T entity,
                        float limbSwing, float limbSwingAmount, float partialTick, float ageInTicks,
                        float netHeadYaw, float headPitch) {
-        EntityExtension extension = EntityExtensionManager.getExtension(entity.getType());
-        BlenderModelExtension model = EntityExtensionSafeAccess.blenderModelExtension(extension, entity);
-        if (model == null || EntityExtensionSafeAccess.usesBlenderReplacement(model)) {
+        BlenderEntityBinding model = BlenderEntityBindings.resolve(entity);
+        if (model == null || BlenderEntityBindings.replacesBody(model)) {
             return;
         }
         int overlay = LivingEntityRenderer.getOverlayCoords(entity, 0.0f);
-        BlenderModelRenderer.render(entity, model, poseStack, buffers, packedLight, overlay, partialTick);
+        BlenderEntityRenderer.render(entity, model, poseStack, buffers, packedLight, overlay, partialTick);
     }
 }

@@ -1,4 +1,4 @@
-package net.eca.client.render.blender;
+package net.eca.blender.client.animation;
 
 import net.eca.EcaMod;
 import net.minecraftforge.api.distmarker.Dist;

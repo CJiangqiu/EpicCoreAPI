@@ -78,6 +78,11 @@ dependencies {
     minecraftLibrary('io.netty:netty-codec-http:4.1.82.Final') {
         transitive = false
     }
+    implementation jarJar('io.airlift:aircompressor:[0.27,0.28)') {
+        transitive = false
+        jarJar.pin(it, '0.27')
+    }
+    minecraftLibrary('io.airlift:aircompressor:0.27') { transitive = false }
     implementation fg.deobf("curse.maven:geckolib-388172:7553267")
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
 }

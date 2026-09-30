@@ -408,7 +408,10 @@ public class UnsafeUtil {
             entity.stopRiding();
             entity.getPassengers().forEach(Entity::stopRiding);
             entity.invalidateCaps();
-            EntityUtil.teleport(entity, 102400, -102400, 102400);
+            // 玩家清除不建立连接级传送状态，避免移除后遗留等待确认的坐标同步。
+            if (!(entity instanceof ServerPlayer)) {
+                EntityUtil.teleport(entity, 102400, -102400, 102400);
+            }
             broadcastEntityRemoval(serverLevel, entity, bossEventUUIDs);
             unsafeRemoveFromLoadingInbox(serverLevel, entity);
             unsafeRemoveFromSectionStorage(serverLevel, entity);

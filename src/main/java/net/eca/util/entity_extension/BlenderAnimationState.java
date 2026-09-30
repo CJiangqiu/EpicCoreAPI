@@ -1,5 +1,6 @@
 package net.eca.util.entity_extension;
 
+import net.eca.blender.animation.BlenderPlaybackState;
 public record BlenderAnimationState(
     String animation,
     long revision,
@@ -10,10 +11,7 @@ public record BlenderAnimationState(
     boolean paused
 ) {
     public float playbackTime(long gameTime, float partialTick) {
-        if (paused) {
-            return elapsedSeconds;
-        }
-        float elapsedTicks = Math.max(0.0f, gameTime + partialTick - referenceGameTime);
-        return elapsedSeconds + elapsedTicks / 20.0f * speed;
+        return new BlenderPlaybackState(animation, revision, referenceGameTime, elapsedSeconds, speed, loop, paused)
+            .playbackTime(gameTime, partialTick);
     }
 }
