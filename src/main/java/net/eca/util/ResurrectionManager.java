@@ -535,8 +535,7 @@ public final class ResurrectionManager {
             living.hurtTime = 0;
             living.setPose(Pose.STANDING);
 
-            /* 顺序有讲究：setInvulnerable 会按 max(当前血量, 最大生命) 自行上锁，
-               先让它跑完，再用记录里的意图值覆盖，最后才落血量。 */
+            /* 先恢复无敌的默认当前血量锁，再用记录里的显式锁值覆盖，最后落实际血量。 */
             if (record.invulnerable && !EcaAPI.isInvulnerable(living)) {
                 EcaAPI.setInvulnerable(living, true);
             }
