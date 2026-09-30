@@ -1,4 +1,4 @@
-package net.eca.util.health;
+package net.eca.util;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;

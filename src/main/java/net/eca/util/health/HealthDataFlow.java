@@ -1,5 +1,6 @@
 package net.eca.util.health;
 
+import net.eca.util.EcaOwnedState;
 import net.eca.util.health.report.HealthReportText;
 
 import net.eca.util.health.report.HealthReportManager;
@@ -28,7 +29,6 @@ import net.eca.util.health.HealthDataflowAnalyzer.MethodCallSource;
 import net.eca.util.health.HealthDataflowAnalyzer.MethodPropertySource;
 import net.eca.util.health.HealthDataflowAnalyzer.Op;
 import net.eca.util.health.HealthDataflowAnalyzer.OptionalContentExpr;
-import net.eca.util.health.HealthDataflowAnalyzer.Primitive;
 import net.eca.util.health.HealthDataflowAnalyzer.Source;
 import net.eca.util.health.HealthDataflowAnalyzer.StaticFieldSource;
 import net.eca.util.health.HealthDataflowAnalyzer.StoreWrite;
