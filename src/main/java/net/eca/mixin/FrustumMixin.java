@@ -68,7 +68,7 @@ public abstract class FrustumMixin {
        这类情况在进入循环前看不出来，只能给判据加次数上限作为最后兜底。 */
     @Redirect(
             method = "offsetToFullyIncludeCameraCube",
-            at = @At(value = "INVOKE", target = "Lorg/joml/FrustumIntersection;intersectAab(FFFFFF)I"),
+            at = @At(value = "INVOKE", target = "Lorg/joml/FrustumIntersection;intersectAab(FFFFFF)I", remap = false),
             require = 0
     )
     private int eca$capOffsetIterations(FrustumIntersection intersection, float minX, float minY, float minZ,

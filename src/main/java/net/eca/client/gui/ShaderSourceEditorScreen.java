@@ -4,7 +4,6 @@ import net.eca.client.render.shader_generator.GeneratedShaderPreview;
 import net.eca.client.render.shader_generator.ShaderPreviewDependencyResolver;
 import net.eca.client.render.shader_generator.ShaderPreviewRenderer;
 import net.eca.client.render.shader_generator.ShaderPreviewTarget;
-import net.eca.mixin.MultiLineEditBoxAccessor;
 import net.eca.util.EcaLogger;
 import net.eca.util.shader_generator.ShaderCompositionProject;
 import net.eca.util.shader_generator.ShaderExportBundle;
@@ -316,8 +315,7 @@ public final class ShaderSourceEditorScreen extends Screen {
         navigationLocation = entry.label();
         openDropdown = -1;
         rebuildWidgets();
-        MultiLineEditBoxAccessor accessor = (MultiLineEditBoxAccessor) (Object) editor;
-        accessor.eca$getTextField().seekCursor(Whence.ABSOLUTE, entry.offset());
+        editor.textField.seekCursor(Whence.ABSOLUTE, entry.offset());
         setFocused(editor);
     }
 
@@ -584,9 +582,8 @@ public final class ShaderSourceEditorScreen extends Screen {
     }
 
     private void clearEditorSelection() {
-        MultiLineEditBoxAccessor accessor = (MultiLineEditBoxAccessor) (Object) editor;
-        accessor.eca$getTextField().setSelecting(false);
-        accessor.eca$getTextField().seekCursor(Whence.RELATIVE, 0);
+        editor.textField.setSelecting(false);
+        editor.textField.seekCursor(Whence.RELATIVE, 0);
         setFocused(null);
     }
 

@@ -7,7 +7,6 @@
   "client": [
     "BossHealthOverlayMixin",
     "BossShowCameraMixin",
-    "CameraAccessor",
     "ClientEntityCallbacksMixin",
     "ClientLevelMixin",
     "DeathScreenMixin",
@@ -22,7 +21,6 @@
     "SoundManagerMixin",
     "ItemRendererMixin",
     "EntityFactionGlowMixin",
-    "MultiLineEditBoxAccessor",
     "ItemStackClientMixin",
     "FallingBlockRendererMixin"
   ],

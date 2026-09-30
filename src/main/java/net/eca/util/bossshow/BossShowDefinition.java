@@ -61,7 +61,7 @@ public final class BossShowDefinition {
     private final List<SubtitleCue> subtitleCues;
     private final List<BossShowEffectCue> effectCues;
     private final Source source;
-    //录制时烤入的 anchor yaw：frame 的 anchor-local 编码参考系
+    //录制时的参考朝向，仅供无实体编辑预览还原；正式播放使用触发实体的起始朝向。
     private final float anchorYawDeg;
 
     public BossShowDefinition(ResourceLocation id,

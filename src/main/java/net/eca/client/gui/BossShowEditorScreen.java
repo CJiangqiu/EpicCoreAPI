@@ -443,8 +443,7 @@ public final class BossShowEditorScreen extends Screen implements BossShowEditor
     }
 
     private void doStartRecording() {
-        if (this.minecraft.level == null) return;
-        BossShowEditorState.enterRecordingStandby(this.minecraft.level.getGameTime());
+        BossShowEditorState.enterRecordSelection();
         this.minecraft.setScreen(null);
     }
 

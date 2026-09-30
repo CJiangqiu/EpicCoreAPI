@@ -270,37 +270,29 @@ public final class BossShowEditorClientEvents {
             return;
         }
 
-        //=== CREATE_NEW 选择模式 ===
-        //右键 hovered 实体 → 绑定该实体（targetType=type, anchor=entity pos）
-        //右键空地 → 不绑定实体（targetType=null, anchor=玩家当前位置 / 玩家 yaw）
-        LocalPlayer player = mc.player;
-        if (player == null) return;
-
+        //录制和新建都以目标实体自身位姿建立局部坐标系。
         Entity target = cachedHovered;
         boolean hasTarget = target != null && !target.isRemoved();
-
-        EntityType<?> type;
-        UUID anchorUuid;
-        double ax, ay, az;
-        float anchorYaw;
-        if (hasTarget) {
-            type = target.getType();
-            anchorUuid = target.getUUID();
-            ax = target.getX();
-            ay = target.getY();
-            az = target.getZ();
-            //anchor yaw = 实体→玩家连线方向，让首帧"自然"面向玩家
-            double adx = player.getX() - ax;
-            double adz = player.getZ() - az;
-            anchorYaw = (float)(Math.atan2(adz, adx) * (180.0 / Math.PI)) - 90.0f;
-        } else {
-            type = null;
-            anchorUuid = null;
-            ax = player.getX();
-            ay = player.getY();
-            az = player.getZ();
-            anchorYaw = player.getYRot();
+        if (BossShowEditorState.isRecordSelectionMode()) {
+            if (!hasTarget || mc.level == null) return;
+            BossShowEditorState.setTargetType(target.getType());
+            BossShowEditorState.setAnchor(target.getUUID(), target.getX(), target.getY(), target.getZ(), target.getYRot());
+            BossShowEditorState.exitSelectionMode();
+            cachedHovered = null;
+            BossShowEditorState.enterRecordingStandby(mc.level.getGameTime());
+            mc.setScreen(null);
+            return;
         }
+
+        LocalPlayer player = mc.player;
+        if (player == null || !hasTarget) return;
+
+        EntityType<?> type = target.getType();
+        UUID anchorUuid = target.getUUID();
+        double ax = target.getX();
+        double ay = target.getY();
+        double az = target.getZ();
+        float anchorYaw = target.getYRot();
 
         ResourceLocation id = BossShowEditorState.generateAutoId(type);
         BossShowDefinition blank = BossShowEditorState.createBlank(id, type);
@@ -333,9 +325,12 @@ public final class BossShowEditorClientEvents {
         }
         if (BossShowEditorState.isAnySelectionMode()) {
             event.setCanceled(true);
+            boolean recordingSelection = BossShowEditorState.isRecordSelectionMode();
             BossShowEditorState.exitSelectionMode();
             cachedHovered = null;
-            Minecraft.getInstance().setScreen(new BossShowEditorHomeScreen());
+            Minecraft.getInstance().setScreen(recordingSelection
+                ? new BossShowEditorScreen()
+                : new BossShowEditorHomeScreen());
             return;
         }
         //在编辑器 session 活着且无 screen 状态下按 ESC 也回到 Home
@@ -368,6 +363,7 @@ public final class BossShowEditorClientEvents {
 
         boolean targeted = BossShowEditorState.getHoveredEntityUuid() != null;
         boolean isPlay = BossShowEditorState.isPlaySelectionMode();
+        boolean isRecord = BossShowEditorState.isRecordSelectionMode();
 
         Component line1;
         if (isPlay) {
@@ -376,6 +372,10 @@ public final class BossShowEditorClientEvents {
             line1 = Component.translatable(targeted
                 ? "gui.eca.bossshow.play_selection.targeted"
                 : "gui.eca.bossshow.play_selection.aim", defStr);
+        } else if (isRecord) {
+            line1 = Component.translatable(targeted
+                ? "gui.eca.bossshow.record_selection.targeted"
+                : "gui.eca.bossshow.record_selection.aim");
         } else {
             line1 = Component.translatable(targeted
                 ? "gui.eca.bossshow.selection.targeted"
@@ -383,7 +383,9 @@ public final class BossShowEditorClientEvents {
         }
         Component line2 = Component.translatable(isPlay
             ? "gui.eca.bossshow.play_selection.hint"
-            : "gui.eca.bossshow.selection.hint");
+            : isRecord
+                ? "gui.eca.bossshow.record_selection.hint"
+                : "gui.eca.bossshow.selection.hint");
 
         int y = h / 4;
         g.drawCenteredString(mc.font, line1, w / 2, y, 0xFFFFFF);

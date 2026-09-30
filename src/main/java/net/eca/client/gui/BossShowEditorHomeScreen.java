@@ -83,7 +83,7 @@ public class BossShowEditorHomeScreen extends Screen implements BossShowEditorSe
     private void editExisting(BossShowDefinition def) {
         BossShowEditorState.enter(def);
         //没有锚点时，把 anchor 落到玩家前方 4 格的空间坐标上（不绑定实体）
-        //非空 def 必须保留 enter() 已经从 def 恢复的 yaw，否则新录帧和旧帧坐标系错乱
+        //非空定义保留录制参考朝向，让无实体预览维持原有空间布局。
         if (!BossShowEditorState.hasAnchor()) {
             LocalPlayer p = this.minecraft.player;
             if (p != null) {

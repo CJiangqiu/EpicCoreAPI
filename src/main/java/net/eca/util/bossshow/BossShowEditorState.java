@@ -45,7 +45,7 @@ public final class BossShowEditorState {
     private static final ArrayList<BossShowDefinition> availableDefs = new ArrayList<>();
 
     //=== 选择模式 ===
-    public enum SelectionKind { NONE, CREATE_NEW, PLAY }
+    public enum SelectionKind { NONE, CREATE_NEW, RECORD, PLAY }
     private static SelectionKind selectionKind = SelectionKind.NONE;
     private static ResourceLocation pendingPlayDefId = null;
     private static UUID hoveredEntityUuid = null;
@@ -132,7 +132,7 @@ public final class BossShowEditorState {
         selectedKeyframeFrameIndex = findFirstKeyframeIndex();
         dirty = false;
         active = true;
-        //def 已有帧时，新录制的帧必须复用同一 anchor yaw，否则坐标系错乱
+        //没有绑定实体时，用录制参考朝向保持编辑预览的空间布局。
         if (!def.frames().isEmpty()) {
             anchorYawDeg = def.anchorYawDeg();
         }
@@ -207,7 +207,7 @@ public final class BossShowEditorState {
         anchorValid = true;
     }
 
-    //编辑已有 def 时：只更新位置，保留当前 yaw，避免覆写烤入 yaw 导致坐标系错乱
+    //编辑已有定义时只移动预览原点，保留录制参考朝向。
     public static void setAnchorPositionKeepYaw(UUID uuid, double x, double y, double z) {
         anchorEntityUuid = uuid;
         anchorX = x;
@@ -838,6 +838,7 @@ public final class BossShowEditorState {
 
     //=== 选择模式 ===
     public static SelectionKind getSelectionKind() { return selectionKind; }
+    public static boolean isRecordSelectionMode() { return selectionKind == SelectionKind.RECORD; }
     public static boolean isPlaySelectionMode() { return selectionKind == SelectionKind.PLAY; }
     public static boolean isAnySelectionMode() { return selectionKind != SelectionKind.NONE; }
 
@@ -854,6 +855,12 @@ public final class BossShowEditorState {
     public static void enterPlaySelection(ResourceLocation defId) {
         selectionKind = SelectionKind.PLAY;
         pendingPlayDefId = defId;
+        hoveredEntityUuid = null;
+    }
+
+    public static void enterRecordSelection() {
+        selectionKind = SelectionKind.RECORD;
+        pendingPlayDefId = null;
         hoveredEntityUuid = null;
     }
 

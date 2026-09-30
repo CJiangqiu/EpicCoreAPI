@@ -56,8 +56,8 @@ public final class BossShowPlaybackTracker {
         double ax = target.getX();
         double ay = target.getY();
         double az = target.getZ();
-        //anchor yaw 直接用 def 录制时烤入的值；保证回放和录制用同一坐标系
-        float ayaw = def.anchorYawDeg();
+        //帧位姿位于目标实体局部坐标系，播放开始时按触发实体朝向还原。
+        float ayaw = target.getYRot();
 
         BossShowSession session = new BossShowSession(viewer, target, def, ax, ay, az, ayaw);
         ACTIVE.put(viewer.getUUID(), session);

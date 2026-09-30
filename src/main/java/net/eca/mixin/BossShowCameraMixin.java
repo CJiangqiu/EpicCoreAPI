@@ -27,8 +27,8 @@ public class BossShowCameraMixin {
         } else {
             return;
         }
-        CameraAccessor self = (CameraAccessor) this;
-        self.eca$setPosition(pose.x, pose.y, pose.z);
-        self.eca$setRotation(pose.yaw, pose.pitch);
+        Camera self = (Camera) (Object) this;
+        self.setPosition(pose.x, pose.y, pose.z);
+        self.setRotation(pose.yaw, pose.pitch);
     }
 }
