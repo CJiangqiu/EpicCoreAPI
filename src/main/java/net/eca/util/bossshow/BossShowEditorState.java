@@ -1,5 +1,7 @@
 package net.eca.util.bossshow;
 
+import net.minecraft.world.phys.Vec3;
+
 import net.eca.client.BossShowScreenEffectState;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowDefinition.EventCue;
@@ -301,17 +303,10 @@ public final class BossShowEditorState {
     //每 tick 由事件处理器调用：把当前摄像机捕获为一个普通帧（仅 RECORDING 状态）
     public static void captureFrameFromCamera(double camX, double camY, double camZ, float camYaw, float camPitch) {
         if (recState != RecState.RECORDING || !anchorValid) return;
-        double rad = Math.toRadians(anchorYawDeg);
-        double cos = Math.cos(rad);
-        double sin = Math.sin(rad);
-        double ox = camX - anchorX;
-        double oy = camY - anchorY;
-        double oz = camZ - anchorZ;
-        //逆旋转到 anchor-local 坐标系
-        double dx = ox * cos - oz * sin;
-        double dz = ox * sin + oz * cos;
+        Vec3 local = BossShowInterpolator.worldToAnchor(camX, camY, camZ,
+            anchorX, anchorY, anchorZ, anchorYawDeg);
         float localYaw = camYaw - anchorYawDeg;
-        workingFrames.add(new Frame(dx, oy, dz, localYaw, camPitch, null));
+        workingFrames.add(new Frame(local.x, local.y, local.z, localYaw, camPitch, null));
     }
 
     //K 键：将当前帧（最后一帧）显式标记为关键帧（录制和暂停态都允许）
@@ -523,31 +518,21 @@ public final class BossShowEditorState {
         List<Keyframe> preserved = remapPathKeyframes(start, end, durationTicks);
 
         double pitchRad = Math.toRadians(first.pitch());
-        double worldYawRad = Math.toRadians(first.yaw() + anchorYawDeg);
-        double cosYaw = Math.cos(worldYawRad);
-        double sinYaw = Math.sin(worldYawRad);
+        double localYawRad = Math.toRadians(first.yaw());
+        double cosYaw = Math.cos(localYawRad);
+        double sinYaw = Math.sin(localYawRad);
         double cosPitch = Math.cos(pitchRad);
         double sinPitch = Math.sin(pitchRad);
-        double worldForwardX = -sinYaw * cosPitch;
+        double forwardX = -sinYaw * cosPitch;
         double forwardY = -sinPitch;
-        double worldForwardZ = cosYaw * cosPitch;
-        double worldRightX = -cosYaw;
-        double worldRightZ = -sinYaw;
-        double worldUpX = -sinYaw * sinPitch;
+        double forwardZ = cosYaw * cosPitch;
+        double rightX = -cosYaw;
+        double rightZ = -sinYaw;
+        double upX = -sinYaw * sinPitch;
         double upY = cosPitch;
-        double worldUpZ = cosYaw * sinPitch;
+        double upZ = cosYaw * sinPitch;
 
-        //位置帧使用 anchor-local 坐标，方向必须先按世界镜头求出再逆旋转到该坐标系。
-        double anchorRad = Math.toRadians(anchorYawDeg);
-        double anchorCos = Math.cos(anchorRad);
-        double anchorSin = Math.sin(anchorRad);
-        double forwardX = worldForwardX * anchorCos - worldForwardZ * anchorSin;
-        double forwardZ = worldForwardX * anchorSin + worldForwardZ * anchorCos;
-        double rightX = worldRightX * anchorCos - worldRightZ * anchorSin;
-        double rightZ = worldRightX * anchorSin + worldRightZ * anchorCos;
-        double upX = worldUpX * anchorCos - worldUpZ * anchorSin;
-        double upZ = worldUpX * anchorSin + worldUpZ * anchorCos;
-
+        //起始帧的相对 yaw 直接给出局部镜头轴，实体朝向只在回放还原时应用。
         double endX = first.dx() + forwardX * forwardDistance + rightX * rightDistance + upX * upDistance;
         double endY = first.dy() + forwardY * forwardDistance + upY * upDistance;
         double endZ = first.dz() + forwardZ * forwardDistance + rightZ * rightDistance + upZ * upDistance;
@@ -574,10 +559,10 @@ public final class BossShowEditorState {
         workingFrames.subList(start, end + 1).clear();
         workingFrames.addAll(start, generated);
         rebuildContentCuesFromFrames();
-        inPoint = start;
-        outPoint = start + durationTicks - 1;
-        playhead = start;
-        selectedKeyframeFrameIndex = start;
+        //连续生成从新路径末帧接续，避免残留选区覆盖上一段。
+        clearRange();
+        setPlayhead(start + durationTicks - 1);
+        selectedKeyframeFrameIndex = playhead;
         dirty = true;
         return true;
     }
@@ -782,14 +767,9 @@ public final class BossShowEditorState {
     public static void commitPoseCapture(double camX, double camY, double camZ,
                                          float camYaw, float camPitch) {
         if (!poseCaptureArmed || poseCaptureFrame < 0) return;
-        double rad = Math.toRadians(anchorYawDeg);
-        double cos = Math.cos(rad);
-        double sin = Math.sin(rad);
-        double ox = camX - anchorX;
-        double oz = camZ - anchorZ;
-        double dx = ox * cos - oz * sin;
-        double dz = ox * sin + oz * cos;
-        replaceFramePose(poseCaptureFrame, dx, camY - anchorY, dz,
+        Vec3 local = BossShowInterpolator.worldToAnchor(camX, camY, camZ,
+            anchorX, anchorY, anchorZ, anchorYawDeg);
+        replaceFramePose(poseCaptureFrame, local.x, local.y, local.z,
             camYaw - anchorYawDeg, camPitch);
         playhead = poseCaptureFrame;
         poseCaptureArmed = false;
@@ -1021,7 +1001,8 @@ public final class BossShowEditorState {
     public static BossShowPose computePreviewPose() {
         int p = Math.max(0, Math.min(playhead, workingFrames.size() - 1));
         double cursor = previewPlaying ? previewCursor : p;
-        BossShowInterpolator.computePose(workingFrames, cinematic, cursor,
+        BossShowInterpolator.computePose(previewPlaying ? workingFrames : List.of(workingFrames.get(p)),
+            cinematic, previewPlaying ? cursor : 0,
             anchorX, anchorY, anchorZ, anchorYawDeg, previewPose);
         return previewPose;
     }

@@ -13,6 +13,7 @@ import net.eca.util.bossshow.BossShowDefinition.Keyframe;
 import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.entity.EntityType;
 
 import java.util.ArrayList;
@@ -20,7 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/* JSON 编解码：format_version=2 使用 frames[]、events[] 和 subtitles[] 三条轨道。
+/* JSON 编解码：format_version=4 的位置与镜头 yaw 使用同向的实体局部坐标系。
  * 读取旧文件时从帧内 keyframe 子对象派生内容轨道。 */
 public final class BossShowJsonCodec {
 
@@ -62,6 +63,7 @@ public final class BossShowJsonCodec {
             boolean cinematic = !root.has("cinematic") || root.get("cinematic").getAsBoolean();
             boolean allowRepeat = root.has("allow_repeat") && root.get("allow_repeat").getAsBoolean();
             float anchorYawDeg = root.has("anchor_yaw") ? root.get("anchor_yaw").getAsFloat() : 0f;
+            int formatVersion = root.has("format_version") ? root.get("format_version").getAsInt() : 1;
 
             List<Frame> frames = new ArrayList<>();
             if (root.has("frames") && root.get("frames").isJsonArray()) {
@@ -71,6 +73,13 @@ public final class BossShowJsonCodec {
                     double dx = fObj.has("dx") ? fObj.get("dx").getAsDouble() : 0.0;
                     double dy = fObj.has("dy") ? fObj.get("dy").getAsDouble() : 0.0;
                     double dz = fObj.has("dz") ? fObj.get("dz").getAsDouble() : 0.0;
+                    if (formatVersion < 4) {
+                        //旧位置旋转方向相反，转换两倍负参考角以保留录制时的世界轨迹。
+                        Vec3 migrated = BossShowInterpolator.anchorToWorld(dx, dy, dz,
+                            0, 0, 0, -2.0f * anchorYawDeg);
+                        dx = migrated.x;
+                        dz = migrated.z;
+                    }
                     float yaw = fObj.has("yaw") ? fObj.get("yaw").getAsFloat() : 0f;
                     float pitch = fObj.has("pitch") ? fObj.get("pitch").getAsFloat() : 0f;
                     Keyframe kf = null;
@@ -199,7 +208,7 @@ public final class BossShowJsonCodec {
 
     public static String serialize(BossShowDefinition def) {
         JsonObject root = new JsonObject();
-        root.addProperty("format_version", 3);
+        root.addProperty("format_version", 4);
         ResourceLocation typeKey = def.targetType() != null
             ? BuiltInRegistries.ENTITY_TYPE.getKey(def.targetType())
             : null;

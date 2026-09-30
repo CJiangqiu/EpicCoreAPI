@@ -22,10 +22,18 @@ public final class BossShowInterpolator {
         double rad = Math.toRadians(anchorYawDeg);
         double cos = Math.cos(rad);
         double sin = Math.sin(rad);
-        double wx = anchorX + (dx * cos + dz * sin);
+        double wx = anchorX + (dx * cos - dz * sin);
         double wy = anchorY + dy;
-        double wz = anchorZ + (-dx * sin + dz * cos);
+        double wz = anchorZ + (dx * sin + dz * cos);
         return new Vec3(wx, wy, wz);
+    }
+
+    //与 Minecraft yaw 同向旋转的逆变换，供录制和镜头回写共用。
+    public static Vec3 worldToAnchor(double x, double y, double z,
+                                     double anchorX, double anchorY, double anchorZ,
+                                     float anchorYawDeg) {
+        return anchorToWorld(x - anchorX, y - anchorY, z - anchorZ,
+            0, 0, 0, -anchorYawDeg);
     }
 
     //角度环绕差

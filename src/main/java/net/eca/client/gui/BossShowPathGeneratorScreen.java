@@ -6,6 +6,7 @@ import net.eca.util.bossshow.Curve;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
@@ -20,6 +21,7 @@ final class BossShowPathGeneratorScreen extends Screen implements BossShowEditor
     };
 
     private final Frame startFrame;
+    private final int startTick;
     private final int initialDuration;
     private final EditBox[] offsetFields = new EditBox[3];
     private EditBox yawChangeBox;
@@ -34,6 +36,7 @@ final class BossShowPathGeneratorScreen extends Screen implements BossShowEditor
 
     BossShowPathGeneratorScreen() {
         super(Component.translatable("gui.eca.bossshow.editor.path.title"));
+        startTick = BossShowEditorState.getPathGenerationStart();
         startFrame = BossShowEditorState.getPathGenerationStartFrame();
         initialDuration = BossShowEditorState.hasValidRange()
             ? BossShowEditorState.getOutPoint() - BossShowEditorState.getInPoint() + 1 : 40;
@@ -46,6 +49,9 @@ final class BossShowPathGeneratorScreen extends Screen implements BossShowEditor
             closePanel();
             return;
         }
+        BossShowEditorState.stopPreviewPlayback();
+        BossShowEditorState.setPlayhead(startTick);
+        BossShowEditorState.setPreviewEnabled(true);
         int center = this.width / 2;
         int leftX = center - 150;
         int rightX = center + 10;
@@ -56,6 +62,7 @@ final class BossShowPathGeneratorScreen extends Screen implements BossShowEditor
             EditBox field = new EditBox(this.font, x, y, 140, 18, Component.empty());
             field.setMaxLength(32);
             field.setValue(defaults[i]);
+            field.setTooltip(Tooltip.create(Component.translatable("gui.eca.bossshow.editor.path.basis")));
             offsetFields[i] = field;
             this.addRenderableWidget(field);
         }
@@ -191,6 +198,12 @@ final class BossShowPathGeneratorScreen extends Screen implements BossShowEditor
     }
 
     @Override
+    public void removed() {
+        BossShowEditorState.setPreviewEnabled(false);
+        super.removed();
+    }
+
+    @Override
     public boolean shouldCloseOnEsc() {
         return false;
     }
@@ -212,7 +225,7 @@ final class BossShowPathGeneratorScreen extends Screen implements BossShowEditor
         graphics.drawCenteredString(this.font, this.title, center, 18, 0xFFFFFF);
         graphics.drawCenteredString(this.font,
             Component.translatable("gui.eca.bossshow.editor.path.start",
-                BossShowEditorState.getPathGenerationStart()), center, 34, 0xAAAAAA);
+                startTick), center, 34, 0xAAAAAA);
         graphics.drawString(this.font, Component.translatable("gui.eca.bossshow.editor.path.forward"),
             labelX, 44, 0xCCCCCC, false);
         graphics.drawString(this.font, Component.translatable("gui.eca.bossshow.editor.path.right"),
@@ -227,6 +240,8 @@ final class BossShowPathGeneratorScreen extends Screen implements BossShowEditor
             center + 10, 112, 0xCCCCCC, false);
         graphics.drawString(this.font, Component.translatable("gui.eca.bossshow.editor.path.speed"),
             labelX, 146, 0xCCCCCC, false);
+        graphics.drawCenteredString(this.font,
+            Component.translatable("gui.eca.bossshow.editor.path.hint"), center, 204, 0xAAAAAA);
         if (!error.getString().isEmpty()) {
             graphics.drawCenteredString(this.font, error, center, this.height - 38, 0xFF5555);
         }
