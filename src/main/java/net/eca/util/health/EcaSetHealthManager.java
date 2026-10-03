@@ -1180,6 +1180,31 @@ public final class EcaSetHealthManager {
         }
     }
 
+    // 公开读取只复用已有存储表达式，避免触发分析或回到实体覆写的 getter。
+    public static float readAnalyzedHealth(LivingEntity target) {
+        if (target == null) return Float.NaN;
+        Class<?> cls = target.getClass();
+        HealthModel model = HealthModel.forClass(cls);
+        if (model.observationOrigin() == HealthModel.ObservationOrigin.EFFECTIVE_HEALTH) {
+            if (!model.effectiveObservationConfirmed()) return Float.NaN;
+            HealthDataflowAnalyzer.EffectiveHealthModel protocol =
+                    HealthDataflowAnalyzer.peekProtocolTargetModel(cls);
+            return protocol == null ? Float.NaN : readProtocolModelHealth(protocol, target);
+        }
+        HealthDataflowAnalyzer.AnalysisResult tree = DATAFLOW_TABLE.get(cls);
+        if (tree == null || tree.classify() != HealthDataflowAnalyzer.AnalysisResult.Kind.REAL_HEALTH) {
+            return Float.NaN;
+        }
+        try {
+            Object value = HealthDataflowAnalyzer.evaluate(tree.returnExpr, HealthDataflowAnalyzer.newContext(target));
+            return value instanceof Number number && Float.isFinite(number.floatValue())
+                    ? number.floatValue() : Float.NaN;
+        } catch (Throwable t) {
+            if (t instanceof VirtualMachineError e) throw e;
+            return Float.NaN;
+        }
+    }
+
     /* ==================== 观测口解耦证据 ==================== */
 
     /* 记录写入成功但锚点读数不变的源，用于识别观测值与存储解耦的实体类。

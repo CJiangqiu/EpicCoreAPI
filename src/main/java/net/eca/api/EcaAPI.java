@@ -261,21 +261,21 @@ public final class EcaAPI {
 
     // 获取实体真实血量
     /**
-     * Get the health observed through the entity's active life protocol.
-     * The protocol bypasses ECA's own health-lock presentation while preserving custom entity storage semantics.
+     * Read health from an existing analyzed storage expression, falling back to vanilla synchronized health data.
+     * This read does not initiate analysis or fall back to the entity's health getter.
      * @param entity the living entity
-     * @return the real health value, or 0.0f if entity is null
+     * @return the health value, NaN if storage cannot be read, or 0.0f if entity is null
      */
     public static float getHealth(LivingEntity entity) {
         return EntityUtil.getHealth(entity);
     }
 
-    // 读取生命协议确认的权威血量
+    // 读取已分析的真实血量，未确认时读取原版同步血量
     /**
-     * Get the authoritative health observation selected by the life protocol analyzer.
-     * If no custom protocol is needed, this naturally resolves to the vanilla synchronized health state.
+     * Read health from an existing analyzed storage expression, falling back to vanilla synchronized health data.
+     * This read does not initiate analysis or fall back to the entity's health getter.
      * @param entity the living entity
-     * @return the authoritative observed health value, or NaN if the entity is null
+     * @return the health value, or NaN if the entity is null or storage cannot be read
      */
     public static float getRealHealth(LivingEntity entity) {
         if (entity == null) return Float.NaN;

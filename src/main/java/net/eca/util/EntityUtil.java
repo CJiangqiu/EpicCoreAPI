@@ -817,16 +817,14 @@ public class EntityUtil {
     //获取实体真实生命值
     public static float getHealth(LivingEntity entity) {
         if (entity == null) return 0.0f;
-        float protocolValue = EcaSetHealthManager.readHealthAnchor(entity);
+        float protocolValue = EcaSetHealthManager.readAnalyzedHealth(entity);
         if (Float.isFinite(protocolValue)) return protocolValue;
         try {
-            SynchedEntityData.DataItem dataItem = getDataItem(entity.getEntityData(), LivingEntity.DATA_HEALTH_ID.getId());
-            if (dataItem == null) {
-                return entity.getHealth();
-            }
-            return (Float) dataItem.value;
+            SynchedEntityData.DataItem dataItem = getDataItem(entity.entityData, LivingEntity.DATA_HEALTH_ID.getId());
+            return dataItem != null && dataItem.value instanceof Float value ? value : Float.NaN;
         } catch (Exception e) {
-            return entity.getHealth();
+            EcaLogger.info("[HealthRead] Failed to read synchronized health: {}", e.toString());
+            return Float.NaN;
         }
     }
 
