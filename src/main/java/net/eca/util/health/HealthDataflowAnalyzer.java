@@ -4245,13 +4245,15 @@ public final class HealthDataflowAnalyzer {
         if (!(insn instanceof MethodInsnNode call)) return null;
         List<Expr> args = invokeValueExprs(call, frame);
         if (args.isEmpty()) return null;
-        Expr known = extractKnownWriteCall(call, args);
+        Expr known = extractKnownWriteCall(call, args, ctx);
         if (known != null) return known;
         Expr inlined = tryInlineWriteCall(call, args, ctx, depth);
         return inlined != null && !(inlined instanceof UnknownExpr) ? inlined : null;
     }
 
-    private static Expr extractKnownWriteCall(MethodInsnNode call, List<Expr> args) {
+    private static Expr extractKnownWriteCall(MethodInsnNode call, List<Expr> args, AnalysisCtx ctx) {
+        Source indirect = indirectAccessSource(call, args, ctx, true);
+        if (indirect != null) return new StoreWrite(indirect, args.get(args.size() - 1));
         if (isSynchedDataSet(call) && args.size() >= 3) {
             Expr accessor = args.get(1);
             if (accessor instanceof Reference ref && ref.value() instanceof EntityDataAccessor<?> acc) {
@@ -4330,7 +4332,7 @@ public final class HealthDataflowAnalyzer {
                 continue;
             }
             if (!(insn instanceof MethodInsnNode call)) continue;
-            if (isMapPut(call)) return true;
+            if (isMapPut(call) || isIndirectAccessOwner(call.owner)) return true;
             if (call.getOpcode() == Opcodes.INVOKEINTERFACE) return true;
             if (!fingerprint.nbtKeys().isEmpty() && isNbtPut(call)) return true;
             // 不会被内联的归属不必递归：调用方自身的写入指令已在本轮扫描中判过
@@ -4539,6 +4541,291 @@ public final class HealthDataflowAnalyzer {
 
     private static char descriptorChar(Type type) {
         return type == null || type.getDescriptor().isEmpty() ? '?' : type.getDescriptor().charAt(0);
+    }
+
+    private static boolean isIndirectAccessOwner(String owner) {
+        return owner.equals("java/lang/reflect/Field") || owner.equals("java/lang/invoke/VarHandle")
+                || owner.equals("sun/misc/Unsafe") || owner.equals("jdk/internal/misc/Unsafe");
+    }
+
+    private static boolean isIndirectMetadataCall(MethodInsnNode call) {
+        return call.owner.equals("java/lang/Class")
+                && (call.name.equals("getDeclaredField") || call.name.equals("getField"))
+                || call.name.equals("getClass") && call.desc.equals("()Ljava/lang/Class;")
+                || call.owner.equals("java/lang/invoke/MethodHandles$Lookup")
+                && (call.name.equals("findVarHandle") || call.name.equals("findStaticVarHandle")
+                    || call.name.equals("unreflectVarHandle"))
+                || call.owner.equals("java/lang/invoke/MethodHandles") && call.name.equals("arrayElementVarHandle")
+                || isIndirectAccessOwner(call.owner)
+                && (call.name.equals("objectFieldOffset") || call.name.equals("staticFieldOffset")
+                    || call.name.equals("staticFieldBase") || call.name.equals("arrayBaseOffset")
+                    || call.name.equals("arrayIndexScale"));
+    }
+
+    private static Class<?> accessClass(Expr expression, AnalysisCtx ctx) {
+        if (expression instanceof Reference reference && reference.value() instanceof Class<?> type) return type;
+        if (expression instanceof Call call && call.name().equals("getClass") && call.args().size() == 1) {
+            Expr receiver = call.args().get(0);
+            if (receiver == EntityParamMarker.I) return ctx.runtimeEntityClass;
+            if (receiver instanceof Reference reference && reference.value() != null) return reference.value().getClass();
+        }
+        return null;
+    }
+
+    private static Field reflectedAccessField(Expr expression, AnalysisCtx ctx) {
+        if (expression instanceof Reference reference && reference.value() instanceof Field field) return field;
+        if (!(expression instanceof Call call) || !call.owner().equals("java/lang/Class")
+                || call.args().size() != 2) return null;
+        Class<?> owner = accessClass(call.args().get(0), ctx);
+        if (owner == null || !(call.args().get(1) instanceof Reference name)
+                || !(name.value() instanceof String fieldName)) return null;
+        return TaintInterpreter.findReflectedField(owner, call.name(), fieldName);
+    }
+
+    private static Source accessFieldSource(Field field, Expr receiver) {
+        if (field == null) return null;
+        if (Modifier.isStatic(field.getModifiers())) return new StaticFieldSource(field);
+        if (receiver == null || receiver instanceof UnknownExpr) return null;
+        return buildFieldSourceFromReceiver(new FieldInsnNode(Opcodes.GETFIELD,
+                internalName(field.getDeclaringClass()), field.getName(), Type.getDescriptor(field.getType())), receiver);
+    }
+
+    /* 初始化辅助方法可能通过反射替换默认引用；用栈帧传递实参，避免按邻近指令猜捕获对象。 */
+    private static Expr traceAssignedValue(Class<?> owner, MethodNode method, TaintValue[] locals,
+                                           Source target, AnalysisCtx ctx, Set<String> visiting, int depth) {
+        if (depth >= ctx.maxDepth || ctx.inlineBudget-- <= 0) return new UnknownExpr("assignment-budget");
+        String key = internalName(owner) + "#" + method.name + method.desc;
+        if (!visiting.add(key)) return new UnknownExpr("assignment-cycle");
+        boolean previous = ctx.tracingAssignments;
+        ctx.tracingAssignments = true;
+        try {
+            TaintInterpreter interpreter = new TaintInterpreter(ctx, depth, internalName(owner), method, locals);
+            Frame<TaintValue>[] frames = analyzeFrames(new Analyzer<>(interpreter), internalName(owner), method, ctx);
+            Expr result = null;
+            int index = 0;
+            for (AbstractInsnNode instruction : method.instructions) {
+                ctx.checkDeadline();
+                Frame<TaintValue> frame = frames[index++];
+                if (frame == null) continue;
+                Source sink = null;
+                Expr value = null;
+                if (instruction instanceof FieldInsnNode field) {
+                    int count = frame.getStackSize();
+                    if (field.getOpcode() == Opcodes.PUTFIELD && count >= 2) {
+                        sink = buildFieldSourceFromReceiver(field, frame.getStack(count - 2).expr);
+                        value = frame.getStack(count - 1).expr;
+                    } else if (field.getOpcode() == Opcodes.PUTSTATIC && count >= 1) {
+                        sink = buildStaticFieldWriteSource(field);
+                        value = frame.getStack(count - 1).expr;
+                    }
+                } else if (instruction instanceof MethodInsnNode call) {
+                    List<Expr> args = invokeValueExprs(call, frame);
+                    sink = indirectAccessSource(call, args, ctx, true);
+                    if (sink != null) value = args.get(args.size() - 1);
+                    else if (isIndirectAccessOwner(call.owner)
+                            && (call.name.equals("set") || call.name.startsWith("put")
+                                || call.name.startsWith("compare") || call.name.startsWith("getAnd")
+                                || call.name.equals("setVolatile") || call.name.equals("setRelease")
+                                || call.name.equals("setOpaque"))) {
+                        // 未定位的间接赋值可能替换当前引用，不能继续相信先前的默认值。
+                        result = new UnknownExpr("indirect-assignment-unresolved");
+                    }
+                    else if (call.owner.equals(internalName(owner)) && !call.name.equals("<clinit>")) {
+                        MethodNode helper = findMethodNode(classNode(owner), call.name, call.desc);
+                        if (helper != null && mayAssignField(owner, helper, target, new HashSet<>(), 0)) {
+                            TaintValue[] seeds = seedCallLocals(call, args, false);
+                            if (seeds == null) return new UnknownExpr("assignment-arguments");
+                            Expr nested = traceAssignedValue(owner, helper, seeds, target, ctx, visiting, depth + 1);
+                            if (nested != null) {
+                                if (conditionalAssignment(method, index - 1)) return new UnknownExpr("conditional-assignment");
+                                result = nested;
+                            }
+                        }
+                    }
+                }
+                if (target.equals(sink)) {
+                    if (conditionalAssignment(method, index - 1)) return new UnknownExpr("conditional-assignment");
+                    result = value;
+                }
+            }
+            return result;
+        } catch (Throwable failure) {
+            if (failure instanceof VirtualMachineError error) throw error;
+            if (failure instanceof AnalysisDeadlineExceeded exhausted) throw exhausted;
+            EcaLogger.info("[HealthDataflow] assignment resolution failed: {}", failure.toString());
+            return new UnknownExpr("assignment-unresolved");
+        } finally {
+            ctx.tracingAssignments = previous;
+            visiting.remove(key);
+        }
+    }
+
+    private static boolean conditionalAssignment(MethodNode method, int assignmentIndex) {
+        for (int i = 0; i < assignmentIndex; i++) {
+            AbstractInsnNode instruction = method.instructions.get(i);
+            if (instruction instanceof JumpInsnNode jump
+                    && method.instructions.indexOf(jump.label) > assignmentIndex) return true;
+            if (instruction instanceof TableSwitchInsnNode || instruction instanceof LookupSwitchInsnNode) return true;
+        }
+        return false;
+    }
+
+    private static boolean mayAssignField(Class<?> owner, MethodNode method, Source target,
+                                          Set<String> visiting, int depth) {
+        if (depth >= 8 || !visiting.add(method.name + method.desc)) return true;
+        String fieldName = target instanceof FieldChainSource chain
+                ? chain.chain.get(chain.chain.size() - 1).name()
+                : target instanceof StaticFieldSource field ? field.field.getName() : null;
+        for (AbstractInsnNode instruction : method.instructions) {
+            if (instruction instanceof FieldInsnNode field && field.name.equals(fieldName)
+                    && (field.getOpcode() == Opcodes.PUTFIELD || field.getOpcode() == Opcodes.PUTSTATIC)) return true;
+            if (!(instruction instanceof MethodInsnNode call)) continue;
+            if (isIndirectAccessOwner(call.owner) && (call.name.startsWith("set")
+                    || call.name.startsWith("put") || call.name.startsWith("compare")
+                    || call.name.startsWith("getAnd"))) return true;
+            if (call.owner.equals(internalName(owner))) {
+                MethodNode helper = findMethodNode(classNode(owner), call.name, call.desc);
+                if (helper != null && mayAssignField(owner, helper, target, visiting, depth + 1)) return true;
+            }
+        }
+        visiting.remove(method.name + method.desc);
+        return false;
+    }
+
+    private static Expr accessorInitializer(Field field, AnalysisCtx ctx) {
+        String key = field.toGenericString();
+        if (ctx.accessorInitializers.containsKey(key)) return ctx.accessorInitializers.get(key);
+        if (!ctx.resolvingAccessors.add(key)) return null;
+        try {
+            Class<?> owner = field.getDeclaringClass();
+            if (owner.getClassLoader() == null) return null;
+            ClassNode node = classNode(owner);
+            MethodNode initializer = node == null ? null : findMethodNode(node, "<clinit>", "()V");
+            if (initializer != null) {
+                boolean metadata = false;
+                for (AbstractInsnNode instruction : initializer.instructions) {
+                    if (instruction instanceof MethodInsnNode call && isIndirectMetadataCall(call)) {
+                        metadata = true;
+                        break;
+                    }
+                }
+                if (!metadata) initializer = null;
+            }
+            Expr value = initializer == null ? null : traceAssignedValue(owner, initializer, null,
+                    new StaticFieldSource(field), ctx, new HashSet<>(), 0);
+            if (!(value instanceof Call call) || !isIndirectMetadataCall(new MethodInsnNode(
+                    call.opcode(), call.owner(), call.name(), call.desc(), false))) value = null;
+            ctx.accessorInitializers.put(key, value);
+            return value;
+        } finally {
+            ctx.resolvingAccessors.remove(key);
+        }
+    }
+
+    /* 只还原有成员来源的访问。裸地址、任意算术偏移和条件原子写入不等价于普通字段赋值。 */
+    private static Source indirectAccessSource(MethodInsnNode method, List<Expr> args,
+                                                AnalysisCtx ctx, boolean write) {
+        if (!isIndirectAccessOwner(method.owner) || args.isEmpty()) return null;
+        String name = method.name;
+        try {
+            if (method.owner.equals("java/lang/reflect/Field")) {
+                Set<String> names = write
+                        ? Set.of("set", "setBoolean", "setByte", "setChar", "setShort", "setInt", "setLong", "setFloat", "setDouble")
+                        : Set.of("get", "getBoolean", "getByte", "getChar", "getShort", "getInt", "getLong", "getFloat", "getDouble");
+                if (!names.contains(name) || args.size() != (write ? 3 : 2)) return null;
+                return accessFieldSource(reflectedAccessField(args.get(0), ctx), args.get(1));
+            }
+            if (method.owner.equals("java/lang/invoke/VarHandle")) {
+                if (!(write ? Set.of("set", "setVolatile", "setRelease", "setOpaque")
+                        : Set.of("get", "getVolatile", "getAcquire", "getOpaque")).contains(name)) return null;
+                if (!(args.get(0) instanceof Call factory)) return null;
+                if (factory.owner().equals("java/lang/invoke/MethodHandles")
+                        && factory.name().equals("arrayElementVarHandle") && factory.args().size() == 1) {
+                    Class<?> arrayType = accessClass(factory.args().get(0), ctx);
+                    if (arrayType == null || !arrayType.isArray() || args.size() != (write ? 4 : 3)) return null;
+                    return new ArrayElementSource(args.get(1), args.get(2), arrayType.getComponentType(), "arr");
+                }
+                if (!factory.owner().equals("java/lang/invoke/MethodHandles$Lookup")) return null;
+                Field field;
+                if (factory.name().equals("unreflectVarHandle") && factory.args().size() == 2) {
+                    field = reflectedAccessField(factory.args().get(1), ctx);
+                } else {
+                    if (!(factory.name().equals("findVarHandle") || factory.name().equals("findStaticVarHandle"))
+                            || factory.args().size() != 4) return null;
+                    Class<?> owner = accessClass(factory.args().get(1), ctx);
+                    if (owner == null || !(factory.args().get(2) instanceof Reference member)
+                            || !(member.value() instanceof String fieldName)) return null;
+                    field = findFieldInHierarchy(owner, fieldName);
+                    if (field == null || field.getType() != accessClass(factory.args().get(3), ctx)
+                            || Modifier.isStatic(field.getModifiers()) != factory.name().equals("findStaticVarHandle")) return null;
+                }
+                if (field == null) return null;
+                boolean isStatic = Modifier.isStatic(field.getModifiers());
+                if (args.size() != (isStatic ? 1 : 2) + (write ? 1 : 0)) return null;
+                return accessFieldSource(field, isStatic ? null : args.get(1));
+            }
+            String operation = write ? "put" : "get";
+            if (!name.matches(operation + "(Boolean|Byte|Char|Short|Int|Long|Float|Double|Object|Reference)(Volatile|Acquire|Release|Opaque)?")
+                    || args.size() != (write ? 4 : 3)) return null;
+            Source array = unsafeArraySource(name, operation, args.get(1), args.get(2), ctx);
+            if (array != null) return array;
+            if (!(args.get(2) instanceof Call offset)
+                    || !isIndirectAccessOwner(offset.owner()) || offset.args().size() != 2) return null;
+            Field field = reflectedAccessField(offset.args().get(1), ctx);
+            if (field == null) return null;
+            boolean isStatic = Modifier.isStatic(field.getModifiers());
+            if (!offset.name().equals(isStatic ? "staticFieldOffset" : "objectFieldOffset")) return null;
+            // 静态偏移必须与同一成员的基址配对，不能把偏移误套到其它对象。
+            if (isStatic && (!(args.get(1) instanceof Call base) || !base.name().equals("staticFieldBase")
+                    || !base.owner().equals(offset.owner()) || base.args().size() != 2
+                    || !field.equals(reflectedAccessField(base.args().get(1), ctx)))) return null;
+            String typeName = field.getType().isPrimitive()
+                    ? field.getType().getSimpleName() : "Object";
+            typeName = Character.toUpperCase(typeName.charAt(0)) + typeName.substring(1);
+            if (!name.startsWith(operation + typeName)
+                    && !(typeName.equals("Object") && name.startsWith(operation + "Reference"))) return null;
+            return accessFieldSource(field, isStatic ? null : args.get(1));
+        } catch (Throwable failure) {
+            if (failure instanceof VirtualMachineError error) throw error;
+            if (failure instanceof AnalysisDeadlineExceeded exhausted) throw exhausted;
+            EcaLogger.info("[HealthDataflow] indirect field resolution failed: {}", failure.toString());
+            return null;
+        }
+    }
+
+    private static Expr stripOffsetWidening(Expr expression) {
+        while (expression instanceof Op op && op.opcode() == Opcodes.I2L && op.args().size() == 1) {
+            expression = op.args().get(0);
+        }
+        return expression;
+    }
+
+    private static Source unsafeArraySource(String name, String operation, Expr array, Expr offset, AnalysisCtx ctx) {
+        // 仅识别 base + index * scale，字节偏移不会直接作为数组下标写入。
+        if (!(offset instanceof Op add) || add.opcode() != Opcodes.LADD || add.args().size() != 2) return null;
+        for (int side = 0; side < 2; side++) {
+            Expr baseExpr = stripOffsetWidening(add.args().get(side));
+            Expr indexed = stripOffsetWidening(add.args().get(1 - side));
+            if (!(baseExpr instanceof Call base) || !isIndirectAccessOwner(base.owner())
+                    || !base.name().equals("arrayBaseOffset") || base.args().size() != 2
+                    || !(indexed instanceof Op multiply) || multiply.opcode() != Opcodes.LMUL
+                    || multiply.args().size() != 2) continue;
+            Class<?> arrayType = accessClass(base.args().get(1), ctx);
+            if (arrayType == null || !arrayType.isArray()) continue;
+            for (int factor = 0; factor < 2; factor++) {
+                Expr scaleExpr = stripOffsetWidening(multiply.args().get(factor));
+                if (!(scaleExpr instanceof Call scale) || !scale.owner().equals(base.owner())
+                        || !scale.name().equals("arrayIndexScale") || scale.args().size() != 2
+                        || accessClass(scale.args().get(1), ctx) != arrayType) continue;
+                Class<?> component = arrayType.getComponentType();
+                String type = component.isPrimitive() ? component.getSimpleName() : "object";
+                type = Character.toUpperCase(type.charAt(0)) + type.substring(1);
+                if (!name.startsWith(operation + type)
+                        && !(type.equals("Object") && name.startsWith(operation + "Reference"))) return null;
+                return new ArrayElementSource(array, stripOffsetWidening(multiply.args().get(1 - factor)), component, "arr");
+            }
+        }
+        return null;
     }
 
     private static Source buildFieldSourceFromReceiver(FieldInsnNode field, Expr receiver) {
@@ -5452,6 +5739,9 @@ public final class HealthDataflowAnalyzer {
         final Set<String> opaqueMethods = new HashSet<>();
         //当前调用栈上正在分析的方法,用于内联环检测
         final Set<String> inflight = new HashSet<>();
+        final Set<String> resolvingAccessors = new HashSet<>();
+        final Map<String, Expr> accessorInitializers = new HashMap<>();
+        boolean tracingAssignments;
         //全局熔断：内联次数上限,超出后直接返回 Unknown,防止指数膨胀
         int inlineBudget = DEFAULT_INLINE_BUDGET;
         //表达式节点预算：构造组合表达式时递减,耗尽即坍缩 Unknown
@@ -5940,6 +6230,15 @@ public final class HealthDataflowAnalyzer {
             //节点预算耗尽：停止展开调用/内联，坍缩 Unknown，防止表达式树爆炸
             if (--ctx.nodeBudget <= 0) return new TaintValue(sz, new UnknownExpr("nodeBudget-exhausted"));
 
+            List<Expr> accessArgs = values.stream().map(value -> value.expr).toList();
+            Source indirect = indirectAccessSource(m, accessArgs, ctx, false);
+            if (indirect != null) return new TaintValue(sz, indirect);
+            // 元数据调用必须保留来源，不能展开到 JDK 内部或折叠成无归属的偏移量。
+            if (ctx.tracingAssignments || isIndirectMetadataCall(m)) {
+                return new TaintValue(sz, new Call(m.owner, currentOwner, m.name, m.desc,
+                        m.getOpcode(), accessArgs));
+            }
+
             Expr methodHandle = tryInlineMethodHandleReturn(m, values);
             if (methodHandle != null && !(methodHandle instanceof UnknownExpr)) {
                 return new TaintValue(sz, methodHandle);
@@ -6095,8 +6394,18 @@ public final class HealthDataflowAnalyzer {
         }
 
         private Expr tryInlineFunctionalCall(MethodInsnNode method, List<? extends TaintValue> values) {
-            if (values.isEmpty()) return null;
+            if (values.isEmpty() || method.getOpcode() == Opcodes.INVOKESTATIC) return null;
             Expr receiver = values.get(0).expr;
+            if (!(receiver instanceof Closure)) {
+                Class<?> functionalType = loadClass(method.owner);
+                if (functionalType == null || !functionalType.isInterface()) return null;
+                long abstractMethods = Arrays.stream(functionalType.getMethods())
+                        .filter(candidate -> Modifier.isAbstract(candidate.getModifiers()))
+                        .filter(candidate -> !candidate.getName().equals("equals")
+                                || !Arrays.equals(candidate.getParameterTypes(), new Class<?>[]{Object.class}))
+                        .map(candidate -> candidate.getName() + Type.getMethodDescriptor(candidate)).distinct().count();
+                if (abstractMethods != 1) return null;
+            }
             Closure closure = receiver instanceof Closure direct ? direct : resolveFunctionalField(receiver);
             if (closure == null || !closure.samName().equals(method.name)) return null;
 
@@ -6106,75 +6415,47 @@ public final class HealthDataflowAnalyzer {
         }
 
         private Closure resolveFunctionalField(Expr receiver) {
-            if (!(receiver instanceof FieldChainSource source) || source.chain.isEmpty()) return null;
+            if (ctx.tracingAssignments || !(receiver instanceof FieldChainSource source)
+                    || source.chain.isEmpty()) return null;
             FieldStep field = source.chain.get(source.chain.size() - 1);
-            Class<?> fieldOwner = loadClass(field.ownerInternal());
-            if (fieldOwner == null) return null;
-            Expr captureRoot = source.chain.size() == 1
-                ? EntityParamMarker.I : makeFieldChain(source.chain.subList(0, source.chain.size() - 1));
-            /* 取最后一次有效赋值：字段初始化器(如 = ()->默认值)会被编译进 <init> 且排在构造器体的真实赋值之前，
-               命中首个 PUTFIELD 会取到初始化器 lambda 而漏掉真实实现。遍历完 <init> 保留最后一个匹配的 closure。
-               沿继承链向上扫，最先出现匹配的(最派生)定义类即生效——其初始化器/构造器在构造序列中最后执行。 */
-            for (Class<?> scan = fieldOwner; scan != null && scan != Object.class; scan = scan.getSuperclass()) {
-                try {
-                    ClassNode node = classNode(scan);
-                    if (node == null) continue;
-                    Closure lastInClass = null;
-                    for (MethodNode method : node.methods) {
-                        if (!method.name.equals("<init>")) continue;
-                        InvokeDynamicInsnNode nearest = null;
-                        int distance = 0;
-                        for (AbstractInsnNode instruction : method.instructions) {
-                            if (instruction instanceof InvokeDynamicInsnNode dynamic) {
-                                nearest = dynamic;
-                                distance = 0;
-                                continue;
-                            }
-                            if (nearest != null && ++distance > 16) nearest = null;
-                            if (!(instruction instanceof FieldInsnNode put) || put.getOpcode() != Opcodes.PUTFIELD) continue;
-                            if (!put.name.equals(field.name()) || !put.desc.equals(field.desc()) || nearest == null) continue;
-                            if (!put.owner.equals(scan.getName().replace('.', '/'))) continue;
-
-                            Type[] capturedTypes = Type.getArgumentTypes(nearest.desc);
-                            List<Expr> captured = new ArrayList<>(capturedTypes.length);
-                            for (int i = 0; i < capturedTypes.length; i++) {
-                                if (i == 0) {
-                                    captured.add(captureRoot);
-                                } else {
-                                    // 尝试映射捕获参数到构造器参数：回溯 INVOKEDYNAMIC 前的 ALOAD <idx>
-                                    Expr resolved = resolveCapturedArg(method.instructions, nearest, i);
-                                    captured.add(resolved != null ? resolved
-                                        : new UnknownExpr("lambda-capture-" + i));
-                                }
-                            }
-                            Closure closure = closureFromExprs(nearest, captured);
-                            if (closure != null) lastInClass = closure;
-                        }
-                    }
-                    if (lastInClass != null) return lastInClass;
-                } catch (Throwable t) {
-                    if (t instanceof VirtualMachineError e) throw e;
-                }
+            Class<?> owner = loadClass(field.ownerInternal());
+            if (owner == null) return null;
+            Field declared = findFieldInHierarchy(owner, field.name());
+            if (declared == null) return null;
+            owner = declared.getDeclaringClass();
+            String key = "functional:" + source.canonicalKey();
+            if (ctx.accessorInitializers.containsKey(key)) {
+                Expr cached = ctx.accessorInitializers.get(key);
+                return cached instanceof Closure closure ? closure : null;
             }
-            return null;
-        }
-
-        /* 尝试将 lambda 的第 captureIdx 个捕获参数映射到构造器的第 paramIdx 个参数。
-           回溯 INVOKEDYNAMIC 前的 ALOAD <idx> 指令：若 idx 在构造器参数范围内，
-           则用对应的 Primitive 或 EntityParamMarker 占位。 */
-        private Expr resolveCapturedArg(InsnList instructions, InvokeDynamicInsnNode target, int captureIdx) {
-            int aloadCount = 0;
-            for (AbstractInsnNode insn = target.getPrevious(); insn != null; insn = insn.getPrevious()) {
-                if (insn.getOpcode() == Opcodes.ALOAD && insn instanceof VarInsnNode v) {
-                    if (aloadCount == captureIdx) {
-                        if (v.var == 0) return EntityParamMarker.I;
-                        // 构造器参数从 1 开始（0 是 this）
-                        return new UnknownExpr("captured-ctor-param-" + v.var);
+            if (!ctx.resolvingAccessors.add(key)) return null;
+            Expr root = source.chain.size() == 1 ? EntityParamMarker.I
+                    : makeFieldChain(source.chain.subList(0, source.chain.size() - 1));
+            try {
+                ClassNode node = classNode(owner);
+                if (node == null) return null;
+                Closure resolved = null;
+                for (MethodNode constructor : node.methods) {
+                    if (!constructor.name.equals("<init>")) continue;
+                    TaintValue[] seeds = new TaintValue[Math.max(1, constructor.maxLocals)];
+                    seeds[0] = new TaintValue(1, root);
+                    Expr assigned = traceAssignedValue(owner, constructor, seeds, source, ctx, new HashSet<>(), 0);
+                    // 多个构造路径不能用遍历顺序裁决；不完整的赋值链也不能退回默认实现。
+                    if (!(assigned instanceof Closure closure)) {
+                        ctx.accessorInitializers.put(key, UnknownExpr.UNKNOWN);
+                        return null;
                     }
-                    aloadCount++;
+                    if (resolved != null && !resolved.equals(closure)) {
+                        ctx.accessorInitializers.put(key, UnknownExpr.UNKNOWN);
+                        return null;
+                    }
+                    resolved = closure;
                 }
+                ctx.accessorInitializers.put(key, resolved);
+                return resolved;
+            } finally {
+                ctx.resolvingAccessors.remove(key);
             }
-            return null;
         }
 
         private Expr inlineClosure(Closure closure, List<Expr> invocationArgs) {
@@ -6287,6 +6568,7 @@ public final class HealthDataflowAnalyzer {
                 return field;
             } catch (Throwable t) {
                 if (t instanceof VirtualMachineError) throw (VirtualMachineError) t;
+                EcaLogger.info("[HealthDataflow] reflected field resolution failed: {}", t.toString());
                 return null;
             }
         }
@@ -6576,6 +6858,12 @@ public final class HealthDataflowAnalyzer {
                 Field f = findFieldInHierarchy(owner, field.name);
                 if (f == null) return null;
                 f.setAccessible(true);
+                if (Modifier.isFinal(f.getModifiers()) && (f.getType() == Field.class
+                        || f.getType() == VarHandle.class || f.getType() == long.class
+                        || f.getType() == int.class || f.getType() == Object.class)) {
+                    Expr metadata = accessorInitializer(f, ctx);
+                    if (metadata != null) return metadata;
+                }
                 if (Modifier.isFinal(f.getModifiers())) {
                     Object value = f.get(null);
                     return value == null ? null : new Reference(value, field.owner);
