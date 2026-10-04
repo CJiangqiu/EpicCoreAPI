@@ -1395,12 +1395,12 @@ public final class EcaAPI {
     }
 
 
-    // 危险！需要开启激进攻击逻辑配置，会尝试对目标实体的所属mod的全部布尔和void方法进行return transformation
+    // 需要开启激进攻击逻辑；玩家定位六个装备槽所属模组，其他实体定位自身所属模组，并遵守转换白名单
     /**
-     * Enable AllReturn for the specified entity's entire owning mod file.
-     * Vanilla entities (players included) are protected by the transform whitelist and own no
-     * transformable mod file, so for those the target falls back to the mod files owning their
-     * equipped items — one AllReturn scope per distinct item mod.
+     * Enable AllReturn for the specified entity's owning mod file, subject to transform whitelists.
+     * Players target the mod files owning items in their four armor slots and two hand slots instead.
+     * Other protected entities are rejected without inspecting their equipment.
+     * Eligible boolean and void methods in the resolved mod files are affected.
      * DANGER! Requires "Enable Radical Logic" in Attack config.
      * @param entity the entity used to resolve the target mod file
      * @return true if AllReturn was enabled successfully
@@ -1419,11 +1419,11 @@ public final class EcaAPI {
         return setEntityModAllReturn(entity, true);
     }
 
-    // 对指定实体所属mod关闭AllReturn
+    // 关闭实体所属模组的 AllReturn；玩家按六个装备槽解析目标，并遵守转换白名单
     /**
      * Disable AllReturn for the specified entity's entire owning mod file.
      * Uses the same target resolution as {@link #enableAllReturn(Entity)}, including the
-     * equipped-item fallback for vanilla entities.
+     * equipment-based targeting exclusively for players.
      * @param entity the entity used to resolve the target mod file
      * @return true if the target mod was resolved and disabled successfully
      */
@@ -1506,22 +1506,22 @@ public final class EcaAPI {
 
     private static boolean setEntityModAllReturn(Entity entity, boolean enable) {
         if (entity == null) return false;
+        if (entity instanceof Player player) {
+            return setEquipmentModAllReturn(player, enable);
+        }
         String targetInternalName = entity.getClass().getName().replace('.', '/');
-        /* 实体自身受转换白名单保护(玩家等原版类)时改以其装备所属 mod 为目标：
-           原版实体永远解析不出可转换的 mod，但它穿戴的模组装备可以，这是对玩家开 AllReturn 的唯一入口。 */
         if (TransformerWhitelist.isProtectedInternal(targetInternalName)) {
-            return setEquipmentModAllReturn(entity, enable);
+            return false;
         }
         return applyAllReturnModScope(targetInternalName, enable);
     }
 
-    // 以实体装备所属 mod 为 AllReturn 目标，逐件解析，任一件成功即算成功
-    private static boolean setEquipmentModAllReturn(Entity entity, boolean enable) {
-        if (!(entity instanceof LivingEntity living)) return false;
+    // 玩家仅以四个盔甲槽和主副手定位目标，避免波及背包物品所属模组。
+    private static boolean setEquipmentModAllReturn(Player player, boolean enable) {
         Set<String> resolved = new HashSet<>();
         boolean applied = false;
         for (EquipmentSlot slot : EquipmentSlot.values()) {
-            ItemStack stack = living.getItemBySlot(slot);
+            ItemStack stack = player.getItemBySlot(slot);
             if (stack.isEmpty()) continue;
             String itemInternalName = stack.getItem().getClass().getName().replace('.', '/');
             if (TransformerWhitelist.isProtectedInternal(itemInternalName)) continue;
