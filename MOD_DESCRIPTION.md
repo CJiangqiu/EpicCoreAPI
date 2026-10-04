@@ -16,16 +16,16 @@ Players can use the following `/eca` commands (requires permission level ≥ 2):
  - `/eca lockHealth <targets> false` - Unlock entity health
  - `/eca lockMaxHealth <targets> true <value>` - Lock entity max health at specific value
  - `/eca lockMaxHealth <targets> false` - Unlock entity max health
- - `/eca banHealing <targets> true [value]` - Ban healing for entities (value optional, defaults to current health)
+ - `/eca banHealing <targets> true [value]` - Prevent affected entities' health from exceeding the configured healing ban value (optional; defaults to current health).
  - `/eca banHealing <targets> false` - Unban healing for entities
  - `/eca hurt <targets> <amount>` - Force entity damage (vanilla hurt first, forced write when the health loss does not land; kill credit goes to the executor when run by a living entity)
  - `/eca kill <targets>` - Kill entities
 - `/eca remove <targets> [reason]` - Remove entities from world
 - `/eca memoryRemove <targets>` - DANGER! Requires Attack Radical Logic config. Remove entities using LWJGL's internal Unsafe instance
-- `/eca teleport <targets> <x> <y> <z>` - Teleport entities
+- `/eca teleport <targets> <x> <y> <z>` - Teleport entities to the specified coordinates in their current dimension.
 - `/eca lockLocation <targets> <true|false> [x y z]` - Lock/unlock entity location
 - `/eca cleanBossBar <targets>` - Clean up boss bars
-- `/eca allReturn <targets> <true|false>` - DANGER! Requires Attack Radical Logic config. Enable/disable return transformation on all boolean and void methods of the mod file owning the target entity, retransforming its already-loaded classes. Vanilla entities (players included) own no transformable mod file, so the target falls back to the mod files owning their equipped items
+- `/eca allReturn <targets> <true|false>` - DANGER! Requires Attack Radical Logic. Enable or disable AllReturn as requested; players target mods owning items in their four armor slots and two hand slots, while other entities target their own mod. Transform whitelists apply.
 - `/eca allReturn global <true|false>` - DANGER! Enable/disable global AllReturn for all non-whitelisted mods
 - `/eca banSpawn <targets> <seconds>` - Ban spawning of selected entities' types for specified duration
 - `/eca banSpawn clear` - Unban all spawns in current dimension
@@ -114,13 +114,13 @@ side="BOTH"
 - `unlockHealth(entity)` - Remove health lock
 - `getLockedHealth(entity)` - Get current health lock value (null if not locked)
 - `isHealthLocked(entity)` - Check if entity health is locked
-- `banHealing(entity, value)` - Ban healing for entity at specified value (entity cannot heal but can take damage)
+- `banHealing(entity, value)` - Prevent the affected entity's health from exceeding the configured healing ban value.
 - `unbanHealing(entity)` - Unban healing for entity
 - `getHealBanValue(entity)` - Get current heal ban value (null if not banned)
 - `isHealingBanned(entity)` - Check if entity has healing banned
-- `getHealth(entity)` - Read the health observed through the entity's active life protocol: the analyzer's health anchor first, falling back to vanilla `DATA_HEALTH_ID` when no anchor resolves (0.0f if the entity is null)
-- `getRealHealth(entity)` - The same authoritative observation, returning NaN instead of 0.0f for a null entity
-- `setHealth(entity, health)` - Verified health transaction that escalates through channels only when the previous one fails verification: vanilla write (write `DATA_HEALTH_ID` directly) → dataflow reversal (ASM dataflow analysis of `getHealth()` locates the real storage and inverts its read expression) → external scan (reverse `isAlive` / `isDeadOrDying` / `hurt` / `actuallyHurt` to locate storage, including effective-health models that need conversion) → method probe (borrow the entity's own writer: reflective setters, functional fields, injected bridges) → numeric inversion (search the object graph for writable numeric cells when the storage cannot be inverted). Each attempt is judged by reading the health anchor back within `max(0.5, abs(target) * 2%)`; every write snapshots the affected state beforehand and rolls the whole transaction back when verification fails. A successful server-side write is broadcast to tracking clients and registered for delayed re-verification; classes whose health is reverted a tick later additionally get an out-of-entity health mirror written. Players run the vanilla write only. Every channel past the vanilla write requires Attack Radical Logic plus its own switch under `Attack → setHealth` (Const Override / External Scan / Method Probe / Numeric Inversion), and all four default to off.
+- `getHealth(entity)` - If ECA's health modification analysis has identified the entity's real health, return that health; otherwise, return the entity's vanilla health data. This read does not initiate analysis or fall back to the entity's `getHealth()`; a null entity returns 0.0f, and unreadable storage returns NaN.
+- `getRealHealth(entity)` - Uses the same read rules as `getHealth(entity)`, but returns NaN for a null entity.
+- `setHealth(entity, health)` - Attempt a verified health change through vanilla direct write → dataflow reversal → external scan → method probe → numeric inversion; players use only the vanilla write. Dataflow analysis locates storage and inverts read expressions, including traceable reflection, Unsafe and VarHandle access. New probe evidence can revisit earlier channels. Channels are constrained by evidence, configuration and budgets, with verification after attempts and snapshots/rollback for probing writes. Immediate verification does not guarantee that entity logic will preserve the value on later ticks; delayed verification checks this separately. Basic dataflow reversal is available by default unless Force Compatibility Mode is enabled. Const Override, External Scan, Method Probe and Numeric Inversion require Attack Radical Logic and their respective switches under `Attack → setHealth`, which default to off.
 - `setMaxHealth(entity, maxHealth)` - Set max health by reverse-calculating attribute base value from current modifiers
 - `lockMaxHealth(entity, value)` - Lock entity max health at specific value (enforced every tick)
 - `unlockMaxHealth(entity)` - Unlock entity max health
@@ -139,7 +139,7 @@ side="BOTH"
 - `revive(level, uuid)` - Clear death state and restore health by UUID in specified level
 - `reviveAllContainers(entity)` - Revive all critical entity containers (tickList, lookup, sections, tracker)
 - `reviveAllContainers(level, uuid)` - Revive all critical entity containers by UUID in specified level
-- `teleport(entity, x, y, z)` - Teleport via direct field access with client sync
+- `teleport(entity, x, y, z)` - Force teleport an entity to the specified coordinates in its current dimension and synchronize clients. Must run on the server's main thread.
 - `lockLocation(entity)` - Lock entity location at current position
 - `lockLocation(entity, position)` - Lock entity location at specified position
 - `unlockLocation(entity)` - Unlock entity location
@@ -150,8 +150,8 @@ side="BOTH"
 - `cleanupBossBar(entity)` - Remove boss bars without removing entity
 - `isInvulnerable(entity)` - Check if entity is invulnerable (ECA internal invulnerability logic)
 - `setInvulnerable(entity, invulnerable)` - Set invulnerability (enable: revive + lock health + block damage + remove harmful effects per tick + prevent mob targeting + protect player inventory; disable: clear all protections)
-- `enableAllReturn(entity)` - DANGER! Requires Attack Radical Logic config. Performs return transformation on all boolean and void methods of the mod file owning the target entity, and retransforms that mod's already-loaded classes. Vanilla entities (players included) fall back to the mod files owning their equipped items
-- `disableAllReturn(entity)` - Disable AllReturn for that entity's owning mod file, using the same target resolution including the equipped-item fallback
+- `enableAllReturn(entity)` - DANGER! Requires Attack Radical Logic. Enables AllReturn for the entity's mod; for players, targets the mods owning their armor and main-hand/off-hand equipment. Only eligible boolean and void methods are transformed, subject to transform whitelists.
+- `disableAllReturn(entity)` - Disable AllReturn using the same target rules as enabling: armor and main-hand/off-hand equipment mods for players, or the entity's own mod for other entities.
 - `setGlobalAllReturn(enable)` - DANGER! Requires Attack Radical Logic config. Enable/disable global AllReturn for all non-whitelisted mods
 - `disableAllReturn()` - Disable AllReturn and clear targets
 - `isAllReturnEnabled()` - Check if AllReturn is enabled
@@ -660,16 +660,16 @@ Any `.json` filename works, and you can have multiple files.
  - `/eca lockHealth <目标> false` - 解锁实体血量
  - `/eca lockMaxHealth <目标> true <值>` - 锁定实体最大生命值
  - `/eca lockMaxHealth <目标> false` - 解锁实体最大生命值
- - `/eca banHealing <目标> true [血量值]` - 禁止实体治疗（血量值可选，默认使用当前血量）
+ - `/eca banHealing <目标> true [血量值]` - 限制被禁疗的实体的生命值无法超过设置的禁疗值（数值可选，默认使用当前血量）。
  - `/eca banHealing <目标> false` - 解除禁疗
  - `/eca hurt <目标> <伤害值>` - 强制实体受伤（先走原版 hurt，血没扣对时强制写入；由生物执行时掉落与经验归属给执行者）
  - `/eca kill <目标>` - 击杀实体
 - `/eca remove <目标> [原因]` - 从世界中移除实体
 - `/eca memoryRemove <目标>` - 危险！需要开启激进攻击逻辑配置，通过 LWJGL 的内部 Unsafe 实例清除实体
-- `/eca teleport <目标> <x> <y> <z>` - 传送实体
+- `/eca teleport <目标> <x> <y> <z>` - 将实体传送到其当前维度的指定坐标。
 - `/eca lockLocation <目标> <true|false> [x y z]` - 锁定/解除实体位置
 - `/eca cleanBossBar <目标>` - 清理 Boss 血条
-- `/eca allReturn <目标> <true|false>` - 危险！需要开启激进攻击逻辑配置，启用/禁用对目标实体所属 mod 文件全部布尔和 void 方法的 return transformation，并对其已加载的类执行 retransform。原版实体（含玩家）没有可转换的 mod 文件，此时改以其装备所属 mod 文件为目标
+- `/eca allReturn <目标> <true|false>` - 危险！需开启“激进攻击逻辑”。按参数启用或关闭 AllReturn；玩家针对四个盔甲槽及主副手装备所属模组，其他实体针对自身所属模组，均遵守转换白名单。
 - `/eca allReturn global <true|false>` - 危险！启用/禁用全局 AllReturn，影响所有非白名单 mod
 - `/eca banSpawn <目标> <秒数>` - 禁止选中实体的类型生成指定时长
 - `/eca banSpawn clear` - 解除当前维度所有禁生成
@@ -758,13 +758,13 @@ side="BOTH"
 - `unlockHealth(entity)` - 解除血量锁定
 - `getLockedHealth(entity)` - 获取当前锁定值（未锁定返回 null）
 - `isHealthLocked(entity)` - 检查是否锁定
-- `banHealing(entity, value)` - 禁止实体治疗（可受伤害，但不能治疗）
+- `banHealing(entity, value)` - 限制被禁疗的实体的生命值无法超过设置的禁疗值。
 - `unbanHealing(entity)` - 解除禁疗
 - `getHealBanValue(entity)` - 获取当前禁疗值（未禁疗返回 null）
 - `isHealingBanned(entity)` - 检查是否被禁疗
-- `getHealth(entity)` - 读取实体当前生命协议观测到的血量：先取分析器确定的血量锚点，锚点无法解析时回退原版 `DATA_HEALTH_ID`（实体为 null 返回 0.0f）
-- `getRealHealth(entity)` - 同一份权威观测值，实体为 null 时返回 NaN 而非 0.0f
-- `setHealth(entity, health)` - 带校验的改血事务，仅在上一通道校验失败时逐级升级：原版直写（直接写 `DATA_HEALTH_ID`）→ 数据流逆向（ASM 数据流分析 `getHealth()` 定位真实存储并反演其读取表达式）→ 外部扫描（逆向 `isAlive` / `isDeadOrDying` / `hurt` / `actuallyHurt` 定位存储，含需要换算的有效血量模型）→ 方法探针（借实体自身的 writer：反射 setter、函数式字段、注入桥接）。每次尝试都以回读血量锚点、落在 `max(0.5, abs(目标) * 2%)` 容差内为判据；三态裁决下诱饵读数不构成反证，常量诱饵读出口改用存储回读、编码往返或生死谓词双值因果证据放行。写入前先对受影响状态快照，校验失败整体回滚；默认写与必需伴随源（影子表/速率基准）同一事务联写，任一失败整体回滚。服务端写入成功后向追踪客户端发送提交后的权威读值，新开始追踪的玩家获得定向补发。玩家只执行原版直写。原版直写之后的每条通道都需要激进攻击逻辑，外加 `Attack → setHealth` 下各自的开关（Dataflow / External Scan / Method Probe），默认全部关闭。
+- `getHealth(entity)` - 如果实体的真实血量已经被ECA改血进行了分析并得到真实血量，返回真实血量；否则将会返回实体的原版生命值数据。读取本身不触发分析，也不回退调用实体的 `getHealth()`；实体为 null 返回 0.0f，存储读取失败返回 NaN。
+- `getRealHealth(entity)` - 读取规则与 `getHealth(entity)` 相同，但实体为 null 时返回 NaN。
+- `setHealth(entity, health)` - 通过带校验的改血流程尝试设置生命值：原版直写 → 数据流逆向 → 外部扫描 → 方法探针 → 数值反演；玩家只执行原版直写。数据流分析定位存储并反演读取表达式，包括可追踪的反射、Unsafe 和 VarHandle 访问；探针发现新证据时可回访前置通道。各通道受证据、配置及预算约束，尝试后校验，涉及探测写入时使用快照与失败回滚；当场校验通过不保证后续 tick 不被实体自身逻辑改回，另有延迟复查。基础数据流逆向默认可用，仅受强制兼容模式限制；Const Override、External Scan、Method Probe 和 Numeric Inversion 需要激进攻击逻辑及 `Attack → setHealth` 下的对应开关，默认关闭。
 - `setMaxHealth(entity, maxHealth)` - 通过反算属性基础值设置最大生命值
 - `lockMaxHealth(entity, value)` - 锁定实体最大生命值（每 tick 强制维持）
 - `unlockMaxHealth(entity)` - 解锁最大生命值
@@ -783,7 +783,7 @@ side="BOTH"
 - `revive(level, uuid)` - 在指定维度按 UUID 复活实体
 - `reviveAllContainers(entity)` - 复活实体的所有关键容器（tickList、lookup、sections、tracker）
 - `reviveAllContainers(level, uuid)` - 在指定维度按 UUID 复活实体的所有关键容器
-- `teleport(entity, x, y, z)` - 直接字段访问传送并同步到客户端
+- `teleport(entity, x, y, z)` - 将实体强制传送到当前维度的指定坐标，并同步到客户端，需要在服务端主线程执行。
 - `lockLocation(entity)` - 锁定实体当前位置
 - `lockLocation(entity, position)` - 锁定实体到指定位置
 - `unlockLocation(entity)` - 解除实体位置锁定
@@ -794,8 +794,8 @@ side="BOTH"
 - `cleanupBossBar(entity)` - 仅移除 Boss 血条
 - `isInvulnerable(entity)` - 检查 ECA 无敌状态
 - `setInvulnerable(entity, invulnerable)` - 设置无敌状态（开启：复活、锁血、阻断伤害、每 tick 清除有害效果、阻止怪物锁定、保护玩家物品栏；关闭：清除所有保护）
-- `enableAllReturn(entity)` - 危险！需要开启激进攻击逻辑配置，对目标实体所属 mod 文件的全部布尔和 void 方法进行 return transformation，并 retransform 该 mod 已加载的类。原版实体（含玩家）回退为以其装备所属 mod 文件为目标
-- `disableAllReturn(entity)` - 关闭该实体所属 mod 文件的 AllReturn，目标解析规则与开启一致，同样包含装备回退
+- `enableAllReturn(entity)` - 危险！需开启“激进攻击逻辑”。对实体所属模组启用AllReturn；玩家则针对盔甲及主副手装备所属模组。仅转换符合条件的 boolean 和 void 方法，并遵守转换白名单。
+- `disableAllReturn(entity)` - 按与启用相同的目标规则关闭 AllReturn：玩家针对盔甲及主副手装备所属模组，其他实体针对自身所属模组。
 - `setGlobalAllReturn(enable)` - 危险！需要开启激进攻击逻辑配置，启用/禁用全局 AllReturn，影响所有非白名单 mod
 - `disableAllReturn()` - 关闭 AllReturn 并清除目标
 - `isAllReturnEnabled()` - 检查 AllReturn 是否启用
