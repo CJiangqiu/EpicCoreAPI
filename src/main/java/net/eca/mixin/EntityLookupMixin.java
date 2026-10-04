@@ -1,9 +1,10 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
+import net.eca.util.EntityRemovalQuarantine;
 import net.eca.util.EntityUtil;
-import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.util.AbortableIterationConsumer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.entity.EntityAccess;
 import net.minecraft.world.level.entity.EntityLookup;
@@ -22,20 +23,20 @@ import java.util.UUID;
 @Mixin(EntityLookup.class)
 public class EntityLookupMixin {
 
-    // 禁生成：阻止被禁实体添加到EntityLookup
+    // 恢复追踪不能受类型禁令影响，仅阻止被清除实例重新加入索引。
     @Inject(method = "add", at = @At("HEAD"), cancellable = true)
     private void eca$onAdd(EntityAccess entity, CallbackInfo ci) {
-        if (SpawnBanHook.shouldBlockSpawn(entity)) {
+        if (entity instanceof Entity realEntity && EntityRemovalQuarantine.shouldBlockAdd(realEntity)) {
             ci.cancel();
         }
     }
 
-    // 查询端同样隐藏被禁实体，避免短暂残留重新进入命令选择结果
+    // 查询只隔离正在清除的实例，类型禁生成不能隐藏其他存活实体。
     @ModifyVariable(method = "getEntities", at = @At("HEAD"), argsOnly = true, ordinal = 0)
     private AbortableIterationConsumer<EntityAccess> eca$filterTypedQuery(
         AbortableIterationConsumer<EntityAccess> consumer
     ) {
-        return entity -> SpawnBanHook.shouldBlockSpawn(entity)
+        return entity -> entity instanceof Entity realEntity && EntityRemovalQuarantine.isQueryHidden(realEntity)
             ? AbortableIterationConsumer.Continuation.CONTINUE
             : consumer.accept(entity);
     }
@@ -44,7 +45,7 @@ public class EntityLookupMixin {
     private void eca$filterAllEntities(CallbackInfoReturnable<Iterable<EntityAccess>> cir) {
         List<EntityAccess> visible = new ArrayList<>();
         for (EntityAccess entity : cir.getReturnValue()) {
-            if (!SpawnBanHook.shouldBlockSpawn(entity)) {
+            if (!(entity instanceof Entity realEntity) || !EntityRemovalQuarantine.isQueryHidden(realEntity)) {
                 visible.add(entity);
             }
         }
@@ -57,7 +58,7 @@ public class EntityLookupMixin {
         cancellable = true
     )
     private void eca$filterEntityById(int entityId, CallbackInfoReturnable<EntityAccess> cir) {
-        if (SpawnBanHook.shouldBlockSpawn(cir.getReturnValue())) {
+        if (cir.getReturnValue() instanceof Entity entity && EntityRemovalQuarantine.isQueryHidden(entity)) {
             cir.setReturnValue(null);
         }
     }
@@ -68,7 +69,7 @@ public class EntityLookupMixin {
         cancellable = true
     )
     private void eca$filterEntityByUuid(UUID entityUuid, CallbackInfoReturnable<EntityAccess> cir) {
-        if (SpawnBanHook.shouldBlockSpawn(cir.getReturnValue())) {
+        if (cir.getReturnValue() instanceof Entity entity && EntityRemovalQuarantine.isQueryHidden(entity)) {
             cir.setReturnValue(null);
         }
     }

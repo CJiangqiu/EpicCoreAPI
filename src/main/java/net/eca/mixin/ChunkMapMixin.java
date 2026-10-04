@@ -4,10 +4,10 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import com.mojang.datafixers.util.Either;
 import net.eca.api.EcaAPI;
 import net.eca.util.EcaLogger;
+import net.eca.util.EntityRemovalQuarantine;
 import net.eca.util.EntityUtil;
 import net.eca.util.entity_extension.ForceLoadingManager;
 import net.eca.util.reflect.UnsafeUtil;
-import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
@@ -38,7 +38,7 @@ public abstract class ChunkMapMixin {
 
     @Inject(method = "addEntity", at = @At("HEAD"), cancellable = true)
     private void eca$onAddEntity(Entity entity, CallbackInfo ci) {
-        if (SpawnBanHook.shouldBlockSpawn(entity)) {
+        if (EntityRemovalQuarantine.shouldBlockAdd(entity)) {
             ci.cancel();
             return;
         }

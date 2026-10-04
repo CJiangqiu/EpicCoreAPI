@@ -1,9 +1,10 @@
 package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
+import net.eca.util.EntityRemovalQuarantine;
 import net.eca.util.EntityUtil;
-import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.util.ClassInstanceMultiMap;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -13,10 +14,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(ClassInstanceMultiMap.class)
 public class ClassInstanceMultiMapMixin {
 
-    // 禁生成：阻止被禁实体添加到ClassInstanceMultiMap
+    // 区段迁移也会加入集合，只阻止已进入清除流程的实例。
     @Inject(method = "add", at = @At("HEAD"), cancellable = true)
     private void eca$onAdd(Object object, CallbackInfoReturnable<Boolean> cir) {
-        if (SpawnBanHook.shouldBlockSpawn(object)) {
+        if (object instanceof Entity entity && EntityRemovalQuarantine.shouldBlockAdd(entity)) {
             cir.setReturnValue(false);
         }
     }
