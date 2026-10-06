@@ -202,6 +202,8 @@ public final class ForceLoadingManager {
 
     // 强加载专属：超视距渲染、追踪距离扩大、区块票据、防despawn
     public static boolean shouldForceLoad(Entity entity) {
+        // 类型集合为空时只检查手动来源，其空集合路径无需读取实体 UUID。
+        if (FORCE_LOADED_TYPES.isEmpty()) return isManualForceLoaded(entity);
         return isForceLoadedType(entity.getType()) || isManualForceLoaded(entity);
     }
 

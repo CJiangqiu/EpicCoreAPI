@@ -209,10 +209,8 @@ public class HealthLockManager {
                                                   EntityDataAccessor<String> encField,
                                                   EntityDataAccessor<String> keyField,
                                                   EntityDataAccessor<String> checkField) {
-        if (entity.level().isClientSide || records.containsKey(entity.getUUID())
-                || encField == null || keyField == null || checkField == null
-                || !validateIntegrity(entity, encField, keyField, checkField)) return;
-        Float value = decryptLockValue(entity, encField, keyField);
+        if (entity.level().isClientSide || records.containsKey(entity.getUUID())) return;
+        Float value = readPresentation(entity, encField, keyField, checkField);
         if (value != null) {
             records.put(entity.getUUID(), new LockRecord(entity.getUUID(), encodeFloatPayload(value), domain));
         }
@@ -282,36 +280,28 @@ public class HealthLockManager {
         entity.getEntityData().set(checkField, "");
     }
 
-    private static boolean validateIntegrity(LivingEntity entity,
-                                              EntityDataAccessor<String> encField,
-                                              EntityDataAccessor<String> keyField,
-                                              EntityDataAccessor<String> checkField) {
+    private static Float readPresentation(LivingEntity entity,
+                                          EntityDataAccessor<String> encField,
+                                          EntityDataAccessor<String> keyField,
+                                          EntityDataAccessor<String> checkField) {
+        if (encField == null || keyField == null || checkField == null) return null;
+        // 校验与解密共用本次读取的字段，避免重复读取及使用未经本次校验的新值。
         String encStr = readSynchedSafely(entity, encField);
-        if (encStr == null || encStr.isEmpty()) return false;
+        if (encStr == null || encStr.isEmpty()) return null;
         String keyStr = readSynchedSafely(entity, keyField);
-        if (keyStr == null || keyStr.isEmpty()) return false;
+        if (keyStr == null || keyStr.isEmpty()) return null;
         String checkStr = readSynchedSafely(entity, checkField);
-        if (checkStr == null || checkStr.isEmpty()) return false;
+        if (checkStr == null || checkStr.isEmpty()) return null;
         int encrypted    = parseEncryptedPayload(encStr);
         int key          = parseIntSafe(keyStr);
         int storedCheck  = parseIntSafe(checkStr);
+        int expected;
         try {
-            int expected = (int) CHECK_MH.invokeExact(encrypted, key);
-            return storedCheck == expected;
+            expected = (int) CHECK_MH.invokeExact(encrypted, key);
         } catch (Throwable e) {
-            return key + encrypted == storedCheck;
+            expected = key + encrypted;
         }
-    }
-
-    // 返回解密值，无法读取或字段为空返回 null
-    private static Float decryptLockValue(LivingEntity entity,
-                                          EntityDataAccessor<String> encField,
-                                          EntityDataAccessor<String> keyField) {
-        String encStr = readSynchedSafely(entity, encField);
-        String keyStr = readSynchedSafely(entity, keyField);
-        if (encStr == null || encStr.isEmpty() || keyStr == null || keyStr.isEmpty()) return null;
-        int encrypted = parseEncryptedPayload(encStr);
-        int key       = parseIntSafe(keyStr);
+        if (storedCheck != expected) return null;
         int payload;
         try {
             payload = (int) DECRYPT_MH.invokeExact(encrypted, key);
@@ -348,15 +338,6 @@ public class HealthLockManager {
         }
         Float value = decodeLockValue((int) payload, true);
         return value != null ? value : Float.POSITIVE_INFINITY;
-    }
-
-    private static Float readPresentation(LivingEntity entity,
-                                          EntityDataAccessor<String> encField,
-                                          EntityDataAccessor<String> keyField,
-                                          EntityDataAccessor<String> checkField) {
-        if (encField == null || keyField == null || checkField == null
-                || !validateIntegrity(entity, encField, keyField, checkField)) return null;
-        return decryptLockValue(entity, encField, keyField);
     }
 
     private static void repairPresentation(LivingEntity entity, Float authoritative,
@@ -475,6 +456,8 @@ public class HealthLockManager {
     public static Float getLock(LivingEntity entity) {
         if (entity == null) return null;
         if (!entity.level().isClientSide) {
+            // 直接检查权威表，避免空闲时按实体查表，也避免维护独立的无锁标记。
+            if (HEALTH_LOCKS.isEmpty()) return null;
             LockRecord record = HEALTH_LOCKS.get(entity.getUUID());
             Float value = readAuthoritative(entity, record, HEALTH_LOCK_DOMAIN);
             if (record != null && record.beginRepair(entity.tickCount, entity.getId())) {
@@ -535,6 +518,7 @@ public class HealthLockManager {
     public static Float getMaxHealthLock(LivingEntity entity) {
         if (entity == null) return null;
         if (!entity.level().isClientSide) {
+            if (MAX_HEALTH_LOCKS.isEmpty()) return null;
             LockRecord record = MAX_HEALTH_LOCKS.get(entity.getUUID());
             Float value = readAuthoritative(entity, record, MAX_HEALTH_LOCK_DOMAIN);
             if (record != null && record.beginRepair(entity.tickCount, entity.getId())) {
