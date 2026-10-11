@@ -413,7 +413,7 @@ public class UnsafeUtil {
                 EntityUtil.teleport(entity, 102400, -102400, 102400);
             }
             broadcastEntityRemoval(serverLevel, entity, bossEventUUIDs);
-            unsafeRemoveFromLoadingInbox(serverLevel, entity);
+            boolean loadingInboxCleaned = unsafeRemoveFromLoadingInbox(serverLevel, entity);
             unsafeRemoveFromSectionStorage(serverLevel, entity);
             unsafeRemoveFromEntityTickList(serverLevel, entity.getId());
             unsafeRemoveFromChunkMap(serverLevel, entity.getId());
@@ -430,7 +430,7 @@ public class UnsafeUtil {
             unsafeRemoveFromKnownUuids(serverLevel, entity.getUUID());
             entity.levelCallback = EntityInLevelCallback.NULL;
             unsafeRemoveSectionIfEmpty(serverLevel, entity);
-            return true;
+            return loadingInboxCleaned;
         } catch (Exception e) {
             EcaLogger.info("[UnsafeUtil] Failed to remove entity: {}", e.getMessage());
             return false;
@@ -661,28 +661,29 @@ public class UnsafeUtil {
     }
 
     // 从 loadingInbox 清理正在加载的实体
-    private static void unsafeRemoveFromLoadingInbox(ServerLevel serverLevel, Entity entity) {
+    private static boolean unsafeRemoveFromLoadingInbox(ServerLevel serverLevel, Entity entity) {
         try {
-            if (SERVER_LEVEL_ENTITY_MANAGER_OFFSET < 0 || PERSISTENT_MANAGER_LOADING_INBOX_OFFSET < 0) return;
-            Object entityManager = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_MANAGER_OFFSET);
-            if (entityManager == null) return;
-
-            Queue<?> loadingInbox = (Queue<?>) lwjglGetObject(entityManager, PERSISTENT_MANAGER_LOADING_INBOX_OFFSET);
-            if (loadingInbox == null) return;
-
-            Iterator<?> iterator = loadingInbox.iterator();
-            while (iterator.hasNext()) {
-                Object chunkEntities = iterator.next();
-                if (chunkEntities == null) continue;
-
-                Field entitiesField = chunkEntities.getClass().getDeclaredField("entities");
-                entitiesField.setAccessible(true);
-                List<?> entities = (List<?>) entitiesField.get(chunkEntities);
-                if (entities != null && entities.contains(entity)) {
-                    entities.remove(entity);
-                }
+            if (SERVER_LEVEL_ENTITY_MANAGER_OFFSET < 0 || PERSISTENT_MANAGER_LOADING_INBOX_OFFSET < 0) {
+                EcaLogger.info("[UnsafeUtil] Loading inbox field offsets are unavailable");
+                return false;
             }
-        } catch (Exception ignored) {}
+            Object entityManager = lwjglGetObject(serverLevel, SERVER_LEVEL_ENTITY_MANAGER_OFFSET);
+            if (entityManager == null) {
+                EcaLogger.info("[UnsafeUtil] Loading inbox entity manager is unavailable");
+                return false;
+            }
+
+            Queue<ChunkEntities<Entity>> loadingInbox = (Queue<ChunkEntities<Entity>>)
+                    lwjglGetObject(entityManager, PERSISTENT_MANAGER_LOADING_INBOX_OFFSET);
+            if (loadingInbox == null) {
+                EcaLogger.info("[UnsafeUtil] Loading inbox queue is unavailable");
+                return false;
+            }
+            return EntityUtil.removeFromLoadingInbox(loadingInbox, entity);
+        } catch (Exception e) {
+            EcaLogger.info("[UnsafeUtil] Loading inbox cleanup failed: {}", e.toString());
+            return false;
+        }
     }
 
     // 清理空的 EntitySection

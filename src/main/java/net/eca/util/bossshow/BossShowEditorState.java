@@ -4,6 +4,9 @@ import net.minecraft.world.phys.Vec3;
 
 import net.eca.client.BossShowScreenEffectState;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
+import net.eca.util.bossshow.BossShowCameraPath.Node;
+import net.eca.util.bossshow.BossShowCameraPath.Shape;
+import net.eca.util.bossshow.BossShowCameraPath.Facing;
 import net.eca.util.bossshow.BossShowDefinition.EventCue;
 import net.eca.util.bossshow.BossShowDefinition.Keyframe;
 import net.eca.util.bossshow.BossShowDefinition.SubtitleCue;
@@ -77,6 +80,8 @@ public final class BossShowEditorState {
     //仅当编辑器 Screen 打开时为 true（由 Screen init/removed 切换）
     private static boolean previewEnabled = false;
     private static final BossShowPose previewPose = new BossShowPose();
+    private static List<Frame> generatedPreview = List.of();
+    private static double generatedPreviewCursor;
     private static boolean poseCaptureArmed = false;
     private static int poseCaptureFrame = -1;
     private static boolean previewPlaying = false;
@@ -354,6 +359,9 @@ public final class BossShowEditorState {
     public static void replaceKeyframe(int frameIdx, Keyframe kf) {
         if (frameIdx < 0 || frameIdx >= workingFrames.size() || kf == null) return;
         Frame f = workingFrames.get(frameIdx);
+        if (kf.cameraPath() == null && f.keyframe() != null && f.keyframe().cameraPath() != null) {
+            kf = new Keyframe(kf.eventId(), kf.subtitleText(), kf.curve(), f.keyframe().cameraPath());
+        }
         if (kf.equals(f.keyframe())) return;
         pushUndoSnapshot();
         workingFrames.set(frameIdx, new Frame(f.dx(), f.dy(), f.dz(), f.yaw(), f.pitch(), kf));
@@ -450,7 +458,7 @@ public final class BossShowEditorState {
         String mergedSubtitle = subtitleText != null ? subtitleText : current != null ? current.subtitleText() : null;
         Curve curve = current != null ? current.curve() : Curve.NONE;
         workingFrames.set(tick, new Frame(frame.dx(), frame.dy(), frame.dz(), frame.yaw(), frame.pitch(),
-            new Keyframe(mergedEvent, mergedSubtitle, curve)));
+            new Keyframe(mergedEvent, mergedSubtitle, curve, current != null ? current.cameraPath() : null)));
     }
 
     //=== getters / metadata ===
@@ -507,6 +515,66 @@ public final class BossShowEditorState {
         return start >= 0 ? workingFrames.get(start) : null;
     }
 
+    //只有生成区间未被手动改动时才复用参数，避免旧参数覆盖后续编辑。
+    public static BossShowCameraPath getEditableCameraPath(int start) {
+        if (start < 0 || start >= workingFrames.size()) return null;
+        Keyframe keyframe = workingFrames.get(start).keyframe();
+        BossShowCameraPath path = keyframe != null ? keyframe.cameraPath() : null;
+        if (path == null || start + path.duration() > workingFrames.size()) return null;
+        if (hasValidRange() && outPoint > inPoint && outPoint != start + path.duration() - 1) return null;
+        List<Frame> generated;
+        try {
+            generated = path.generate();
+        } catch (IllegalArgumentException exception) {
+            return null;
+        }
+        for (int i = 0; i < generated.size(); i++) {
+            Frame a = generated.get(i);
+            Frame b = workingFrames.get(start + i);
+            if (b.keyframe() != null && b.keyframe().curve() != Curve.NONE) return null;
+            if (Math.abs(a.dx() - b.dx()) > 0.00015 || Math.abs(a.dy() - b.dy()) > 0.00015
+                || Math.abs(a.dz() - b.dz()) > 0.00015
+                || Math.abs(BossShowInterpolator.lerpYaw(a.yaw(), b.yaw(), 1) - a.yaw()) > 0.001
+                || Math.abs(a.pitch() - b.pitch()) > 0.001) return null;
+        }
+        return path;
+    }
+
+    public static boolean generateCameraPath(int start, int end, BossShowCameraPath path) {
+        if (recState != RecState.IDLE || start < 0 || end < start || end >= workingFrames.size()) return false;
+        List<Frame> frames = path.generate();
+        List<Keyframe> preserved = remapPathKeyframes(start, end, frames.size());
+        ArrayList<Frame> generated = new ArrayList<>(frames.size());
+        for (int i = 0; i < frames.size(); i++) {
+            Frame frame = frames.get(i);
+            Keyframe keyframe = preserved.get(i);
+            if (i == 0 || i == frames.size() - 1) {
+                keyframe = new Keyframe(keyframe != null ? keyframe.eventId() : null,
+                    keyframe != null ? keyframe.subtitleText() : null, Curve.NONE, i == 0 ? path : null);
+            }
+            generated.add(new Frame(frame.dx(), frame.dy(), frame.dz(), frame.yaw(), frame.pitch(), keyframe));
+        }
+        pushUndoSnapshot();
+        int difference = frames.size() - (end - start + 1);
+        for (int i = 0; i < workingEffectCues.size(); i++) {
+            BossShowEffectCue cue = workingEffectCues.get(i);
+            int tick = cue.tick();
+            if (tick > end) tick += difference;
+            else if (tick >= start) tick = start + (end == start ? 0
+                : (int) Math.round((tick - start) * (frames.size() - 1.0) / (end - start)));
+            workingEffectCues.set(i, new BossShowEffectCue(tick, cue.type(), cue.effect(),
+                cue.durationTicks(), cue.fadeInTicks(), cue.fadeOutTicks(), cue.easing(), cue.parameters()));
+        }
+        workingFrames.subList(start, end + 1).clear();
+        workingFrames.addAll(start, generated);
+        rebuildContentCuesFromFrames();
+        clearRange();
+        setPlayhead(start + frames.size() - 1);
+        selectedKeyframeFrameIndex = playhead;
+        dirty = true;
+        return true;
+    }
+
     //使用起始镜头局部坐标生成平滑路径，并替换当前选区或播放头帧。
     public static boolean generateCameraPath(int durationTicks,
                                              double forwardDistance, double rightDistance, double upDistance,
@@ -515,7 +583,6 @@ public final class BossShowEditorState {
         int start = getPathGenerationStart();
         int end = hasValidRange() ? outPoint : start;
         Frame first = workingFrames.get(start);
-        List<Keyframe> preserved = remapPathKeyframes(start, end, durationTicks);
 
         double pitchRad = Math.toRadians(first.pitch());
         double localYawRad = Math.toRadians(first.yaw());
@@ -538,33 +605,11 @@ public final class BossShowEditorState {
         double endZ = first.dz() + forwardZ * forwardDistance + rightZ * rightDistance + upZ * upDistance;
         Curve motionCurve = easing != null ? easing : Curve.NONE;
 
-        ArrayList<Frame> generated = new ArrayList<>(durationTicks);
-        for (int i = 0; i < durationTicks; i++) {
-            double linearProgress = i / (double) (durationTicks - 1);
-            double progress = motionCurve.apply(linearProgress);
-            Keyframe keyframe = preserved.get(i);
-            if ((i == 0 || i == durationTicks - 1) && keyframe == null) {
-                keyframe = new Keyframe(null, null, Curve.NONE);
-            }
-            generated.add(new Frame(
-                lerp(first.dx(), endX, progress),
-                lerp(first.dy(), endY, progress),
-                lerp(first.dz(), endZ, progress),
-                first.yaw() + (float) (yawChange * progress),
-                first.pitch() + (float) (pitchChange * progress),
-                keyframe));
-        }
-
-        pushUndoSnapshot();
-        workingFrames.subList(start, end + 1).clear();
-        workingFrames.addAll(start, generated);
-        rebuildContentCuesFromFrames();
-        //连续生成从新路径末帧接续，避免残留选区覆盖上一段。
-        clearRange();
-        setPlayhead(start + durationTicks - 1);
-        selectedKeyframeFrameIndex = playhead;
-        dirty = true;
-        return true;
+        BossShowCameraPath path = new BossShowCameraPath(false, Shape.LINE, Facing.INTERPOLATE,
+            motionCurve, durationTicks, 0, 0, 1.5, List.of(
+                new Node(0, first.dx(), first.dy(), first.dz(), first.yaw(), first.pitch()),
+                new Node(1, endX, endY, endZ, first.yaw() + yawChange, first.pitch() + pitchChange)));
+        return generateCameraPath(start, end, path);
     }
 
     //时长改变时按相对时间保留原区间的事件与字幕，曲线由生成器烘焙后归零。
@@ -989,7 +1034,16 @@ public final class BossShowEditorState {
     }
 
     //=== 相机预览 ===
-    public static void setPreviewEnabled(boolean v) { previewEnabled = v; }
+    public static void setPreviewEnabled(boolean v) {
+        previewEnabled = v;
+        if (!v) generatedPreview = List.of();
+    }
+
+    //临时预览不写入时间轴，也不占用撤销记录。
+    public static void setGeneratedPreview(List<Frame> frames, double cursor) {
+        generatedPreview = frames;
+        generatedPreviewCursor = cursor;
+    }
 
     //仅在编辑器 Screen 打开、非录制、已有锚点且有帧时介入相机（与播放互斥）
     public static boolean isPreviewActive() {
@@ -999,6 +1053,11 @@ public final class BossShowEditorState {
 
     //播放头帧的世界空间位姿（原始帧位姿，不做曲线重映射）
     public static BossShowPose computePreviewPose() {
+        if (!generatedPreview.isEmpty()) {
+            BossShowInterpolator.computePose(generatedPreview, cinematic, generatedPreviewCursor,
+                anchorX, anchorY, anchorZ, anchorYawDeg, previewPose);
+            return previewPose;
+        }
         int p = Math.max(0, Math.min(playhead, workingFrames.size() - 1));
         double cursor = previewPlaying ? previewCursor : p;
         BossShowInterpolator.computePose(previewPlaying ? workingFrames : List.of(workingFrames.get(p)),
@@ -1012,5 +1071,6 @@ public final class BossShowEditorState {
         inPoint = -1;
         outPoint = -1;
         previewEnabled = false;
+        generatedPreview = List.of();
     }
 }

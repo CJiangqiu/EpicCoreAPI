@@ -3,6 +3,7 @@ package net.eca.util;
 import com.google.common.collect.ImmutableList;
 import net.eca.api.EcaAPI;
 import net.eca.config.EcaConfiguration;
+import net.eca.coremod.EcaContainers;
 import net.eca.network.ClientRemovePacket;
 import net.eca.network.EntityContainerCheckRequestPacket;
 import net.eca.network.EntityTeleportSyncPacket;
@@ -1226,7 +1227,7 @@ public class EntityUtil {
         try {
             PersistentEntitySectionManager<Entity> entityManager = serverLevel.entityManager;
 
-            removeFromLoadingInbox(entityManager, entity);
+            removeFromLoadingInbox(entityManager.loadingInbox, entity);
             removeFromSectionStorage(entityManager.sectionStorage, entity);
             removeFromEntityTickList(serverLevel.entityTickList, entity);
             serverLevel.chunkSource.chunkMap.entityMap.remove(entity.getId());
@@ -1252,11 +1253,51 @@ public class EntityUtil {
         }
     }
 
-    //从 loadingInbox 清理正在加载的实体
-    private static void removeFromLoadingInbox(PersistentEntitySectionManager<Entity> entityManager, Entity entity) {
-        for (ChunkEntities<Entity> chunkEntities : entityManager.loadingInbox) {
-            chunkEntities.entities.remove(entity);
+    // 物理清理必须读取原始内容，隔离中的实体会被普通列表视图隐藏。
+    /**
+     * Removes an entity instance from pending chunk loads without mutating immutable lists.
+     * Preserves empty chunk entries so pending loads can still complete.
+     * @param loadingInbox the pending chunk load queue
+     * @param entity the entity instance to remove
+     * @return true if every inspected entry was cleaned successfully
+     */
+    public static boolean removeFromLoadingInbox(Queue<ChunkEntities<Entity>> loadingInbox, Entity entity) {
+        boolean success = true;
+        try {
+            // 固定本次遍历范围，避免重新检查刚加入的替代条目。
+            for (ChunkEntities<Entity> chunkEntities : new ArrayList<>(loadingInbox)) {
+                try {
+                    List<Entity> remaining = EcaContainers.rawValues(chunkEntities.entities);
+                    if (!remaining.removeIf(candidate -> candidate == entity)) continue;
+
+                    if (chunkEntities.entities instanceof EcaContainers.EcaArrayList<?>) {
+                        chunkEntities.entities.removeIf(candidate -> candidate == entity);
+                        if (EcaContainers.rawValues(chunkEntities.entities).stream()
+                                .anyMatch(candidate -> candidate == entity)) {
+                            success = false;
+                            EcaLogger.info("[EntityUtil] Loading inbox list removal was blocked, chunk={}",
+                                    chunkEntities.getPos());
+                        }
+                    } else {
+                        ChunkEntities<Entity> replacement = new ChunkEntities<>(chunkEntities.getPos(), remaining);
+                        if (!loadingInbox.remove(chunkEntities)) {
+                            success = false;
+                            EcaLogger.info("[EntityUtil] Loading inbox entry removal failed, chunk={}",
+                                    chunkEntities.getPos());
+                            continue;
+                        }
+                        loadingInbox.add(replacement);
+                    }
+                } catch (Exception e) {
+                    success = false;
+                    EcaLogger.info("[EntityUtil] Loading inbox entry cleanup failed: {}", e.toString());
+                }
+            }
+        } catch (Exception e) {
+            success = false;
+            EcaLogger.info("[EntityUtil] Loading inbox cleanup failed: {}", e.toString());
         }
+        return success;
     }
 
     //从 EntitySectionStorage 遍历所有 section 移除实体（直接操作 ClassInstanceMultiMap 底层，绕过可被 Mixin 的 MC 层 API）

@@ -116,7 +116,16 @@ public final class BossShowJsonCodec {
         String sub = obj.has("subtitle") && !obj.get("subtitle").isJsonNull()
             ? obj.get("subtitle").getAsString() : null;
         Curve curve = obj.has("curve") ? Curve.fromKey(obj.get("curve").getAsString()) : Curve.NONE;
-        return new Keyframe(evt, sub, curve);
+        BossShowCameraPath path = null;
+        if (obj.has("camera_path")) {
+            try {
+                path = BossShowCameraPath.fromJson(obj.getAsJsonObject("camera_path"));
+            } catch (RuntimeException exception) {
+                //编辑参数损坏时仍可播放已生成的帧。
+                EcaLogger.info("BossShow camera path metadata ignored: {}", exception.getMessage());
+            }
+        }
+        return new Keyframe(evt, sub, curve, path);
     }
 
     private static List<EventCue> parseEventCues(JsonArray array) {
@@ -241,6 +250,7 @@ public final class BossShowJsonCodec {
                 if (kf.eventId() != null) kfObj.addProperty("event_id", kf.eventId());
                 if (kf.subtitleText() != null) kfObj.addProperty("subtitle", kf.subtitleText());
                 if (kf.curve() != Curve.NONE) kfObj.addProperty("curve", kf.curve().key());
+                if (kf.cameraPath() != null) kfObj.add("camera_path", kf.cameraPath().toJson());
                 fObj.add("keyframe", kfObj);
             }
             fArr.add(fObj);

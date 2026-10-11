@@ -20,7 +20,11 @@ public final class BossShowDefinition {
     /* 关键帧附加数据：仅显式标记的帧持有。
      * curve 控制本关键帧 → 下一个关键帧之间那段帧的镜头/朝向变化趋势。
      * eventId 与 subtitleText 完全独立，可任意组合。 */
-    public record Keyframe(String eventId, String subtitleText, Curve curve) {
+    public record Keyframe(String eventId, String subtitleText, Curve curve, BossShowCameraPath cameraPath) {
+        public Keyframe(String eventId, String subtitleText, Curve curve) {
+            this(eventId, subtitleText, curve, null);
+        }
+
         public Keyframe {
             if (eventId != null && eventId.isEmpty()) eventId = null;
             if (subtitleText != null && subtitleText.isEmpty()) subtitleText = null;

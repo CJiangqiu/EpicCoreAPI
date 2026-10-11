@@ -17,7 +17,7 @@ import net.minecraftforge.network.simple.SimpleChannel;
 @SuppressWarnings("removal")
 public class NetworkHandler {
 
-    private static final String PROTOCOL_VERSION = "3";
+    private static final String PROTOCOL_VERSION = "4";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(EcaMod.MOD_ID, "main"),

@@ -1,5 +1,6 @@
 package net.eca.util.bossshow;
 
+import com.google.gson.JsonParser;
 import net.eca.util.bossshow.BossShowDefinition.Frame;
 import net.eca.util.bossshow.BossShowDefinition.EventCue;
 import net.eca.util.bossshow.BossShowDefinition.Keyframe;
@@ -42,6 +43,8 @@ public final class BossShowNetCodec {
                 buf.writeBoolean(kf.subtitleText() != null);
                 if (kf.subtitleText() != null) buf.writeUtf(kf.subtitleText());
                 buf.writeByte(kf.curve().ordinal());
+                buf.writeBoolean(kf.cameraPath() != null);
+                if (kf.cameraPath() != null) buf.writeUtf(kf.cameraPath().toJson().toString(), 65536);
             }
         }
     }
@@ -65,7 +68,9 @@ public final class BossShowNetCodec {
                 int ci = buf.readByte() & 0xFF;
                 Curve[] cv = Curve.values();
                 Curve curve = (ci < cv.length) ? cv[ci] : Curve.NONE;
-                kf = new Keyframe(eid, sub, curve);
+                BossShowCameraPath path = buf.readBoolean()
+                    ? BossShowCameraPath.fromJson(JsonParser.parseString(buf.readUtf(65536)).getAsJsonObject()) : null;
+                kf = new Keyframe(eid, sub, curve, path);
             }
             out.add(new Frame(dx, dy, dz, yaw, pitch, kf));
         }

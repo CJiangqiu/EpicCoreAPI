@@ -3,6 +3,7 @@ package net.eca.event;
 import net.eca.api.EcaAPI;
 import net.eca.compat.FriendModCheck;
 import net.eca.config.EcaConfiguration;
+import net.eca.coremod.AllReturnToggle;
 import net.eca.network.FactionGlowSyncPacket;
 import net.eca.network.NetworkHandler;
 import net.eca.util.EntityLocationManager;
@@ -251,6 +252,7 @@ public class EcaEventHandler {
     //服务器停止时清空静态状态，防止单人模式下集成服务器跨存档残留
     @SubscribeEvent
     public void onServerStopped(ServerStoppedEvent event) {
+        AllReturnToggle.clearAll();
         ResurrectionManager.stop();
         ResurrectionManager.clearAll();
         InvulnerableEntityManager.clearAll();
