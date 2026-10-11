@@ -48,6 +48,11 @@ public final class RaidClientState {
         return BAR_STATES.get(bossEventId);
     }
 
+    // 返回快照，避免音乐选择依赖血条渲染或暴露可变状态表。
+    public static Map<UUID, RaidBarState> getBarStates() {
+        return Map.copyOf(BAR_STATES);
+    }
+
     // 移除一条映射
     /**
      * @param bossEventId the boss event UUID

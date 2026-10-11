@@ -90,6 +90,10 @@ public final class EntityExtensionClientState {
         return ACTIVE_MUSICS.get(dimensionId);
     }
 
+    public static boolean isMusicOverridden(ResourceLocation dimensionId) {
+        return dimensionId != null && OVERRIDE_MUSICS.contains(dimensionId);
+    }
+
     public static void setActiveFog(ResourceLocation dimensionId, GlobalFogExtension fog) {
         setActiveFog(dimensionId, fog, false);
     }

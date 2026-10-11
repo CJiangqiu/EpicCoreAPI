@@ -1,6 +1,7 @@
 package net.eca.event;
 
 import net.eca.client.FactionGlowData;
+import net.eca.client.music.CombatMusicManager;
 import net.eca.client.HealthClientSync;
 import net.eca.coremod.AllReturnToggle;
 import net.eca.util.entity_extension.EntityExtensionClientState;
@@ -8,6 +9,7 @@ import net.eca.util.raid.RaidClientState;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.event.level.LevelEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.event.TickEvent;
 
@@ -23,11 +25,20 @@ public final class EcaClientEventHandler {
     }
 
     @SubscribeEvent
+    public static void onClientLevelUnload(LevelEvent.Unload event) {
+        if (event.getLevel().isClientSide()) {
+            RaidClientState.clearAll();
+            CombatMusicManager.reset();
+        }
+    }
+
+    @SubscribeEvent
     public static void onClientLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
         AllReturnToggle.clearAll();
         HealthClientSync.clear();
         EntityExtensionClientState.clearAll();
         FactionGlowData.clear();
         RaidClientState.clearAll();
+        CombatMusicManager.reset();
     }
 }

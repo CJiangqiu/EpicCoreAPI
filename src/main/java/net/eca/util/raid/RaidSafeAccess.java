@@ -23,6 +23,18 @@ public final class RaidSafeAccess {
 
     private RaidSafeAccess() {}
 
+    public static RaidMusicExtension combatMusicExtension(RaidDefinition definition, RaidBarState state) {
+        if (definition == null || state == null) {
+            return null;
+        }
+        try {
+            return definition.combatMusicExtension(state);
+        } catch (Throwable t) {
+            logOnce(definition.getClass(), "combatMusicExtension", t);
+            return null;
+        }
+    }
+
     public static RaidBossBarExtension bossBarExtension(RaidDefinition definition) {
         if (definition == null) {
             return null;

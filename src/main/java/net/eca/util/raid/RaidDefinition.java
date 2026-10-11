@@ -285,6 +285,22 @@ public abstract class RaidDefinition {
         return 600;
     }
 
+    // 音乐跟随参与范围和袭击状态，调用方无需维护播放与停止。
+    /**
+     * Supply client-side music while this raid is ongoing. Returning null disables music.
+     * The framework calls this independently of boss bar rendering and automatically
+     * withdraws the request when the player leaves or the raid ends. Entity extension
+     * music takes precedence; interrupted looping raid music restarts from the beginning.
+     * A non-looping track plays once per participation and sound id, then releases its lock.
+     * Changing wave counts alone does not replay a completed track.
+     * @param state the synchronized state of this raid
+     * @return music settings, or null for no raid music
+     */
+    @OnlyIn(Dist.CLIENT)
+    public RaidMusicExtension combatMusicExtension(RaidBarState state) {
+        return null;
+    }
+
     // ==================== 可选覆写：血条外观 ====================
 
     // 自定义 Boss 血条外观（仅客户端）
