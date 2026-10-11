@@ -10,7 +10,9 @@ displayURL = "https://modrinth.com/mod/epic-core-api"
 logoFile = "logo.png"
 authors = "CJiangqiu"
 credits = '''
-Contributor:WZZ,Mascot:MCreator
+Contributor: WZZ
+Bug reports and fix suggestions: jivinstev
+Mascot: MCreator
 '''
 description = '''
 A library mod that provides powerful entity manipulation APIs through CoreMod (ITransformationService) and Mixin technologies, plus a set of feature modules: BossShow, entity extensions, block extensions, item extensions, screen filters, the ECA shader generator, custom factions, and custom raids.

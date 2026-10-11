@@ -10,7 +10,9 @@ displayURL = "https://modrinth.com/mod/epic-core-api"
 logoFile = "logo.png"
 authors = "CJiangqiu"
 credits = '''
-Contributor:WZZ,Mascot:MCreator
+Contributor: WZZ
+Bug reports and fix suggestions: jivinstev
+Mascot: MCreator
 '''
 description = '''
 A library mod that provides powerful entity manipulation APIs through CoreMod (ITransformationService), Java Agent, and Mixin technologies.
