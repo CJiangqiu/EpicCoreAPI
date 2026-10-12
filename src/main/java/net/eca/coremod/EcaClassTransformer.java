@@ -26,11 +26,11 @@ import org.objectweb.asm.tree.VarInsnNode;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
+import java.lang.instrument.UnmodifiableClassException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.ProtectionDomain;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -192,20 +192,17 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         EcaTransformerManager.applyLoadCompleteTransforms();
     }
 
-    static boolean retransformLoadedClassesWithInstrumentation(Instrumentation inst) {
-        if (inst == null) {
-            EarlyLogWriter.info("[EcaClassTransformer] No Instrumentation available, skipping init");
-            return false;
-        }
-        if (!ensureRegistered(inst)) return false;
-        int before = transformCount;
+    static void retransformOwnedClasses(Instrumentation inst, Class<?>[] classes) throws UnmodifiableClassException {
+        boolean previous = OWN_RETRANSFORM.get();
+        OWN_RETRANSFORM.set(true);
         RuntimeBytecodeProvider.beginSelfRetransform();
         try {
-            retransformLoadedClasses(inst);
+            inst.retransformClasses(classes);
         } finally {
             RuntimeBytecodeProvider.endSelfRetransform();
+            if (previous) OWN_RETRANSFORM.set(true);
+            else OWN_RETRANSFORM.remove();
         }
-        return transformCount > before;
     }
 
     static void ensureWhitelistLoaded() {
@@ -251,7 +248,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         }
     }
 
-    private static synchronized boolean ensureRegistered(Instrumentation inst) {
+    static synchronized boolean ensureRegistered(Instrumentation inst) {
         if (registered) return true;
         try {
             ensureWhitelistLoaded();
@@ -329,76 +326,6 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             EarlyLogWriter.info("[EcaClassTransformer] Failed to read " + configPath + ": " + t.getMessage());
         }
         return false;
-    }
-
-    //重转换已加载的类（Entity/LivingEntity 子类 + Entity/LivingEntity 自身）
-    private static void retransformLoadedClasses(Instrumentation inst) {
-        List<Class<?>> toRetransform = new ArrayList<>();
-
-        // 首先确保 Entity 和 LivingEntity 自身被 retransform，使 RuntimeBytecodeProvider 缓存其运行时字节码
-        for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!inst.isModifiableClass(clazz)) continue;
-            String name = clazz.getName();
-            if (name.equals("net.minecraft.world.entity.Entity")) {
-                KNOWN_ENTITY_ONLY_CLASSES.add(name.replace('.', '/'));
-                toRetransform.add(clazz);
-            } else if (name.equals("net.minecraft.world.entity.LivingEntity")) {
-                KNOWN_LIVING_ENTITY_CLASSES.add(name.replace('.', '/'));
-                toRetransform.add(clazz);
-            }
-        }
-
-        for (Class<?> clazz : inst.getAllLoadedClasses()) {
-            if (!inst.isModifiableClass(clazz)) continue;
-            String name = clazz.getName();
-
-            String internalName = name.replace('.', '/');
-            if (ContainerReplacementTransformer.isTarget(internalName)) {
-                toRetransform.add(clazz);
-                continue;
-            }
-
-            if (TransformerWhitelist.isSystemProtected(name)) continue;
-
-            // 一次遍历继承链，同时判断 LivingEntity 和 Entity
-            try {
-                int ancestorType = classifyEntity(clazz);
-                if (ancestorType == 1) {
-                    KNOWN_LIVING_ENTITY_CLASSES.add(internalName);
-                    toRetransform.add(clazz);
-                } else if (ancestorType == 2) {
-                    KNOWN_ENTITY_ONLY_CLASSES.add(internalName);
-                    toRetransform.add(clazz);
-                }
-            } catch (Throwable ignored) {}
-        }
-
-        EarlyLogWriter.info("[EcaClassTransformer] Retransforming " + toRetransform.size() + " loaded classes");
-
-        // 标记本线程为 ECA 自己的 retransform，使实体 hook 分支放行（他人触发的 retransform 无此标记，不参与）
-        OWN_RETRANSFORM.set(Boolean.TRUE);
-        try {
-            // 批量 retransform
-            int batchSize = 32;
-            for (int i = 0; i < toRetransform.size(); i += batchSize) {
-                int end = Math.min(i + batchSize, toRetransform.size());
-                Class<?>[] batch = toRetransform.subList(i, end).toArray(new Class<?>[0]);
-                try {
-                    inst.retransformClasses(batch);
-                } catch (Throwable t) {
-                    // 批量失败时逐个重试
-                    for (Class<?> clazz : batch) {
-                        try {
-                            inst.retransformClasses(clazz);
-                        } catch (Throwable t2) {
-                            EarlyLogWriter.error("[EcaClassTransformer] Failed to retransform: " + clazz.getName(), t2);
-                        }
-                    }
-                }
-            }
-        } finally {
-            OWN_RETRANSFORM.remove();
-        }
     }
 
     private static int classifyEntity(Class<?> clazz) {

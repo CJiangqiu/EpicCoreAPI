@@ -12,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /*
  * 运行期字节码提供器：类首次加载与重转换时由永久捕获器自动缓存主转换链输出，
  * get() 直接从缓存返回，不触发 retransform，消除按需捕获造成的卡顿。
- * 捕获器由 EcaClassTransformer 的 register()/init() 在 transformer 注册后、retransformLoadedClasses 前注册，
+ * 捕获器在主转换器注册后、启动批量重转换前注册，
  * 确保已加载类的批量重转换也能被截获；按需末端健康变换由独立回执器验证。
  */
 public final class RuntimeBytecodeProvider {

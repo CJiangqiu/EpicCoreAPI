@@ -65,27 +65,8 @@ public final class EcaTransformerManager {
     }
 
     public static boolean applyLoadCompleteTransforms() {
-        if (isCoremodBackend()) {
-            if (tryAgentHealthLoadComplete()) {
-                backend = Backend.COREMOD;
-                return true;
-            }
-            if (tryNativeLoadComplete()) return true;
-            backend = Backend.COREMOD;
-            return true;
-        }
-        boolean agentOk = tryAgentLoadComplete();
-        if (agentOk) {
-            tryAgentHealthLoadComplete();
-            backend = Backend.AGENT;
-            return true;
-        }
-
-        if (tryNativeLoadComplete()) return true;
-
-        backend = Backend.NONE;
-        logAllFailed();
-        return false;
+        if (EcaConfiguration.getForceCompatibilityModeSafely()) return false;
+        return tryAgentLoadComplete();
     }
 
     public static boolean retransformClass(Class<?> clazz) {
@@ -237,40 +218,111 @@ public final class EcaTransformerManager {
     }
 
     private static boolean tryAgentLoadComplete() {
-        Instrumentation inst = EcaAgent.getInstrumentation();
-        if (inst == null) return false;
-        try {
-            return EcaClassTransformer.retransformLoadedClassesWithInstrumentation(inst);
-        } catch (Throwable t) {
-            EarlyLogWriter.info("[EcaTransformerManager] Agent load-complete transform failed: " + t.getMessage());
-            return false;
-        }
-    }
-
-    private static boolean tryAgentHealthLoadComplete() {
-        Instrumentation inst = acquireInstrumentation();
-        if (inst == null || !inst.isRetransformClassesSupported()) return false;
+        Instrumentation inst;
+        long generation;
         List<Class<?>> targets = new ArrayList<>();
         try {
+            inst = acquireInstrumentation();
+            if (inst == null || !inst.isRetransformClassesSupported()) return tryNativeLoadComplete();
+            EcaClassTransformer.prepareNativeTargets(List.of());
+            if (!isCoremodBackend() && !EcaClassTransformer.ensureRegistered(inst)) {
+                return tryNativeLoadComplete();
+            }
+            // 整理器和校验器必须先于首批请求注册，避免为获取回执再转换全部目标。
+            generation = ensureTerminalAgentTransformers(inst, true);
+            if (generation <= 0L) return tryNativeLoadComplete();
             for (Class<?> type : inst.getAllLoadedClasses()) {
-                if (!isModifiable(inst, type) || classifyEntity(type) == 0) continue;
-                targets.add(type);
+                if (classifyEntity(type) != 0
+                        || (!isCoremodBackend() && EcaClassTransformer.isNativeLoadCompleteTarget(type))) {
+                    targets.add(type);
+                }
             }
             EcaClassTransformer.prepareNativeTargets(targets);
-            long generation = ensureTerminalAgentTransformers(inst, true);
-            if (generation <= 0L) return false;
-            int confirmed = 0;
-            for (Class<?> type : targets) {
-                HealthTransformResult result = retransformHealthClass(type, false);
-                if (result.confirmed()) confirmed++;
-            }
-            EarlyLogWriter.info("[EcaTransformerManager] Terminal health handoff targets="
-                    + targets.size() + ", confirmed=" + confirmed);
-            return !targets.isEmpty() && confirmed == targets.size();
         } catch (Throwable t) {
-            EarlyLogWriter.info("[EcaTransformerManager] Terminal health handoff failed: " + t.getMessage());
-            return false;
+            EarlyLogWriter.log("INFO", "[EcaTransformerManager] Agent load-complete preparation failed", t);
+            return tryNativeLoadComplete();
         }
+
+        long started = System.nanoTime();
+        List<Class<?>> agentTargets = new ArrayList<>();
+        Set<Class<?>> agentConfirmed = new HashSet<>();
+        for (Class<?> type : targets) {
+            if (isModifiable(inst, type)) agentTargets.add(type);
+        }
+        int batchSize = 32;
+        for (int start = 0; start < agentTargets.size(); start += batchSize) {
+            int end = Math.min(start + batchSize, agentTargets.size());
+            Class<?>[] batch = agentTargets.subList(start, end).toArray(new Class<?>[0]);
+            boolean[] receipts = retransformHealthBatch(inst, batch, generation, 0);
+            for (int i = 0; i < batch.length; i++) {
+                if (receipts[i]) agentConfirmed.add(batch[i]);
+            }
+        }
+        // 复查只读取首轮结果；后续请求若使回执失效，该类也必须交给原生补救。
+        List<Class<?>> fallback = new ArrayList<>();
+        for (Class<?> type : targets) {
+            if (!agentConfirmed.contains(type)
+                    || (classifyEntity(type) != 0 && !isHealthTransformConfirmed(type, Backend.AGENT))) {
+                fallback.add(type);
+            }
+        }
+        int confirmed = targets.size() - fallback.size();
+        if (confirmed > 0) backend = isCoremodBackend() ? Backend.COREMOD : Backend.AGENT;
+        EarlyLogWriter.info("[EcaTransformerManager] Agent first pass targets=" + targets.size()
+                + ", confirmed=" + confirmed + ", fallback=" + fallback.size()
+                + ", elapsedMs=" + (System.nanoTime() - started) / 1_000_000L);
+        int nativeConfirmed = applyNativeLoadCompleteFallback(fallback);
+        EarlyLogWriter.info("[EcaTransformerManager] Load-complete review targets=" + targets.size()
+                + ", agentConfirmed=" + confirmed + ", nativeConfirmed=" + nativeConfirmed
+                + ", unresolved=" + (fallback.size() - nativeConfirmed));
+        if (confirmed + nativeConfirmed == 0 && !targets.isEmpty()) {
+            backend = Backend.NONE;
+            logAllFailed();
+        }
+        return confirmed + nativeConfirmed == targets.size();
+    }
+
+    private static boolean[] retransformHealthBatch(Instrumentation inst, Class<?>[] batch,
+                                                    long generation, int lockIndex) {
+        // 与单类请求共用锁，避免批量回执被并发请求覆盖；递归深度不超过批量大小。
+        if (lockIndex < batch.length) {
+            String name = batch[lockIndex].getName().replace('.', '/');
+            Object lock = HEALTH_TRANSFORM_LOCKS.computeIfAbsent(name, ignored -> new Object());
+            synchronized (lock) {
+                return retransformHealthBatch(inst, batch, generation, lockIndex + 1);
+            }
+        }
+
+        String[] names = new String[batch.length];
+        long[] epochs = new long[batch.length];
+        boolean[] confirmed = new boolean[batch.length];
+        boolean applied = false;
+        try {
+            for (int i = 0; i < batch.length; i++) {
+                names[i] = batch[i].getName().replace('.', '/');
+                if (classifyEntity(batch[i]) != 0) epochs[i] = beginReceipt(names[i], generation);
+            }
+            EcaClassTransformer.retransformOwnedClasses(inst, batch);
+            applied = true;
+            for (int i = 0; i < batch.length; i++) {
+                confirmed[i] = epochs[i] == 0L || receiptConfirmed(names[i], epochs[i]);
+            }
+        } catch (Throwable t) {
+            EarlyLogWriter.log("INFO", "[EcaTransformerManager] Agent first-pass batch failed; queuing "
+                    + batch.length + " classes for native fallback", t);
+        } finally {
+            for (int i = 0; i < batch.length; i++) {
+                if (epochs[i] == 0L) continue;
+                // 回调验证通过不代表 JVM 已接受整批转换，失败批次的临时确认必须作废。
+                if (!applied) {
+                    long epoch = epochs[i];
+                    CONFIRMED_RECEIPTS.computeIfPresent(names[i],
+                            (ignored, receipt) -> receipt.epoch() == epoch ? null : receipt);
+                }
+                endReceipt(names[i], epochs[i]);
+            }
+        }
+        return confirmed;
     }
 
     private static Instrumentation acquireInstrumentation() {
@@ -297,8 +349,8 @@ public final class EcaTransformerManager {
             }
             return true;
         } catch (Throwable t) {
-            EarlyLogWriter.info("[EcaTransformerManager] Agent retransform failed for "
-                    + clazz.getName() + ": " + t.getMessage());
+            EarlyLogWriter.log("INFO", "[EcaTransformerManager] Agent retransform failed for "
+                    + clazz.getName(), t);
             return false;
         }
     }
@@ -534,12 +586,32 @@ public final class EcaTransformerManager {
     }
 
     private static boolean tryNativeLoadComplete() {
-        if (!ensureNativeActive()) return false;
+        if (!ensureNativeActive()) {
+            backend = isCoremodBackend() ? Backend.COREMOD : Backend.NONE;
+            logAllFailed();
+            return false;
+        }
         List<Class<?>> targets = new ArrayList<>();
         for (Class<?> type : nativeClasses()) {
-            if (EcaClassTransformer.isNativeLoadCompleteTarget(type)) targets.add(type);
+            if (classifyEntity(type) != 0 || EcaClassTransformer.isNativeLoadCompleteTarget(type)) targets.add(type);
         }
-        return requestNative(targets, false);
+        int confirmed = applyNativeLoadCompleteFallback(targets);
+        EarlyLogWriter.info("[EcaTransformerManager] Native load-complete targets=" + targets.size()
+                + ", confirmed=" + confirmed + ", unresolved=" + (targets.size() - confirmed));
+        return !targets.isEmpty() && confirmed == targets.size();
+    }
+
+    private static int applyNativeLoadCompleteFallback(List<Class<?>> targets) {
+        int confirmed = 0;
+        for (Class<?> type : targets) {
+            if (requestNative(List.of(type), classifyEntity(type) != 0)) {
+                confirmed++;
+            } else {
+                EarlyLogWriter.info("[EcaTransformerManager] Load-complete transform unresolved for "
+                        + type.getName());
+            }
+        }
+        return confirmed;
     }
 
     private static boolean forEachNativeClass(Consumer<Class<?>> consumer) {
