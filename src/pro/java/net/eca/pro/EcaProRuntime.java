@@ -12,9 +12,9 @@ import java.net.URI;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.security.CodeSource;
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -60,10 +60,13 @@ public final class EcaProRuntime {
         if (config.coremod && !config.relaunch) {
             AgentLogWriter.info("[EcaPro] Transformation-service interception requires trusted JVM relaunch");
         }
-        Path relaunchedAgent = Path.of(System.getProperty("user.dir"),
-                "ECA", "runtime", "pro", "eca-agent.jar").toAbsolutePath().normalize();
-        if (ForgeVM.relaunchGeneration() > 0 && Files.isRegularFile(relaunchedAgent)) {
-            trustedAgent = relaunchedAgent;
+        if (ForgeVM.relaunchGeneration() > 0) {
+            try {
+                Path relaunchedAgent = trustedAgentPath(readEmbeddedAgent());
+                if (Files.isRegularFile(relaunchedAgent)) trustedAgent = relaunchedAgent;
+            } catch (Throwable t) {
+                AgentLogWriter.info("[EcaPro] Trusted agent path unavailable: " + t);
+            }
         }
         if (config.relaunch && ForgeVM.relaunchGeneration() == 0) relaunch();
     }
@@ -187,14 +190,43 @@ public final class EcaProRuntime {
     }
 
     private static Path extractTrustedAgent() throws Exception {
-        Path directory = Path.of(System.getProperty("user.dir"), "ECA", "runtime", "pro");
+        byte[] content = readEmbeddedAgent();
+        Path archive = trustedAgentPath(content);
+        Path directory = archive.getParent();
         Files.createDirectories(directory);
-        Path archive = directory.resolve("eca-agent.jar");
+        String expectedHash = sha256(content);
+        if (Files.isRegularFile(archive)) {
+            if (!expectedHash.equals(sha256(archive))) throw new IllegalStateException("trusted_agent_hash_mismatch");
+            return archive;
+        }
+        Path pending = Files.createTempFile(directory, "eca-agent-", ".tmp");
+        try {
+            Files.write(pending, content);
+            try {
+                Files.move(pending, archive);
+            } catch (FileAlreadyExistsException e) {
+                if (!expectedHash.equals(sha256(archive))) throw e;
+            }
+        } finally {
+            Files.deleteIfExists(pending);
+        }
+        return archive;
+    }
+
+    private static byte[] readEmbeddedAgent() throws Exception {
         try (InputStream input = EcaProRuntime.class.getResourceAsStream(AGENT_RESOURCE)) {
             if (input == null) throw new IllegalStateException("embedded_agent_missing");
-            Files.copy(input, archive, StandardCopyOption.REPLACE_EXISTING);
+            return input.readAllBytes();
         }
-        return archive.toAbsolutePath().normalize();
+    }
+
+    private static Path trustedAgentPath(byte[] content) throws Exception {
+        return Path.of(System.getProperty("user.dir"), "ECA", "runtime", "pro",
+                "eca-agent-" + sha256(content) + ".jar").toAbsolutePath().normalize();
+    }
+
+    private static String sha256(byte[] content) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
     }
 
     private static String sha256(Path path) throws Exception {

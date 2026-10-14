@@ -32,7 +32,7 @@ final class EcaProWhitelist {
         addPath(paths, trustedAgent);
         addPath(paths, AgentLoader.getLoadedAgentPath());
         paths.addAll(config.javaAgentPaths);
-        if (paths.isEmpty()) paths.add("*\\ECA\\runtime\\pro\\eca-agent.jar");
+        if (paths.isEmpty()) paths.add("*\\ECA\\runtime\\pro\\eca-agent-*.jar");
         return AgentFilter.Whitelist(paths.toArray(String[]::new));
     }
 

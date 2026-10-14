@@ -2,6 +2,7 @@ package net.eca.mixin;
 
 import net.eca.api.EcaAPI;
 
+import net.eca.util.EntityRemovalQuarantine;
 import net.eca.util.EntityUtil;
 import net.eca.util.spawn_ban.SpawnBanHook;
 import net.minecraft.world.entity.Entity;
@@ -88,8 +89,21 @@ public class PersistentEntitySectionManagerMixin {
         @Shadow
         private EntityAccess entity;
 
+        // 清除中的移动不能借旧回调重新建立区段关联。
+        @Inject(method = "onMove", at = @At("HEAD"), cancellable = true)
+        private void eca$onMove(CallbackInfo ci) {
+            if (this.entity instanceof Entity realEntity && EntityRemovalQuarantine.shouldBlockAdd(realEntity)) {
+                ci.cancel();
+            }
+        }
+
         @Inject(method = "onRemove", at = @At("HEAD"), cancellable = true)
         private void eca$onRemove(Entity.RemovalReason reason, CallbackInfo ci) {
+            // 底层清理由隔离流程负责，恢复的旧回调不能再次访问失效区段。
+            if (this.entity instanceof Entity realEntity && EntityRemovalQuarantine.shouldBlockAdd(realEntity)) {
+                ci.cancel();
+                return;
+            }
             if (this.entity instanceof LivingEntity realEntity) {
                 if (EcaAPI.isInvulnerable(realEntity) && !(reason == Entity.RemovalReason.CHANGED_DIMENSION && EntityUtil.isChangingDimension(realEntity))) {
                     ci.cancel();

@@ -157,6 +157,7 @@ public final class ProContainerHooks {
         if (value instanceof EcaContainers.EcaLong2ObjectOpenHashMap<?>) return value;
         EcaContainers.EcaLong2ObjectOpenHashMap<Object> result =
                 new EcaContainers.EcaLong2ObjectOpenHashMap<>(value.size());
+        result.defaultReturnValue(value.defaultReturnValue());
         result.putAll((Map<? extends Long, ?>) value);
         return result;
     }
