@@ -2,6 +2,7 @@ package net.eca.coremod;
 
 import net.eca.coremod.EarlyLogWriter;
 import net.eca.config.EcaConfiguration;
+import net.eca.util.EcaLogger;
 import net.eca.util.call_bridge.CallBridgeManager;
 import net.eca.util.call_bridge.CallBridgeRuntime;
 import net.eca.util.call_bridge.CallWatchdogTransformer;
@@ -27,6 +28,8 @@ import org.objectweb.asm.tree.VarInsnNode;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.lang.instrument.UnmodifiableClassException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -212,6 +215,25 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
     static void ensureWhitelistLoaded() {
         TransformerWhitelist.loadJsonWhitelist();
+    }
+
+    static boolean declaresHealthHook(Class<?> type) {
+        try {
+            for (Method method : type.getDeclaredMethods()) {
+                if (method.getParameterCount() != 0 || Modifier.isStatic(method.getModifiers())) continue;
+                String name = method.getName();
+                if (method.getReturnType() == float.class && (GET_HEALTH.equals(name)
+                        || GET_MAX_HEALTH.equals(name) || "getHealth".equals(name) || "getMaxHealth".equals(name))) return true;
+                if (method.getReturnType() == boolean.class && (IS_REMOVED.equals(name)
+                        || IS_ALIVE.equals(name) || IS_DEAD_OR_DYING.equals(name)
+                        || "isRemoved".equals(name) || "isAlive".equals(name) || "isDeadOrDying".equals(name))) return true;
+            }
+            return false;
+        } catch (LinkageError | RuntimeException failure) {
+            EcaLogger.info("[TransformAudit] Method inspection unavailable; retaining transform target: {}",
+                    failure.getClass().getSimpleName());
+            return true;
+        }
     }
 
     static void prepareNativeTargets(List<Class<?>> targets) throws ClassNotFoundException {
@@ -670,14 +692,12 @@ public final class EcaClassTransformer implements ClassFileTransformer {
                 MethodNode changed = changedMethods.get(methodKey(name, desc));
                 if (changed != null) {
                     changed.accept(writer);
-                    return null;
                 }
-                // 直接返回原 reader 对应的 writer，保留未修改方法的字节码和栈帧。
-                return super.visitMethod(access, name, desc, signature, exceptions);
+                return null;
             }
         }, ClassReader.EXPAND_FRAMES);
         transformCount++;
-        return writer.toByteArray();
+        return mergeComputedHookMethods(reader, writer.toByteArray());
     }
 
     private static boolean verifyNormalizedHealthHooks(String className, byte[] bytes) {

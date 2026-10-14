@@ -20,6 +20,7 @@ import org.objectweb.asm.tree.VarInsnNode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -129,15 +130,22 @@ public final class ConstOverride {
         List<Site> sites = SPECS.get(classInternal);
         if (sites == null || sites.isEmpty() || bytes == null) return false;
         try {
-            ClassNode owner = new ClassNode();
+            ClassNode owner = new ClassNode(Opcodes.ASM9);
             new ClassReader(bytes).accept(owner, ClassReader.EXPAND_FRAMES);
-            int confirmed = 0;
+            Map<String, Integer> required = new HashMap<>();
+            for (Site site : sites) required.merge(site.methodName() + site.methodDesc(), 1, Integer::sum);
             for (MethodNode method : owner.methods) {
+                String key = method.name + method.desc;
+                Integer expected = required.get(key);
+                if (expected == null) continue;
+                int confirmed = 0;
                 for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                     if (isResolveCall(insn)) confirmed++;
                 }
+                if (confirmed < expected) return false;
+                required.remove(key);
             }
-            return confirmed >= sites.size();
+            return required.isEmpty();
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             return false;
@@ -151,7 +159,7 @@ public final class ConstOverride {
         if (sites == null || sites.isEmpty() || bytes == null) return null;
         try {
             ClassReader cr = new ClassReader(bytes);
-            ClassNode cn = new ClassNode();
+            ClassNode cn = new ClassNode(Opcodes.ASM9);
             cr.accept(cn, ClassReader.EXPAND_FRAMES);
             List<PatchTarget> targets = new ArrayList<>();
             Set<AbstractInsnNode> used = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -185,7 +193,8 @@ public final class ConstOverride {
                 EcaLogger.info("[ConstOverride] transform patched class={} sites={} patched={} fallback={} missed={}",
                         classInternal, sites.size(), targets.size(), fallbackCount, missed);
             }
-            ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+            // 补丁不新增分支或局部变量，保留原帧可避免类型合并退化。
+            ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_MAXS);
             cn.accept(cw);
             return cw.toByteArray();
         } catch (Throwable t) {

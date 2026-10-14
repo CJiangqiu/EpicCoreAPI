@@ -8,6 +8,7 @@ import java.security.ProtectionDomain;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /*
  * 运行期字节码提供器：类首次加载与重转换时由永久捕获器自动缓存主转换链输出，
@@ -22,12 +23,22 @@ public final class RuntimeBytecodeProvider {
     private static final Map<String, byte[]> RUNTIME_BYTES = new ConcurrentHashMap<>();
     private static final Map<String, byte[]> ANALYSIS_BYTES = new ConcurrentHashMap<>();
     private static volatile boolean captureRegistered = false;
+    private static final AtomicLong BYTECODE_REVISION = new AtomicLong();
+
+    public static long bytecodeRevision() {
+        return BYTECODE_REVISION.get();
+    }
+
+    static void advanceBytecodeRevision() {
+        BYTECODE_REVISION.incrementAndGet();
+    }
 
     /* ECA 自发 retransform 期间进入 transform 的字节码已含自身 hook，不得作为分析输入 */
     private static volatile int selfRetransformDepth = 0;
     private static final ThreadLocal<Integer> LOCAL_RETRANSFORM_DEPTH = ThreadLocal.withInitial(() -> 0);
 
     public static void beginSelfRetransform() {
+        advanceBytecodeRevision();
         LOCAL_RETRANSFORM_DEPTH.set(LOCAL_RETRANSFORM_DEPTH.get() + 1);
         selfRetransformDepth++;
     }
@@ -37,6 +48,7 @@ public final class RuntimeBytecodeProvider {
         if (depth <= 0) LOCAL_RETRANSFORM_DEPTH.remove();
         else LOCAL_RETRANSFORM_DEPTH.set(depth);
         selfRetransformDepth = Math.max(0, selfRetransformDepth - 1);
+        advanceBytecodeRevision();
     }
 
     static boolean isSelfRetransform() {
@@ -96,7 +108,10 @@ public final class RuntimeBytecodeProvider {
     }
 
     private static void put(Map<String, byte[]> target, String key, byte[] bytes, boolean replace) {
-        if (replace) target.put(key, bytes);
+        if (replace) {
+            byte[] previous = target.put(key, bytes);
+            if (previous != null && !Arrays.equals(previous, bytes)) advanceBytecodeRevision();
+        }
         else target.putIfAbsent(key, bytes);
     }
 

@@ -7,6 +7,7 @@ import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
 import net.eca.util.health.MethodProbe;
 import net.eca.util.health.ConstOverride;
+import net.eca.util.health.WarmupTimings;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
@@ -70,6 +71,18 @@ public final class EcaTransformerManager {
             return new FailureState();
         }
     };
+    private static final ClassValue<Boolean> DECLARES_HEALTH_HOOK = new ClassValue<>() {
+        @Override
+        protected Boolean computeValue(Class<?> type) {
+            return EcaClassTransformer.declaresHealthHook(type);
+        }
+    };
+
+    private static boolean requiresLocalTransform(Class<?> type) {
+        String name = type.getName().replace('.', '/');
+        return classifyEntity(type) == 0 || DECLARES_HEALTH_HOOK.get(type)
+                || MethodProbe.hasTransformSpecs(name) || ConstOverride.hasSites(name);
+    }
 
     public record HealthTransformResult(Backend backend, boolean confirmed) {}
 
@@ -102,6 +115,12 @@ public final class EcaTransformerManager {
     }
 
     public static HealthTransformResult retransformHealthClass(Class<?> clazz, boolean refreshTerminal) {
+        try (WarmupTimings.Scope ignored = WarmupTimings.enter(WarmupTimings.Stage.TRANSFORM)) {
+            return retransformHealthClassTimed(clazz, refreshTerminal);
+        }
+    }
+
+    private static HealthTransformResult retransformHealthClassTimed(Class<?> clazz, boolean refreshTerminal) {
         if (clazz == null) return new HealthTransformResult(Backend.NONE, false);
         if (EcaConfiguration.getForceCompatibilityModeSafely()) {
             return new HealthTransformResult(Backend.NONE, false);
@@ -125,6 +144,7 @@ public final class EcaTransformerManager {
 
     static void observeExternalTransform(Class<?> type) {
         if (type == null || RuntimeBytecodeProvider.isSelfRetransform()) return;
+        RuntimeBytecodeProvider.advanceBytecodeRevision();
         FailureState state = HEALTH_FAILURES.get(type);
         state.externalRevision.incrementAndGet();
         state.failed = null;
@@ -279,7 +299,7 @@ public final class EcaTransformerManager {
         List<Class<?>> agentTargets = new ArrayList<>();
         Set<Class<?>> agentConfirmed = new HashSet<>();
         for (Class<?> type : targets) {
-            if (isModifiable(inst, type)) agentTargets.add(type);
+            if (requiresLocalTransform(type) && isModifiable(inst, type)) agentTargets.add(type);
         }
         int batchSize = TRANSFORM_BATCH_SIZE;
         for (int start = 0; start < agentTargets.size(); start += batchSize) {
@@ -291,6 +311,7 @@ public final class EcaTransformerManager {
             }
         }
         EarlyLogWriter.info("[EcaTransformerManager] Agent first pass targets=" + targets.size()
+                + ", requested=" + agentTargets.size()
                 + ", localReceipts=" + agentConfirmed.size()
                 + ", elapsedMs=" + (System.nanoTime() - started) / 1_000_000L);
         // 回执不能代表后续链输出；复查回调只补救当前类缺失的 Hook。
@@ -376,9 +397,17 @@ public final class EcaTransformerManager {
             EarlyLogWriter.info("[TransformAudit] Review preparation failed: " + failure.getClass().getSimpleName());
             return passed;
         }
-        collectNativeBatches(targets, true, true, phase, observed);
+        Set<Class<?>> inheritedOnly = new HashSet<>();
+        List<Class<?>> localTargets = new ArrayList<>();
+        for (Class<?> type : targets) {
+            if (requiresLocalTransform(type)) localTargets.add(type);
+            else inheritedOnly.add(type);
+        }
+        collectNativeBatches(localTargets, true, true, phase, observed);
         Map<Class<?>, Boolean> localValidity = new HashMap<>();
-        for (Class<?> type : targets) localValidity.put(type, verifyOutput(type, observed.get(type)));
+        for (Class<?> type : targets) {
+            localValidity.put(type, inheritedOnly.contains(type) || verifyOutput(type, observed.get(type)));
+        }
         int nativeConfirmed = 0;
         // 先收齐所有输出，再检查继承关系，避免子类顺序影响验收。
         for (Class<?> type : targets) {
@@ -401,12 +430,19 @@ public final class EcaTransformerManager {
                     nativeConfirmed++;
                 }
             }
-            TransformAudit.report(type, phase, valid ? "PASS"
-                    : bytes == null ? "UNVERIFIED: no accepted output" : "FAIL: hooks or inherited contract", bytes);
+            TransformAudit.report(type, phase, valid
+                    ? inheritedOnly.contains(type) ? "PASS: inherited contract" : "PASS"
+                    : inheritedOnly.contains(type) ? "FAIL: inherited contract"
+                    : bytes == null ? "UNVERIFIED: no accepted output; modifiable="
+                            + NativeRuntimeBridge.isModifiable(type) + " hidden=" + type.isHidden()
+                            + " synthetic=" + type.isSynthetic()
+                    : localValidity.get(type) ? "FAIL: inherited contract"
+                    : "FAIL: local hooks or requested patches", bytes);
         }
         EarlyLogWriter.info("[TransformAudit] phase=" + phase + " targets=" + targets.size()
                 + " passed=" + passed.size() + " agentPreserved=" + (passed.size() - nativeConfirmed)
                 + " nativeConfirmed=" + nativeConfirmed
+                + " inheritedOnly=" + inheritedOnly.size() + " localTargets=" + localTargets.size()
                 + " unresolved=" + (targets.size() - passed.size())
                 + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000L);
         return passed;

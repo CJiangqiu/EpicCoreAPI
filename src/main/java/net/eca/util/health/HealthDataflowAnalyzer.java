@@ -7,6 +7,7 @@ import static net.eca.util.health.report.HealthReportText.tr;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import net.eca.config.EcaConfiguration;
 import net.eca.coremod.EcaTransformerManager;
+import net.eca.coremod.RuntimeBytecodeProvider;
 import net.eca.util.EcaLogger;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -5145,8 +5146,7 @@ public final class HealthDataflowAnalyzer {
             // 运行时 klass 替换后的隐藏类不能从资源回退；若没有捕获到其覆写，继承的可读 getter
             // 仍可描述同一存储协议，优先交给父类分析而非把伪字节码当作真实实现。
             if (entityClass.getName().contains("/0x")
-                    && !classDefinesMethodInBytes(entityClass, classBytes, GET_HEALTH.srg())
-                    && !classDefinesMethodInBytes(entityClass, classBytes, GET_HEALTH.mcp())
+                    && declaredMethodName(entityClass, classBytes, GET_HEALTH) == null
                     && entityClass.getSuperclass() != null) {
                 return analyze(entityClass.getSuperclass(), maxDepth);
             }
@@ -5376,11 +5376,11 @@ public final class HealthDataflowAnalyzer {
 
     /* 只载一次 classBytes，沿继承链扫描 getHealth()F 定义类 */
     private static ClassAndMethod findMethodOwnerFromBytes(Class<?> startClass, byte[] startBytes) {
-        if (classDefinesMethodInBytes(startClass, startBytes, GET_HEALTH.srg())) return new ClassAndMethod(startClass, GET_HEALTH.srg());
-        if (classDefinesMethodInBytes(startClass, startBytes, GET_HEALTH.mcp())) return new ClassAndMethod(startClass, GET_HEALTH.mcp());
-        for (Class<?> c = startClass.getSuperclass(); c != null && c != Object.class; c = c.getSuperclass()) {
-            if (classDefinesMethod(c, GET_HEALTH.srg(), GET_HEALTH.desc())) return new ClassAndMethod(c, GET_HEALTH.srg());
-            if (classDefinesMethod(c, GET_HEALTH.mcp(), GET_HEALTH.desc())) return new ClassAndMethod(c, GET_HEALTH.mcp());
+        for (Class<?> current = startClass; current != null && current != Object.class;
+             current = current.getSuperclass()) {
+            byte[] bytes = current == startClass ? startBytes : classBytes(current);
+            String name = declaredMethodName(current, bytes, GET_HEALTH);
+            if (name != null) return new ClassAndMethod(current, name);
         }
         return null;
     }
@@ -5388,24 +5388,23 @@ public final class HealthDataflowAnalyzer {
     private static ClassAndMethod findMethodOwner(Class<?> startClass, McMethod method) {
         for (Class<?> current = startClass; current != null && current != Object.class;
              current = current.getSuperclass()) {
-            if (classDefinesMethod(current, method.srg(), method.desc())) {
-                return new ClassAndMethod(current, method.srg());
-            }
-            if (classDefinesMethod(current, method.mcp(), method.desc())) {
-                return new ClassAndMethod(current, method.mcp());
-            }
+            String name = declaredMethodName(current, classBytes(current), method);
+            if (name != null) return new ClassAndMethod(current, name);
         }
         return null;
     }
 
-    private static boolean classDefinesMethodInBytes(Class<?> owner, byte[] bytes, String name) {
-        if (bytes == null) return false;
+    private static String declaredMethodName(Class<?> owner, byte[] bytes, McMethod method) {
         try {
-            ClassNode cn = new ClassNode();
-            new ClassReader(bytes).accept(cn, 0);
-            for (MethodNode mn : cn.methods) if (mn.name.equals(name) && mn.desc.equals(GET_HEALTH.desc())) return true;
+            ParsedClass parsed = cachedClass(owner, bytes);
+            if (parsed == null) return null;
+            Set<MethodSignature> signatures = methodSignatures(parsed);
+            if (signatures.contains(new MethodSignature(method.srg(), method.desc()))) return method.srg();
+            if (signatures.contains(new MethodSignature(method.mcp(), method.desc()))) return method.mcp();
+        } catch (AnalysisDeadlineExceeded incomplete) {
+            throw incomplete;
         } catch (Exception ignored) {}
-        return false;
+        return null;
     }
 
     /* 动态求解用：以具体种子分析任意方法的返回表达式。seedExprs[i] 对应方法第 i 个局部槽
@@ -5596,11 +5595,11 @@ public final class HealthDataflowAnalyzer {
 
     static boolean classDefinesMethod(Class<?> clazz, String name, String desc) {
         byte[] bytes = classBytes(clazz);
-        if (bytes == null) return false;
         try {
-            ClassNode cn = new ClassNode();
-            new ClassReader(bytes).accept(cn, 0);
-            for (MethodNode mn : cn.methods) if (mn.name.equals(name) && mn.desc.equals(desc)) return true;
+            ParsedClass parsed = cachedClass(clazz, bytes);
+            return parsed != null && methodSignatures(parsed).contains(new MethodSignature(name, desc));
+        } catch (AnalysisDeadlineExceeded incomplete) {
+            throw incomplete;
         } catch (Exception ignored) {}
         return false;
     }
@@ -5615,43 +5614,140 @@ public final class HealthDataflowAnalyzer {
     }
 
     private static byte[] classBytes(Class<?> clazz) {
+        AnalysisRun run = ANALYSIS_RUN.get();
+        if (run != null) {
+            run.snapshot.check();
+            if (run.snapshot.bytes.containsKey(clazz)) {
+                WarmupTimings.count(WarmupTimings.CacheEvent.SNAPSHOT_BYTES_HIT);
+                return run.snapshot.bytes.get(clazz);
+            }
+        }
         BYTES_FETCH_COUNT.get()[0]++;
-        return bytesProvider.get(clazz);
+        try (WarmupTimings.Scope ignored = WarmupTimings.enter(WarmupTimings.Stage.BYTECODE)) {
+            byte[] bytes = bytesProvider.get(clazz);
+            if (run == null) return bytes;
+            run.snapshot.check();
+            byte[] snapshot = bytes == null ? null : bytes.clone();
+            run.snapshot.bytes.put(clazz, snapshot);
+            return snapshot;
+        }
     }
 
-    /* 解析结果缓存：深度内联会把同一批类反复解析上千次，而 EXPAND_FRAMES 展开栈映射帧是最贵的一步。
-       缓存按线程私有，因为 ASM 的 InsnList.indexOf 会惰性写 insnNode.index，共享实例存在数据竞争；
-       而每次分析本就在单线程内跑完，重复解析也发生在同一线程内，线程私有不损命中率。
-       值用软引用并限量淘汰，避免常驻分析线程持续累积展开后的 ClassNode。
-       只服务于只读分析路径；ConstOverride 与 HeadBridge 注入会改指令，必须各自重新解析。 */
+    /* 签名与解析节点绑定同一字节快照；内容变化时共同失效。
+       ASM 节点有惰性可变状态，缓存保持线程私有，并用软引用及容量上限约束内存。 */
     private static final int CLASS_NODE_CACHE_LIMIT = 128;
-    private static final ThreadLocal<LinkedHashMap<Class<?>, SoftReference<ClassNode>>> CLASS_NODE_CACHE =
+    private static final ThreadLocal<LinkedHashMap<Class<?>, SoftReference<ParsedClass>>> CLASS_NODE_CACHE =
             ThreadLocal.withInitial(() -> new LinkedHashMap<>(32, 0.75f, true) {
-                @Override protected boolean removeEldestEntry(Map.Entry<Class<?>, SoftReference<ClassNode>> eldest) {
-                    return size() > CLASS_NODE_CACHE_LIMIT;
+                @Override protected boolean removeEldestEntry(Map.Entry<Class<?>, SoftReference<ParsedClass>> eldest) {
+                    boolean remove = size() > CLASS_NODE_CACHE_LIMIT;
+                    if (remove) WarmupTimings.count(WarmupTimings.CacheEvent.EVICTED);
+                    return remove;
                 }
             });
+
+    private record MethodSignature(String name, String desc) {}
+
+    private static final class ParsedClass {
+        final byte[] bytes;
+        Set<MethodSignature> signatures;
+        ClassNode node;
+
+        ParsedClass(byte[] bytes) {
+            // 保留独立副本，字节码提供器复用并修改数组时也能识别变化。
+            this.bytes = bytes.clone();
+        }
+    }
+
+    private static ParsedClass cachedClass(Class<?> owner, byte[] bytes) {
+        AnalysisRun run = ANALYSIS_RUN.get();
+        AnalysisSnapshot snapshot = run == null ? null : run.snapshot;
+        if (snapshot != null) {
+            snapshot.check();
+            if (snapshot.bytes.containsKey(owner) && snapshot.bytes.get(owner) == bytes
+                    && snapshot.parsed.containsKey(owner)) {
+                WarmupTimings.count(WarmupTimings.CacheEvent.SNAPSHOT_PARSED_HIT);
+                return snapshot.parsed.get(owner);
+            }
+        }
+        ParsedClass parsed = checkedCachedClass(owner, bytes);
+        if (snapshot != null && snapshot.bytes.containsKey(owner) && snapshot.bytes.get(owner) == bytes) {
+            snapshot.check();
+            snapshot.parsed.put(owner, parsed);
+        }
+        return parsed;
+    }
+
+    private static ParsedClass checkedCachedClass(Class<?> owner, byte[] bytes) {
+        try (WarmupTimings.Scope ignored = WarmupTimings.enter(WarmupTimings.Stage.CACHE_CHECK)) {
+            LinkedHashMap<Class<?>, SoftReference<ParsedClass>> cache = CLASS_NODE_CACHE.get();
+            SoftReference<ParsedClass> reference = cache.get(owner);
+            ParsedClass cached = reference == null ? null : reference.get();
+            if (bytes == null) {
+                if (reference != null) {
+                    cache.remove(owner);
+                    WarmupTimings.count(WarmupTimings.CacheEvent.INVALIDATED);
+                }
+                return null;
+            }
+            // 比较完整内容，不能仅凭数组身份或短哈希确认字节码版本。
+            if (cached != null && Arrays.equals(cached.bytes, bytes)) {
+                WarmupTimings.count(WarmupTimings.CacheEvent.HIT);
+                return cached;
+            }
+            WarmupTimings.count(cached == null ? WarmupTimings.CacheEvent.MISS : WarmupTimings.CacheEvent.INVALIDATED);
+            ParsedClass parsed = new ParsedClass(bytes);
+            cache.put(owner, new SoftReference<>(parsed));
+            return parsed;
+        }
+    }
+
+    private static Set<MethodSignature> methodSignatures(ParsedClass parsed) {
+        if (parsed.signatures != null) {
+            WarmupTimings.count(WarmupTimings.CacheEvent.SIGNATURE_HIT);
+            return parsed.signatures;
+        }
+        try (WarmupTimings.Scope ignored = WarmupTimings.enter(WarmupTimings.Stage.SIGNATURES)) {
+            Set<MethodSignature> signatures = new HashSet<>();
+            if (parsed.node != null) {
+                for (MethodNode method : parsed.node.methods) signatures.add(new MethodSignature(method.name, method.desc));
+            } else {
+                new ClassReader(parsed.bytes).accept(new ClassVisitor(Opcodes.ASM9) {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
+                        signatures.add(new MethodSignature(name, desc));
+                        return null;
+                    }
+                }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            }
+            parsed.signatures = Set.copyOf(signatures);
+            return parsed.signatures;
+        }
+    }
 
     /* 取该类以 EXPAND_FRAMES 解析出的 ClassNode；调用方只读，不得修改返回的节点。 */
     private static ClassNode classNode(Class<?> clazz) {
         if (clazz == null) return null;
-        LinkedHashMap<Class<?>, SoftReference<ClassNode>> cache = CLASS_NODE_CACHE.get();
-        SoftReference<ClassNode> cached = cache.get(clazz);
-        ClassNode node = cached == null ? null : cached.get();
-        if (node != null) return node;
-        byte[] bytes = classBytes(clazz);
-        if (bytes == null) return null;
-        node = new ClassNode();
-        new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
-        cache.put(clazz, new SoftReference<>(node));
-        return node;
+        ParsedClass parsed = cachedClass(clazz, classBytes(clazz));
+        if (parsed == null) return null;
+        if (parsed.node != null) {
+            WarmupTimings.count(WarmupTimings.CacheEvent.NODE_HIT);
+            return parsed.node;
+        }
+        try (WarmupTimings.Scope ignored = WarmupTimings.enter(WarmupTimings.Stage.PARSE)) {
+            ClassNode node = new ClassNode(Opcodes.ASM9);
+            new ClassReader(parsed.bytes).accept(node, ClassReader.EXPAND_FRAMES);
+            parsed.node = node;
+            return node;
+        }
     }
 
     /* 在已解析的类中按名字与描述符定位方法；找不到返回 null。 */
     private static MethodNode findMethodNode(ClassNode node, String name, String desc) {
         if (node == null) return null;
-        for (MethodNode method : node.methods) {
-            if (method.name.equals(name) && method.desc.equals(desc)) return method;
+        try (WarmupTimings.Scope ignored = WarmupTimings.enter(WarmupTimings.Stage.METHOD_LOOKUP)) {
+            for (MethodNode method : node.methods) {
+                if (method.name.equals(name) && method.desc.equals(desc)) return method;
+            }
         }
         return null;
     }
@@ -5677,6 +5773,27 @@ public final class HealthDataflowAnalyzer {
     private static final ThreadLocal<AnalysisRun> ANALYSIS_RUN = new ThreadLocal<>();
     private static final ThreadLocal<AnalysisCtx> ACTIVE_ANALYSIS = new ThreadLocal<>();
 
+    // 嵌套分析共享同一版本快照；顶层分析退出后释放，下一轮重新获取并校验。
+    private static final class AnalysisSnapshot {
+        final long revision = RuntimeBytecodeProvider.bytecodeRevision();
+        final ClassBytesProvider provider = bytesProvider;
+        final Map<Class<?>, byte[]> bytes = new HashMap<>();
+        final Map<Class<?>, ParsedClass> parsed = new HashMap<>();
+        boolean invalidated;
+
+        void check() {
+            if (revision == RuntimeBytecodeProvider.bytecodeRevision() && provider == bytesProvider) return;
+            if (!invalidated) {
+                invalidated = true;
+                bytes.clear();
+                parsed.clear();
+                WarmupTimings.count(WarmupTimings.CacheEvent.SNAPSHOT_INVALIDATED);
+            }
+            // 旧表达式和调用上下文也依赖旧版本，不能只清解析节点后继续拼接。
+            throw incompleteAnalysis();
+        }
+    }
+
     private static AnalysisDeadlineExceeded incompleteAnalysis() {
         return incompleteAnalysis(false);
     }
@@ -5699,6 +5816,7 @@ public final class HealthDataflowAnalyzer {
 
     private static final class AnalysisRun implements AutoCloseable {
         final AnalysisRun previous = ANALYSIS_RUN.get();
+        final AnalysisSnapshot snapshot = previous == null ? new AnalysisSnapshot() : previous.snapshot;
         final long deadline;
         boolean incomplete;
         boolean structuralLimited;
@@ -5719,6 +5837,7 @@ public final class HealthDataflowAnalyzer {
         }
 
         void check() {
+            snapshot.check();
             if (incomplete || System.nanoTime() > deadline) throw incompleteAnalysis();
         }
 
@@ -5817,7 +5936,10 @@ public final class HealthDataflowAnalyzer {
         ACTIVE_ANALYSIS.set(context);
         try {
             context.throwIfDeadlineExceeded();
-            return analyzer.analyze(owner, method);
+            WarmupTimings.recordFrames(method);
+            try (WarmupTimings.Scope ignored = WarmupTimings.enter(WarmupTimings.Stage.FRAMES)) {
+                return analyzer.analyze(owner, method);
+            }
         } finally {
             if (previous == null) ACTIVE_ANALYSIS.remove();
             else ACTIVE_ANALYSIS.set(previous);
@@ -5831,10 +5953,14 @@ public final class HealthDataflowAnalyzer {
         ctx.checkDeadline();
 
         String cacheKey = owner.getName().replace('.', '/') + "#" + name + "#" + desc;
+        if (seedLocals != null) WarmupTimings.count(WarmupTimings.CacheEvent.SEEDED_CALL);
         if (seedLocals != null && ctx.opaqueMethods.contains(cacheKey)) return opaqueInputs(seedLocals);
         if (seedLocals == null) {
             Expr cached = ctx.methodCache.get(cacheKey);
-            if (cached != null) return cached;
+            if (cached != null) {
+                WarmupTimings.count(WarmupTimings.CacheEvent.METHOD_RESULT_HIT);
+                return cached;
+            }
         }
 
         //环检测：覆盖顶层方法 + 跨方法环(如 getHealth↔position↔setHealth 互相调用),已在分析栈上则坍缩 Unknown

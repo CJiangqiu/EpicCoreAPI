@@ -920,6 +920,7 @@ public final class EcaSetHealthManager {
         long startNanos = System.nanoTime();
         AtomicInteger analyzed = new AtomicInteger();
         boolean enumerated = false;
+        WarmupTimings.begin();
         WARMUP_DIAGNOSTICS_SUPPRESSED.set(true);
         try {
             enumerated = EcaTransformerManager.forEachLoadedClass(clazz -> {
@@ -935,6 +936,7 @@ public final class EcaSetHealthManager {
             }
         } finally {
             WARMUP_DIAGNOSTICS_SUPPRESSED.remove();
+            WarmupTimings.finish();
         }
         // 预热耗时决定运行期惰性分析要顶多久；枚举失败(analyzed=0)也必须能看出来
         EcaLogger.info("[HealthDataflow] warmup done enumerated={} analyzed={} elapsedMs={}",
@@ -947,16 +949,24 @@ public final class EcaSetHealthManager {
         if (Player.class.isAssignableFrom(clazz)) return;
         if (Modifier.isAbstract(clazz.getModifiers())) return;
         if (DATAFLOW_TABLE.containsKey(clazz)) return;
+        long started = System.nanoTime();
+        long[] before = WarmupTimings.snapshot();
         try {
             /* 只做数据流逆向与桥接安装：二者挡的是运行期首次改血在服务器线程上的同步分析。
                外部扫描改由实体加入世界时触发，按已加载类顺序盲扫命中率过低。 */
-            resolveTree(clazz);
-            installMethodBridgeOnce(clazz);
+            try (WarmupTimings.Scope ignored = WarmupTimings.enter(WarmupTimings.Stage.ANALYSIS)) {
+                resolveTree(clazz);
+            }
+            try (WarmupTimings.Scope ignored = WarmupTimings.enter(WarmupTimings.Stage.BRIDGE)) {
+                installMethodBridgeOnce(clazz);
+            }
             analyzed.incrementAndGet();
         } catch (Throwable t) {
             if (t instanceof VirtualMachineError e) throw e;
             if (!isWarmupDiagnosticsSuppressed())
                 EcaLogger.info("[HealthDataflow] warmup analyze {} failed: {}", clazz.getName(), t.toString());
+        } finally {
+            WarmupTimings.recordTarget(clazz, started, before);
         }
     }
 
