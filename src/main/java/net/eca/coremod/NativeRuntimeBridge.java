@@ -160,6 +160,13 @@ final class NativeRuntimeBridge {
     }
 
     @SuppressWarnings("unchecked")
+    static boolean observe(Class<?>[] classes) {
+        Object operation = prepare().get("retransform");
+        // 观察轮必须保留完整 Agent 链，不能启用补救轮的转换抑制标记。
+        return operation instanceof Predicate<?> && ((Predicate<Class<?>[]>) operation).test(classes);
+    }
+
+    @SuppressWarnings("unchecked")
     static boolean retransform(Class<?>[] classes) {
         Object operation = prepare().get("retransform");
         if (!(operation instanceof Predicate<?>)) return false;

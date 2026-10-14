@@ -5,11 +5,14 @@ import net.eca.agent.AgentLoader;
 import net.eca.agent.EcaAgent;
 import net.eca.config.EcaConfiguration;
 import net.eca.util.EcaLogger;
+import net.eca.util.health.MethodProbe;
+import net.eca.util.health.ConstOverride;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -22,6 +25,7 @@ import java.util.function.Consumer;
 public final class EcaTransformerManager {
 
     private static final String TRANSFORMATION_BACKEND_KEY = "net.eca.transform.backend";
+    private static final int TRANSFORM_BATCH_SIZE = 32;
 
     public enum Backend {
         AGENT,
@@ -41,13 +45,31 @@ public final class EcaTransformerManager {
     private static final Object NATIVE_LOCK = new Object();
     private static volatile boolean nativeActive;
     private static final ThreadLocal<NativeRequest> NATIVE_REQUEST = new ThreadLocal<>();
+    private static final AtomicLong REVIEW_TRACE_ID = new AtomicLong();
     private static final Set<Class<?>> NATIVE_HEALTH_CONFIRMED = ConcurrentHashMap.newKeySet();
+    private static final Set<Class<?>> NATIVE_REPAIRED = ConcurrentHashMap.newKeySet();
+    private static final Map<Class<?>, Backend> REVIEWED_CLASSES = new ConcurrentHashMap<>();
 
     private record NativeRequest(Set<Class<?>> targets, Map<Class<?>, byte[]> outputs,
-                                 Set<Class<?>> healthConfirmed, boolean health) {}
+                                 boolean health, boolean review, long traceId,
+                                 List<ReviewTrace> trace, Set<Class<?>> repairs) {}
+    private record ReviewTrace(Class<?> type, String stage, long generation, byte[] bytes) {}
 
-    private record PendingReceipt(long epoch, long generation) {}
+    private record PendingReceipt(long epoch, long generation, byte[][] diagnosticOutput) {}
     private record ConfirmedReceipt(long epoch, Backend backend) {}
+
+    private record HealthRequestKey(Object bridge, List<ConstOverride.Site> constants,
+                                    long externalRevision, boolean nativeEnabled) {}
+    private static final class FailureState {
+        final AtomicLong externalRevision = new AtomicLong();
+        volatile HealthRequestKey failed;
+    }
+    private static final ClassValue<FailureState> HEALTH_FAILURES = new ClassValue<>() {
+        @Override
+        protected FailureState computeValue(Class<?> type) {
+            return new FailureState();
+        }
+    };
 
     public record HealthTransformResult(Backend backend, boolean confirmed) {}
 
@@ -87,24 +109,35 @@ public final class EcaTransformerManager {
         String internalName = clazz.getName().replace('.', '/');
         Object lock = HEALTH_TRANSFORM_LOCKS.computeIfAbsent(internalName, ignored -> new Object());
         synchronized (lock) {
-            return retransformHealthClassLocked(clazz, internalName, refreshTerminal);
+            FailureState state = HEALTH_FAILURES.get(clazz);
+            HealthRequestKey key = new HealthRequestKey(MethodProbe.transformRequestKey(internalName),
+                    ConstOverride.transformRequestKey(internalName), state.externalRevision.get(), nativeAllowed());
+            // 刷新转换器不等于补丁变化，同一失败请求不能随每个实体分析反复执行。
+            if (key.equals(state.failed)) return new HealthTransformResult(Backend.NONE, false);
+            HealthTransformResult result = retransformHealthClassLocked(clazz, internalName, refreshTerminal);
+            state.failed = result.confirmed() ? null : key;
+            if (!result.confirmed()) {
+                TransformAudit.report(clazz, "runtime-cache", "FAILED: identical patch requests suppressed", null);
+            }
+            return result;
         }
+    }
+
+    static void observeExternalTransform(Class<?> type) {
+        if (type == null || RuntimeBytecodeProvider.isSelfRetransform()) return;
+        FailureState state = HEALTH_FAILURES.get(type);
+        state.externalRevision.incrementAndGet();
+        state.failed = null;
     }
 
     public static boolean isHealthTransformConfirmed(Class<?> clazz) {
         if (clazz == null) return false;
-        String internalName = clazz.getName().replace('.', '/');
-        return CONFIRMED_RECEIPTS.containsKey(internalName)
-                || (nativeAllowed() && NATIVE_HEALTH_CONFIRMED.contains(clazz));
+        return REVIEWED_CLASSES.containsKey(clazz);
     }
 
     public static boolean isHealthTransformConfirmed(Class<?> clazz, Backend expectedBackend) {
         if (clazz == null || expectedBackend == null) return false;
-        if (expectedBackend == Backend.JVMTI) {
-            return nativeAllowed() && NATIVE_HEALTH_CONFIRMED.contains(clazz);
-        }
-        ConfirmedReceipt receipt = CONFIRMED_RECEIPTS.get(clazz.getName().replace('.', '/'));
-        return receipt != null && receipt.backend() == expectedBackend;
+        return REVIEWED_CLASSES.get(clazz) == expectedBackend;
     }
 
     static void invalidateHealthTransformReceipt(String internalName) {
@@ -112,29 +145,28 @@ public final class EcaTransformerManager {
         CONFIRMED_RECEIPTS.remove(internalName.replace('.', '/'));
         String normalized = internalName.replace('.', '/');
         NATIVE_HEALTH_CONFIRMED.removeIf(type -> type.getName().replace('.', '/').equals(normalized));
+        REVIEWED_CLASSES.keySet().removeIf(type -> type.getName().replace('.', '/').equals(normalized));
     }
 
     private static HealthTransformResult retransformHealthClassLocked(
             Class<?> clazz, String internalName, boolean refreshTerminal) {
         Instrumentation inst = EcaAgent.getInstrumentation();
+        boolean agentRequested = false;
         if (inst != null && isModifiable(inst, clazz)) {
             long generation = ensureTerminalAgentTransformers(inst, refreshTerminal);
             if (generation > 0L) {
-                long epoch = beginReceipt(internalName, generation);
+                long epoch = beginReceipt(clazz, generation);
                 boolean requested = tryAgentRetransform(clazz);
-                boolean confirmed = requested && receiptConfirmed(internalName, epoch);
+                agentRequested = requested;
+                reportAgentOutput(clazz, epoch, requested);
                 endReceipt(internalName, epoch);
-                if (confirmed) {
-                    backend = Backend.AGENT;
-                    return new HealthTransformResult(Backend.AGENT, true);
-                }
-                EarlyLogWriter.info("[EcaTransformerManager] Agent health transform not confirmed for "
-                        + clazz.getName());
             }
         }
 
-        if (requestNative(List.of(clazz), true) && NATIVE_HEALTH_CONFIRMED.contains(clazz)) {
-            return new HealthTransformResult(Backend.JVMTI, true);
+        if (reviewClasses(List.of(clazz), "runtime-review",
+                agentRequested ? Backend.AGENT : Backend.JVMTI).contains(clazz)) {
+            backend = REVIEWED_CLASSES.get(clazz);
+            return new HealthTransformResult(backend, true);
         }
         return new HealthTransformResult(Backend.NONE, false);
     }
@@ -249,7 +281,7 @@ public final class EcaTransformerManager {
         for (Class<?> type : targets) {
             if (isModifiable(inst, type)) agentTargets.add(type);
         }
-        int batchSize = 32;
+        int batchSize = TRANSFORM_BATCH_SIZE;
         for (int start = 0; start < agentTargets.size(); start += batchSize) {
             int end = Math.min(start + batchSize, agentTargets.size());
             Class<?>[] batch = agentTargets.subList(start, end).toArray(new Class<?>[0]);
@@ -258,23 +290,19 @@ public final class EcaTransformerManager {
                 if (receipts[i]) agentConfirmed.add(batch[i]);
             }
         }
-        // 复查只读取首轮结果；后续请求若使回执失效，该类也必须交给原生补救。
-        List<Class<?>> fallback = new ArrayList<>();
-        for (Class<?> type : targets) {
-            if (!agentConfirmed.contains(type)
-                    || (classifyEntity(type) != 0 && !isHealthTransformConfirmed(type, Backend.AGENT))) {
-                fallback.add(type);
-            }
-        }
-        int confirmed = targets.size() - fallback.size();
-        if (confirmed > 0) backend = isCoremodBackend() ? Backend.COREMOD : Backend.AGENT;
         EarlyLogWriter.info("[EcaTransformerManager] Agent first pass targets=" + targets.size()
-                + ", confirmed=" + confirmed + ", fallback=" + fallback.size()
+                + ", localReceipts=" + agentConfirmed.size()
                 + ", elapsedMs=" + (System.nanoTime() - started) / 1_000_000L);
-        int nativeConfirmed = applyNativeLoadCompleteFallback(fallback);
+        // 回执不能代表后续链输出；复查回调只补救当前类缺失的 Hook。
+        Set<Class<?>> reviewed = reviewClasses(targets, "load-complete-review", Backend.AGENT);
+        int nativeConfirmed = (int) reviewed.stream()
+                .filter(type -> REVIEWED_CLASSES.get(type) == Backend.JVMTI).count();
+        int confirmed = reviewed.size() - nativeConfirmed;
+        if (!reviewed.isEmpty()) backend = nativeConfirmed > 0 ? Backend.JVMTI
+                : isCoremodBackend() ? Backend.COREMOD : Backend.AGENT;
         EarlyLogWriter.info("[EcaTransformerManager] Load-complete review targets=" + targets.size()
                 + ", agentConfirmed=" + confirmed + ", nativeConfirmed=" + nativeConfirmed
-                + ", unresolved=" + (fallback.size() - nativeConfirmed));
+                + ", unresolved=" + (targets.size() - reviewed.size()));
         if (confirmed + nativeConfirmed == 0 && !targets.isEmpty()) {
             backend = Backend.NONE;
             logAllFailed();
@@ -300,7 +328,7 @@ public final class EcaTransformerManager {
         try {
             for (int i = 0; i < batch.length; i++) {
                 names[i] = batch[i].getName().replace('.', '/');
-                if (classifyEntity(batch[i]) != 0) epochs[i] = beginReceipt(names[i], generation);
+                if (classifyEntity(batch[i]) != 0) epochs[i] = beginReceipt(batch[i], generation);
             }
             EcaClassTransformer.retransformOwnedClasses(inst, batch);
             applied = true;
@@ -313,6 +341,7 @@ public final class EcaTransformerManager {
         } finally {
             for (int i = 0; i < batch.length; i++) {
                 if (epochs[i] == 0L) continue;
+                reportAgentOutput(batch[i], epochs[i], applied);
                 // 回调验证通过不代表 JVM 已接受整批转换，失败批次的临时确认必须作废。
                 if (!applied) {
                     long epoch = epochs[i];
@@ -323,6 +352,178 @@ public final class EcaTransformerManager {
             }
         }
         return confirmed;
+    }
+
+    private static Set<Class<?>> reviewClasses(List<Class<?>> targets, String phase, Backend origin) {
+        Set<Class<?>> passed = new HashSet<>();
+        if (targets.isEmpty()) return passed;
+        long started = System.nanoTime();
+        for (Class<?> type : targets) {
+            REVIEWED_CLASSES.remove(type);
+            NATIVE_HEALTH_CONFIRMED.remove(type);
+        }
+        if (!ensureNativeActive()) {
+            for (Class<?> type : targets) {
+                REVIEWED_CLASSES.remove(type);
+                TransformAudit.report(type, phase, "UNVERIFIED: independent observer unavailable", null);
+            }
+            return passed;
+        }
+        Map<Class<?>, byte[]> observed = new HashMap<>();
+        try {
+            EcaClassTransformer.prepareNativeTargets(targets);
+        } catch (Throwable failure) {
+            EarlyLogWriter.info("[TransformAudit] Review preparation failed: " + failure.getClass().getSimpleName());
+            return passed;
+        }
+        collectNativeBatches(targets, true, true, phase, observed);
+        Map<Class<?>, Boolean> localValidity = new HashMap<>();
+        for (Class<?> type : targets) localValidity.put(type, verifyOutput(type, observed.get(type)));
+        int nativeConfirmed = 0;
+        // 先收齐所有输出，再检查继承关系，避免子类顺序影响验收。
+        for (Class<?> type : targets) {
+            byte[] bytes = observed.get(type);
+            boolean valid = localValidity.get(type);
+            boolean nativeRequired = origin == Backend.JVMTI || NATIVE_REPAIRED.contains(type);
+            for (Class<?> parent = type.getSuperclass(); valid && parent != null;
+                 parent = parent.getSuperclass()) {
+                if (classifyEntity(parent) == 0) continue;
+                valid = localValidity.containsKey(parent) ? localValidity.get(parent)
+                        : REVIEWED_CLASSES.containsKey(parent);
+                nativeRequired |= NATIVE_REPAIRED.contains(parent)
+                        || REVIEWED_CLASSES.get(parent) == Backend.JVMTI;
+            }
+            if (valid) {
+                passed.add(type);
+                REVIEWED_CLASSES.put(type, nativeRequired ? Backend.JVMTI : origin);
+                if (nativeRequired) {
+                    NATIVE_HEALTH_CONFIRMED.add(type);
+                    nativeConfirmed++;
+                }
+            }
+            TransformAudit.report(type, phase, valid ? "PASS"
+                    : bytes == null ? "UNVERIFIED: no accepted output" : "FAIL: hooks or inherited contract", bytes);
+        }
+        EarlyLogWriter.info("[TransformAudit] phase=" + phase + " targets=" + targets.size()
+                + " passed=" + passed.size() + " agentPreserved=" + (passed.size() - nativeConfirmed)
+                + " nativeConfirmed=" + nativeConfirmed
+                + " unresolved=" + (targets.size() - passed.size())
+                + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000L);
+        return passed;
+    }
+
+    private static void collectNativeBatches(List<? extends Class<?>> targets, boolean health,
+                                             boolean review, String phase,
+                                             Map<Class<?>, byte[]> acceptedOutputs) {
+        List<Class<?>> modifiable = new ArrayList<>();
+        for (Class<?> type : targets) {
+            if (type != null && NativeRuntimeBridge.isModifiable(type)) modifiable.add(type);
+        }
+        long started = System.nanoTime();
+        EarlyLogWriter.info("[TransformAudit] phase=" + phase + " begin targets=" + targets.size()
+                + " modifiable=" + modifiable.size() + " batchSize=" + TRANSFORM_BATCH_SIZE);
+        for (int start = 0; start < modifiable.size(); start += TRANSFORM_BATCH_SIZE) {
+            int end = Math.min(start + TRANSFORM_BATCH_SIZE, modifiable.size());
+            long batchStarted = System.nanoTime();
+            collectNativeBatch(modifiable.subList(start, end), health, review, acceptedOutputs);
+            EarlyLogWriter.info("[TransformAudit] phase=" + phase + " progress=" + end + "/"
+                    + modifiable.size() + " accepted=" + acceptedOutputs.size()
+                    + " batchMs=" + (System.nanoTime() - batchStarted) / 1_000_000L
+                    + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000L);
+        }
+    }
+
+    private static void collectNativeBatch(List<Class<?>> batch, boolean health, boolean review,
+                                           Map<Class<?>, byte[]> acceptedOutputs) {
+        if (batch.isEmpty()) return;
+        NativeRequest request = new NativeRequest(Set.copyOf(batch), new HashMap<>(), health, review,
+                review ? REVIEW_TRACE_ID.incrementAndGet() : 0L, new ArrayList<>(), new HashSet<>());
+        NATIVE_REQUEST.set(request);
+        RuntimeBytecodeProvider.beginSelfRetransform();
+        boolean accepted = false;
+        try {
+            Class<?>[] types = batch.toArray(Class<?>[]::new);
+            accepted = review ? NativeRuntimeBridge.observe(types) : NativeRuntimeBridge.retransform(types);
+        } catch (Throwable failure) {
+            EarlyLogWriter.info("[TransformAudit] Batch request failed: " + failure.getClass().getSimpleName());
+        } finally {
+            RuntimeBytecodeProvider.endSelfRetransform();
+            NATIVE_REQUEST.remove();
+        }
+        reportReviewTrace(request, accepted);
+        if (accepted) {
+            acceptedOutputs.putAll(request.outputs());
+            for (Class<?> type : request.repairs()) {
+                byte[] output = request.outputs().get(type);
+                if (output == null) continue;
+                NATIVE_REPAIRED.add(type);
+                RuntimeBytecodeProvider.captureNativeOutput(type.getName().replace('.', '/'), output);
+            }
+            if (review && !request.repairs().isEmpty()) {
+                EarlyLogWriter.info("[TransformAudit] reviewRequest=" + request.traceId()
+                        + " acceptedRepairs=" + request.repairs().size());
+            }
+        } else if (batch.size() > 1) {
+            // 整批被 JVM 拒绝时丢弃临时回执，二分隔离故障类。
+            EarlyLogWriter.info("[TransformAudit] Splitting rejected batch size=" + batch.size());
+            int middle = batch.size() / 2;
+            collectNativeBatch(batch.subList(0, middle), health, review, acceptedOutputs);
+            collectNativeBatch(batch.subList(middle, batch.size()), health, review, acceptedOutputs);
+        } else {
+            Class<?> type = batch.get(0);
+            TransformAudit.reportRejected(type, request.outputs().get(type));
+        }
+    }
+
+    // 回调只记录三个基础类的快照，验证和日志输出放在请求返回之后。
+    private static void captureReviewTrace(Class<?> type, String stage, long generation, byte[] bytes) {
+        NativeRequest request = NATIVE_REQUEST.get();
+        if (request == null || !request.review() || !TransformAudit.isCoreTarget(type)
+                || !request.targets().contains(type) || bytes == null) return;
+        request.trace().add(new ReviewTrace(type, stage, generation, bytes.clone()));
+    }
+
+    private static void reportReviewTrace(NativeRequest request, boolean accepted) {
+        if (!request.review()) return;
+        try {
+            Map<Class<?>, byte[]> previous = new HashMap<>();
+            int sequence = 0;
+            for (ReviewTrace trace : request.trace()) {
+                byte[] before = previous.put(trace.type(), trace.bytes());
+                EarlyLogWriter.info("[TransformAudit] reviewRequest=" + request.traceId()
+                        + " sequence=" + ++sequence + " target=" + trace.type().getName()
+                        + " stage=" + trace.stage() + " generation=" + trace.generation()
+                        + " requestAccepted=" + accepted + " localHooks="
+                        + (verifyOutput(trace.type(), trace.bytes()) ? "PASS" : "FAIL")
+                        + " bytes=" + trace.bytes().length + " changedFromPrevious="
+                        + (before == null ? "FIRST" : Boolean.toString(!Arrays.equals(before, trace.bytes()))));
+            }
+            for (Class<?> type : request.targets()) {
+                if (!TransformAudit.isCoreTarget(type)) continue;
+                long javaCallbacks = request.trace().stream().filter(trace -> trace.type() == type
+                        && trace.stage().startsWith("java-")
+                        && !trace.stage().equals("java-normalizer-output")).count();
+                EarlyLogWriter.info("[TransformAudit] reviewRequest=" + request.traceId()
+                        + " target=" + type.getName() + " javaCallbacks=" + javaCallbacks
+                        + " nativeOutput=" + request.outputs().containsKey(type)
+                        + " requestAccepted=" + accepted);
+            }
+        } catch (RuntimeException failure) {
+            EarlyLogWriter.info("[TransformAudit] Review trace failed: " + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static boolean verifyOutput(Class<?> type, byte[] bytes) {
+        if (bytes == null) return false;
+        try {
+            String name = type.getName().replace('.', '/');
+            return ContainerReplacementTransformer.isTarget(name)
+                    ? ContainerReplacementTransformer.verify(name, bytes)
+                    : EcaClassTransformer.verifyNormalizedHealthTail(name, bytes);
+        } catch (Throwable failure) {
+            EarlyLogWriter.info("[TransformAudit] Bytecode verification failed: " + failure.getClass().getSimpleName());
+            return false;
+        }
     }
 
     private static Instrumentation acquireInstrumentation() {
@@ -372,15 +573,24 @@ public final class EcaTransformerManager {
                     @Override
                     public byte[] transform(ClassLoader loader, String name, Class<?> beingRedefined,
                                             ProtectionDomain domain, byte[] bytes) {
-                        if (NativeRuntimeBridge.isTransforming()) return null;
-                        return EcaClassTransformer.normalizeHealthTail(name, bytes);
+                        boolean suppressed = NativeRuntimeBridge.isTransforming();
+                        captureReviewTrace(beingRedefined, suppressed ? "java-normalizer-skipped"
+                                : "java-normalizer-input", generation, bytes);
+                        if (suppressed) return null;
+                        byte[] output = EcaClassTransformer.normalizeHealthTail(name, bytes);
+                        captureReviewTrace(beingRedefined, "java-normalizer-output", generation,
+                                output == null ? bytes : output);
+                        return output;
                     }
                 }, true);
                 inst.addTransformer(new ClassFileTransformer() {
                     @Override
                     public byte[] transform(ClassLoader loader, String name, Class<?> beingRedefined,
                                             ProtectionDomain domain, byte[] bytes) {
-                        if (NativeRuntimeBridge.isTransforming()) return null;
+                        boolean suppressed = NativeRuntimeBridge.isTransforming();
+                        captureReviewTrace(beingRedefined, suppressed ? "java-receipt-skipped"
+                                : "java-receipt", generation, bytes);
+                        if (suppressed) return null;
                         confirmReceipt(name, bytes, generation);
                         return null;
                     }
@@ -397,9 +607,11 @@ public final class EcaTransformerManager {
         }
     }
 
-    private static long beginReceipt(String internalName, long generation) {
+    private static long beginReceipt(Class<?> type, long generation) {
+        String internalName = type.getName().replace('.', '/');
         long epoch = TRANSFORM_EPOCH.incrementAndGet();
-        PENDING_RECEIPTS.put(internalName, new PendingReceipt(epoch, generation));
+        PENDING_RECEIPTS.put(internalName, new PendingReceipt(epoch, generation,
+                TransformAudit.isCoreTarget(type) ? new byte[1][] : null));
         CONFIRMED_RECEIPTS.remove(internalName);
         return epoch;
     }
@@ -409,6 +621,7 @@ public final class EcaTransformerManager {
         String normalized = internalName.replace('.', '/');
         PendingReceipt pending = PENDING_RECEIPTS.get(normalized);
         if (pending == null || pending.generation() != generation) return;
+        if (pending.diagnosticOutput() != null) pending.diagnosticOutput()[0] = bytes.clone();
         if (EcaClassTransformer.verifyNormalizedHealthTail(normalized, bytes)) {
             CONFIRMED_RECEIPTS.put(normalized, new ConfirmedReceipt(pending.epoch(), Backend.AGENT));
         }
@@ -417,6 +630,16 @@ public final class EcaTransformerManager {
     private static boolean receiptConfirmed(String internalName, long epoch) {
         ConfirmedReceipt receipt = CONFIRMED_RECEIPTS.get(internalName);
         return receipt != null && receipt.epoch() == epoch;
+    }
+
+    private static void reportAgentOutput(Class<?> type, long epoch, boolean accepted) {
+        if (!TransformAudit.isCoreTarget(type)) return;
+        PendingReceipt pending = PENDING_RECEIPTS.get(type.getName().replace('.', '/'));
+        if (pending == null || pending.epoch() != epoch || pending.diagnosticOutput() == null) return;
+        byte[] output = pending.diagnosticOutput()[0];
+        TransformAudit.reportStage(type, "agent-output", !accepted ? "REQUEST_REJECTED"
+                : verifyOutput(type, output) ? "REQUEST_ACCEPTED: local hooks PASS"
+                : "REQUEST_ACCEPTED: local hooks FAIL", output);
     }
 
     private static void endReceipt(String internalName, long epoch) {
@@ -475,6 +698,7 @@ public final class EcaTransformerManager {
                 if (nativeActive) NativeRuntimeBridge.deactivate();
                 nativeActive = false;
                 NATIVE_HEALTH_CONFIRMED.clear();
+                REVIEWED_CLASSES.clear();
                 return false;
             }
             if (nativeActive) return true;
@@ -486,6 +710,12 @@ public final class EcaTransformerManager {
                     public byte[] transform(ClassLoader loader, String name, Class<?> type,
                                             ProtectionDomain domain, byte[] bytes) {
                         NativeRequest request = NATIVE_REQUEST.get();
+                        if (request == null && type != null && NATIVE_REPAIRED.contains(type)) {
+                            String internalName = type.getName().replace('.', '/');
+                            return ContainerReplacementTransformer.isTarget(internalName)
+                                    ? ContainerReplacementTransformer.transform(internalName, bytes)
+                                    : EcaClassTransformer.normalizeHealthTail(internalName, bytes);
+                        }
                         if (type == null && nativeOwnsLoads) {
                             RuntimeBytecodeProvider.captureAnalysisInput(name, bytes);
                             // Coremod already handles protected base classes and containers at definition time.
@@ -493,8 +723,18 @@ public final class EcaTransformerManager {
                             return EcaClassTransformer.transformNative(name, null, bytes, false);
                         }
                         if (request == null || type == null || !request.targets().contains(type)) return null;
+                        captureReviewTrace(type, "native-input", 0L, bytes);
                         String internalName = type.getName().replace('.', '/');
-                        return EcaClassTransformer.transformNative(internalName, type, bytes, request.health());
+                        // 父类契约在整批接受后统一检查，不能据此重写本类。
+                        if (request.review() && verifyOutput(type, bytes)) return null;
+                        TransformAudit.captureNativeInput(type, bytes);
+                        try {
+                            byte[] output = EcaClassTransformer.transformNative(internalName, type, bytes, request.health());
+                            if (output != null) request.repairs().add(type);
+                            return output;
+                        } finally {
+                            TransformAudit.endNativeCapture();
+                        }
                     }
                 }, new ClassFileTransformer() {
                     @Override
@@ -506,16 +746,14 @@ public final class EcaTransformerManager {
                             return null;
                         }
                         if (request == null && type != null) {
-                            // Leave fresh Agent receipts intact, but retire an older native confirmation.
+                            observeExternalTransform(type);
+                            REVIEWED_CLASSES.remove(type);
                             NATIVE_HEALTH_CONFIRMED.remove(type);
                             return null;
                         }
                         if (request == null || type == null || !request.targets().contains(type)) return null;
-                        String internalName = type.getName().replace('.', '/');
+                        captureReviewTrace(type, "native-observer", 0L, bytes);
                         request.outputs().put(type, bytes.clone());
-                        if (request.health() && EcaClassTransformer.verifyNormalizedHealthTail(internalName, bytes)) {
-                            request.healthConfirmed().add(type);
-                        }
                         return null;
                     }
                 });
@@ -535,22 +773,19 @@ public final class EcaTransformerManager {
             if (targets.isEmpty()) return false;
             EcaClassTransformer.prepareNativeTargets(targets);
             boolean anyConfirmed = false;
+            Map<Class<?>, byte[]> outputs = new HashMap<>();
+            collectNativeBatches(targets, health, false, "repair", outputs);
             for (Class<?> type : targets) {
-                NativeRequest request = new NativeRequest(Set.of(type), new HashMap<>(), new HashSet<>(), health);
-                NATIVE_REQUEST.set(request);
-                RuntimeBytecodeProvider.beginSelfRetransform();
-                boolean applied;
-                try {
-                    applied = NativeRuntimeBridge.retransform(new Class<?>[]{type});
-                } finally {
-                    RuntimeBytecodeProvider.endSelfRetransform();
-                    NATIVE_REQUEST.remove();
-                }
-                // Callback output is provisional until RetransformClasses also reports success.
-                if (applied && request.outputs().containsKey(type)) {
-                    RuntimeBytecodeProvider.captureNativeOutput(type.getName().replace('.', '/'),
-                            request.outputs().get(type));
-                    if (!health || request.healthConfirmed().contains(type)) {
+                byte[] output = outputs.get(type);
+                if (output != null) {
+                    if (TransformAudit.isCoreTarget(type)) {
+                        TransformAudit.reportStage(type, "repair-output",
+                                verifyOutput(type, output) ? "REQUEST_ACCEPTED: local hooks PASS"
+                                        : "REQUEST_ACCEPTED: local hooks FAIL", output);
+                    }
+                    NATIVE_REPAIRED.add(type);
+                    RuntimeBytecodeProvider.captureNativeOutput(type.getName().replace('.', '/'), output);
+                    if (!health || verifyOutput(type, output)) {
                         if (health) NATIVE_HEALTH_CONFIRMED.add(type);
                         anyConfirmed = true;
                     }
@@ -602,16 +837,11 @@ public final class EcaTransformerManager {
     }
 
     private static int applyNativeLoadCompleteFallback(List<Class<?>> targets) {
-        int confirmed = 0;
+        Set<Class<?>> reviewed = reviewClasses(targets, "native-review", Backend.JVMTI);
         for (Class<?> type : targets) {
-            if (requestNative(List.of(type), classifyEntity(type) != 0)) {
-                confirmed++;
-            } else {
-                EarlyLogWriter.info("[EcaTransformerManager] Load-complete transform unresolved for "
-                        + type.getName());
-            }
+            if (!reviewed.contains(type)) REVIEWED_CLASSES.remove(type);
         }
-        return confirmed;
+        return reviewed.size();
     }
 
     private static boolean forEachNativeClass(Consumer<Class<?>> consumer) {

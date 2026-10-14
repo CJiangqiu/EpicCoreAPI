@@ -31,7 +31,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.ProtectionDomain;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -116,16 +118,19 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         boolean changed = false;
         try {
             byte[] normalized = normalizeHealthHooks(className, result);
+            TransformAudit.captureNativeStage(className, "normalize-hooks", normalized);
             if (normalized != null) {
                 result = normalized;
                 changed = true;
             }
             byte[] bridgeResult = MethodProbe.transform(className, result);
+            TransformAudit.captureNativeStage(className, "normalize-bridge", bridgeResult);
             if (bridgeResult != null) {
                 result = bridgeResult;
                 changed = true;
             }
             byte[] constantResult = ConstOverride.transform(className, result);
+            TransformAudit.captureNativeStage(className, "normalize-constants", constantResult);
             if (constantResult != null) {
                 result = constantResult;
                 changed = true;
@@ -187,9 +192,9 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
     /* 注册 Transformer 并重转换已加载的类。注册本身同样必须推迟到 mod 并行构造结束，
        否则首次类定义会在持有 Mixin 锁时进入此 Transformer。 */
-    public static void init() {
-        if (EcaConfiguration.getForceCompatibilityModeSafely()) return;
-        EcaTransformerManager.applyLoadCompleteTransforms();
+    public static boolean init() {
+        if (EcaConfiguration.getForceCompatibilityModeSafely()) return false;
+        return EcaTransformerManager.applyLoadCompleteTransforms();
     }
 
     static void retransformOwnedClasses(Instrumentation inst, Class<?>[] classes) throws UnmodifiableClassException {
@@ -238,9 +243,12 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         TRANSFORMING.set(true);
         try {
             byte[] transformed = SINGLETON.transformInternal(name, type, bytes);
+            TransformAudit.captureNativeStage(name, "native-internal", transformed);
             if (!health) return transformed;
             byte[] tail = normalizeHealthTail(name, transformed == null ? bytes : transformed);
-            return tail == null ? transformed : tail;
+            byte[] output = tail == null ? transformed : tail;
+            TransformAudit.captureNativeStage(name, "native-return", output == null ? bytes : output);
+            return output;
         } finally {
             if (previous) OWN_RETRANSFORM.set(true);
             else OWN_RETRANSFORM.remove();
@@ -278,6 +286,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             NativeRuntimeBridge.class,
             EcaTransformerManager.class,
             RuntimeBytecodeProvider.class,
+            TransformAudit.class,
             ContainerReplacementTransformer.class,
             TransformerWhitelist.class,
             AllReturnToggle.class,
@@ -463,7 +472,7 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         cr.accept(scanner, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
         if (!scanner.hasAnyTarget) return null;
 
-        // ASM 转换（复用同一个 ClassReader）
+        // 中间输出只包含需要注入的方法，避免非目标方法参与栈帧重算。
         ClassWriter cw = new SafeClassWriter(cr, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
         HookInjector injector = new HookInjector(cw, isLivingEntity, scanner.hookedMethods,
                 scanner.resultHookedMethods);
@@ -473,7 +482,31 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
         transformCount++;
         EarlyLogWriter.info("[EcaClassTransformer] Transformed: " + className + " (total: " + transformCount + ")");
-        return cw.toByteArray();
+        return mergeComputedHookMethods(cr, cw.toByteArray());
+    }
+
+    private static byte[] mergeComputedHookMethods(ClassReader original, byte[] computed) {
+        ClassNode patched = new ClassNode(Opcodes.ASM9);
+        new ClassReader(computed).accept(patched, ClassReader.EXPAND_FRAMES);
+        Map<String, MethodNode> replacements = new HashMap<>();
+        for (MethodNode method : patched.methods) {
+            replacements.put(methodKey(method.name, method.desc), method);
+        }
+        // 合并时禁用重算，即使 ASM 未走直接复制路径也保留输入帧。
+        SafeClassWriter writer = new SafeClassWriter(original, 0);
+        original.accept(new ClassVisitor(Opcodes.ASM9, writer) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String desc,
+                                             String signature, String[] exceptions) {
+                MethodNode replacement = replacements.get(methodKey(name, desc));
+                if (replacement != null) {
+                    replacement.accept(writer);
+                    return null;
+                }
+                return super.visitMethod(access, name, desc, signature, exceptions);
+            }
+        }, ClassReader.EXPAND_FRAMES);
+        return writer.toByteArray();
     }
 
     // ==================== 快速方法扫描 ====================
@@ -533,9 +566,13 @@ public final class EcaClassTransformer implements ClassFileTransformer {
 
         @Override
         public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
-            MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-            if ((access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) return mv;
+            if ((access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0
+                    || expectedHookOwner(isLivingEntity, name, desc) == null) return null;
             String key = methodKey(name, desc);
+            boolean needsResult = isLivingEntity && name.equals(GET_HEALTH) && desc.equals("()F")
+                    && !resultHookedMethods.contains(key);
+            if (hookedMethods.contains(key) && !needsResult) return null;
+            MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
 
             if (isLivingEntity) {
                 if (name.equals(GET_HEALTH) && desc.equals("()F")) {
@@ -609,11 +646,12 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         ClassReader reader = new ClassReader(bytes);
         ClassNode node = new ClassNode(Opcodes.ASM9);
         reader.accept(node, ClassReader.EXPAND_FRAMES);
-        boolean changed = false;
+        Map<String, MethodNode> changedMethods = new HashMap<>();
         for (MethodNode method : node.methods) {
             String owner = expectedHookOwner(living, method.name, method.desc);
             String hook = expectedHookName(living, method.name, method.desc);
             if (owner == null || (method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) continue;
+            boolean changed = false;
             if (!hasCanonicalHead(method, owner, hook)) {
                 injectCanonicalHead(method, owner, hook, living);
                 changed = true;
@@ -621,10 +659,23 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             if (living && GET_HEALTH.equals(method.name) && "()F".equals(method.desc)) {
                 changed |= finalizeFloatReturns(method);
             }
+            if (changed) changedMethods.put(methodKey(method.name, method.desc), method);
         }
-        if (!changed) return null;
+        if (changedMethods.isEmpty()) return null;
         SafeClassWriter writer = new SafeClassWriter(reader, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-        node.accept(writer);
+        reader.accept(new ClassVisitor(Opcodes.ASM9, writer) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String desc,
+                                             String signature, String[] exceptions) {
+                MethodNode changed = changedMethods.get(methodKey(name, desc));
+                if (changed != null) {
+                    changed.accept(writer);
+                    return null;
+                }
+                // 直接返回原 reader 对应的 writer，保留未修改方法的字节码和栈帧。
+                return super.visitMethod(access, name, desc, signature, exceptions);
+            }
+        }, ClassReader.EXPAND_FRAMES);
         transformCount++;
         return writer.toByteArray();
     }
@@ -635,6 +686,13 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         if (!living && !entity) return true;
         ClassNode node = new ClassNode(Opcodes.ASM9);
         new ClassReader(bytes).accept(node, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+        // 基类的方法缺失不能按“继承而未覆写”放行。
+        Set<String> declared = ConcurrentHashMap.newKeySet();
+        for (MethodNode method : node.methods) declared.add(methodKey(method.name, method.desc));
+        if (LIVING_ENTITY.equals(className) && !declared.containsAll(Set.of(
+                methodKey(GET_HEALTH, "()F"), methodKey(GET_MAX_HEALTH, "()F"),
+                methodKey(IS_DEAD_OR_DYING, "()Z"), methodKey(IS_ALIVE, "()Z")))) return false;
+        if (ENTITY.equals(className) && !declared.contains(methodKey(IS_REMOVED, "()Z"))) return false;
         boolean requested = false;
         for (MethodNode method : node.methods) {
             String owner = expectedHookOwner(living, method.name, method.desc);
@@ -660,7 +718,8 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         if (!(cursor instanceof TypeInsnNode type) || cursor.getOpcode() != Opcodes.CHECKCAST
                 || !castType.equals(type.desc)) return false;
         cursor = nextCode(cursor.getNext());
-        if (!isCall(cursor, owner, hook)) return false;
+        if (!isCall(cursor, owner, hook)
+                || !((MethodInsnNode) cursor).desc.equals(expectedHookDescriptor(owner, hook))) return false;
         cursor = nextCode(cursor.getNext());
 
         if (method.desc.endsWith("F")) {
@@ -670,7 +729,8 @@ public final class EcaClassTransformer implements ClassFileTransformer {
             cursor = nextCode(cursor.getNext());
             if (cursor == null || cursor.getOpcode() != Opcodes.FCMPL) return false;
             cursor = nextCode(cursor.getNext());
-            if (!(cursor instanceof JumpInsnNode) || cursor.getOpcode() != Opcodes.IFLT) return false;
+            if (!(cursor instanceof JumpInsnNode jump) || cursor.getOpcode() != Opcodes.IFLT
+                    || nextCode(jump.label) == null || nextCode(jump.label).getOpcode() != Opcodes.POP) return false;
             cursor = nextCode(cursor.getNext());
             if (GET_HEALTH.equals(method.name)) {
                 if (!isVar(cursor, Opcodes.ALOAD, 0)) return false;
@@ -690,7 +750,8 @@ public final class EcaClassTransformer implements ClassFileTransformer {
         cursor = nextCode(cursor.getNext());
         if (cursor == null || cursor.getOpcode() != Opcodes.ICONST_M1) return false;
         cursor = nextCode(cursor.getNext());
-        if (!(cursor instanceof JumpInsnNode) || cursor.getOpcode() != Opcodes.IF_ICMPEQ) return false;
+        if (!(cursor instanceof JumpInsnNode jump) || cursor.getOpcode() != Opcodes.IF_ICMPEQ
+                || nextCode(jump.label) == null || nextCode(jump.label).getOpcode() != Opcodes.POP) return false;
         cursor = nextCode(cursor.getNext());
         return cursor != null && cursor.getOpcode() == Opcodes.IRETURN;
     }
@@ -750,7 +811,13 @@ public final class EcaClassTransformer implements ClassFileTransformer {
     }
 
     private static boolean isFinalHealthResult(AbstractInsnNode instruction) {
-        return isCall(instruction, LIVING_HOOK, "processGetHealthResult");
+        if (!isCall(instruction, LIVING_HOOK, "processGetHealthResult")
+                || !((MethodInsnNode) instruction).desc.equals("(Lnet/minecraft/world/entity/LivingEntity;F)F")) return false;
+        AbstractInsnNode swap = previousCode(instruction);
+        if (swap == null || swap.getOpcode() != Opcodes.SWAP) return false;
+        AbstractInsnNode cast = previousCode(swap);
+        return cast instanceof TypeInsnNode type && cast.getOpcode() == Opcodes.CHECKCAST
+                && LIVING_ENTITY.equals(type.desc) && isVar(previousCode(cast), Opcodes.ALOAD, 0);
     }
 
     private static boolean isCall(AbstractInsnNode instruction, String owner, String name) {

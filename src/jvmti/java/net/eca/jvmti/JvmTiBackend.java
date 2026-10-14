@@ -54,7 +54,6 @@ public final class JvmTiBackend {
     private final Consumer<String> logger;
     private final Set<Class<?>> collected = Collections.newSetFromMap(new WeakHashMap<>());
     private final ThreadLocal<Boolean> inCallback = ThreadLocal.withInitial(() -> false);
-    private final ThreadLocal<Boolean> requesting = ThreadLocal.withInitial(() -> false);
     // Registered native callback pointers must always retain their Java callback objects.
     private final PrepareCallback prepareCallback = this::onClassPrepare;
     private final LoadCallback loadCallback = this::onClassFileLoad;
@@ -217,13 +216,8 @@ public final class JvmTiBackend {
                 if (references[i] == null) return false;
                 array.setPointer((long) i * Native.POINTER_SIZE, references[i]);
             }
-            requesting.set(true);
-            try {
-                return ok(function(transformEnv, RETRANSFORM_CLASSES).invokeInt(
-                        new Object[]{transformEnv, types.length, array}), "RetransformClasses");
-            } finally {
-                requesting.remove();
-            }
+            return ok(function(transformEnv, RETRANSFORM_CLASSES).invokeInt(
+                    new Object[]{transformEnv, types.length, array}), "RetransformClasses");
         } catch (Throwable t) {
             log("Retransformation failed: " + t);
             return false;
@@ -259,9 +253,8 @@ public final class JvmTiBackend {
             Class<?> type = javaObject(jni, redefined, Class.class);
             ClassLoader classLoader = javaObject(jni, loader, ClassLoader.class);
             byte[] input = data.getByteArray(0, length);
-            // Other agents' retransforms are observed for invalidation without applying ECA changes.
-            byte[] output = redefined == null || requesting.get()
-                    ? transformer.transform(classLoader, name, type, null, input) : null;
+            // 是否保留既有补救由调度器按类裁决，不能因请求来自其他 Agent 就撤掉保护。
+            byte[] output = transformer.transform(classLoader, name, type, null, input);
             if (output != null) {
                 PointerByReference destination = new PointerByReference();
                 if (!ok(function(env, ALLOCATE).invokeInt(new Object[]{

@@ -93,9 +93,10 @@ public final class LoadCompleteHandler {
             }
 
             // 触发 retransform：填充 KNOWN_* 并对已加载的 Entity/LivingEntity/子类/容器施加 hook
-            EcaClassTransformer.init();
-
-            hasDelayedRetransform = true;
+            hasDelayedRetransform = EcaClassTransformer.init();
+            if (!hasDelayedRetransform) {
+                EarlyLogWriter.info("[EcaMod] Load-complete transformation has unresolved targets; protection is not fully verified");
+            }
 
         } catch (Throwable e) {
             EcaLogger.error("Delayed retransform failed: {}", e.getMessage());

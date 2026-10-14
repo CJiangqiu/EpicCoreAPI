@@ -31,55 +31,82 @@ final class ContainerReplacementTransformer {
         return TARGET_CLASSES.contains(internalClassName);
     }
 
+    static boolean verify(String className, byte[] bytes) {
+        if (!isTarget(className) || bytes == null) return false;
+        ClassNode node = new ClassNode(ASM9);
+        new ClassReader(bytes).accept(node, ClassReader.EXPAND_FRAMES);
+        boolean replaced = false;
+        for (MethodNode method : node.methods) {
+            if (!method.name.equals("<init>") && !method.name.equals("<clinit>")) continue;
+            for (AbstractInsnNode instruction : method.instructions.toArray()) {
+                if (instruction instanceof TypeInsnNode type && type.getOpcode() == NEW
+                        && type.desc.startsWith(ECA)) replaced = true;
+            }
+        }
+        // 原始构造点仍可被替换时，说明返回的字节码并未完成容器保护。
+        for (MethodNode method : node.methods) {
+            if (!method.name.equals("<init>") && !method.name.equals("<clinit>")) continue;
+            for (Replacement replacement : replacements(className)) {
+                if (replacement.apply(method) > 0) return false;
+            }
+        }
+        return replaced;
+    }
+
     static byte[] transform(String className, byte[] classfileBuffer) {
         try {
-            return switch (className) {
-                case "net/minecraft/world/level/entity/EntityTickList" ->
-                    replace(classfileBuffer, "EntityTickList", new Replacement[]{
-                        newInst("it/unimi/dsi/fastutil/ints/Int2ObjectLinkedOpenHashMap", ECA + "EcaInt2ObjectLinkedOpenHashMap")
-                    });
-                case "net/minecraft/world/level/entity/EntityLookup" ->
-                    replace(classfileBuffer, "EntityLookup", new Replacement[]{
-                        newInst("it/unimi/dsi/fastutil/ints/Int2ObjectLinkedOpenHashMap", ECA + "EcaInt2ObjectLinkedOpenHashMap"),
-                        guava("com/google/common/collect/Maps", "newHashMap", ECA + "EcaHashMap")
-                    });
-                case "net/minecraft/util/ClassInstanceMultiMap" ->
-                    replace(classfileBuffer, "ClassInstanceMultiMap", new Replacement[]{
-                        guava("com/google/common/collect/Maps", "newHashMap", ECA + "EcaHashMap"),
-                        guava("com/google/common/collect/Lists", "newArrayList", ECA + "EcaArrayList")
-                    });
-                case "net/minecraft/server/level/ChunkMap" ->
-                    replace(classfileBuffer, "ChunkMap", new Replacement[]{
-                        newInst("it/unimi/dsi/fastutil/ints/Int2ObjectOpenHashMap", ECA + "EcaInt2ObjectOpenHashMap")
-                    });
-                case "net/minecraft/world/level/entity/PersistentEntitySectionManager" ->
-                    replace(classfileBuffer, "PersistentEntitySectionManager", new Replacement[]{
-                        guava("com/google/common/collect/Sets", "newHashSet", ECA + "EcaHashSet"),
-                        guava("com/google/common/collect/Queues", "newConcurrentLinkedQueue", ECA + "EcaConcurrentLinkedQueue")
-                    });
-                case "net/minecraft/world/level/entity/EntitySectionStorage" ->
-                    replace(classfileBuffer, "EntitySectionStorage", new Replacement[]{
-                        newInst("it/unimi/dsi/fastutil/longs/Long2ObjectOpenHashMap", ECA + "EcaLong2ObjectOpenHashMap"),
-                        newInst("it/unimi/dsi/fastutil/longs/LongAVLTreeSet", ECA + "EcaLongAVLTreeSet")
-                    });
-                case "net/minecraft/server/level/ServerLevel" ->
-                    replace(classfileBuffer, "ServerLevel", new Replacement[]{
-                        guava("com/google/common/collect/Lists", "newArrayList", ECA + "EcaArrayList"),
-                        newInst("it/unimi/dsi/fastutil/objects/ObjectOpenHashSet", ECA + "EcaHashSet")
-                    });
-                default -> null;
-            };
+            return replace(classfileBuffer, className, replacements(className));
         } catch (Throwable t) {
             EarlyLogWriter.error("[ContainerReplacementTransformer] Failed: " + className, t);
             return null;
         }
     }
 
+
+    private static Replacement[] replacements(String className) {
+            return switch (className) {
+                case "net/minecraft/world/level/entity/EntityTickList" ->
+                    new Replacement[]{
+                        newInst("it/unimi/dsi/fastutil/ints/Int2ObjectLinkedOpenHashMap", ECA + "EcaInt2ObjectLinkedOpenHashMap")
+                    };
+                case "net/minecraft/world/level/entity/EntityLookup" ->
+                    new Replacement[]{
+                        newInst("it/unimi/dsi/fastutil/ints/Int2ObjectLinkedOpenHashMap", ECA + "EcaInt2ObjectLinkedOpenHashMap"),
+                        guava("com/google/common/collect/Maps", "newHashMap", ECA + "EcaHashMap")
+                    };
+                case "net/minecraft/util/ClassInstanceMultiMap" ->
+                    new Replacement[]{
+                        guava("com/google/common/collect/Maps", "newHashMap", ECA + "EcaHashMap"),
+                        guava("com/google/common/collect/Lists", "newArrayList", ECA + "EcaArrayList")
+                    };
+                case "net/minecraft/server/level/ChunkMap" ->
+                    new Replacement[]{
+                        newInst("it/unimi/dsi/fastutil/ints/Int2ObjectOpenHashMap", ECA + "EcaInt2ObjectOpenHashMap")
+                    };
+                case "net/minecraft/world/level/entity/PersistentEntitySectionManager" ->
+                    new Replacement[]{
+                        guava("com/google/common/collect/Sets", "newHashSet", ECA + "EcaHashSet"),
+                        guava("com/google/common/collect/Queues", "newConcurrentLinkedQueue", ECA + "EcaConcurrentLinkedQueue")
+                    };
+                case "net/minecraft/world/level/entity/EntitySectionStorage" ->
+                    new Replacement[]{
+                        newInst("it/unimi/dsi/fastutil/longs/Long2ObjectOpenHashMap", ECA + "EcaLong2ObjectOpenHashMap"),
+                        newInst("it/unimi/dsi/fastutil/longs/LongAVLTreeSet", ECA + "EcaLongAVLTreeSet")
+                    };
+                case "net/minecraft/server/level/ServerLevel" ->
+                    new Replacement[]{
+                        guava("com/google/common/collect/Lists", "newArrayList", ECA + "EcaArrayList"),
+                        newInst("it/unimi/dsi/fastutil/objects/ObjectOpenHashSet", ECA + "EcaHashSet")
+                    };
+                default -> new Replacement[0];
+            };
+    }
+
     // ==================== 替换引擎 ====================
 
     private static byte[] replace(byte[] classBytes, String simpleName, Replacement[] replacements) {
-        ClassNode cn = new ClassNode();
-        new ClassReader(classBytes).accept(cn, 0);
+        ClassNode cn = new ClassNode(ASM9);
+        new ClassReader(classBytes).accept(cn, ClassReader.EXPAND_FRAMES);
 
         int total = 0;
         for (MethodNode mn : cn.methods) {
