@@ -938,6 +938,15 @@ public final class MethodProbe {
         return false;
     }
 
+    // 按补丁内容比较，重复登记同一规格不会开启新的失败重试。
+    public static Object transformRequestKey(String classInternal) {
+        Set<ProtocolBridgeSpec> protocols = PROTOCOL_SPECS.get(classInternal);
+        return new TransformRequestKey(SPECS.get(classInternal),
+                protocols == null ? Set.of() : Set.copyOf(protocols));
+    }
+
+    private record TransformRequestKey(BridgeSpec bridge, Set<ProtocolBridgeSpec> protocols) {}
+
     public static boolean verifyTransform(String classInternal, byte[] bytes) {
         if (!hasTransformSpecs(classInternal) || bytes == null) return false;
         try {

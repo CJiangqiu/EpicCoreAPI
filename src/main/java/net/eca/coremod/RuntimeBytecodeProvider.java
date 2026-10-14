@@ -25,13 +25,22 @@ public final class RuntimeBytecodeProvider {
 
     /* ECA 自发 retransform 期间进入 transform 的字节码已含自身 hook，不得作为分析输入 */
     private static volatile int selfRetransformDepth = 0;
+    private static final ThreadLocal<Integer> LOCAL_RETRANSFORM_DEPTH = ThreadLocal.withInitial(() -> 0);
 
     public static void beginSelfRetransform() {
+        LOCAL_RETRANSFORM_DEPTH.set(LOCAL_RETRANSFORM_DEPTH.get() + 1);
         selfRetransformDepth++;
     }
 
     public static void endSelfRetransform() {
+        int depth = LOCAL_RETRANSFORM_DEPTH.get() - 1;
+        if (depth <= 0) LOCAL_RETRANSFORM_DEPTH.remove();
+        else LOCAL_RETRANSFORM_DEPTH.set(depth);
         selfRetransformDepth = Math.max(0, selfRetransformDepth - 1);
+    }
+
+    static boolean isSelfRetransform() {
+        return LOCAL_RETRANSFORM_DEPTH.get() > 0;
     }
 
     // 注册永久捕获器：截获主转换器之后的运行期字节码，并使该类旧健康变换回执失效
@@ -44,6 +53,7 @@ public final class RuntimeBytecodeProvider {
                     Class<?> beingRedefined, ProtectionDomain pd, byte[] buf) {
                 // Native requests commit their final output only after the JVM accepts the transformation.
                 if (NativeRuntimeBridge.isTransforming()) return null;
+                EcaTransformerManager.observeExternalTransform(beingRedefined);
                 capture(name, buf);
                 return null;   // 只读不改
             }

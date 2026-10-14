@@ -119,6 +119,12 @@ public final class ConstOverride {
         return list != null && !list.isEmpty();
     }
 
+    // 实体覆写值不影响补丁安装状态，只有位置变化才需要重新转换。
+    public static List<Site> transformRequestKey(String classInternal) {
+        List<Site> sites = SPECS.get(classInternal);
+        return sites == null ? List.of() : List.copyOf(sites);
+    }
+
     public static boolean verifyTransform(String classInternal, byte[] bytes) {
         List<Site> sites = SPECS.get(classInternal);
         if (sites == null || sites.isEmpty() || bytes == null) return false;
