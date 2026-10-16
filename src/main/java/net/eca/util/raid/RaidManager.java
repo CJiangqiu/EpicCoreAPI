@@ -6,6 +6,7 @@ import net.eca.util.faction.FactionManager;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ChunkPos;
@@ -356,6 +357,27 @@ public class RaidManager {
 
     // ==================== 驱动 ====================
 
+    // 只选择铃铛所在参与范围内最近的一场袭击。
+    public static void onBellUsed(ServerLevel level, ServerPlayer player, BlockPos bellPos) {
+        Map<Integer, RaidInstance> raids = ACTIVE_RAIDS.get(level.dimension());
+        if (raids == null || raids.isEmpty() || player.isSpectator()) return;
+        RaidInstance nearest = null;
+        double best = Double.POSITIVE_INFINITY;
+        for (RaidInstance raid : raids.values()) {
+            if (raid.isOver()) continue;
+            RaidDefinition definition = raid.getDefinition();
+            if (definition == null) continue;
+            double radius = definition.getParticipantRadius();
+            double distance = raid.getCenter().distSqr(bellPos);
+            if (Double.isFinite(radius) && radius >= 0 && distance <= radius * radius
+                    && (distance < best || (distance == best && nearest != null && raid.getId() < nearest.getId()))) {
+                nearest = raid;
+                best = distance;
+            }
+        }
+        if (nearest != null) nearest.onBellUsed(level, player, bellPos);
+    }
+
     // 推进该维度的全部活跃袭击
     /**
      * Tick every active raid in a level and retire the ones that have stopped.
@@ -449,6 +471,7 @@ public class RaidManager {
                 Map<Integer, RaidInstance> raids = ACTIVE_RAIDS.get(level.dimension());
                 if (raids == null) continue;
                 for (RaidInstance raid : raids.values()) {
+                    raid.clearGlow();
                     forceLoadCenter(level, raid, false);
                 }
             }

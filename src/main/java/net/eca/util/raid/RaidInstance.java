@@ -5,6 +5,7 @@ import net.eca.network.RaidBossBarSyncPacket;
 import net.eca.util.EcaLogger;
 import net.eca.util.faction.FactionManager;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
@@ -28,6 +29,10 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.pathfinder.BlockPathTypes;
+import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -84,6 +89,9 @@ public class RaidInstance {
     private final Set<UUID> raiderUuids = new LinkedHashSet<>();
     private final Map<UUID, Entity> raiderEntities = new HashMap<>();
     private final Map<UUID, ChunkPos> raiderLastChunks = new HashMap<>();
+    private final Map<UUID, Entity> glowingRaiders = new HashMap<>();
+    private long bellGlowUntil;
+    private long lastBellUseTick = Long.MIN_VALUE;
 
     private List<RaidWave> cachedWaves;
     private ServerBossEvent bossEvent;
@@ -281,7 +289,92 @@ public class RaidInstance {
         }
 
         tickWaveProgress(level, def, ctx);
+        if (!isOver()) updateGlow(level, def.shouldGlowRaiders(ctx) || ticksActive < bellGlowUntil);
         updateBossBarDisplay(level, def);
+    }
+
+    private void updateGlow(ServerLevel level, boolean enabled) {
+        if (!enabled || isOver()) {
+            clearGlow();
+            return;
+        }
+        glowingRaiders.entrySet().removeIf(entry -> {
+            Entity entity = entry.getValue();
+            if (!raiderUuids.contains(entry.getKey()) || level.getEntity(entry.getKey()) != entity || !entity.isAlive()) {
+                setRaidGlow(entity, false);
+                return true;
+            }
+            return false;
+        });
+        for (UUID uuid : raiderUuids) {
+            if (glowingRaiders.containsKey(uuid)) continue;
+            Entity entity = level.getEntity(uuid);
+            if (entity != null && entity.isAlive()) {
+                setRaidGlow(entity, true);
+                glowingRaiders.put(uuid, entity);
+            }
+        }
+    }
+
+    private static void setRaidGlow(Entity entity, boolean enabled) {
+        if (entity instanceof RaidGlowState glow) glow.eca$setRaidGlow(enabled);
+    }
+
+    void clearGlow() {
+        if (glowingRaiders.isEmpty()) return;
+        for (Entity entity : glowingRaiders.values()) setRaidGlow(entity, false);
+        glowingRaiders.clear();
+    }
+
+    void onBellUsed(ServerLevel level, ServerPlayer player, BlockPos bellPos) {
+        RaidDefinition def = getDefinition();
+        if (def == null || isOver() || lastBellUseTick == level.getGameTime()) return;
+        lastBellUseTick = level.getGameTime();
+        RaidContext ctx = new RaidContext(level, this);
+        boolean teleport = def.shouldTeleportRaidersOnBell(ctx, player, bellPos);
+        boolean glow = def.shouldGlowRaidersOnBell(ctx, player, bellPos);
+        if (isOver()) return;
+        if (glow) {
+            int duration = def.getBellGlowDurationTicks(ctx, player, bellPos);
+            if (duration > 0 && !isOver()) {
+                bellGlowUntil = Math.max(bellGlowUntil, ticksActive + duration);
+                updateGlow(level, true);
+            }
+        }
+        if (!teleport || isOver()) return;
+        for (Entity entity : ctx.getAliveRaiders()) {
+            if (isOver()) break;
+            Vec3 target = findBellLanding(level, entity, bellPos);
+            if (target == null) continue;
+            // 逐个验证成员落点，不能让未验证的乘客随载具被带入障碍物。
+            entity.stopRiding();
+            entity.ejectPassengers();
+            if (entity instanceof Mob mob) mob.getNavigation().stop();
+            entity.teleportTo(target.x, target.y, target.z);
+            entity.setDeltaMovement(Vec3.ZERO);
+            entity.fallDistance = 0;
+            raiderLastChunks.put(entity.getUUID(), copyChunkPos(entity.chunkPosition()));
+        }
+    }
+
+    private Vec3 findBellLanding(ServerLevel level, Entity entity, BlockPos bellPos) {
+        RandomSource random = level.getRandom();
+        for (int attempt = 0; attempt < 64; attempt++) {
+            BlockPos pos = bellPos.offset(random.nextInt(17) - 8, random.nextInt(9) - 4, random.nextInt(17) - 8);
+            Vec3 target = Vec3.atBottomCenterOf(pos);
+            AABB box = entity.getBoundingBox().move(target.subtract(entity.position()));
+            if (box.minY < level.getMinBuildHeight() || box.maxY > level.getMaxBuildHeight()
+                    || !level.getWorldBorder().isWithinBounds(box)) continue;
+            // 路径类型查询会读取邻格，碰撞检查也会读取包围盒边缘，先验证整个范围已加载。
+            if (!level.hasChunksAt(BlockPos.containing(box.minX, box.minY, box.minZ).offset(-1, -1, -1),
+                    BlockPos.containing(box.maxX, box.maxY, box.maxZ).offset(1, 1, 1))) continue;
+            if (WalkNodeEvaluator.getBlockPathTypeStatic(level, pos.mutable()) != BlockPathTypes.WALKABLE) continue;
+            if (!level.getBlockState(pos.below()).isFaceSturdy(level, pos.below(), Direction.UP)) continue;
+            if (!level.noCollision(entity, box)) continue;
+            if (level.getBlockStates(box).anyMatch(state -> !state.getFluidState().isEmpty())) continue;
+            return target;
+        }
+        return null;
     }
 
     private void tickWaveProgress(ServerLevel level, RaidDefinition def, RaidContext ctx) {
@@ -494,6 +587,8 @@ public class RaidInstance {
      */
     public boolean onRaiderRemoved(UUID uuid) {
         if (!raiderUuids.remove(uuid)) return false;
+        Entity glowing = glowingRaiders.remove(uuid);
+        if (glowing != null) setRaidGlow(glowing, false);
         raiderEntities.remove(uuid);
         raiderLastChunks.remove(uuid);
         return true;
@@ -575,6 +670,7 @@ public class RaidInstance {
 
     // 清除全部存活袭击者
     private void clearRaiders(ServerLevel level) {
+        clearGlow();
         for (UUID uuid : new ArrayList<>(raiderUuids)) {
             Entity entity = level.getEntity(uuid);
             if (entity == null) {
@@ -592,6 +688,7 @@ public class RaidInstance {
 
     private void setVictory(ServerLevel level, RaidDefinition def) {
         status = RaidStatus.VICTORY;
+        clearGlow();
         celebrationTicks = 0;
         RaidContext ctx = new RaidContext(level, this);
         def.onVictory(ctx);
@@ -601,6 +698,7 @@ public class RaidInstance {
 
     private void setDefeat(ServerLevel level, RaidDefinition def) {
         status = RaidStatus.DEFEAT;
+        clearGlow();
         celebrationTicks = 0;
         RaidContext ctx = new RaidContext(level, this);
         def.onDefeat(ctx);
@@ -615,6 +713,7 @@ public class RaidInstance {
      */
     public void stop() {
         status = RaidStatus.STOPPED;
+        clearGlow();
         if (bossEvent != null) {
             // 解除客户端映射，否则该 BossEvent UUID 的状态会一直留在客户端表里
             for (ServerPlayer player : new ArrayList<>(bossEvent.getPlayers())) {

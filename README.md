@@ -3253,6 +3253,39 @@ public class UndeadLegionFaction extends FactionDefinition {
 
 **流程控制**：`shouldAdvanceWave`、`checkVictory` 和 `checkDefeat` 均可覆写。默认实现复现原版语义：上一波清空后生成下一波，全部波次生成完毕且袭击者全灭时防守方获胜。
 
+**袭击者高亮与铃铛召回**：以下三个布尔方法默认均返回 `false`，可直接覆写为常量开关，也可根据上下文编写条件流程。
+
+| 覆写方法 | 生效方式 |
+| --- | --- |
+| `shouldGlowRaiders(RaidContext ctx)` | 每个进行中的袭击 tick 判断是否持续高亮成员 |
+| `shouldTeleportRaidersOnBell(RaidContext ctx, ServerPlayer player, BlockPos bellPos)` | 玩家右键敲响铃铛时，决定是否将成员召回铃铛附近 |
+| `shouldGlowRaidersOnBell(RaidContext ctx, ServerPlayer player, BlockPos bellPos)` | 玩家右键敲响铃铛时，决定是否启动临时高亮 |
+
+铃铛选择其所在参与半径内最近的一场进行中的 ECA 袭击，距离相同时选择较小实例 ID；不会因该场关闭铃铛功能而继续查找其他袭击。传送与临时高亮可同时启用，同一场袭击每个游戏 tick 最多处理一次铃铛操作。红石、弹射物敲铃不触发这些条件。
+
+`getBellGlowDurationTicks(ctx, player, bellPos)` 默认返回 `200`（10 秒），返回非正数则不启动本次临时高亮。重复敲铃可延长但不会缩短剩余时间；持续高亮和临时高亮任一有效即可显示。高亮是独立来源，条件关闭、时间到期或袭击结束时仅撤销袭击自身的高亮，保留原有发光标签、药水和阵营描边。临时高亮计时不跨服务器重启保存，持续高亮会在恢复袭击后重新判断。
+
+功能仅作用于本场已加载且存活的成员，不强制加载远处区块。高亮期间新生成或重新加载的成员也会加入高亮。召回在铃铛水平正负 8 格、垂直正负 4 格内为每个成员最多尝试 64 个落点，要求有支撑、无碰撞、无液体、可安全行走且位于世界边界内；没有合适落点的成员留在原处。成功召回会解除该成员的乘骑关系、停止导航并清除速度与摔落距离，避免乘客未经位置检查一起进入障碍物。
+
+在 `RaidDefinition` 子类中可这样组合条件（按需在文件开头导入 `BlockPos`、`ServerPlayer` 和 `RaidContext`）：
+
+```java
+@Override
+public boolean shouldGlowRaiders(RaidContext ctx) {
+    return ctx.getWavesSpawned() >= 3;
+}
+
+@Override
+public boolean shouldTeleportRaidersOnBell(RaidContext ctx, ServerPlayer player, BlockPos bellPos) {
+    return ctx.getAliveRaiderCount() <= 3;
+}
+
+@Override
+public boolean shouldGlowRaidersOnBell(RaidContext ctx, ServerPlayer player, BlockPos bellPos) {
+    return ctx.getTicksActive() >= 1200;
+}
+```
+
 **时间与回调**：`getMaxDurationTicks()` 默认 48000，`getWaveCooldownTicks()` 默认 300，`getParticipantRadius()` 默认 96 格，`getCelebrationTicks()` 默认 600。每个波次还可设置 `spawnDelay()` 和 `spawnRadius()`。生命周期回调包括 `onStart`、`onWaveStart`、`onWaveEnd`、`onVictory`、`onDefeat` 与 `onStop`；客户端 `bossBarExtension()` 可在保留服务端袭击状态同步的同时替换血条外观。
 
 **无限波次**：`isEndless()` 会循环使用波次列表且永远不满足默认胜利条件。此类袭击需要通过 `EcaAPI.endRaid` 收尾，该方法会清除全部仍存活的袭击者。

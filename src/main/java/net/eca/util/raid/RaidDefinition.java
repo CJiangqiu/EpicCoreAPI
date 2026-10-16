@@ -1,5 +1,7 @@
 package net.eca.util.raid;
 
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.tags.TagKey;
 import net.minecraft.world.BossEvent;
@@ -131,6 +133,48 @@ public abstract class RaidDefinition {
      */
     public int getRaiderGoalPriority() {
         return 3;
+    }
+
+    // 动态决定是否持续高亮本场袭击的已加载成员。
+    /**
+     * @param ctx the current raid context, evaluated each ongoing tick
+     * @return true to highlight loaded raiders independently of other glow sources
+     */
+    public boolean shouldGlowRaiders(RaidContext ctx) {
+        return false;
+    }
+
+    // 玩家成功右键敲铃时决定是否召回已加载成员。
+    /**
+     * @param ctx the selected ongoing raid
+     * @param player the player ringing the bell
+     * @param bellPos the bell position
+     * @return true to attempt safe teleports near the bell without loading chunks
+     */
+    public boolean shouldTeleportRaidersOnBell(RaidContext ctx, ServerPlayer player, BlockPos bellPos) {
+        return false;
+    }
+
+    // 玩家成功右键敲铃时决定是否临时高亮袭击者。
+    /**
+     * @param ctx the selected ongoing raid
+     * @param player the player ringing the bell
+     * @param bellPos the bell position
+     * @return true to activate temporary raid highlighting
+     */
+    public boolean shouldGlowRaidersOnBell(RaidContext ctx, ServerPlayer player, BlockPos bellPos) {
+        return false;
+    }
+
+    // 铃铛高亮时长也可随袭击和交互上下文变化。
+    /**
+     * @param ctx the selected ongoing raid
+     * @param player the player ringing the bell
+     * @param bellPos the bell position
+     * @return glow duration in ticks, or a non-positive value to disable this pulse
+     */
+    public int getBellGlowDurationTicks(RaidContext ctx, ServerPlayer player, BlockPos bellPos) {
+        return 200;
     }
 
     // ==================== 可选覆写：流程控制 ====================

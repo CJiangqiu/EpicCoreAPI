@@ -32,7 +32,8 @@ public final class BlenderControllers {
     private static final Set<UUID> RESOLVING = new HashSet<>();
     private static final Set<Class<?>> LOGGED_FAILURES = ConcurrentHashMap.newKeySet();
     private static final AtomicLong EXECUTIONS = new AtomicLong();
-    private static volatile Function<LivingEntity, BlenderControllerSet> fallback = entity -> null;
+    private static final Function<LivingEntity, BlenderControllerSet> NO_FALLBACK = entity -> null;
+    private static volatile Function<LivingEntity, BlenderControllerSet> fallback = NO_FALLBACK;
     private static boolean shuttingDown;
 
     private BlenderControllers() { }
@@ -55,6 +56,11 @@ public final class BlenderControllers {
     }
 
     private static Session session(LivingEntity entity) {
+        if (entity == null) return null;
+        // 注销后的旧会话仍需进入发现流程完成释放，自定义解析器也不能缓存未命中。
+        if (fallback == NO_FALLBACK
+                && (DEFINITIONS.isEmpty() || !DEFINITIONS.containsKey(entity.getType()))
+                && (SESSIONS.isEmpty() || !SESSIONS.containsKey(entity.getUUID()))) return null;
         if (!serverEntity(entity) || !RESOLVING.add(entity.getUUID())) return null;
         try {
             Session old = SESSIONS.get(entity.getUUID());
